@@ -1,0 +1,48 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "organizeImports": {
+    "enabled": true
+  },
+  "files": {
+    "ignore": [
+      "node_modules",
+      ".next",
+      "ref",
+      ".claude",
+      "apps/*/convex/_generated",
+      "apps/*/convex/_generated/**",
+      ".turbo",
+      "dist",
+      "build",
+      "out"
+    ],
+    "maxSize": 6000000
+  },
+  "linter": {
+    "ignore": [
+      "node_modules",
+      ".next",
+      "packages/tsconfig",
+      "ref",
+      ".claude",
+      "apps/*/convex/_generated",
+      "apps/*/convex/_generated/**"
+    ],
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "a11y": {
+        "noSvgWithoutTitle": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "off"
+      }
+    }
+  },
+  "formatter": {
+    "indentStyle": "space"
+  }
+}

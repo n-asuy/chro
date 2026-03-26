@@ -1,0 +1,11 @@
+title = "Chro gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow the public PostHog project key used by the desktop client."
+regexTarget = "line"
+regexes = [
+  '''POSTHOG_KEY\s*=\s*"phc_[A-Za-z0-9]+"''',
+]

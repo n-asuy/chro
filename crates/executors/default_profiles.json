@@ -1,0 +1,18 @@
+{
+  "executors": {
+    "CLAUDE_CODE": {
+      "DEFAULT": {
+        "CLAUDE_CODE": {
+          "dangerously_skip_permissions": true
+        }
+      }
+    },
+    "CODEX": {
+      "DEFAULT": {
+        "CODEX": {
+          "sandbox": "danger-full-access"
+        }
+      }
+    }
+  }
+}

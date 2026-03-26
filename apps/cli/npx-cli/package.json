@@ -1,0 +1,35 @@
+{
+  "name": "@chro-ai/cli",
+  "version": "0.1.0",
+  "description": "Chro CLI",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/n-asuy/chro"
+  },
+  "homepage": "https://chro-ai.com",
+  "config": {
+    "r2PublicUrl": ""
+  },
+  "bin": {
+    "chro": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/postinstall.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "cli",
+    "skills",
+    "productivity",
+    "ai"
+  ]
+}

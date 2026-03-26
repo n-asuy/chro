@@ -1,0 +1,47 @@
+{
+  "allowedLicenses": [
+    "0BSD",
+    "(Apache-2.0 AND BSD-3-Clause)",
+    "(BSD-2-Clause OR MIT OR Apache-2.0)",
+    "(MIT AND Zlib)",
+    "(MIT OR CC0-1.0)",
+    "(MIT OR WTFPL)",
+    "(MPL-2.0 OR Apache-2.0)",
+    "(WTFPL OR MIT)",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BlueOak-1.0.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT OR Apache-2.0",
+    "MIT-0",
+    "MPL-2.0",
+    "Python-2.0",
+    "Unlicense",
+    "WTFPL OR ISC",
+    "Zlib"
+  ],
+  "blockedLicenseNotes": {
+    "CC-BY-4.0": "Attribution/content license. Legal review required before redistribution.",
+    "EPL-2.0": "Copyleft-family license. Legal review required before redistribution.",
+    "LGPL-3.0-or-later": "Strong copyleft library license. Legal review required before redistribution.",
+    "UNKNOWN": "license-checker could not determine the upstream license.",
+    "WTFPL": "Not on the approved allowlist."
+  },
+  "overrides": {
+    "@excalidraw/mermaid-to-excalidraw@1.1.2": {
+      "license": "MIT",
+      "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."
+    },
+    "khroma@2.1.0": {
+      "license": "MIT",
+      "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."
+    },
+    "posthog-js@1.360.0": {
+      "license": "Apache-2.0",
+      "reason": "package.json uses SEE LICENSE IN LICENSE; shipped LICENSE file is Apache-2.0."
+    }
+  }
+}

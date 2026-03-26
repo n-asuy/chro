@@ -1,0 +1,51 @@
+/**
+ * Hashtag parser for Obsidian-style tags (#tag)
+ * Based on lezer-markdown-obsidian
+ */
+
+import type { InlineContext, MarkdownConfig } from "@lezer/markdown";
+import { Tag } from "@lezer/highlight";
+
+const hashtagRE =
+  /^[^\u2000-\u206F\u2E00-\u2E7F'!"#$%&()*+,.:;<=>?@^`{|}~\[\]\\\s]+/;
+
+const lezerHighlightHashtagTag = Tag.define("HashtagTag");
+const lezerHighlightHashtagTagMark = Tag.define(
+  "HashtagTagMark",
+  lezerHighlightHashtagTag,
+);
+const lezerHighlightHashtagTagLabel = Tag.define(
+  "HashtagTagLabel",
+  lezerHighlightHashtagTag,
+);
+
+export const hashtagParser: MarkdownConfig = {
+  defineNodes: [
+    { name: "HashtagTag", style: lezerHighlightHashtagTag },
+    { name: "HashtagTagMark", style: lezerHighlightHashtagTagMark },
+    { name: "HashtagTagLabel", style: lezerHighlightHashtagTagLabel },
+  ],
+  parseInline: [
+    {
+      name: "HashtagTag",
+      parse(cx: InlineContext, next: number, pos: number) {
+        if (next !== 35 /* # */) {
+          return -1;
+        }
+        const start = pos;
+        pos += 1;
+        const match = hashtagRE.exec(cx.text.slice(pos - cx.offset));
+        if (match && /\D/.test(match[0])) {
+          pos += match[0].length;
+          return cx.addElement(
+            cx.elt("HashtagTag", start, pos, [
+              cx.elt("HashtagTagMark", start, start + 1),
+              cx.elt("HashtagTagLabel", start + 1, pos),
+            ]),
+          );
+        }
+        return -1;
+      },
+    },
+  ],
+};

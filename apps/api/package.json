@@ -1,0 +1,19 @@
+{
+  "name": "@chro/api",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled --port 5286",
+    "dev:local": "wrangler dev --local --persist-to=./.wrangler/state --port 5286",
+    "build": "cargo build --target wasm32-unknown-unknown --release",
+    "check": "cargo fmt -- --check",
+    "fmt": "cargo fmt",
+    "deploy": "wrangler deploy",
+    "deploy:preview": "wrangler deploy --dry-run",
+    "migrate:local": "wrangler d1 migrations apply APP_DB --local",
+    "migrate:remote": "wrangler d1 migrations apply APP_DB --remote",
+    "migrate:reset": "bun scripts/reset-d1.ts"
+  },
+  "devDependencies": {}
+}

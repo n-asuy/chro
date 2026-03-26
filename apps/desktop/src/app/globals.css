@@ -1,0 +1,2740 @@
+/* External imports must come first */
+@import "katex/dist/katex.min.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .text-1\.5xl {
+    font-size: 1.375rem;
+    line-height: 1.875rem;
+  }
+
+  .text-2\.5xl {
+    font-size: 1.75rem;
+    line-height: 2.25rem;
+  }
+
+  .font-workspace {
+    font-family: var(--font-inter), "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    text-rendering: optimizeLegibility;
+    font-synthesis: none;
+  }
+}
+@layer base {
+  html {
+    font-family: "Inter", sans-serif;
+  }
+
+  :root {
+    color-scheme: light !important;
+
+    --color-primary-10: 229, 243, 250;
+    --color-primary-20: 216, 237, 248;
+    --color-primary-30: 199, 229, 244;
+    --color-primary-40: 169, 214, 239;
+    --color-primary-50: 144, 202, 234;
+    --color-primary-60: 109, 186, 227;
+    --color-primary-70: 75, 170, 221;
+    --color-primary-80: 41, 154, 214;
+    --color-primary-90: 34, 129, 180;
+    --color-primary-100: 0, 99, 153;
+    --color-primary-200: 0, 92, 143;
+    --color-primary-300: 0, 86, 133;
+    --color-primary-400: 0, 77, 117;
+    --color-primary-500: 0, 66, 102;
+    --color-primary-600: 0, 53, 82;
+    --color-primary-700: 0, 43, 66;
+    --color-primary-800: 0, 33, 51;
+    --color-primary-900: 0, 23, 36;
+
+    --color-background-100: 255, 255, 255; /* primary bg */
+    --color-background-90: 249, 249, 249; /* secondary bg - cleaner, closer to white */
+    --color-background-80: 240, 240, 240; /* tertiary bg - softer gray */
+
+    --color-text-100: 23, 23, 23; /* primary text */
+    --color-text-200: 58, 58, 58; /* secondary text */
+    --color-text-300: 82, 82, 82; /* tertiary text */
+    --color-text-400: 163, 163, 163; /* placeholder text */
+
+    --color-scrollbar: 163, 163, 163; /* scrollbar thumb */
+
+    --color-border-100: 245, 245, 245; /* subtle border= 1 */
+    --color-border-200: 229, 229, 229; /* subtle border- 2 */
+    --color-border-300: 212, 212, 212; /* strong border- 1 */
+    --color-border-400: 185, 185, 185; /* strong border- 2 */
+
+    --color-shadow-2xs:
+      0px 0px 1px 0px rgba(23, 23, 23, 0.06),
+      0px 1px 2px 0px rgba(23, 23, 23, 0.06),
+      0px 1px 2px 0px rgba(23, 23, 23, 0.14);
+    --color-shadow-xs:
+      0px 1px 2px 0px rgba(0, 0, 0, 0.16),
+      0px 2px 4px 0px rgba(16, 24, 40, 0.12),
+      0px 1px 8px -1px rgba(16, 24, 40, 0.1);
+    --color-shadow-sm:
+      0px 1px 4px 0px rgba(0, 0, 0, 0.01), 0px 4px 8px 0px rgba(0, 0, 0, 0.02),
+      0px 1px 12px 0px rgba(0, 0, 0, 0.12);
+    --color-shadow-rg:
+      0px 3px 6px 0px rgba(0, 0, 0, 0.1),
+      0px 4px 4px 0px rgba(16, 24, 40, 0.08),
+      0px 1px 12px 0px rgba(16, 24, 40, 0.04);
+    --color-shadow-md:
+      0px 4px 8px 0px rgba(0, 0, 0, 0.12),
+      0px 6px 12px 0px rgba(16, 24, 40, 0.12),
+      0px 1px 16px 0px rgba(16, 24, 40, 0.12);
+    --color-shadow-lg:
+      0px 6px 12px 0px rgba(0, 0, 0, 0.12),
+      0px 8px 16px 0px rgba(0, 0, 0, 0.12),
+      0px 1px 24px 0px rgba(16, 24, 40, 0.12);
+    --color-shadow-xl:
+      0px 0px 18px 0px rgba(0, 0, 0, 0.16),
+      0px 0px 24px 0px rgba(16, 24, 40, 0.16),
+      0px 0px 52px 0px rgba(16, 24, 40, 0.16);
+    --color-shadow-2xl:
+      0px 8px 16px 0px rgba(0, 0, 0, 0.12),
+      0px 12px 24px 0px rgba(16, 24, 40, 0.12),
+      0px 1px 32px 0px rgba(16, 24, 40, 0.12);
+    --color-shadow-3xl:
+      0px 12px 24px 0px rgba(0, 0, 0, 0.12),
+      0px 16px 32px 0px rgba(0, 0, 0, 0.12),
+      0px 1px 48px 0px rgba(16, 24, 40, 0.12);
+    --color-shadow-4xl:
+      0px 8px 40px 0px rgba(0, 0, 61, 0.05),
+      0px 12px 32px -16px rgba(0, 0, 0, 0.05);
+
+    --color-sidebar-background-100: var(
+      --color-background-100
+    ); /* primary sidebar bg */
+    --color-sidebar-background-90: 252, 252, 252; /* secondary sidebar bg - slightly brighter */
+    --color-sidebar-background-80: var(
+      --color-background-80
+    ); /* tertiary sidebar bg */
+
+    --color-sidebar-text-100: var(--color-text-100); /* primary sidebar text */
+    --color-sidebar-text-200: var(
+      --color-text-200
+    ); /* secondary sidebar text */
+    --color-sidebar-text-300: var(--color-text-300); /* tertiary sidebar text */
+    --color-sidebar-text-400: var(
+      --color-text-400
+    ); /* sidebar placeholder text */
+
+    --color-sidebar-border-100: var(
+      --color-border-100
+    ); /* subtle sidebar border= 1 */
+    --color-sidebar-border-200: var(
+      --color-border-100
+    ); /* subtle sidebar border- 2 */
+    --color-sidebar-border-300: var(
+      --color-border-100
+    ); /* strong sidebar border- 1 */
+    --color-sidebar-border-400: var(
+      --color-border-100
+    ); /* strong sidebar border- 2 */
+
+    --color-sidebar-shadow-2xs: var(--color-shadow-2xs);
+    --color-sidebar-shadow-xs: var(--color-shadow-xs);
+    --color-sidebar-shadow-sm: var(--color-shadow-sm);
+    --color-sidebar-shadow-rg: var(--color-shadow-rg);
+    --color-sidebar-shadow-md: var(--color-shadow-md);
+    --color-sidebar-shadow-lg: var(--color-shadow-lg);
+    --color-sidebar-shadow-xl: var(--color-shadow-xl);
+    --color-sidebar-shadow-2xl: var(--color-shadow-2xl);
+    --color-sidebar-shadow-3xl: var(--color-shadow-3xl);
+    --color-sidebar-shadow-4xl: var(--color-shadow-4xl);
+
+    /* pi */
+    --color-pi-50: var(--color-background-90);
+    --color-pi-100: var(--color-background-90);
+    --color-pi-200: var(--color-primary-200);
+    --color-pi-300: var(--color-primary-200);
+    --color-pi-400: var(--color-primary-200);
+    --color-pi-500: var(--color-primary-200);
+    --color-pi-600: 151, 150, 246;
+    --color-pi-700: var(--color-primary-100);
+    --color-pi-800: 57, 56, 149;
+    --color-pi-900: 30, 29, 78;
+    --color-pi-950: 14, 14, 37;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light !important;
+
+    --color-background-100: 255, 255, 255; /* primary bg */
+    --color-background-90: 249, 249, 249; /* secondary bg - cleaner, closer to white */
+    --color-background-80: 240, 240, 240; /* tertiary bg - softer gray */
+
+    /* pi */
+    --color-pi-50: var(--color-background-90);
+    --color-pi-100: var(--color-background-90);
+    --color-pi-200: var(--color-primary-200);
+    --color-pi-300: var(--color-primary-200);
+    --color-pi-400: var(--color-primary-200);
+    --color-pi-500: var(--color-primary-200);
+    --color-pi-600: 151, 150, 246;
+    --color-pi-700: var(--color-primary-100);
+    --color-pi-800: 57, 56, 149;
+    --color-pi-900: 30, 29, 78;
+    --color-pi-950: 14, 14, 37;
+  }
+
+  :root[data-theme="light"] {
+    --color-text-100: 23, 23, 23; /* primary text */
+    --color-text-200: 58, 58, 58; /* secondary text */
+    --color-text-300: 82, 82, 82; /* tertiary text */
+    --color-text-400: 163, 163, 163; /* placeholder text */
+
+    --color-scrollbar: 163, 163, 163; /* scrollbar thumb */
+
+    --color-border-100: 245, 245, 245; /* subtle border= 1 */
+    --color-border-200: 229, 229, 229; /* subtle border- 2 */
+    --color-border-300: 212, 212, 212; /* strong border- 1 */
+    --color-border-400: 185, 185, 185; /* strong border- 2 */
+
+    /* onboarding colors */
+    --gradient-onboarding-100: linear-gradient(
+      106deg,
+      #f2f6ff 29.8%,
+      #e1eaff 99.34%
+    );
+    --gradient-onboarding-200: linear-gradient(
+      129deg,
+      rgba(255, 255, 255, 0) -22.23%,
+      rgba(255, 255, 255, 0.8) 62.98%
+    );
+    --gradient-onboarding-300: linear-gradient(
+      164deg,
+      #fff 4.25%,
+      rgba(255, 255, 255, 0.06) 93.5%
+    );
+    --gradient-onboarding-400: linear-gradient(
+      129deg,
+      rgba(255, 255, 255, 0) -22.23%,
+      rgba(255, 255, 255, 0.8) 62.98%
+    );
+
+    --color-onboarding-text-100: 23, 23, 23;
+    --color-onboarding-text-200: 58, 58, 58;
+    --color-onboarding-text-300: 82, 82, 82;
+    --color-onboarding-text-400: 163, 163, 163;
+
+    --color-onboarding-background-100: 236, 241, 255;
+    --color-onboarding-background-200: 255, 255, 255;
+    --color-onboarding-background-300: 236, 241, 255;
+    --color-onboarding-background-400: 177, 206, 250;
+
+    --color-onboarding-border-100: 229, 229, 229;
+    --color-onboarding-border-200: 217, 228, 255;
+    --color-onboarding-border-300: 229, 229, 229, 0.5;
+
+    --color-onboarding-shadow-sm: 0px 4px 20px 0px rgba(126, 139, 171, 0.1);
+
+    /* toast theme */
+    --color-toast-success-text: 62, 155, 79;
+    --color-toast-error-text: 220, 62, 66;
+    --color-toast-warning-text: 255, 186, 24;
+    --color-toast-info-text: 51, 88, 212;
+    --color-toast-loading-text: 28, 32, 36;
+    --color-toast-secondary-text: 128, 131, 141;
+    --color-toast-tertiary-text: 96, 100, 108;
+
+    --color-toast-success-background: 253, 253, 254;
+    --color-toast-error-background: 255, 252, 252;
+    --color-toast-warning-background: 254, 253, 251;
+    --color-toast-info-background: 253, 253, 254;
+    --color-toast-loading-background: 253, 253, 254;
+
+    --color-toast-success-border: 218, 241, 219;
+    --color-toast-error-border: 255, 219, 220;
+    --color-toast-warning-border: 255, 247, 194;
+    --color-toast-info-border: 210, 222, 255;
+    --color-toast-loading-border: 224, 225, 230;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark !important;
+
+    --color-primary-10: 8, 31, 43;
+    --color-primary-20: 10, 37, 51;
+    --color-primary-30: 13, 49, 69;
+    --color-primary-40: 16, 58, 81;
+    --color-primary-50: 18, 68, 94;
+    --color-primary-60: 23, 86, 120;
+    --color-primary-70: 28, 104, 146;
+    --color-primary-80: 31, 116, 163;
+    --color-primary-90: 34, 129, 180;
+    --color-primary-100: 40, 146, 204;
+    --color-primary-200: 41, 154, 214;
+    --color-primary-300: 75, 170, 221;
+    --color-primary-400: 109, 186, 227;
+    --color-primary-500: 144, 202, 234;
+    --color-primary-600: 169, 214, 239;
+    --color-primary-700: 199, 229, 244;
+    --color-primary-800: 216, 237, 248;
+    --color-primary-900: 229, 243, 250;
+
+    --color-background-100: 25, 25, 25; /* primary bg */
+    --color-background-90: 32, 32, 32; /* secondary bg */
+    --color-background-80: 44, 44, 44; /* tertiary bg */
+
+    --color-shadow-2xs:
+      0px 0px 1px 0px rgba(0, 0, 0, 0.15), 0px 1px 3px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-xs:
+      0px 0px 2px 0px rgba(0, 0, 0, 0.2), 0px 2px 4px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-sm:
+      0px 0px 4px 0px rgba(0, 0, 0, 0.2), 0px 2px 6px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-rg:
+      0px 0px 6px 0px rgba(0, 0, 0, 0.2), 0px 4px 6px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-md:
+      0px 2px 8px 0px rgba(0, 0, 0, 0.2), 0px 4px 8px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-lg:
+      0px 4px 12px 0px rgba(0, 0, 0, 0.25), 0px 4px 10px 0px rgba(0, 0, 0, 0.55);
+    --color-shadow-xl:
+      0px 0px 14px 0px rgba(0, 0, 0, 0.25), 0px 6px 10px 0px rgba(0, 0, 0, 0.55);
+    --color-shadow-2xl:
+      0px 0px 18px 0px rgba(0, 0, 0, 0.25), 0px 8px 12px 0px rgba(0, 0, 0, 0.6);
+    --color-shadow-3xl:
+      0px 4px 24px 0px rgba(0, 0, 0, 0.3), 0px 12px 40px 0px rgba(0, 0, 0, 0.65);
+    /* pi */
+    --color-pi-50: var(--color-background-90);
+    --color-pi-100: var(--color-background-90);
+    --color-pi-200: var(--color-primary-200);
+    --color-pi-300: var(--color-primary-200);
+    --color-pi-400: var(--color-primary-200);
+    --color-pi-500: var(--color-primary-200);
+    --color-pi-600: 151, 150, 246;
+    --color-pi-700: var(--color-primary-100);
+    --color-pi-800: 57, 56, 149;
+    --color-pi-900: 30, 29, 78;
+    --color-pi-950: 14, 14, 37;
+  }
+
+  :root[data-theme="dark"] {
+    --color-text-100: 229, 229, 229; /* primary text */
+    --color-text-200: 163, 163, 163; /* secondary text */
+    --color-text-300: 115, 115, 115; /* tertiary text */
+    --color-text-400: 82, 82, 82; /* placeholder text */
+
+    --color-scrollbar: 82, 82, 82; /* scrollbar thumb */
+
+    --color-border-100: 34, 34, 34; /* subtle border= 1 */
+    --color-border-200: 38, 38, 38; /* subtle border- 2 */
+    --color-border-300: 46, 46, 46; /* strong border- 1 */
+    --color-border-400: 58, 58, 58; /* strong border- 2 */
+
+    /* onboarding colors */
+    --gradient-onboarding-100: linear-gradient(
+      106deg,
+      #18191b 25.17%,
+      #18191b 99.34%
+    );
+    --gradient-onboarding-200: linear-gradient(
+      129deg,
+      rgba(47, 49, 53, 0.8) -22.23%,
+      rgba(33, 34, 37, 0.8) 62.98%
+    );
+    --gradient-onboarding-300: linear-gradient(
+      167deg,
+      rgba(47, 49, 53, 0.45) 19.22%,
+      #212225 98.48%
+    );
+
+    --color-onboarding-text-100: 237, 238, 240;
+    --color-onboarding-text-200: 176, 180, 187;
+    --color-onboarding-text-300: 118, 123, 132;
+    --color-onboarding-text-400: 105, 110, 119;
+
+    --color-onboarding-background-100: 54, 58, 64;
+    --color-onboarding-background-200: 40, 42, 45;
+    --color-onboarding-background-300: 40, 42, 45;
+    --color-onboarding-background-400: 67, 72, 79;
+
+    --color-onboarding-border-100: 54, 58, 64;
+    --color-onboarding-border-200: 54, 58, 64;
+    --color-onboarding-border-300: 34, 35, 38, 0.5;
+
+    --color-onboarding-shadow-sm: 0px 4px 20px 0px rgba(39, 44, 56, 0.1);
+
+    /* toast theme */
+    --color-toast-success-text: 178, 221, 181;
+    --color-toast-error-text: 206, 44, 49;
+    --color-toast-warning-text: 255, 186, 24;
+    --color-toast-info-text: 141, 164, 239;
+    --color-toast-loading-text: 255, 255, 255;
+    --color-toast-secondary-text: 185, 187, 198;
+    --color-toast-tertiary-text: 139, 141, 152;
+
+    --color-toast-success-background: 46, 46, 46;
+    --color-toast-error-background: 46, 46, 46;
+    --color-toast-warning-background: 46, 46, 46;
+    --color-toast-info-background: 46, 46, 46;
+    --color-toast-loading-background: 46, 46, 46;
+
+    --color-toast-success-border: 42, 126, 59;
+    --color-toast-error-border: 100, 23, 35;
+    --color-toast-warning-border: 79, 52, 34;
+    --color-toast-info-border: 58, 91, 199;
+    --color-toast-loading-border: 96, 100, 108;
+  }
+
+  :root[data-theme="light"],
+  :root[data-theme="dark"] {
+    --color-sidebar-background-100: var(
+      --color-background-100
+    ); /* primary sidebar bg */
+    --color-sidebar-background-90: var(
+      --color-background-90
+    ); /* secondary sidebar bg */
+    --color-sidebar-background-80: var(
+      --color-background-80
+    ); /* tertiary sidebar bg */
+
+    --color-sidebar-text-100: var(--color-text-100); /* primary sidebar text */
+    --color-sidebar-text-200: var(
+      --color-text-200
+    ); /* secondary sidebar text */
+    --color-sidebar-text-300: var(--color-text-300); /* tertiary sidebar text */
+    --color-sidebar-text-400: var(
+      --color-text-400
+    ); /* sidebar placeholder text */
+
+    --color-sidebar-border-100: var(
+      --color-border-100
+    ); /* subtle sidebar border= 1 */
+    --color-sidebar-border-200: var(
+      --color-border-200
+    ); /* subtle sidebar border- 2 */
+    --color-sidebar-border-300: var(
+      --color-border-300
+    ); /* strong sidebar border- 1 */
+    --color-sidebar-border-400: var(
+      --color-border-400
+    ); /* strong sidebar border- 2 */
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-text-size-adjust: 100%;
+  -ms-text-size-adjust: 100%;
+  font-variant-ligatures: none;
+  -webkit-font-variant-ligatures: none;
+  text-rendering: optimizeLegibility;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  color: rgba(var(--color-text-100));
+}
+
+/* scrollbar style */
+::-webkit-scrollbar {
+  display: none;
+}
+
+/* Show vertical scrollbar for elements with .show-scrollbar class */
+.show-scrollbar::-webkit-scrollbar:vertical {
+  display: block;
+  width: 10px;
+}
+
+.show-scrollbar::-webkit-scrollbar:horizontal {
+  display: none;
+}
+
+.show-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.show-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(var(--color-scrollbar), 0.4);
+  border-radius: 2px;
+}
+
+.show-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(var(--color-scrollbar), 0.6);
+}
+
+::-webkit-input-placeholder,
+::placeholder,
+:-ms-input-placeholder {
+  color: rgb(var(--color-text-400));
+}
+:root,
+:root[data-theme="light"] {
+  --background: 0 0% 100%;
+  --foreground: 0 0% 9%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 9%;
+  --primary: 201 100% 30%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 23%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 35%;
+  --accent: 210 40% 96%;
+  --accent-foreground: 0 0% 23%;
+  --destructive: 358 69% 55%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 90%;
+  --input: 0 0% 90%;
+  --ring: 201 100% 35%;
+  --radius: 0.75rem;
+  --sidebar-background: 0 0% 100%;
+  --sidebar-foreground: 0 0% 23%;
+  --sidebar-primary: 201 100% 30%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 0 0% 94%;
+  --sidebar-accent-foreground: 0 0% 23%;
+  --sidebar-border: 0 0% 90%;
+  --sidebar-ring: 201 100% 35%;
+}
+
+:root[data-theme="dark"] {
+  --background: 0 0% 10%;
+  --foreground: 0 0% 100%;
+  --card: 0 0% 15%;
+  --card-foreground: 0 0% 100%;
+  --popover: 0 0% 15%;
+  --popover-foreground: 0 0% 100%;
+  --primary: 201 100% 60%;
+  --primary-foreground: 0 0% 10%;
+  --secondary: 0 0% 20%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 0 0% 20%;
+  --muted-foreground: 0 0% 70%;
+  --accent: 0 0% 25%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 100% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 30%;
+  --input: 0 0% 30%;
+  --ring: 201 100% 60%;
+  --sidebar-background: 0 0% 10%;
+  --sidebar-foreground: 0 0% 96%;
+  --sidebar-primary: 201 100% 48%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 0 0% 16%;
+  --sidebar-accent-foreground: 0 0% 96%;
+  --sidebar-border: 0 0% 16%;
+  --sidebar-ring: 201 100% 60%;
+}
+
+/* Text selection highlight */
+::selection {
+  background-color: hsl(var(--primary) / 0.3);
+  color: inherit;
+}
+
+/* Muya Editor Customization for Valut - Obsidian-like styling */
+.mu-editor {
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif !important;
+  font-size: 16px !important;
+  line-height: 1.5 !important;
+  color: rgb(var(--color-text-100)) !important;
+  background: transparent !important;
+  border: none !important;
+  outline: none !important;
+}
+
+.mu-editor p,
+.mu-editor h1,
+.mu-editor h2,
+.mu-editor h3,
+.mu-editor h4,
+.mu-editor h5,
+.mu-editor h6 {
+  margin: 0 !important;
+  padding: 0 !important;
+  color: rgb(var(--color-text-100)) !important;
+}
+
+.mu-editor p {
+  line-height: 1.6 !important;
+  margin: 0 !important;
+}
+
+/* Heading styles: minimal bottom margin, top margin only */
+.mu-editor h1 { font-size: 2em !important; font-weight: 700 !important; line-height: 1.2 !important; margin: 1em 0 0 !important; }
+.mu-editor h2 { font-size: 1.6em !important; font-weight: 600 !important; line-height: 1.2 !important; margin: 0.8em 0 0 !important; }
+.mu-editor h3 { font-size: 1.37em !important; font-weight: 600 !important; line-height: 1.3 !important; margin: 0.6em 0 0 !important; }
+.mu-editor h4 { font-size: 1.15em !important; font-weight: 600 !important; line-height: 1.4 !important; margin: 0.4em 0 0 !important; }
+.mu-editor h5 { font-size: 1em !important; font-weight: 600 !important; line-height: 1.4 !important; margin: 0.4em 0 0 !important; }
+.mu-editor h6 { font-size: 0.9em !important; font-weight: 600 !important; line-height: 1.4 !important; margin: 0.4em 0 0 !important; }
+
+/* First heading or paragraph has no top margin */
+.mu-editor > :first-child { margin-top: 0 !important; }
+
+.mu-editor code {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+  border-radius: 4px !important;
+  padding: 2px 4px !important;
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace !important;
+  font-size: 0.9em !important;
+}
+
+.mu-editor pre {
+  background-color: #f6f8fa !important;
+  border-radius: 4px !important;
+  padding: 12px !important;
+  overflow-x: auto !important;
+  margin: 0.4em 0 !important;
+  line-height: 1.45 !important;
+}
+
+.mu-editor blockquote {
+  padding-left: 12px !important;
+  color: #656d76 !important;
+  margin: 0.4em 0 !important;
+}
+
+.mu-editor blockquote::before {
+  background: #d0d7de !important;
+}
+
+.mu-editor a {
+  color: #7c3aed !important;
+  text-decoration: none !important;
+}
+
+.mu-editor a:hover {
+  text-decoration: underline !important;
+}
+
+.mu-editor ul,
+.mu-editor ol {
+  margin-left: 1.2em !important;
+  margin-top: 0.1em !important;
+  margin-bottom: 0.1em !important;
+  padding-left: 0.4em !important;
+}
+
+.mu-editor li {
+  margin: 0.05em 0 !important;
+  line-height: 1.5 !important;
+}
+
+.mu-editor li p {
+  margin: 0 !important;
+}
+
+/* dial down Muya task list checkbox shadow so it fits Vault UI */
+.mu-editor li.mu-task-list-item > input[type="checkbox"]:before,
+.mu-editor li.mu-task-list-item > span.mu-task-list-checkbox:before,
+.mu-editor li.mu-task-list-item > input.mu-checkbox-checked:before,
+.mu-editor li.mu-task-list-item > span.mu-checkbox-checked:before {
+  box-shadow: none !important;
+}
+
+/* Table styling - Obsidian-like */
+.mu-editor table {
+  border-collapse: collapse !important;
+  margin: 0.4em 0 !important;
+  width: auto !important;
+}
+
+.mu-editor th,
+.mu-editor td {
+  border: 1px solid #d0d7de !important;
+  padding: 6px 13px !important;
+  line-height: 1.5 !important;
+}
+
+.mu-editor th {
+  background-color: #f6f8fa !important;
+  font-weight: 600 !important;
+}
+
+/* HR styling */
+.mu-editor hr {
+  border: none !important;
+  border-top: 1px solid #d0d7de !important;
+  margin: 1em 0 !important;
+}
+
+/* Remove Muya default toolbar styles that conflict */
+.mu-inline-format-toolbar,
+.mu-front-icon,
+.mu-front-menu {
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif !important;
+}
+
+/* Obsidian-like image behavior: show image normally, show markdown text when focused/selected */
+.mu-editor .mu-inline-image {
+  display: inline !important;
+}
+
+/* Hide the image by default when the paragraph containing it is active (being edited) */
+.mu-editor .mu-active .mu-inline-image .mu-image-container,
+.mu-editor .mu-inline-image.mu-inline-image-selected .mu-image-container {
+  display: none !important;
+}
+
+/* Show the markdown text when the paragraph is active or image is selected */
+.mu-editor .mu-active .mu-inline-image .mu-image-marked-text,
+.mu-editor .mu-inline-image.mu-inline-image-selected .mu-image-marked-text {
+  display: inline !important;
+  font-size: 1em !important;
+  line-height: 1.5 !important;
+  color: #7c3aed !important;
+}
+
+/* Hide the markdown text when not active (show image instead) */
+.mu-editor .mu-inline-image:not(.mu-inline-image-selected) .mu-image-marked-text {
+  display: none !important;
+}
+
+/* Show image container when not editing */
+.mu-editor p:not(.mu-active) .mu-inline-image:not(.mu-inline-image-selected) .mu-image-container {
+  display: inline-block !important;
+}
+
+/* Remove image icons and toolbars */
+.mu-editor .mu-inline-image a.mu-image-icon-success,
+.mu-editor .mu-inline-image a.mu-image-icon-fail,
+.mu-editor .mu-inline-image a.mu-image-icon-close {
+  display: none !important;
+}
+
+/* ============================================
+   CodeMirror 6 WYSIWYG Editor Styles
+   Obsidian-inspired rich markdown editing
+   ============================================ */
+
+.cm-editor-container {
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
+}
+
+.cm-editor-container .cm-editor {
+  height: 100%;
+  width: 100%;
+  outline: none !important;
+}
+
+.cm-editor-container .cm-scroller {
+  overflow: auto;
+  font-family: inherit;
+}
+
+.cm-editor-container .cm-content {
+  color: rgb(var(--color-text-100));
+  padding: 0;
+}
+
+/* Remove default line padding so text aligns with the centered title column */
+.cm-editor-container .cm-line {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* Cursor */
+.cm-editor-container .cm-cursor {
+  border-left: 2px solid hsl(var(--primary)) !important;
+  border-radius: 1px;
+}
+
+/* Selection */
+.cm-editor-container .cm-selectionBackground {
+  background-color: hsl(var(--primary) / 0.2) !important;
+}
+
+/* Ensure selection stays visible over codeblock backgrounds */
+.cm-editor-container .cm-editor .cm-content {
+  position: relative;
+  z-index: 0;
+}
+
+.cm-editor-container .cm-editor .cm-selectionLayer {
+  z-index: 3 !important;
+}
+
+.cm-editor-container .cm-editor .cm-cursorLayer {
+  z-index: 4 !important;
+}
+
+/* Use native selection highlight */
+.cm-editor-container .cm-editor.cm-focused .cm-line::selection,
+.cm-editor-container .cm-editor.cm-focused .cm-line > span::selection,
+.cm-editor-container .cm-editor.cm-focused .cm-content ::selection {
+  background-color: hsl(var(--primary) / 0.2) !important;
+}
+
+/* Focused editor */
+.cm-editor-container .cm-focused {
+  outline: none !important;
+}
+
+/* Placeholder */
+.cm-editor-container .cm-placeholder {
+  color: rgb(var(--color-text-400));
+  font-style: italic;
+}
+
+/* Active line highlight (disabled for cleaner look) */
+.cm-editor-container .cm-activeLine {
+  background: transparent;
+}
+
+/* Line numbers (hidden by default for WYSIWYG feel, shown in code mode) */
+.cm-editor-container .cm-gutters {
+  display: none;
+}
+.cm-editor-container.cm-code-mode .cm-gutters {
+  display: flex;
+  background: transparent;
+  border-right: 1px solid rgb(var(--color-border-200, 229 231 235));
+  color: rgb(var(--color-text-400, 156 163 175));
+}
+
+/* ============================================
+   Headings
+   ============================================ */
+
+.cm-editor-container .cm-heading {
+  font-weight: 600;
+  text-decoration: none !important;
+  color: rgb(var(--color-text-100));
+}
+
+.cm-editor-container .cm-heading-1 {
+  font-size: 2em !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+}
+
+.cm-editor-container .cm-heading-2 {
+  font-size: 1.6em !important;
+  font-weight: 600 !important;
+  line-height: 1.25 !important;
+}
+
+.cm-editor-container .cm-heading-3 {
+  font-size: 1.37em !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+}
+
+.cm-editor-container .cm-heading-4 {
+  font-size: 1.15em !important;
+  font-weight: 600 !important;
+  line-height: 1.4 !important;
+}
+
+/* ============================================
+   Text Formatting
+   ============================================ */
+
+.cm-editor-container .cm-emphasis {
+  font-style: italic;
+}
+
+.cm-editor-container .cm-strong {
+  font-weight: 700;
+  font-style: normal;
+}
+
+.cm-editor-container .cm-strong.cm-emphasis {
+  font-style: italic;
+}
+
+.cm-editor-container .cm-strikethrough {
+  text-decoration: line-through;
+}
+
+/* Inline code */
+.cm-editor-container .cm-mono {
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  font-size: 0.9em;
+  background-color: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+/* Disable inline code styling inside code blocks */
+.cm-editor-container .cm-codeblock .cm-mono {
+  background-color: transparent;
+  border-radius: 0;
+  padding: 0;
+}
+
+/* Meta/escape characters (hidden markdown syntax) */
+.cm-editor-container .cm-meta,
+.cm-editor-container .cm-escape {
+  color: #9ca3af !important;
+  text-decoration: none !important;
+}
+
+/* ============================================
+   Links
+   ============================================ */
+
+.cm-editor-container .cm-link,
+.cm-editor-container .cm-internal-link-path,
+.cm-editor-container .cm-internal-link-subpath,
+.cm-editor-container .cm-internal-link-display {
+  color: hsl(var(--primary)) !important;
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-clickable-link {
+  cursor: pointer;
+}
+
+/* ============================================
+   Hashtags
+   ============================================ */
+
+.cm-editor-container .cm-hashtag {
+  display: inline-flex;
+  align-items: center;
+  background: linear-gradient(to top, hsl(var(--primary) / 0.2), hsl(var(--primary) / 0.1));
+  border: 1px solid hsl(var(--primary) / 0.5);
+  border-radius: 9999px;
+  padding: 0 6px;
+  font-size: 0.9em;
+  color: hsl(var(--primary)) !important;
+}
+
+/* ============================================
+   Highlighted text (==text==)
+   ============================================ */
+
+.cm-editor-container .cm-highlighted {
+  background-color: hsl(var(--primary) / 0.2);
+  color: hsl(var(--primary));
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+/* ============================================
+   Blockquotes
+   ============================================ */
+
+.cm-editor-container .cm-quoteblock {
+  background-color: rgba(0, 0, 0, 0.02);
+  padding-left: 12px;
+  margin-left: 8px;
+}
+
+.cm-editor-container .cm-quoteblock-single {
+  border-radius: 4px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.cm-editor-container .cm-quoteblock-start {
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+  padding-top: 8px;
+}
+
+.cm-editor-container .cm-quoteblock-end {
+  border-bottom-left-radius: 4px;
+  border-bottom-right-radius: 4px;
+  padding-bottom: 8px;
+}
+
+.cm-editor-container .cm-formatting-quote {
+  color: #9ca3af;
+}
+
+/* ============================================
+   Lists
+   ============================================ */
+
+.cm-editor-container .cm-obsidian-bullet {
+  color: #6b7280;
+}
+
+/* ============================================
+   Task lists
+   ============================================ */
+
+.cm-editor-container .cm-task-checkbox-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-bottom: 2px;
+  border-radius: 9999px;
+  border: 1px solid #d1d5db;
+  background-color: white;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.cm-editor-container .cm-task-checkbox-wrapper[data-checked="true"] {
+  background-color: hsl(var(--primary));
+  border-color: hsl(var(--primary));
+}
+
+.cm-editor-container .cm-task-checkbox-wrapper[data-checked="true"]::before {
+  content: "✔";
+  font-size: 10px;
+  color: white;
+}
+
+.cm-editor-container .cm-task-checkbox-wrapper[data-special] {
+  font-family: "SF Mono", monospace;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.cm-editor-container .cm-task-checked {
+  text-decoration: line-through;
+  color: #9ca3af;
+}
+
+/* ============================================
+   Code blocks
+   ============================================ */
+
+.cm-editor-container .cm-codeblock {
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  font-size: 14px !important;
+  font-weight: 500;
+  position: relative;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding: 2px 12px;
+  line-height: 1.5;
+  background-color: transparent;
+}
+
+.cm-editor-container .cm-codeblock::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: #f6f8fa;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+  z-index: -2;
+  pointer-events: none;
+}
+
+.cm-editor-container .cm-line-codeblock-begin {
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.cm-editor-container .cm-line-codeblock-begin::before {
+  border-top: 1px solid #e5e7eb;
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+
+.cm-editor-container .cm-line-codeblock-end {
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+}
+
+.cm-editor-container .cm-line-codeblock-end::before {
+  border-bottom: 1px solid #e5e7eb;
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+
+.cm-editor-container .cm-line-codeblock-single {
+  padding: 8px 12px;
+  margin: 4px 0;
+}
+
+.cm-editor-container .cm-line-codeblock-single::before {
+  border: 1px solid #e5e7eb;
+  border-radius: 3px;
+}
+
+/* Dark theme adjustments for code blocks */
+[data-theme="dark"] .cm-editor-container .cm-codeblock::before {
+  background-color: #1e1e1e;
+  border-left-color: #3a3a3a;
+  border-right-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-line-codeblock-begin::before {
+  border-top-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-line-codeblock-end::before {
+  border-bottom-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-line-codeblock-single::before {
+  border-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-meta,
+[data-theme="dark"] .cm-editor-container .cm-escape {
+  color: #6b7280 !important;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mono {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .cm-editor-container .cm-codeblock .cm-mono {
+  background-color: transparent;
+}
+
+/* ============================================
+   Horizontal rule
+   ============================================ */
+
+.cm-editor-container .cm-line.hr {
+  height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.cm-editor-container .cm-line.hr::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 1px;
+  background-color: #d1d5db;
+}
+
+/* ============================================
+   YAML Frontmatter
+   ============================================ */
+
+.cm-editor-container .cm-yaml-marker,
+.cm-editor-container .cm-yaml-content {
+  font-family: "SF Mono", monospace;
+  color: #6b7280;
+  padding: 0 4px;
+}
+
+/* ============================================
+   Hidden elements (WYSIWYG mode)
+   ============================================ */
+
+.cm-editor-container .cm-obsidian-hidden {
+  display: none;
+}
+
+.cm-editor-container .cm-hidden-latex {
+  display: none;
+}
+
+/* ============================================
+   Indentation guides
+   ============================================ */
+
+.cm-editor-container .cm-indent {
+  min-width: 1.5rem;
+  position: relative;
+  display: inline-block;
+}
+
+.cm-editor-container .cm-indent::before {
+  content: "\200B";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  border-right: 1px solid #e5e7eb;
+}
+
+/* ============================================
+   Autocomplete tooltip
+   NOTE: CodeMirror renders tooltips on document.body,
+   outside .cm-editor-container.
+   ============================================ */
+
+.cm-tooltip {
+  border-radius: 8px;
+  background-color: white;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  border: 1px solid #e5e7eb;
+  font-family: var(--font-inter), "Inter", sans-serif;
+  padding: 8px;
+}
+
+.cm-tooltip ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.cm-tooltip li {
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.cm-tooltip li[aria-selected="true"] {
+  background-color: hsl(var(--primary) / 0.1);
+}
+
+.cm-completionLabel {
+  color: #374151;
+}
+
+.cm-completionDetail {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* ============================================
+   Internal Links ([[link]])
+   ============================================ */
+
+.cm-editor-container .cm-internal-link {
+  color: hsl(var(--primary)) !important;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.15s ease;
+}
+
+.cm-editor-container .cm-internal-link:hover {
+  background-color: hsl(var(--primary) / 0.1);
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-table-internal-link,
+.cm-editor-container .cm-table-external-link {
+  color: hsl(var(--primary));
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.15s ease;
+}
+
+.cm-editor-container .cm-table-internal-link:hover,
+.cm-editor-container .cm-table-external-link:hover {
+  background-color: hsl(var(--primary) / 0.1);
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-internal-link-editing {
+  background-color: hsl(var(--primary) / 0.08);
+}
+
+.cm-editor-container .cm-internal-link-hidden,
+.cm-editor-container .cm-internal-link-path-hidden,
+.cm-editor-container .cm-internal-link-subpath-hidden {
+  display: none;
+}
+
+.cm-editor-container .cm-internal-link-icon {
+  font-size: 0.75em;
+  margin-left: 2px;
+  opacity: 0.6;
+  vertical-align: super;
+}
+
+/* ============================================
+   External Links [text](url)
+   ============================================ */
+
+.cm-editor-container .cm-external-link {
+  color: hsl(var(--primary)) !important;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.15s ease;
+}
+
+.cm-editor-container .cm-external-link:hover {
+  background-color: hsl(var(--primary) / 0.1);
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-external-link-editing {
+  background-color: hsl(var(--primary) / 0.08);
+}
+
+.cm-editor-container .cm-external-link-hidden {
+  display: none;
+}
+
+.cm-editor-container .cm-external-link-icon {
+  font-size: 0.75em;
+  margin-left: 2px;
+  opacity: 0.6;
+  vertical-align: super;
+}
+
+/* ============================================
+   Reference Links [text][ref]
+   ============================================ */
+
+.cm-editor-container .cm-reference-link {
+  color: hsl(var(--primary)) !important;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.15s ease;
+}
+
+.cm-editor-container .cm-reference-link:hover {
+  background-color: hsl(var(--primary) / 0.1);
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-reference-link-editing {
+  background-color: hsl(var(--primary) / 0.08);
+}
+
+.cm-editor-container .cm-reference-link-hidden {
+  display: none;
+}
+
+/* ============================================
+   Markdown Images ![alt](url)
+   ============================================ */
+
+.cm-editor-container .cm-markdown-image {
+  display: block;
+  margin: 8px 0;
+  cursor: pointer;
+}
+
+.cm-editor-container .cm-markdown-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+.cm-editor-container .cm-markdown-image:hover img {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.cm-editor-container .cm-markdown-image-editing {
+  background-color: hsl(var(--primary) / 0.08);
+  border-radius: 2px;
+}
+
+.cm-editor-container .cm-markdown-image-error {
+  padding: 16px;
+  background-color: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+/* ============================================
+   Callouts ([!type])
+   ============================================ */
+
+.cm-editor-container .cm-callout {
+  padding: 4px 12px;
+  border-radius: 0;
+}
+
+.cm-editor-container .cm-callout-first {
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
+.cm-editor-container .cm-callout-last {
+  border-bottom-left-radius: 4px;
+  border-bottom-right-radius: 4px;
+  padding-bottom: 12px;
+  margin-bottom: 4px;
+}
+
+.cm-editor-container .cm-callout-editing {
+  background-color: rgba(0, 0, 0, 0.02) !important;
+}
+
+.cm-editor-container .cm-callout-marker-hidden,
+.cm-editor-container .cm-callout-syntax-hidden {
+  display: none;
+}
+
+/* Callout header widget - label style with subtle background */
+.cm-editor-container .cm-callout-header {
+  display: inline;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-right: 4px;
+}
+
+.cm-editor-container .cm-callout-fold {
+  font-size: 0.8em;
+  opacity: 0.6;
+}
+
+/* Callout color themes - unified background with colored title label */
+.cm-editor-container .callout-note {
+  background-color: rgba(59, 130, 246, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-note {
+  color: rgb(59, 130, 246);
+  background-color: rgba(59, 130, 246, 0.15);
+}
+
+.cm-editor-container .callout-abstract {
+  background-color: rgba(6, 182, 212, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-abstract {
+  color: rgb(6, 182, 212);
+  background-color: rgba(6, 182, 212, 0.15);
+}
+
+.cm-editor-container .callout-info {
+  background-color: rgba(14, 165, 233, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-info {
+  color: rgb(14, 165, 233);
+  background-color: rgba(14, 165, 233, 0.15);
+}
+
+.cm-editor-container .callout-tip {
+  background-color: rgba(16, 185, 129, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-tip {
+  color: rgb(16, 185, 129);
+  background-color: rgba(16, 185, 129, 0.15);
+}
+
+.cm-editor-container .callout-success {
+  background-color: rgba(34, 197, 94, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-success {
+  color: rgb(34, 197, 94);
+  background-color: rgba(34, 197, 94, 0.15);
+}
+
+.cm-editor-container .callout-question {
+  background-color: rgba(234, 179, 8, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-question {
+  color: rgb(202, 138, 4);
+  background-color: rgba(234, 179, 8, 0.15);
+}
+
+.cm-editor-container .callout-warning {
+  background-color: rgba(249, 115, 22, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-warning {
+  color: rgb(249, 115, 22);
+  background-color: rgba(249, 115, 22, 0.15);
+}
+
+.cm-editor-container .callout-failure {
+  background-color: rgba(239, 68, 68, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-failure {
+  color: rgb(239, 68, 68);
+  background-color: rgba(239, 68, 68, 0.15);
+}
+
+.cm-editor-container .callout-danger {
+  background-color: rgba(239, 68, 68, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-danger {
+  color: rgb(239, 68, 68);
+  background-color: rgba(239, 68, 68, 0.15);
+}
+
+.cm-editor-container .callout-bug {
+  background-color: rgba(168, 85, 247, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-bug {
+  color: rgb(168, 85, 247);
+  background-color: rgba(168, 85, 247, 0.15);
+}
+
+.cm-editor-container .callout-example {
+  background-color: rgba(139, 92, 246, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-example {
+  color: rgb(139, 92, 246);
+  background-color: rgba(139, 92, 246, 0.15);
+}
+
+.cm-editor-container .callout-quote {
+  background-color: rgba(107, 114, 128, 0.08);
+}
+
+.cm-editor-container .cm-callout-header.callout-quote {
+  color: rgb(107, 114, 128);
+  background-color: rgba(107, 114, 128, 0.15);
+}
+
+/* ============================================
+   Embeds (![[file]])
+   ============================================ */
+
+.cm-editor-container .cm-embed {
+  display: block;
+  margin: 12px 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cm-editor-container .cm-embed-editing {
+  background-color: hsl(var(--primary) / 0.08);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+/* Image embeds */
+.cm-editor-container .cm-embed-image {
+  text-align: center;
+}
+
+.cm-editor-container .cm-embed-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.cm-editor-container .cm-embed-error {
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px dashed rgb(239, 68, 68);
+  color: rgb(153, 27, 27);
+  padding: 12px;
+  text-align: center;
+  font-size: 14px;
+}
+
+/* Note embeds */
+.cm-editor-container .cm-embed-note {
+  background-color: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cm-editor-container .cm-embed-note-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background-color: rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cm-editor-container .cm-embed-note-icon {
+  font-size: 1.1em;
+}
+
+.cm-editor-container .cm-embed-note-title {
+  flex: 1;
+  font-weight: 500;
+  color: hsl(var(--primary));
+}
+
+.cm-editor-container .cm-embed-note-link {
+  font-size: 0.9em;
+  opacity: 0.6;
+  cursor: pointer;
+}
+
+.cm-editor-container .cm-embed-note-link:hover {
+  opacity: 1;
+}
+
+.cm-editor-container .cm-embed-note-subpath {
+  padding: 4px 14px;
+  font-size: 0.85em;
+  color: #6b7280;
+}
+
+.cm-editor-container .cm-embed-note-preview {
+  padding: 12px 14px;
+  font-size: 14px;
+  color: #6b7280;
+  font-style: italic;
+}
+
+/* Embeds inside callouts - integrated inline style */
+.cm-editor-container .cm-embed-in-callout {
+  display: inline-block;
+  width: 100%;
+  margin: 4px 0;
+  border-radius: 6px;
+  background-color: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cm-editor-container .cm-embed-in-callout .cm-embed-note-header {
+  padding: 8px 12px;
+  background-color: transparent;
+  border-bottom: none;
+}
+
+.cm-editor-container .cm-embed-in-callout .cm-embed-note-preview {
+  display: none;
+}
+
+/* Audio embeds */
+.cm-editor-container .cm-embed-audio {
+  padding: 12px;
+  background-color: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.cm-editor-container .cm-embed-audio audio {
+  width: 100%;
+}
+
+/* Video embeds */
+.cm-editor-container .cm-embed-video {
+  text-align: center;
+}
+
+.cm-editor-container .cm-embed-video video {
+  max-width: 100%;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* YouTube embeds */
+.cm-editor-container .cm-embed-youtube {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cm-editor-container .cm-embed-youtube-wrapper {
+  position: relative;
+  width: 100%;
+  padding-bottom: 56.25%; /* 16:9 aspect ratio */
+}
+
+.cm-editor-container .cm-embed-youtube-wrapper iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.cm-editor-container .cm-embed-youtube-edit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.cm-editor-container .cm-embed-youtube:hover .cm-embed-youtube-edit {
+  opacity: 1;
+}
+
+.cm-editor-container .cm-embed-youtube-edit:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.cm-editor-container .cm-youtube-editing {
+  background-color: hsl(var(--primary) / 0.08);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+/* PDF embeds */
+.cm-editor-container .cm-embed-pdf {
+  background-color: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cm-editor-container .cm-embed-pdf-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background-color: rgba(220, 38, 38, 0.05);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.cm-editor-container .cm-embed-pdf-icon {
+  font-size: 1.1em;
+}
+
+.cm-editor-container .cm-embed-pdf-title {
+  flex: 1;
+  font-weight: 500;
+}
+
+.cm-editor-container .cm-embed-pdf-link {
+  display: block;
+  padding: 12px 14px;
+  color: hsl(var(--primary));
+  text-decoration: none;
+}
+
+.cm-editor-container .cm-embed-pdf-link:hover {
+  text-decoration: underline;
+}
+
+/* ===== Mermaid Diagram Styles ===== */
+.cm-editor-container .cm-mermaid-container {
+  margin: 16px 0;
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  transition: border-color 0.15s;
+}
+
+.cm-editor-container .cm-mermaid-container:hover {
+  border-color: #e2e8f0;
+}
+
+/* Viewport: clip region for zoomed/panned content */
+.cm-editor-container .cm-mermaid-viewport {
+  overflow: hidden;
+  cursor: grab;
+  position: relative;
+  min-height: 100px;
+}
+
+.cm-editor-container .cm-mermaid-viewport:active {
+  cursor: grabbing;
+}
+
+/* Canvas: transformed layer holding the SVG */
+.cm-editor-container .cm-mermaid-canvas {
+  transform-origin: 0 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.cm-editor-container .cm-mermaid-canvas svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Zoom/pan controls toolbar (hover reveal) */
+.cm-editor-container .cm-mermaid-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.cm-editor-container .cm-mermaid-container:hover .cm-mermaid-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.cm-editor-container .cm-mermaid-control-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cm-editor-container .cm-mermaid-control-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.cm-editor-container .cm-mermaid-control-btn:active {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.cm-editor-container .cm-mermaid-loading {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.cm-editor-container .cm-mermaid-loading::before {
+  content: "";
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  border: 2px solid #e1e4e8;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: cm-mermaid-spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes cm-mermaid-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.cm-editor-container .cm-mermaid-container.cm-mermaid-error {
+  background: #fef2f2;
+  border-radius: 4px;
+}
+
+.cm-editor-container .cm-mermaid-error-message {
+  padding: 12px 16px;
+  color: #dc2626;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+.cm-editor-container .cm-mermaid-editing {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.cm-editor-container .cm-mermaid-editing.cm-line-codeblock-begin::before {
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+
+.cm-editor-container .cm-mermaid-editing.cm-line-codeblock-end::before {
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+
+/* Mermaid SVG styling overrides */
+.cm-editor-container .cm-mermaid-container .node rect,
+.cm-editor-container .cm-mermaid-container .node circle,
+.cm-editor-container .cm-mermaid-container .node ellipse,
+.cm-editor-container .cm-mermaid-container .node polygon,
+.cm-editor-container .cm-mermaid-container .node path {
+  stroke-width: 1.5px;
+}
+
+.cm-editor-container .cm-mermaid-container .edgePath .path {
+  stroke-width: 1.5px;
+}
+
+.cm-editor-container .cm-mermaid-container .label {
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* Mermaid expanded modal */
+.cm-mermaid-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.cm-mermaid-modal {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
+  width: 90vw;
+  height: 85vh;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.cm-mermaid-modal:active {
+  cursor: grabbing;
+}
+
+.cm-mermaid-modal-canvas {
+  transform-origin: center center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+}
+
+.cm-mermaid-modal-canvas svg {
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+}
+
+.cm-mermaid-modal-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.cm-mermaid-modal:hover .cm-mermaid-modal-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.cm-mermaid-modal-controls .cm-mermaid-control-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cm-mermaid-modal-controls .cm-mermaid-control-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.cm-mermaid-modal-controls .cm-mermaid-control-btn:active {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+/* Flowchart specific */
+.cm-editor-container .cm-mermaid-container .flowchart-link {
+  stroke: #6b7280;
+}
+
+/* Sequence diagram specific */
+.cm-editor-container .cm-mermaid-container .actor {
+  stroke: #3b82f6;
+  fill: #eff6ff;
+}
+
+.cm-editor-container .cm-mermaid-container .actor-line {
+  stroke: #9ca3af;
+}
+
+/* Class diagram specific */
+.cm-editor-container .cm-mermaid-container .classGroup rect {
+  fill: #f8fafc;
+  stroke: #e2e8f0;
+}
+
+/* State diagram specific */
+.cm-editor-container .cm-mermaid-container .stateGroup rect {
+  fill: #f8fafc;
+  stroke: #e2e8f0;
+}
+
+/* Gantt chart specific */
+.cm-editor-container .cm-mermaid-container .section {
+  fill: #eff6ff;
+}
+
+.cm-editor-container .cm-mermaid-container .task {
+  fill: #3b82f6;
+}
+
+/* Pie chart specific */
+.cm-editor-container .cm-mermaid-container .pieTitleText {
+  font-weight: 600;
+}
+
+/* ER diagram specific */
+.cm-editor-container .cm-mermaid-container .er.entityBox {
+  fill: #f8fafc;
+  stroke: #e2e8f0;
+}
+
+/* Git graph specific */
+.cm-editor-container .cm-mermaid-container .commit-id {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+}
+
+/* ===== Mermaid Dark Mode ===== */
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container:hover {
+  border-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-loading {
+  color: #9ca3af;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-loading::before {
+  border-color: #3a3a3a;
+  border-top-color: #60a5fa;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container.cm-mermaid-error {
+  background: #2d1515;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-error-message {
+  color: #f87171;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-control-btn {
+  background: rgba(255, 255, 255, 0.15);
+  color: #e5e5e5;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-control-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-control-btn:active {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* Modal dark mode */
+[data-theme="dark"] .cm-mermaid-modal {
+  background: #1e1e1e;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .cm-mermaid-modal-controls .cm-mermaid-control-btn {
+  background: rgba(255, 255, 255, 0.15);
+  color: #e5e5e5;
+}
+
+[data-theme="dark"] .cm-mermaid-modal-controls .cm-mermaid-control-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+[data-theme="dark"] .cm-mermaid-modal-controls .cm-mermaid-control-btn:active {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* Dark mode SVG overrides */
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .flowchart-link {
+  stroke: #9ca3af;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .actor {
+  stroke: #60a5fa;
+  fill: #1e3a5f;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .actor-line {
+  stroke: #6b7280;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .classGroup rect {
+  fill: #1e1e2e;
+  stroke: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .stateGroup rect {
+  fill: #1e1e2e;
+  stroke: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .section {
+  fill: #1e3a5f;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-mermaid-container .er.entityBox {
+  fill: #1e1e2e;
+  stroke: #3a3a3a;
+}
+
+/* ===================================================================
+   HTML Block and Inline Styles (Obsidian-like HTML rendering)
+   =================================================================== */
+
+/* HTML Block Container */
+.cm-editor-container .cm-html-block-container {
+  margin: 8px 0;
+  padding: 0;
+}
+
+/* Allow native styling for rendered HTML elements */
+.cm-editor-container .cm-html-block-container * {
+  all: revert;
+}
+
+/* Restore basic layout for the container itself */
+.cm-editor-container .cm-html-block-container {
+  display: block;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+/* Details/Summary element styling (common in Obsidian) */
+.cm-editor-container .cm-html-block-container details {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.cm-editor-container .cm-html-block-container details[open] {
+  padding-bottom: 12px;
+}
+
+.cm-editor-container .cm-html-block-container summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: #374151;
+  padding: 4px 0;
+  list-style: revert;
+}
+
+.cm-editor-container .cm-html-block-container summary:hover {
+  color: #111827;
+}
+
+.cm-editor-container .cm-html-block-container details > *:not(summary) {
+  margin-top: 8px;
+}
+
+/* Div containers */
+.cm-editor-container .cm-html-block-container > div {
+  margin: 8px 0;
+}
+
+/* Common semantic elements */
+.cm-editor-container .cm-html-block-container section,
+.cm-editor-container .cm-html-block-container article,
+.cm-editor-container .cm-html-block-container aside {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+/* Figure and figcaption */
+.cm-editor-container .cm-html-block-container figure {
+  margin: 16px 0;
+  text-align: center;
+}
+
+.cm-editor-container .cm-html-block-container figcaption {
+  margin-top: 8px;
+  font-size: 0.9em;
+  color: #6b7280;
+  font-style: italic;
+}
+
+/* Iframe styling */
+.cm-editor-container .cm-html-block-container iframe {
+  max-width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+/* Video and audio elements */
+.cm-editor-container .cm-html-block-container video,
+.cm-editor-container .cm-html-block-container audio {
+  max-width: 100%;
+  margin: 8px 0;
+}
+
+/* Center element (legacy but commonly used) */
+.cm-editor-container .cm-html-block-container center {
+  display: block;
+  text-align: center;
+  margin: 8px 0;
+}
+
+/* HTML Block editing mode */
+.cm-editor-container .cm-html-block-editing {
+  background: #f0f9ff;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+  color: #1e40af;
+}
+
+/* HTML Inline Container */
+.cm-editor-container .cm-html-inline-container {
+  display: inline;
+}
+
+/* Inline HTML - revert to browser defaults */
+.cm-editor-container .cm-html-inline-container * {
+  all: revert;
+}
+
+/* Common inline elements with enhanced styling */
+.cm-editor-container .cm-html-inline-container mark {
+  background-color: #fef08a;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+.cm-editor-container .cm-html-inline-container sub,
+.cm-editor-container .cm-html-inline-container sup {
+  font-size: 0.75em;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+}
+
+.cm-editor-container .cm-html-inline-container sub {
+  bottom: -0.25em;
+}
+
+.cm-editor-container .cm-html-inline-container sup {
+  top: -0.5em;
+}
+
+.cm-editor-container .cm-html-inline-container kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  box-shadow: 0 1px 0 #9ca3af;
+}
+
+.cm-editor-container .cm-html-inline-container abbr {
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.cm-editor-container .cm-html-inline-container del,
+.cm-editor-container .cm-html-inline-container s {
+  text-decoration: line-through;
+  color: #6b7280;
+}
+
+.cm-editor-container .cm-html-inline-container ins,
+.cm-editor-container .cm-html-inline-container u {
+  text-decoration: underline;
+}
+
+.cm-editor-container .cm-html-inline-container small {
+  font-size: 0.85em;
+}
+
+.cm-editor-container .cm-html-inline-container cite {
+  font-style: italic;
+}
+
+.cm-editor-container .cm-html-inline-container q::before {
+  content: open-quote;
+}
+
+.cm-editor-container .cm-html-inline-container q::after {
+  content: close-quote;
+}
+
+/* HTML Inline editing mode */
+.cm-editor-container .cm-html-inline-editing {
+  background: #f0f9ff;
+  border-radius: 2px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+  color: #1e40af;
+}
+
+/* Dark theme adjustments for HTML */
+[data-theme="dark"] .cm-editor-container .cm-html-block-container details {
+  background: #1e293b;
+  border-color: #334155;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-block-container summary {
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-block-container summary:hover {
+  color: #f8fafc;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-block-container section,
+[data-theme="dark"] .cm-editor-container .cm-html-block-container article,
+[data-theme="dark"] .cm-editor-container .cm-html-block-container aside {
+  border-color: #334155;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-block-container figcaption {
+  color: #9ca3af;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-block-editing,
+[data-theme="dark"] .cm-editor-container .cm-html-inline-editing {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-inline-container mark {
+  background-color: #854d0e;
+  color: #fef08a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-html-inline-container kbd {
+  background: #374151;
+  border-color: #4b5563;
+  box-shadow: 0 1px 0 #1f2937;
+  color: #e5e7eb;
+}
+
+/* ===================================================================
+   Math/LaTeX Styles (KaTeX)
+   =================================================================== */
+
+/* Inline math styling */
+.cm-editor-container .cm-math.cm-math-inline {
+  display: inline;
+  vertical-align: baseline;
+  padding: 0 2px;
+}
+
+.cm-editor-container .cm-math.cm-math-inline:hover {
+  background: #f1f5f9;
+  border-radius: 2px;
+}
+
+/* Block math styling */
+.cm-editor-container .cm-math.cm-math-block {
+  display: block;
+  margin: 16px 0;
+  padding: 16px 24px;
+  background: #fafbfc;
+  border: 1px solid #e1e4e8;
+  border-radius: 8px;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.cm-editor-container .cm-math.cm-math-block:hover {
+  border-color: #d0d7de;
+  background: #f6f8fa;
+}
+
+/* Math rendering error styling */
+.cm-editor-container .cm-math.cm-math-error {
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px dashed #fecaca;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+}
+
+/* Math editing mode styling */
+.cm-editor-container .cm-math-editing {
+  background: #f0f9ff;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+/* KaTeX overrides for better integration */
+.cm-editor-container .katex {
+  font-size: 1.1em;
+}
+
+.cm-editor-container .cm-math-block .katex {
+  font-size: 1.21em;
+}
+
+.cm-editor-container .katex-display {
+  margin: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.cm-editor-container .katex-display > .katex {
+  text-align: center;
+}
+
+/* ===================================================================
+   Table Styles — inline-editable tables
+   =================================================================== */
+
+.cm-editor-container .cm-table-container {
+  margin: 16px 0;
+  overflow-x: auto;
+}
+
+.cm-editor-container .cm-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.cm-editor-container .cm-table th,
+.cm-editor-container .cm-table td {
+  padding: 8px 12px;
+  border: 1px solid #e1e4e8;
+  cursor: text;
+  transition: background-color 0.1s ease;
+}
+
+.cm-editor-container .cm-table th {
+  background: #f6f8fa;
+  font-weight: 600;
+  text-align: left;
+}
+
+.cm-editor-container .cm-table td:hover {
+  background: #f0f7ff;
+}
+
+.cm-editor-container .cm-table th:hover {
+  background: #edf2f7;
+}
+
+.cm-editor-container .cm-table tbody tr:nth-child(even) td {
+  background: #fafbfc;
+}
+
+.cm-editor-container .cm-table tbody tr:nth-child(even) td:hover {
+  background: #f0f7ff;
+}
+
+/* Active (contenteditable) cell */
+.cm-editor-container .cm-table .cm-table-cell-active {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+  background: #eff6ff !important;
+}
+
+.cm-editor-container .cm-table .cm-table-cell-active:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+
+/* ── Dark theme ── */
+
+[data-theme="dark"] .cm-editor-container .cm-table {
+  border-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table th,
+[data-theme="dark"] .cm-editor-container .cm-table td {
+  border-color: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table th {
+  background: #2c2c2c;
+  color: #e5e5e5;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table td {
+  color: #e5e5e5;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table td:hover {
+  background: #333333;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table th:hover {
+  background: #363636;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table tbody tr:nth-child(even) td {
+  background: #222222;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table tbody tr:nth-child(even) td:hover {
+  background: #333333;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table .cm-table-cell-active {
+  outline-color: #60a5fa;
+  background: #333333 !important;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table .cm-table-cell-active:focus {
+  outline-color: #3b82f6;
+}
+
+/* ── Table edge +buttons ── */
+
+.cm-editor-container .cm-table-container.cm-table-inline-edit {
+  position: relative;
+  padding-right: 32px;
+  margin-bottom: 28px;
+  overflow: visible;
+  z-index: 1;
+}
+
+.cm-editor-container .cm-table-add-col-btn,
+.cm-editor-container .cm-table-add-row-btn {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #d1d5db;
+  background: #f9fafb;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s, color 0.15s;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.cm-editor-container .cm-table-container.cm-table-inline-edit:hover .cm-table-add-col-btn,
+.cm-editor-container .cm-table-container.cm-table-inline-edit:hover .cm-table-add-row-btn {
+  opacity: 0.5;
+}
+
+.cm-editor-container .cm-table-add-col-btn:hover,
+.cm-editor-container .cm-table-add-row-btn:hover {
+  opacity: 1 !important;
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #3b82f6;
+}
+
+.cm-editor-container .cm-table-add-col-btn {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  border-radius: 0 4px 4px 0;
+}
+
+.cm-editor-container .cm-table-add-row-btn {
+  bottom: -24px;
+  left: 0;
+  right: 32px;
+  height: 20px;
+  border-radius: 0 0 4px 4px;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table-add-col-btn,
+[data-theme="dark"] .cm-editor-container .cm-table-add-row-btn {
+  border-color: #3a3a3a;
+  background: #2c2c2c;
+  color: #737373;
+}
+
+[data-theme="dark"] .cm-editor-container .cm-table-add-col-btn:hover,
+[data-theme="dark"] .cm-editor-container .cm-table-add-row-btn:hover {
+  background: #333333;
+  border-color: #60a5fa;
+  color: #60a5fa;
+}
+
+/* ── Table context menu ── */
+
+.cm-table-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  padding: 4px 0;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cm-table-context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: #1e293b;
+  font-family: inherit;
+  font-size: 13px;
+  transition: background 0.1s;
+}
+
+.cm-table-context-menu-item:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.cm-table-context-menu-item:active:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.cm-table-context-menu-item-disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+
+.cm-table-context-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: #e2e8f0;
+}
+
+[data-theme="dark"] .cm-table-context-menu {
+  background: #2c2c2c;
+  border-color: #3a3a3a;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="dark"] .cm-table-context-menu-item {
+  color: #e5e5e5;
+}
+
+[data-theme="dark"] .cm-table-context-menu-item:hover:not(:disabled) {
+  background: #3a3a3a;
+}
+
+[data-theme="dark"] .cm-table-context-menu-item:active:not(:disabled) {
+  background: #444444;
+}
+
+[data-theme="dark"] .cm-table-context-menu-item-disabled {
+  color: #737373;
+}
+
+[data-theme="dark"] .cm-table-context-menu-separator {
+  background: #3a3a3a;
+}
+
+/* ===================================================================
+   Slash Command Menu Styles
+   NOTE: CodeMirror renders autocomplete tooltips on document.body,
+   outside .cm-editor-container, so selectors must not be scoped to it.
+   =================================================================== */
+
+.cm-tooltip.cm-tooltip-autocomplete {
+  border: 1px solid rgb(var(--color-border-200));
+  border-radius: 6px;
+  background: rgb(var(--color-background-100));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  min-width: 220px;
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  position: relative;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: linear-gradient(to bottom, transparent, rgb(var(--color-background-100)));
+  border-radius: 0 0 6px 6px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul {
+  /* !important needed to override CodeMirror baseTheme (10em, monospace) */
+  max-height: 40vh !important;
+  font-family: inherit !important;
+  white-space: normal !important;
+  overflow: hidden auto !important;
+  height: auto !important;
+  padding: 4px;
+  padding-bottom: 28px;
+  margin: 0;
+  list-style: none;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  padding: 0;
+  margin: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected="true"] {
+  background: rgb(var(--color-background-90));
+}
+
+.cm-slash-command-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.cm-slash-command-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  font-size: 11px;
+  flex-shrink: 0;
+  color: rgb(var(--color-text-300));
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+}
+
+.cm-slash-command-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cm-slash-command-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgb(var(--color-text-100));
+}
+
+.cm-slash-command-detail {
+  font-size: 11px;
+  color: rgb(var(--color-text-300));
+}
+
+/* Hide default completion styling when using slash command custom rendering */
+.cm-slash-command-option .cm-completionLabel,
+.cm-slash-command-option .cm-completionDetail,
+.cm-slash-command-option .cm-completionIcon {
+  display: none;
+}
+
+/* Dark theme adjustments */
+[data-theme="dark"] .cm-tooltip.cm-tooltip-autocomplete {
+  border-color: rgb(var(--color-border-300));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}

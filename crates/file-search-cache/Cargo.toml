@@ -1,0 +1,23 @@
+[package]
+name = "file-search-cache"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+fst = "0.4"
+git2 = { version = "0.18", features = ["vendored-libgit2", "vendored-openssl"] }
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+moka = { version = "0.12", features = ["future"] }
+notify = "6"
+notify-debouncer-full = "0.3"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"

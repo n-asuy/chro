@@ -1,0 +1,11 @@
+apps/browser-extension/
+docs/
+.agents/
+.claude/
+skills/
+skills-lock.json
+.github/workflows/desktop-release.yml
+.github/workflows/oss-sanitization.yml
+.github/workflows/sync-oss.yml
+.github/public-oss-ignore-rules.json
+tooling/scripts/check-oss-sanitization.mjs

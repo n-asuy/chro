@@ -1,0 +1,16 @@
+{
+  "name": "@chro/cli",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "cargo run --manifest-path ../../crates/server/Cargo.toml --bin chro-server --",
+    "build": "cargo build --release --manifest-path ../../crates/server/Cargo.toml",
+    "package:local": "bash ./local-build.sh",
+    "package:release": "bash ./release.sh",
+    "test": "cargo test --manifest-path ../../crates/server/Cargo.toml",
+    "lint": "cargo fmt --manifest-path ../../crates/server/Cargo.toml -- --check",
+    "format": "cargo fmt --manifest-path ../../crates/server/Cargo.toml",
+    "typecheck": "cargo check --manifest-path ../../crates/server/Cargo.toml"
+  }
+}
