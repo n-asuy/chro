@@ -231,11 +231,16 @@ impl FileSearchCache {
     /// Pre-warm cache for given repository
     pub async fn warm(&self, repo_path: &Path) -> Result<(), FileSearchError> {
         if !repo_path.exists() {
-            return Err(FileSearchError::RepoMissing(repo_path.display().to_string()));
+            return Err(FileSearchError::RepoMissing(
+                repo_path.display().to_string(),
+            ));
         }
 
         if let Err(e) = self.build_queue.send(repo_path.to_path_buf()) {
-            error!("Failed to enqueue repo for warming: {:?} - {}", repo_path, e);
+            error!(
+                "Failed to enqueue repo for warming: {:?} - {}",
+                repo_path, e
+            );
         }
         Ok(())
     }
@@ -433,7 +438,11 @@ fn build_file_index(repo_path: &Path) -> Result<(Vec<IndexedFile>, Map<Vec<u8>>)
         .hidden(false)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            name != ".git" && name != "node_modules" && name != "target" && name != "dist" && name != "build"
+            name != ".git"
+                && name != "node_modules"
+                && name != "target"
+                && name != "dist"
+                && name != "build"
         });
 
     let walker = builder.build();
@@ -457,9 +466,8 @@ fn build_file_index(repo_path: &Path) -> Result<(Vec<IndexedFile>, Map<Vec<u8>>)
     }
 
     for result in walker {
-        let entry = result.map_err(|e| {
-            FileSearchError::Io(std::io::Error::other(e.to_string()))
-        })?;
+        let entry =
+            result.map_err(|e| FileSearchError::Io(std::io::Error::other(e.to_string())))?;
         let path = entry.path();
 
         if path == repo_path {
@@ -564,7 +572,9 @@ pub fn search_content(
     limit: usize,
 ) -> Result<Vec<ContentSearchResult>, FileSearchError> {
     if !repo_path.exists() {
-        return Err(FileSearchError::RepoMissing(repo_path.display().to_string()));
+        return Err(FileSearchError::RepoMissing(
+            repo_path.display().to_string(),
+        ));
     }
 
     let matcher = RegexMatcher::new_line_matcher(&format!("(?i){}", regex::escape(pattern)))
@@ -631,8 +641,8 @@ pub fn search_content(
 fn is_likely_binary(path: &Path) -> bool {
     let binary_extensions = [
         "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "pdf", "zip", "tar", "gz", "rar",
-        "7z", "exe", "dll", "so", "dylib", "wasm", "mp3", "mp4", "avi", "mov", "wav", "ogg",
-        "ttf", "otf", "woff", "woff2", "eot", "db", "sqlite", "lock",
+        "7z", "exe", "dll", "so", "dylib", "wasm", "mp3", "mp4", "avi", "mov", "wav", "ogg", "ttf",
+        "otf", "woff", "woff2", "eot", "db", "sqlite", "lock",
     ];
 
     path.extension()
@@ -648,7 +658,9 @@ pub fn search_combined(
     limit: usize,
 ) -> Result<Vec<SearchResult>, FileSearchError> {
     if !repo_path.exists() {
-        return Err(FileSearchError::RepoMissing(repo_path.display().to_string()));
+        return Err(FileSearchError::RepoMissing(
+            repo_path.display().to_string(),
+        ));
     }
 
     let query_lower = query.to_lowercase();

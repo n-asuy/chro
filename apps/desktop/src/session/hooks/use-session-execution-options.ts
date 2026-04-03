@@ -13,6 +13,7 @@ type UseSessionExecutionOptionsArgs = {
 type UseSessionExecutionOptionsResult = {
   useWorktree: boolean;
   setUseWorktree: (next: boolean) => void;
+  isGitRepository: boolean;
   baseBranch: string | null;
   setBaseBranch: (next: string | null) => void;
   baseBranchCandidates: BranchInfo[];
@@ -32,6 +33,7 @@ export function useSessionExecutionOptions({
   addErrorMessage,
 }: UseSessionExecutionOptionsArgs): UseSessionExecutionOptionsResult {
   const [useWorktree, setUseWorktree] = useState(true);
+  const [isGitRepository, setIsGitRepository] = useState(true);
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [baseBranchCandidates, setBaseBranchCandidates] = useState<
     BranchInfo[]
@@ -49,9 +51,15 @@ export function useSessionExecutionOptions({
   }, [baseBranchCandidates, baseBranchSearch]);
 
   useEffect(() => {
+    setUseWorktree(true);
+    setIsGitRepository(true);
+  }, [routeProjectId]);
+
+  useEffect(() => {
     if (!routeProjectId) {
       setBaseBranchCandidates([]);
       setBaseBranch(null);
+      setIsGitRepository(true);
       setIsLoadingBaseBranches(false);
       return;
     }
@@ -60,8 +68,15 @@ export function useSessionExecutionOptions({
     setIsLoadingBaseBranches(true);
 
     listGitBranches(routeProjectId)
-      .then((branches) => {
+      .then(({ branches, isRepository }) => {
         if (cancelled) return;
+        setIsGitRepository(isRepository);
+        if (!isRepository) {
+          setUseWorktree(false);
+          setBaseBranchCandidates([]);
+          setBaseBranch(null);
+          return;
+        }
         const localBranches = toLocalBranches(branches);
         setBaseBranchCandidates(localBranches);
         setBaseBranch((previous) => {
@@ -97,7 +112,8 @@ export function useSessionExecutionOptions({
     setIsInitializingGit(true);
     try {
       await initGitRepository(routeProjectId);
-      const branches = await listGitBranches(routeProjectId);
+      const { branches, isRepository } = await listGitBranches(routeProjectId);
+      setIsGitRepository(isRepository);
       const localBranches = toLocalBranches(branches);
       setBaseBranchCandidates(localBranches);
       setBaseBranch((previous) => {
@@ -123,6 +139,7 @@ export function useSessionExecutionOptions({
   return {
     useWorktree,
     setUseWorktree,
+    isGitRepository,
     baseBranch,
     setBaseBranch,
     baseBranchCandidates,

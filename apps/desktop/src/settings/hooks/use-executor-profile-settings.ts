@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { TranslationFunction } from "@/i18n";
 import {
-  detectClaudeVersion,
-  fetchExecutorProfile,
-  updateExecutorProfile,
   type BaseCodingAgent,
   type ExecutorConfigs,
   type ExecutorProfileId,
   type ExecutorProfileOptions,
   type UpdateExecutorProfileRequest,
+  detectClaudeVersion,
+  fetchExecutorProfile,
+  updateExecutorProfile,
 } from "@/lib/executor-client";
-import type { TranslationFunction } from "@/i18n";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type ClaudeVersionData = {
   version: string | null;

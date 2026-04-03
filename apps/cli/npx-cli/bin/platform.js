@@ -67,12 +67,8 @@ function getBinaryName(base) {
   return process.platform === "win32" ? `${base}.exe` : base;
 }
 
-function hasConfiguredPublicUrl() {
-  return R2_PUBLIC_URL.length > 0;
-}
-
 function assertPublicUrlConfigured() {
-  if (hasConfiguredPublicUrl()) return;
+  if (R2_PUBLIC_URL.length > 0) return;
 
   console.error("chro: R2 public URL is not configured.");
   console.error(
@@ -86,6 +82,5 @@ module.exports = {
   getEffectiveArch,
   getPlatformDir,
   getBinaryName,
-  hasConfiguredPublicUrl,
   R2_PUBLIC_URL,
 };

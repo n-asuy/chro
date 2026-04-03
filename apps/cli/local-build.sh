@@ -67,6 +67,30 @@ cp "$TARGET_DIR/$BIN_NAME" "$SCRIPT_DIR/$BIN_NAME"
 rm -f "$SCRIPT_DIR/$BIN_NAME"
 mv "$SCRIPT_DIR/chro-server.zip" "$SCRIPT_DIR/npx-cli/dist/$PLATFORM_DIR/chro-server.zip"
 
+echo "Generating binary manifest..."
+node -e '
+const fs = require("fs");
+const crypto = require("crypto");
+const manifest = { version: "v" + process.argv[1], platforms: {} };
+const distDir = process.argv[2] + "/npx-cli/dist";
+
+for (const platform of fs.readdirSync(distDir)) {
+  const platformPath = distDir + "/" + platform;
+  if (!fs.statSync(platformPath).isDirectory()) continue;
+  manifest.platforms[platform] = {};
+  const zipPath = platformPath + "/chro-server.zip";
+  if (fs.existsSync(zipPath)) {
+    const data = fs.readFileSync(zipPath);
+    manifest.platforms[platform]["chro-server"] = {
+      sha256: crypto.createHash("sha256").update(data).digest("hex"),
+      size: data.length
+    };
+  }
+}
+fs.writeFileSync(distDir + "/manifest.json", JSON.stringify(manifest, null, 2));
+console.log("  " + distDir + "/manifest.json");
+' "$VERSION" "$SCRIPT_DIR"
+
 echo "Syncing npm package metadata..."
 node -e '
 const fs = require("fs");

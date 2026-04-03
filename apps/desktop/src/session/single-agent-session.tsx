@@ -28,6 +28,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
+import { toast } from "@chro/ui/hooks/use-toast";
 import {
   Tooltip,
   TooltipContent,
@@ -109,6 +110,9 @@ const createPerfRequestId = (): string => {
   }
   return `perf-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
+
+const normalizeSessionErrorMessage = (message: string): string =>
+  message.replace(/^bad request:\s*/i, "").trim();
 
 const parseExecutorProfileId = (
   value: string | null | undefined,
@@ -204,7 +208,12 @@ export function SingleAgentSessionView({
   }, []);
 
   const addErrorMessage = useCallback((message: string) => {
-    console.error("[SingleAgentSession] Error:", message);
+    const normalizedMessage = normalizeSessionErrorMessage(message);
+    console.error("[SingleAgentSession] Error:", normalizedMessage);
+    toast({
+      title: normalizedMessage,
+      variant: "warning",
+    });
   }, []);
 
   const {
@@ -224,6 +233,7 @@ export function SingleAgentSessionView({
   const {
     useWorktree,
     setUseWorktree,
+    isGitRepository,
     baseBranch,
     setBaseBranch,
     baseBranchCandidates,
@@ -1051,8 +1061,14 @@ export function SingleAgentSessionView({
       (commitsAhead > 0 || mergeSuccess),
   );
 
-  // Rebase: disabled during the active rebase mutation only.
-  const canRebase = Boolean(taskRunId && !isRebasing);
+  // Rebase requires Git branch context and pending work against the base branch.
+  const canRebase = Boolean(
+    taskRunId &&
+      hasDiffs &&
+      branchStatus?.target_branch &&
+      !isRebasing &&
+      commitsBehind > 0,
+  );
 
   // Filter out archived tasks (now using status field)
   const sortedTasks = useMemo(
@@ -1210,7 +1226,7 @@ export function SingleAgentSessionView({
 
         {/* Footer Status Bar */}
         <div className="mt-3 flex items-center justify-between px-1 text-xs font-medium text-muted-foreground">
-          {isLoadingBaseBranches ? null : baseBranchCandidates.length > 0 ? (
+          {isLoadingBaseBranches ? null : isGitRepository ? (
             <>
               <div className="flex items-center gap-4">
                 <TooltipProvider delayDuration={120}>
@@ -1350,7 +1366,11 @@ export function SingleAgentSessionView({
               </div>
             </>
           ) : (
-            <div className="flex w-full items-center">
+            <div className="flex w-full items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <Laptop className="h-3 w-3" />
+                <span>Local</span>
+              </div>
               <button
                 type="button"
                 disabled={isInitializingGit || !routeProjectId}

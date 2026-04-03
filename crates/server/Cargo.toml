@@ -1,6 +1,6 @@
 [package]
 name = "chro-server"
-version = "0.1.1"
+version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -36,7 +36,9 @@ worktree = { path = "../worktree" }
 git = { path = "../git" }
 file-search-cache = { path = "../file-search-cache" }
 analytics = { path = "../analytics" }
-rlimit = "0.10"
 rust-embed = "8"
 mime_guess = "2"
 open = "5"
+
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.10"

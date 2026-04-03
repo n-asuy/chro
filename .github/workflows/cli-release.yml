@@ -1,0 +1,325 @@
+name: CLI Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: cli-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: stable
+  BUN_VERSION: "1.1.26"
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.version.outputs.new_tag }}
+      new_version: ${{ steps.version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Determine and update versions
+        id: version
+        run: |
+          latest_npm_version=$(npm view @chro-ai/cli version 2>/dev/null || echo "0.0.0")
+          echo "Latest npm version: $latest_npm_version"
+
+          current_repo_version=$(grep '^version' crates/server/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Current repo version: $current_repo_version"
+
+          base_version=$(node -e "
+            const npm = '$latest_npm_version'.split('.').map(Number);
+            const repo = '$current_repo_version'.split('.').map(Number);
+            for (let i = 0; i < 3; i++) {
+              if ((npm[i] || 0) > (repo[i] || 0)) { console.log('$latest_npm_version'); process.exit(); }
+              if ((npm[i] || 0) < (repo[i] || 0)) { console.log('$current_repo_version'); process.exit(); }
+            }
+            console.log('$current_repo_version');
+          ")
+          echo "Base version for bump: $base_version"
+
+          new_version=$(node -e "
+            const [major, minor, patch] = '$base_version'.split('.').map(Number);
+            const type = '${{ github.event.inputs.version_type }}';
+            if (type === 'major') console.log((major+1) + '.0.0');
+            else if (type === 'minor') console.log(major + '.' + (minor+1) + '.0');
+            else console.log(major + '.' + minor + '.' + (patch+1));
+          ")
+
+          timestamp=$(date +%Y%m%d%H%M%S)
+          new_tag="v${new_version}-${timestamp}"
+
+          echo "New version: $new_version"
+          echo "New tag: $new_tag"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Update crates/server/Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.new_version }}"/' crates/server/Cargo.toml
+
+      - name: Update npx-cli package.json
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("apps/cli/npx-cli/package.json", "utf8"));
+            pkg.version = "${{ steps.version.outputs.new_version }}";
+            fs.writeFileSync("apps/cli/npx-cli/package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Update Cargo.lock
+        run: cargo check --manifest-path crates/server/Cargo.toml
+
+      - name: Commit changes and create tag
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add crates/server/Cargo.toml apps/cli/npx-cli/package.json Cargo.lock
+          git commit -m "chore(cli): bump version to ${{ steps.version.outputs.new_version }}"
+          git tag -a ${{ steps.version.outputs.new_tag }} -m "CLI Release ${{ steps.version.outputs.new_tag }}"
+          git push
+          git push --tags
+
+  build-frontend:
+    needs: bump-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend
+        run: bun run --filter=@chro/desktop build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: apps/desktop/dist-vite/
+          retention-days: 1
+
+  build-backend:
+    needs: [bump-version, build-frontend]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            name: linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-14
+            name: macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-15
+            name: macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: apps/desktop/dist-vite/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build chro-server
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path crates/server/Cargo.toml
+
+      - name: Locate binary
+        id: bin
+        shell: bash
+        run: |
+          # --manifest-path may place output under crates/server/target or root target
+          if [ -f "target/${{ matrix.target }}/release/chro-server${{ runner.os == 'Windows' && '.exe' || '' }}" ]; then
+            echo "dir=target/${{ matrix.target }}/release" >> $GITHUB_OUTPUT
+          elif [ -f "crates/server/target/${{ matrix.target }}/release/chro-server${{ runner.os == 'Windows' && '.exe' || '' }}" ]; then
+            echo "dir=crates/server/target/${{ matrix.target }}/release" >> $GITHUB_OUTPUT
+          else
+            echo "Binary not found" >&2
+            find . -name "chro-server*" -path "*/release/*" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          cp ${{ steps.bin.outputs.dir }}/chro-server dist/${{ matrix.name }}/chro-server
+          cd dist/${{ matrix.name }}
+          zip -q chro-server.zip chro-server
+          rm chro-server
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          cp ${{ steps.bin.outputs.dir }}/chro-server.exe dist/${{ matrix.name }}/chro-server.exe
+          cd dist/${{ matrix.name }}
+          powershell -Command "Compress-Archive -Path 'chro-server.exe' -DestinationPath 'chro-server.zip' -Force"
+          rm chro-server.exe
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.name }}
+          path: dist/
+          retention-days: 1
+
+  upload-to-r2:
+    needs: [bump-version, build-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Download all platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: binaries/
+          merge-multiple: true
+
+      - name: List downloaded binaries
+        run: find binaries/
+
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws configure set default.region auto
+
+      - name: Generate manifest and upload to R2
+        run: |
+          VERSION="${{ needs.bump-version.outputs.new_version }}"
+          TAG="v${VERSION}"
+          ENDPOINT="${{ secrets.R2_ENDPOINT }}"
+          BUCKET="${{ secrets.R2_BUCKET }}"
+
+          node -e "
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const manifest = { version: '$TAG', platforms: {} };
+            const platforms = ['linux-x64', 'linux-arm64', 'windows-x64', 'macos-x64', 'macos-arm64'];
+
+            for (const platform of platforms) {
+              manifest.platforms[platform] = {};
+              const zipPath = 'binaries/' + platform + '/chro-server.zip';
+              if (fs.existsSync(zipPath)) {
+                const data = fs.readFileSync(zipPath);
+                manifest.platforms[platform]['chro-server'] = {
+                  sha256: crypto.createHash('sha256').update(data).digest('hex'),
+                  size: data.length
+                };
+              }
+            }
+            fs.writeFileSync('manifest.json', JSON.stringify(manifest, null, 2));
+            console.log('Generated manifest:');
+            console.log(JSON.stringify(manifest, null, 2));
+          "
+
+          for platform in linux-x64 linux-arm64 windows-x64 macos-x64 macos-arm64; do
+            if [ -f "binaries/$platform/chro-server.zip" ]; then
+              echo "Uploading $platform/chro-server.zip..."
+              aws s3 cp "binaries/$platform/chro-server.zip" \
+                "s3://$BUCKET/releases/$TAG/$platform/chro-server.zip" \
+                --endpoint-url "$ENDPOINT"
+            fi
+          done
+
+          echo "Uploading manifest..."
+          aws s3 cp manifest.json \
+            "s3://$BUCKET/releases/$TAG/manifest.json" \
+            --endpoint-url "$ENDPOINT" --content-type "application/json"
+
+          echo "{\"latest\":\"$VERSION\"}" | aws s3 cp - \
+            "s3://$BUCKET/releases/latest.json" \
+            --endpoint-url "$ENDPOINT" --content-type "application/json"
+
+      - name: Verify upload
+        run: |
+          TAG="v${{ needs.bump-version.outputs.new_version }}"
+          aws s3 ls "s3://${{ secrets.R2_BUCKET }}/releases/$TAG/" \
+            --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
+            --recursive
+
+  publish-npm:
+    needs: [bump-version, upload-to-r2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Prepare npm package
+        run: |
+          cd apps/cli/npx-cli
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = "${{ needs.bump-version.outputs.new_version }}";
+            pkg.config = { ...(pkg.config || {}), r2PublicUrl: "${{ secrets.R2_PUBLIC_URL }}" };
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Pack and publish
+        working-directory: apps/cli/npx-cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm pack
+          npm publish --access public

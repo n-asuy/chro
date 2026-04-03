@@ -42,8 +42,10 @@ struct GitStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BranchListResponse {
     branches: Vec<BranchInfo>,
+    is_repository: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,11 +130,21 @@ async fn list_branches(
     let project_path = get_project_path(&state, project_id).await?;
     let git_service = GitService::new();
 
+    if !git_service.is_repository(&project_path) {
+        return Ok(Json(BranchListResponse {
+            branches: Vec::new(),
+            is_repository: false,
+        }));
+    }
+
     let branches = git_service
         .list_branches(&project_path)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    Ok(Json(BranchListResponse { branches }))
+    Ok(Json(BranchListResponse {
+        branches,
+        is_repository: true,
+    }))
 }
 
 async fn get_current_branch(

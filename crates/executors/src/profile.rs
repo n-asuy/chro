@@ -118,7 +118,6 @@ impl ExecutorProfileId {
             variant: None,
         }
     }
-
 }
 
 impl std::fmt::Display for ExecutorProfileId {
@@ -147,7 +146,6 @@ impl ExecutorConfig {
     pub fn get_variant(&self, variant: &str) -> Option<&CodingAgent> {
         self.configurations.get(variant)
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -373,7 +371,6 @@ impl PermissionRuntimeConfig {
             hooks: None,
         }
     }
-
 }
 
 /// Model preset for Anthropic models.
@@ -941,7 +938,9 @@ pub fn get_auth_status_all() -> AuthStatusResult {
 fn extract_auth_url(text: &str) -> Option<String> {
     let url_re = regex::Regex::new(r"https?://[^\s\x1b\]\)>]+").ok()?;
     for m in url_re.find_iter(text) {
-        let url = m.as_str().trim_end_matches(|c: char| c == '.' || c == ',' || c == ')');
+        let url = m
+            .as_str()
+            .trim_end_matches(|c: char| c == '.' || c == ',' || c == ')');
         // Skip localhost URLs
         if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("::1") {
             continue;
@@ -956,17 +955,19 @@ fn extract_auth_url(text: &str) -> Option<String> {
 /// Resolves the executable, spawns the login command, reads stdout/stderr
 /// for up to 15 seconds to extract the OAuth URL, then returns the URL
 /// so the frontend can open it in the browser.
-pub async fn trigger_auth_login(executor: BaseCodingAgent) -> Result<AuthLoginResult, ExecutorError> {
+pub async fn trigger_auth_login(
+    executor: BaseCodingAgent,
+) -> Result<AuthLoginResult, ExecutorError> {
     let (program, args): (&str, Vec<&str>) = match executor {
         BaseCodingAgent::ClaudeCode => ("claude", vec!["auth", "login"]),
         BaseCodingAgent::Codex => ("codex", vec!["login"]),
     };
 
-    let executable = resolve_executable_path(program)
-        .await
-        .ok_or_else(|| ExecutorError::ExecutableNotFound {
+    let executable = resolve_executable_path(program).await.ok_or_else(|| {
+        ExecutorError::ExecutableNotFound {
             program: program.to_string(),
-        })?;
+        }
+    })?;
 
     let mut cmd = tokio::process::Command::new(&executable);
     cmd.args(args)

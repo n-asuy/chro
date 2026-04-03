@@ -34,10 +34,9 @@ async fn stream_project_file_events(
 ) -> Result<impl IntoResponse, ApiError> {
     let project = ProjectRecord::get(state.pool(), project_id).await?;
     let project_path = PathBuf::from(&project.git_repo_path);
-
-    state.runtime().start_workspace_watcher(project_path);
-
-    let rx = state.runtime().subscribe_workspace_file_events();
+    let rx = state
+        .runtime()
+        .subscribe_workspace_file_events(project_path)?;
     Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, rx)))
 }
 
@@ -49,26 +48,38 @@ async fn handle_file_events_ws(
     use tokio_stream::wrappers::BroadcastStream;
 
     let (mut sender, mut ws_receiver) = socket.split();
-
-    tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
-
     let mut stream = BroadcastStream::new(rx);
-    while let Some(result) = stream.next().await {
-        if let Ok(event) = result {
-            let event_type_str = match event.event_type {
-                WorkspaceFileEventType::Created => "created",
-                WorkspaceFileEventType::Modified => "modified",
-                WorkspaceFileEventType::Deleted => "deleted",
-                WorkspaceFileEventType::Renamed => "renamed",
-            };
-            let data = serde_json::json!({
-                "event_type": event_type_str,
-                "relative_path": event.relative_path,
-                "is_directory": event.is_directory,
-            })
-            .to_string();
-            if sender.send(Message::Text(data.into())).await.is_err() {
-                break;
+
+    loop {
+        tokio::select! {
+            message = ws_receiver.next() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+            result = stream.next() => {
+                match result {
+                    Some(Ok(event)) => {
+                        let event_type_str = match event.event_type {
+                            WorkspaceFileEventType::Created => "created",
+                            WorkspaceFileEventType::Modified => "modified",
+                            WorkspaceFileEventType::Deleted => "deleted",
+                            WorkspaceFileEventType::Renamed => "renamed",
+                        };
+                        let data = serde_json::json!({
+                            "event_type": event_type_str,
+                            "relative_path": event.relative_path,
+                            "is_directory": event.is_directory,
+                        })
+                        .to_string();
+                        if sender.send(Message::Text(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) => continue,
+                    None => break,
+                }
             }
         }
     }

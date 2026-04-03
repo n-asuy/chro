@@ -2,25 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { app, protocol, net } from "electron";
 
-export const PROTOCOL_SCHEME = "chro";
-
 /**
  * Custom protocol scheme for serving Vite-built SPA in production.
  * Handles SPA routing by serving index.html for non-file paths.
  */
 export const APP_PROTOCOL_SCHEME = "app";
-
-export const registerProtocolClient = () => {
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      app.setAsDefaultProtocolClient(PROTOCOL_SCHEME, process.execPath, [
-        path.resolve(process.argv[1]!),
-      ]);
-    }
-  } else {
-    app.setAsDefaultProtocolClient(PROTOCOL_SCHEME);
-  }
-};
 
 /**
  * Register custom protocol scheme for production SPA serving.

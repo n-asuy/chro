@@ -22,7 +22,10 @@ pub fn record_event(name: &str, fields: serde_json::Value) {
 
     let mut payload = serde_json::Map::new();
     payload.insert("ts".into(), serde_json::Value::String(timestamp()));
-    payload.insert("type".into(), serde_json::Value::String("backend-action".into()));
+    payload.insert(
+        "type".into(),
+        serde_json::Value::String("backend-action".into()),
+    );
     payload.insert("name".into(), serde_json::Value::String(name.into()));
 
     if let serde_json::Value::Object(fields) = fields {

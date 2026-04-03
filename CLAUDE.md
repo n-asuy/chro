@@ -8,21 +8,22 @@ AI-powered productivity desktop application.
 apps/
   desktop/    → Electron + Vite + React 19 + TanStack Router (main product)
   api/        → Cloudflare Workers (Rust → WASM, D1 database)
+  cli/        → CLI launcher for dev services (Rust)
 
 packages/
   ui/         → Shared components (Radix UI + Tailwind CSS)
-  kv/         → Key-value storage utilities
 
-crates/       → Rust backend (15 crates)
+crates/       → Rust backend (17 crates)
   server/     → Axum web server (local, SQLite, JSON-RPC/WebSocket)
   db/         → SQLx + SQLite ORM layer
-  ...         → approvals, config, diff-stream, events, executors,
+  ...         → analytics, approvals, config, diff-stream, events, executors,
                 file-search-cache, filesystem, git, image, local-runtime,
-                log-types, runtime, worktree
+                log-types, napi-filesystem, runtime, worktree
 
 tooling/
   scripts/    → Build & deployment scripts
   typescript/ → Shared TS config
+  licenses/   → License checking utilities
 ```
 
 ## Tech Stack

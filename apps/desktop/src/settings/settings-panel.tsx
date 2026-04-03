@@ -6,11 +6,11 @@ import {
 import { cn } from "@/lib/cn";
 import { getVersion } from "@/lib/desktop-bridge";
 import {
+  type AvailabilityInfo,
+  type BaseCodingAgent,
   fetchAuthStatus,
   triggerAuthLogin,
   updateExecutorProfile,
-  type AvailabilityInfo,
-  type BaseCodingAgent,
 } from "@/lib/executor-client";
 import type { AppTheme } from "@/lib/preferences-client";
 import { setUiValue } from "@/lib/ui-state-client";
@@ -59,8 +59,8 @@ import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
 import { useMcpSettings } from "./hooks/use-mcp-settings";
-import { usePreferencesSettings } from "./hooks/use-preferences-settings";
 import { useMergeSettings } from "./hooks/use-merge-settings";
+import { usePreferencesSettings } from "./hooks/use-preferences-settings";
 import { useWorktreeSettings } from "./hooks/use-worktree-settings";
 import { useEditorConfigStore } from "./state/editor-config-store";
 
@@ -219,7 +219,6 @@ export function SettingsPanel({
     executorProfileError,
     profileSaving,
     availableExecutors,
-    currentExecutorLabel,
     handleExecutorSelect,
   } = useExecutorProfileSettings({ t });
   const {
@@ -284,9 +283,14 @@ export function SettingsPanel({
   } = useWorktreeSettings({ t });
 
   // Auth status state
-  const [authStatus, setAuthStatus] = useState<Record<BaseCodingAgent, AvailabilityInfo> | null>(null);
+  const [authStatus, setAuthStatus] = useState<Record<
+    BaseCodingAgent,
+    AvailabilityInfo
+  > | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-  const [authTriggering, setAuthTriggering] = useState<BaseCodingAgent | null>(null);
+  const [authTriggering, setAuthTriggering] = useState<BaseCodingAgent | null>(
+    null,
+  );
 
   const loadAuthStatus = useCallback(async () => {
     setAuthLoading(true);
@@ -318,7 +322,8 @@ export function SettingsPanel({
       const poll = setInterval(async () => {
         try {
           const result = await fetchAuthStatus();
-          const info = executor === "CLAUDE_CODE" ? result.claude_code : result.codex;
+          const info =
+            executor === "CLAUDE_CODE" ? result.claude_code : result.codex;
           if (info.type === "LOGIN_DETECTED") {
             clearInterval(poll);
             setAuthStatus({
@@ -331,7 +336,9 @@ export function SettingsPanel({
             setUiValue("chro:selected-executor", executor);
             void updateExecutorProfile({ executor, variant: null });
           }
-        } catch { /* keep polling */ }
+        } catch {
+          /* keep polling */
+        }
       }, 2000);
       // Stop polling after 5 minutes
       setTimeout(() => {
@@ -661,7 +668,9 @@ export function SettingsPanel({
               size="sm"
               className="h-7 text-[11px]"
               onClick={handleTemplateReset}
-              disabled={mergeSettingsLoading || mergeSettingsSaveState === "saving"}
+              disabled={
+                mergeSettingsLoading || mergeSettingsSaveState === "saving"
+              }
             >
               {t("mergeCommitTemplateResetLabel")}
             </Button>
@@ -674,7 +683,9 @@ export function SettingsPanel({
               onChange={(e) => handleTemplateChange(e.target.value)}
               onBlur={handleTemplateBlur}
               placeholder={t("mergeCommitTemplatePlaceholder")}
-              disabled={mergeSettingsLoading || mergeSettingsSaveState === "saving"}
+              disabled={
+                mergeSettingsLoading || mergeSettingsSaveState === "saving"
+              }
               spellCheck={false}
             />
             {mergeSettingsSaveState === "success" ? (
@@ -968,6 +979,12 @@ export function SettingsPanel({
     const merged = [...base, ...DEFAULT_MCP_EXECUTORS];
     return Array.from(new Set(merged)) as BaseCodingAgent[];
   }, [availableExecutors]);
+  const defaultExecutorLabel = useMemo(() => {
+    if (!executorProfileId) {
+      return t("claudeModelUnknown");
+    }
+    return t(MCP_EXECUTOR_LABEL_KEYS[executorProfileId.executor]);
+  }, [executorProfileId, t]);
 
   const agentsSection = (
     <section className="flex flex-col gap-6">
@@ -1001,7 +1018,7 @@ export function SettingsPanel({
                   disabled={executorProfileLoading || profileSaving}
                   className="font-workspace flex h-9 min-w-[180px] items-center justify-between rounded-lg border border-border/40 bg-custom-background-90 px-3 text-[13px] text-foreground transition hover:border-border/60 hover:bg-custom-background-80 focus-visible:ring-1 focus-visible:ring-primary"
                 >
-                  <span className="truncate">{currentExecutorLabel}</span>
+                  <span className="truncate">{defaultExecutorLabel}</span>
                   <ChevronDown className="h-4 w-4 text-current" />
                 </Button>
               </DropdownMenuTrigger>

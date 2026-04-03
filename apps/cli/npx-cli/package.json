@@ -1,6 +1,6 @@
 {
   "name": "@chro-ai/cli",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Chro CLI",
   "license": "Apache-2.0",
   "repository": {
@@ -9,14 +9,12 @@
   },
   "homepage": "https://chro-ai.com",
   "config": {
-    "r2PublicUrl": ""
+    "r2PublicUrl": "https://dl.chro-ai.com"
   },
   "bin": {
     "chro": "bin/cli.js"
   },
-  "scripts": {
-    "postinstall": "node bin/postinstall.js"
-  },
+  "scripts": {},
   "files": [
     "bin"
   ],

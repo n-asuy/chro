@@ -1,7 +1,4 @@
-use std::{
-    collections::VecDeque,
-    sync::RwLock,
-};
+use std::{collections::VecDeque, sync::RwLock};
 
 use futures::{stream::BoxStream, StreamExt};
 use json_patch::Patch;

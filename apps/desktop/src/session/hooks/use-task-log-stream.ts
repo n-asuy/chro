@@ -9,6 +9,7 @@ import { recordPerfEvent } from "@/perf/recorder";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalRecord } from "../types/api";
 import type { DisplayEntry, NormalizedEntry } from "../types/normalized";
+import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 
 export type DiffChangeKind =
   | "added"
@@ -40,6 +41,11 @@ export type DiffEntry = DiffContent;
 export type PatchDocument = {
   diffs: Record<string, DiffEntry>;
   approvals: Record<string, ApprovalRecord>;
+};
+
+export type TaskRunPatchState = {
+  entries: DisplayEntry[];
+  document: PatchDocument;
 };
 
 export interface UseTaskRunStreamResult {
@@ -100,9 +106,15 @@ const generateEntryId = (): string => {
 
 const FIRST_PATCH_STALL_MS = 15_000;
 
-function createNormalizedDisplayEntry(entry: ServerWireEntry): DisplayEntry {
+function createNormalizedDisplayEntry(
+  entry: ServerWireEntry,
+  existing?: DisplayEntry,
+): DisplayEntry {
   const { type: entryType, ...rest } = entry;
-  const id = generateEntryId();
+  const id =
+    existing?.type === "NORMALIZED_ENTRY"
+      ? existing.content.id
+      : generateEntryId();
   return {
     type: "NORMALIZED_ENTRY",
     content: {
@@ -110,7 +122,7 @@ function createNormalizedDisplayEntry(entry: ServerWireEntry): DisplayEntry {
       entry_type: entryType as NormalizedEntry["entry_type"],
       ...rest,
     },
-    key: id,
+    key: existing?.key ?? id,
   };
 }
 
@@ -190,8 +202,11 @@ function normalizeDiffPatchValue(
   return normalizeDiffContent(value, fallbackPath);
 }
 
-function createStdoutDisplayEntry(content: string): DisplayEntry {
-  const key = generateEntryId();
+function createStdoutDisplayEntry(
+  content: string,
+  existing?: DisplayEntry,
+): DisplayEntry {
+  const key = existing?.key ?? generateEntryId();
   return {
     type: "STDOUT",
     content,
@@ -199,12 +214,171 @@ function createStdoutDisplayEntry(content: string): DisplayEntry {
   };
 }
 
-function createStderrDisplayEntry(content: string): DisplayEntry {
-  const key = generateEntryId();
+function createStderrDisplayEntry(
+  content: string,
+  existing?: DisplayEntry,
+): DisplayEntry {
+  const key = existing?.key ?? generateEntryId();
   return {
     type: "STDERR",
     content,
     key,
+  };
+}
+
+function createEmptyPatchDocument(): PatchDocument {
+  return {
+    diffs: {},
+    approvals: {},
+  };
+}
+
+function createEmptyTaskRunPatchState(): TaskRunPatchState {
+  return {
+    entries: [],
+    document: createEmptyPatchDocument(),
+  };
+}
+
+export function applyTaskRunPatchOperations(
+  state: TaskRunPatchState,
+  ops: JsonPatchOperation[],
+): TaskRunPatchState {
+  const dedupedOps = dedupeJsonPatchOperations(ops);
+  const entryOps = dedupedOps.filter((op) => /^\/entries\/\d+$/.test(op.path));
+  const documentOps = dedupedOps.filter(
+    (op) => !/^\/entries\/\d+$/.test(op.path),
+  );
+
+  let nextEntries = state.entries;
+  if (entryOps.length > 0) {
+    nextEntries = [...state.entries];
+
+    for (const op of entryOps) {
+      const entriesMatch = op.path.match(/^\/entries\/(\d+)$/);
+      if (!entriesMatch) {
+        continue;
+      }
+
+      const index = Number.parseInt(entriesMatch[1], 10);
+      if (Number.isNaN(index)) {
+        continue;
+      }
+
+      const existingEntry =
+        index < nextEntries.length ? nextEntries[index] : undefined;
+
+      switch (op.op) {
+        case "add":
+        case "replace": {
+          if (!op.value) {
+            continue;
+          }
+
+          let displayEntry: DisplayEntry | null = null;
+
+          if (op.value.type === "NORMALIZED_ENTRY") {
+            displayEntry = createNormalizedDisplayEntry(
+              op.value.content,
+              existingEntry,
+            );
+          } else if (op.value.type === "STDOUT") {
+            displayEntry = createStdoutDisplayEntry(
+              op.value.content,
+              existingEntry,
+            );
+          } else if (op.value.type === "STDERR") {
+            displayEntry = createStderrDisplayEntry(
+              op.value.content,
+              existingEntry,
+            );
+          }
+
+          if (!displayEntry) {
+            continue;
+          }
+
+          if (op.op === "add") {
+            nextEntries.splice(index, 0, displayEntry);
+          } else if (index < nextEntries.length) {
+            nextEntries[index] = displayEntry;
+          } else {
+            nextEntries.push(displayEntry);
+          }
+          break;
+        }
+        case "remove": {
+          if (index < nextEntries.length) {
+            nextEntries.splice(index, 1);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  let nextDocument = state.document;
+  if (documentOps.length > 0) {
+    const document: PatchDocument = {
+      diffs: { ...state.document.diffs },
+      approvals: { ...state.document.approvals },
+    };
+    let documentChanged = false;
+
+    for (const op of documentOps) {
+      const segments = op.path.split("/").filter(Boolean);
+
+      if (segments[0] === "diffs" && segments.length >= 2) {
+        const diffPath = segments.slice(1).join("/");
+        if (op.op === "remove") {
+          if (diffPath in document.diffs) {
+            delete document.diffs[diffPath];
+            documentChanged = true;
+          }
+          continue;
+        }
+
+        if (op.value === undefined) {
+          continue;
+        }
+
+        const normalized = normalizeDiffPatchValue(op.value, diffPath);
+        if (!normalized) {
+          continue;
+        }
+
+        document.diffs[diffPath] = normalized;
+        documentChanged = true;
+        continue;
+      }
+
+      if (segments[0] === "approvals" && segments.length >= 2) {
+        const approvalId = segments[1];
+        if (op.op === "remove") {
+          if (approvalId in document.approvals) {
+            delete document.approvals[approvalId];
+            documentChanged = true;
+          }
+          continue;
+        }
+
+        if (op.value === undefined) {
+          continue;
+        }
+
+        document.approvals[approvalId] = op.value as unknown as ApprovalRecord;
+        documentChanged = true;
+      }
+    }
+
+    if (documentChanged) {
+      nextDocument = document;
+    }
+  }
+
+  return {
+    entries: nextEntries,
+    document: nextDocument,
   };
 }
 
@@ -217,10 +391,9 @@ export function useTaskRunStream({
   callbacks,
 }: UseTaskRunStreamParams): UseTaskRunStreamResult {
   const [entries, setEntries] = useState<DisplayEntry[]>([]);
-  const [document, setDocument] = useState<PatchDocument>({
-    diffs: {},
-    approvals: {},
-  });
+  const [document, setDocument] = useState<PatchDocument>(
+    createEmptyPatchDocument,
+  );
   const [isStreaming, setIsStreaming] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -237,7 +410,13 @@ export function useTaskRunStream({
   const firstPatchTimerRef = useRef<number | null>(null);
   const patchMessagesRef = useRef(0);
   const patchOpsRef = useRef(0);
+  const entriesRef = useRef(entries);
+  const documentRef = useRef(document);
+  const currentTaskRunIdRef = useRef<string | null>(taskRunId);
   const [retryNonce, setRetryNonce] = useState(0);
+
+  entriesRef.current = entries;
+  documentRef.current = document;
 
   const endpoint = useMemo(() => {
     if (!taskRunId) return undefined;
@@ -245,102 +424,41 @@ export function useTaskRunStream({
     return `${baseUrl}/streams/task-runs/${encodeURIComponent(taskRunId)}/logs`;
   }, [taskRunId]);
 
-  const applyCustomPatch = useCallback((op: JsonPatchOperation) => {
-    const segments = op.path.split("/").filter(Boolean);
-
-    // Handle /entries/{index}
-    const entriesMatch = op.path.match(/^\/entries\/(\d+)$/);
-    if (entriesMatch) {
-      const index = Number.parseInt(entriesMatch[1], 10);
-
-      setEntries((prev: DisplayEntry[]) => {
-        const next = [...prev];
-
-        switch (op.op) {
-          case "add":
-          case "replace": {
-            if (!op.value) return prev;
-
-            let displayEntry: DisplayEntry | null = null;
-
-            if (op.value.type === "NORMALIZED_ENTRY") {
-              displayEntry = createNormalizedDisplayEntry(op.value.content);
-            } else if (op.value.type === "STDOUT") {
-              displayEntry = createStdoutDisplayEntry(op.value.content);
-            } else if (op.value.type === "STDERR") {
-              displayEntry = createStderrDisplayEntry(op.value.content);
-            }
-
-            if (!displayEntry) return prev;
-
-            if (op.op === "add") {
-              next.splice(index, 0, displayEntry);
-            } else {
-              if (index < next.length) {
-                next[index] = displayEntry;
-              } else {
-                next.push(displayEntry);
-              }
-            }
-            break;
-          }
-          case "remove": {
-            if (index < next.length) {
-              next.splice(index, 1);
-            }
-            break;
-          }
-        }
-
-        return next;
-      });
-      return;
-    }
-
-    // Handle /diffs/{path}
-    if (segments[0] === "diffs" && segments.length >= 2) {
-      const diffPath = segments.slice(1).join("/");
-      setDocument((prev: PatchDocument) => {
-        if (op.op === "remove") {
-          const { [diffPath]: _, ...rest } = prev.diffs;
-          return { ...prev, diffs: rest };
-        }
-        if (op.value !== undefined) {
-          const normalized = normalizeDiffPatchValue(op.value, diffPath);
-          if (!normalized) {
-            return prev;
-          }
-          return {
-            ...prev,
-            diffs: { ...prev.diffs, [diffPath]: normalized },
-          };
-        }
-        return prev;
-      });
-      return;
-    }
-
-    // Handle /approvals/{id}
-    if (segments[0] === "approvals" && segments.length >= 2) {
-      const approvalId = segments[1];
-      setDocument((prev: PatchDocument) => {
-        if (op.op === "remove") {
-          const { [approvalId]: _, ...rest } = prev.approvals;
-          return { ...prev, approvals: rest };
-        }
-        if (op.value !== undefined) {
-          return {
-            ...prev,
-            approvals: {
-              ...prev.approvals,
-              [approvalId]: op.value as unknown as ApprovalRecord,
+  const applyCustomPatches = useCallback(
+    (ops: JsonPatchOperation[], replace = false) => {
+      const next = applyTaskRunPatchOperations(
+        replace
+          ? createEmptyTaskRunPatchState()
+          : {
+              entries: entriesRef.current,
+              document: documentRef.current,
             },
-          };
-        }
-        return prev;
-      });
-    }
+        ops,
+      );
+
+      entriesRef.current = next.entries;
+      documentRef.current = next.document;
+      setEntries(next.entries);
+      setDocument(next.document);
+    },
+    [],
+  );
+
+  const resetEntriesState = useCallback(() => {
+    entriesRef.current = [];
+    setEntries([]);
   }, []);
+
+  const resetDocumentState = useCallback(() => {
+    const next = createEmptyPatchDocument();
+    documentRef.current = next;
+    setDocument(next);
+  }, []);
+
+  const resetTaskRunState = useCallback(() => {
+    resetEntriesState();
+    resetDocumentState();
+  }, [resetDocumentState, resetEntriesState]);
 
   const scheduleReconnect = useCallback(() => {
     if (retryTimerRef.current) return;
@@ -374,20 +492,30 @@ export function useTaskRunStream({
   }, []);
 
   useEffect(() => {
+    let pendingOps: JsonPatchOperation[] = [];
+    let rafId: number | null = null;
+    let cancelled = false;
+
     if (!taskRunId || !endpoint) {
+      currentTaskRunIdRef.current = taskRunId;
       closeWebSocket();
       retryCountRef.current = 0;
       finishedRef.current = false;
-      setEntries([]);
-      setDocument({ diffs: {}, approvals: {} });
+      resetTaskRunState();
       setIsStreaming(false);
       setError(null);
       return;
     }
 
-    // Reset state on new taskRunId
-    setEntries([]);
-    setDocument({ diffs: {}, approvals: {} });
+    const taskRunChanged = currentTaskRunIdRef.current !== taskRunId;
+    currentTaskRunIdRef.current = taskRunId;
+
+    if (taskRunChanged) {
+      resetTaskRunState();
+      retryCountRef.current = 0;
+      finishedRef.current = false;
+    }
+
     setIsStreaming(status === "running");
     connectedAtRef.current = null;
     firstPatchSeenRef.current = false;
@@ -400,11 +528,31 @@ export function useTaskRunStream({
 
     if (!wsRef.current) {
       finishedRef.current = false;
+      const capturedTaskRunId = taskRunId;
+      const isReconnect = retryCountRef.current > 0;
+      let pendingReplace = isReconnect;
+
+      const flushPendingOps = () => {
+        rafId = null;
+        if (pendingOps.length === 0) {
+          return;
+        }
+
+        const ops = pendingOps;
+        pendingOps = [];
+        applyCustomPatches(ops, pendingReplace);
+        pendingReplace = false;
+      };
 
       const wsEndpoint = httpToWs(endpoint);
       const ws = new WebSocket(wsEndpoint);
 
       ws.onopen = () => {
+        if (cancelled || currentTaskRunIdRef.current !== capturedTaskRunId) {
+          ws.close();
+          return;
+        }
+
         setError(null);
         setIsConnected(true);
         connectedAtRef.current = performance.now();
@@ -430,6 +578,10 @@ export function useTaskRunStream({
       };
 
       ws.onmessage = (event) => {
+        if (cancelled || currentTaskRunIdRef.current !== capturedTaskRunId) {
+          return;
+        }
+
         try {
           const msg = JSON.parse(event.data) as LogEntryMessage;
 
@@ -454,12 +606,17 @@ export function useTaskRunStream({
                     : Math.round((performance.now() - connectedAt) * 100) / 100,
               });
             }
-            for (const op of msg.JsonPatch) {
-              applyCustomPatch(op);
+            pendingOps.push(...msg.JsonPatch);
+            if (rafId === null) {
+              rafId = requestAnimationFrame(flushPendingOps);
             }
           }
 
           if (msg.finished) {
+            if (rafId !== null) {
+              cancelAnimationFrame(rafId);
+            }
+            flushPendingOps();
             finishedRef.current = true;
             setIsStreaming(false);
             const connectedAt = connectedAtRef.current;
@@ -491,6 +648,10 @@ export function useTaskRunStream({
       };
 
       ws.onerror = () => {
+        if (cancelled || currentTaskRunIdRef.current !== capturedTaskRunId) {
+          return;
+        }
+
         const errorMsg = "Connection failed";
         recordPerfEvent("task_run_stream_error", {
           task_run_id: taskRunId,
@@ -501,6 +662,10 @@ export function useTaskRunStream({
       };
 
       ws.onclose = (evt) => {
+        if (cancelled || currentTaskRunIdRef.current !== capturedTaskRunId) {
+          return;
+        }
+
         setIsConnected(false);
         wsRef.current = null;
 
@@ -521,6 +686,11 @@ export function useTaskRunStream({
     }
 
     return () => {
+      cancelled = true;
+      if (typeof rafId === "number") {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
       closeWebSocket();
       finishedRef.current = false;
     };
@@ -528,17 +698,12 @@ export function useTaskRunStream({
     taskRunId,
     endpoint,
     status,
-    applyCustomPatch,
+    applyCustomPatches,
     scheduleReconnect,
     closeWebSocket,
+    resetTaskRunState,
     retryNonce,
   ]);
-
-  const resetEntries = useCallback(() => setEntries([]), []);
-  const resetDocument = useCallback(
-    () => setDocument({ diffs: {}, approvals: {} }),
-    [],
-  );
 
   return {
     entries,
@@ -547,8 +712,8 @@ export function useTaskRunStream({
     isStreaming,
     isConnected,
     error,
-    resetEntries,
-    resetDocument,
+    resetEntries: resetEntriesState,
+    resetDocument: resetDocumentState,
     closeSocket: closeWebSocket,
   };
 }

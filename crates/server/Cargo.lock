@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "analytics",
  "anyhow",

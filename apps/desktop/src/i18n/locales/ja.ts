@@ -390,8 +390,10 @@ const ja = {
   authSignIn: "サインイン",
   authSigningIn: "サインイン中...",
   authReAuthenticate: "再認証",
-  authClaudeDescription: "Claude Code を使用するには Anthropic にサインインしてください。",
-  authCodexDescription: "Codex を使用するには OpenAI にサインインしてください。",
+  authClaudeDescription:
+    "Claude Code を使用するには Anthropic にサインインしてください。",
+  authCodexDescription:
+    "Codex を使用するには OpenAI にサインインしてください。",
   authNotSignedIn: "未認証",
 } as const;
 

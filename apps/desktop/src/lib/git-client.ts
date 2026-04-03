@@ -38,6 +38,12 @@ export type BranchInfo = {
 
 type BranchListResponse = {
   branches: BranchInfo[];
+  isRepository: boolean;
+};
+
+export type GitBranchesResult = {
+  branches: BranchInfo[];
+  isRepository: boolean;
 };
 
 type CurrentBranchResponse = {
@@ -78,11 +84,14 @@ export const getGitStatus = async (
 
 export const listGitBranches = async (
   projectId: string,
-): Promise<BranchInfo[]> => {
-  const { branches } = await desktopFetch<BranchListResponse>(
+): Promise<GitBranchesResult> => {
+  const response = await desktopFetch<BranchListResponse>(
     `/rpc/projects/${projectId}/git/branches`,
   );
-  return branches;
+  return {
+    branches: response.branches,
+    isRepository: response.isRepository,
+  };
 };
 
 export const stageFiles = async (

@@ -265,7 +265,7 @@ export const SourceControlPanel = ({ onClose }: SourceControlPanelProps) => {
   useEffect(() => {
     if (branchDropdownOpen && projectId) {
       listGitBranches(projectId)
-        .then(setBranches)
+        .then((result) => setBranches(result.branches))
         .catch((err) =>
           console.error("[source-control] Failed to fetch branches:", err),
         );

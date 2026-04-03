@@ -25,9 +25,7 @@ import {
 import { autoUpdater, type UpdateInfo } from "electron-updater";
 import { findAvailablePort } from "./port-utils";
 import {
-  PROTOCOL_SCHEME,
   APP_PROTOCOL_SCHEME,
-  registerProtocolClient,
   registerAppProtocolScheme,
   registerAppProtocolHandler,
   resolveDistDir,
@@ -48,7 +46,6 @@ app.setName("Chro");
 app.setAboutPanelOptions({
   applicationName: "Chro",
 });
-registerProtocolClient();
 // Register app:// protocol scheme before app.whenReady()
 registerAppProtocolScheme();
 // Migrate legacy "Chronist" directory to "Chro" before configuring userData
@@ -379,16 +376,6 @@ const sendToRenderer = (channel: string, payload: unknown) => {
   BrowserWindow.getAllWindows().forEach((window) => {
     window.webContents.send(channel, payload);
   });
-};
-
-const handleProtocolUrl = (url: string) => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    mainWindow.show();
-    mainWindow.focus();
-  }
 };
 
 const createDesktopError = (code: DesktopErrorCode, message: string) => {
@@ -1086,14 +1073,6 @@ async function bootstrap() {
   initTray(() => mainWindow, describeWorkspaceWindows);
   syncTrayState("connected");
 
-  // Handle protocol URL passed via command line on startup
-  const startupProtocolUrl = process.argv.find((arg) =>
-    arg.startsWith(`${PROTOCOL_SCHEME}://`),
-  );
-  if (startupProtocolUrl) {
-    handleProtocolUrl(startupProtocolUrl);
-  }
-
   app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const runtimeDir =
@@ -1103,9 +1082,6 @@ async function bootstrap() {
     }
   });
 
-  app.on("open-url", (_event, url) => {
-    handleProtocolUrl(url);
-  });
 }
 
 app.on("window-all-closed", () => {

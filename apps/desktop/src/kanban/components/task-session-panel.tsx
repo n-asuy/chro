@@ -16,6 +16,7 @@ import {
   type ExecutorProfileId,
   fetchExecutorProfile,
 } from "@/lib/executor-client";
+import { listGitBranches } from "@/lib/git-client";
 import { ApprovalPanel } from "@/session/components/approval-panel";
 import type { GitBranch as GitBranchType } from "@/session/components/branch-selector";
 import { DiffViewerPanel } from "@/session/components/diff-viewer-panel";
@@ -34,6 +35,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
 import { Textarea } from "@chro/ui/textarea";
@@ -113,7 +115,7 @@ export const TaskSessionPanel = ({
 }: TaskSessionPanelProps) => {
   const isFullScreen = peekMode === "full-screen";
   const { t } = useLanguage();
-  const { workspacePath } = useWorkspaceBoardContext();
+  const { workspacePath, projectId } = useWorkspaceBoardContext();
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
   const [input, setInput] = useState("");
   const [taskRunId, setTaskRunId] = useState<string | null>(null);
@@ -129,6 +131,7 @@ export const TaskSessionPanel = ({
   const [mergeSuccess, setMergeSuccess] = useState(false);
   const [rebaseDialogOpen, setRebaseDialogOpen] = useState(false);
   const [useWorktree, setUseWorktree] = useState(true);
+  const [isGitRepository, setIsGitRepository] = useState(true);
   const [executorProfileId, setExecutorProfileId] =
     useState<ExecutorProfileId | null>(null);
   const [executorConfigs, setExecutorConfigs] =
@@ -146,6 +149,40 @@ export const TaskSessionPanel = ({
   const forceNewAttemptRef = useRef(false);
   const isComposingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setUseWorktree(true);
+    setIsGitRepository(true);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setIsGitRepository(true);
+      return;
+    }
+
+    let cancelled = false;
+
+    listGitBranches(projectId)
+      .then(({ isRepository }) => {
+        if (cancelled) return;
+        setIsGitRepository(isRepository);
+        if (!isRepository) {
+          setUseWorktree(false);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn(
+          "[task-session-panel] Failed to determine git repository state",
+          error,
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -987,50 +1024,60 @@ export const TaskSessionPanel = ({
 
                 <div className="mt-3 flex items-center justify-between px-1 text-xs font-medium text-muted-foreground">
                   <div className="flex items-center gap-4">
-                    <TooltipProvider delayDuration={120}>
-                      <Tooltip>
-                        <DropdownMenu>
-                          <TooltipTrigger asChild>
-                            <DropdownMenuTrigger disabled={isSending} asChild>
-                              <button
-                                type="button"
-                                disabled={isSending}
-                                className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
+                    {isGitRepository ? (
+                      <TooltipProvider delayDuration={120}>
+                        <Tooltip>
+                          <DropdownMenu>
+                            <TooltipTrigger asChild>
+                              <DropdownMenuTrigger disabled={isSending} asChild>
+                                <button
+                                  type="button"
+                                  disabled={isSending}
+                                  className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  <Laptop className="h-3 w-3" />
+                                  <span>
+                                    {useWorktree ? "Worktree" : "Local"}
+                                  </span>
+                                  <ChevronDown className="h-2.5 w-2.5" />
+                                </button>
+                              </DropdownMenuTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent
+                              side="bottom"
+                              className="text-[11px]"
+                            >
+                              Worktree isolates changes, Local edits in place
+                            </TooltipContent>
+                            <DropdownMenuContent align="start">
+                              <DropdownMenuItem
+                                onClick={() => setUseWorktree(true)}
+                                className="flex items-center justify-between gap-3 text-[11px]"
                               >
-                                <Laptop className="h-3 w-3" />
-                                <span>
-                                  {useWorktree ? "Worktree" : "Local"}
-                                </span>
-                                <ChevronDown className="h-2.5 w-2.5" />
-                              </button>
-                            </DropdownMenuTrigger>
-                          </TooltipTrigger>
-                          <TooltipContent side="bottom" className="text-[11px]">
-                            Worktree isolates changes, Local edits in place
-                          </TooltipContent>
-                          <DropdownMenuContent align="start">
-                            <DropdownMenuItem
-                              onClick={() => setUseWorktree(true)}
-                              className="flex items-center justify-between gap-3 text-[11px]"
-                            >
-                              <span>Worktree</span>
-                              {useWorktree ? (
-                                <Check className="h-3.5 w-3.5" />
-                              ) : null}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() => setUseWorktree(false)}
-                              className="flex items-center justify-between gap-3 text-[11px]"
-                            >
-                              <span>Local</span>
-                              {!useWorktree ? (
-                                <Check className="h-3.5 w-3.5" />
-                              ) : null}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </Tooltip>
-                    </TooltipProvider>
+                                <span>Worktree</span>
+                                {useWorktree ? (
+                                  <Check className="h-3.5 w-3.5" />
+                                ) : null}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => setUseWorktree(false)}
+                                className="flex items-center justify-between gap-3 text-[11px]"
+                              >
+                                <span>Local</span>
+                                {!useWorktree ? (
+                                  <Check className="h-3.5 w-3.5" />
+                                ) : null}
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <Laptop className="h-3 w-3" />
+                        <span>Local</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

@@ -9,6 +9,7 @@ import { recordPerfEvent } from "@/perf/recorder";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flattenConversationEntries } from "../domain/conversation-history";
 import type { DisplayEntry, NormalizedEntry, TaskRunRecord } from "../types";
+import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 import { useTaskRunsStream } from "./use-task-runs-stream";
 import { useTaskSessionsStream } from "./use-task-sessions-stream";
 
@@ -90,9 +91,13 @@ function sortRunsByCreatedAtAscending(
 function createNormalizedDisplayEntry(
   entry: ServerWireEntry,
   taskRunId: string,
+  existing?: DisplayEntry,
 ): DisplayEntry {
   const { type: entryType, ...rest } = entry;
-  const id = generateEntryId();
+  const id =
+    existing?.type === "NORMALIZED_ENTRY"
+      ? existing.content.id
+      : generateEntryId();
   return {
     type: "NORMALIZED_ENTRY",
     content: {
@@ -100,31 +105,33 @@ function createNormalizedDisplayEntry(
       entry_type: entryType as NormalizedEntry["entry_type"],
       ...rest,
     },
-    key: `${taskRunId}:${id}`,
+    key: existing?.key ?? `${taskRunId}:${id}`,
   };
 }
 
 function createStdoutDisplayEntry(
   content: string,
   taskRunId: string,
+  existing?: DisplayEntry,
 ): DisplayEntry {
-  const key = generateEntryId();
+  const key = existing?.key ?? `${taskRunId}:${generateEntryId()}`;
   return {
     type: "STDOUT",
     content,
-    key: `${taskRunId}:${key}`,
+    key,
   };
 }
 
 function createStderrDisplayEntry(
   content: string,
   taskRunId: string,
+  existing?: DisplayEntry,
 ): DisplayEntry {
-  const key = generateEntryId();
+  const key = existing?.key ?? `${taskRunId}:${generateEntryId()}`;
   return {
     type: "STDERR",
     content,
-    key: `${taskRunId}:${key}`,
+    key,
   };
 }
 
@@ -147,6 +154,7 @@ function applyEntriesPatch(
   }
 
   const next = [...entries];
+  const existingEntry = index < next.length ? next[index] : undefined;
 
   if (op.op === "remove") {
     if (index < next.length) {
@@ -161,11 +169,23 @@ function applyEntriesPatch(
 
   let displayEntry: DisplayEntry | null = null;
   if (op.value.type === "NORMALIZED_ENTRY") {
-    displayEntry = createNormalizedDisplayEntry(op.value.content, taskRunId);
+    displayEntry = createNormalizedDisplayEntry(
+      op.value.content,
+      taskRunId,
+      existingEntry,
+    );
   } else if (op.value.type === "STDOUT") {
-    displayEntry = createStdoutDisplayEntry(op.value.content, taskRunId);
+    displayEntry = createStdoutDisplayEntry(
+      op.value.content,
+      taskRunId,
+      existingEntry,
+    );
   } else if (op.value.type === "STDERR") {
-    displayEntry = createStderrDisplayEntry(op.value.content, taskRunId);
+    displayEntry = createStderrDisplayEntry(
+      op.value.content,
+      taskRunId,
+      existingEntry,
+    );
   }
 
   if (!displayEntry) {
@@ -188,7 +208,7 @@ function applyEntriesPatches(
   ops: JsonPatchOperation[],
   taskRunId: string,
 ): DisplayEntry[] {
-  return ops.reduce(
+  return dedupeJsonPatchOperations(ops).reduce(
     (current, op) => applyEntriesPatch(current, op, taskRunId),
     entries,
   );
@@ -264,6 +284,20 @@ function streamRunningTaskRunEntries(
   let firstPatchSeen = false;
   let patchMessages = 0;
   let patchOps = 0;
+  let pendingOps: JsonPatchOperation[] = [];
+  let rafId: number | null = null;
+
+  const flushPendingOps = () => {
+    rafId = null;
+    if (closed || pendingOps.length === 0) {
+      pendingOps = [];
+      return;
+    }
+
+    const ops = pendingOps;
+    pendingOps = [];
+    onPatch(dedupeJsonPatchOperations(ops));
+  };
 
   ws.onopen = () => {
     connectedAt = performance.now();
@@ -294,10 +328,17 @@ function streamRunningTaskRunEntries(
           });
         }
 
-        onPatch(msg.JsonPatch);
+        pendingOps.push(...msg.JsonPatch);
+        if (rafId === null) {
+          rafId = requestAnimationFrame(flushPendingOps);
+        }
       }
 
       if (msg.finished) {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+        }
+        flushPendingOps();
         recordPerfEvent("conv_stream_finished", {
           task_run_id: taskRunId,
           elapsed_ms:
@@ -341,6 +382,10 @@ function streamRunningTaskRunEntries(
   return {
     close: () => {
       closed = true;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
       ws.onopen = null;
       ws.onmessage = null;
       ws.onerror = null;

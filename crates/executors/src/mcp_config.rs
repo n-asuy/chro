@@ -53,11 +53,7 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    pub fn new(
-        servers_path: Vec<String>,
-        template: Value,
-        is_toml_config: bool,
-    ) -> Self {
+    pub fn new(servers_path: Vec<String>, template: Value, is_toml_config: bool) -> Self {
         Self {
             servers: HashMap::new(),
             servers_path,

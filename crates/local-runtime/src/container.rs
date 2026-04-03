@@ -132,7 +132,11 @@ impl LocalContainerService {
             resolved_agent = ?base_agent,
             "[create_agent_for_run] resolved executor profile"
         );
-        let permission = PermissionRuntimeConfig::new(PermissionMode::BypassPermissions);
+        let permission_mode = match &coding_agent {
+            CodingAgent::ClaudeCode(claude) => claude.permission_mode(),
+            _ => PermissionMode::BypassPermissions,
+        };
+        let permission = PermissionRuntimeConfig::new(permission_mode);
         Ok((coding_agent, base_agent, permission))
     }
 

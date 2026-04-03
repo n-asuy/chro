@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyPatch } from "rfc6902";
 import type { Operation } from "rfc6902";
+import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 
 /**
  * LogEntry message types from Chro server
@@ -66,6 +67,8 @@ export function useJsonPatchWsStream<T extends object>(
   const retryTimerRef = useRef<number | null>(null);
   const retryCountRef = useRef<number>(0);
   const finishedRef = useRef<boolean>(false);
+  const pendingOpsRef = useRef<Operation[]>([]);
+  const rafIdRef = useRef<number | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
 
   const optionsRef = useRef(options);
@@ -74,7 +77,7 @@ export function useJsonPatchWsStream<T extends object>(
   const scheduleReconnect = useCallback(() => {
     if (retryTimerRef.current) return;
     const attempt = retryCountRef.current;
-    const delay = Math.min(8000, 1000 * Math.pow(2, attempt));
+    const delay = Math.min(8000, 1000 * 2 ** attempt);
     retryTimerRef.current = window.setTimeout(() => {
       retryTimerRef.current = null;
       setRetryNonce((n) => n + 1);
@@ -82,6 +85,11 @@ export function useJsonPatchWsStream<T extends object>(
   }, []);
 
   const closeWebSocket = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    pendingOpsRef.current = [];
     if (wsRef.current) {
       const ws = wsRef.current;
       ws.onopen = null;
@@ -135,16 +143,38 @@ export function useJsonPatchWsStream<T extends object>(
           const msg = JSON.parse(event.data) as LogEntryMessage;
 
           if (msg.type === "json_patch") {
-            const patches: Operation[] = msg.payload;
-            const current = dataRef.current;
-            if (!patches.length || !current) return;
+            pendingOpsRef.current.push(...msg.payload);
+            if (rafIdRef.current === null) {
+              rafIdRef.current = requestAnimationFrame(() => {
+                rafIdRef.current = null;
+                const current = dataRef.current;
+                const patches = dedupeJsonPatchOperations(
+                  pendingOpsRef.current,
+                );
+                pendingOpsRef.current = [];
+                if (!patches.length || !current) return;
 
-            const next = structuredClone(current);
-            applyPatch(next, patches);
+                const next = structuredClone(current);
+                applyPatch(next, patches);
 
-            dataRef.current = next;
-            setData(next);
+                dataRef.current = next;
+                setData(next);
+              });
+            }
           } else if (msg.type === "finished") {
+            if (rafIdRef.current !== null) {
+              cancelAnimationFrame(rafIdRef.current);
+              rafIdRef.current = null;
+            }
+            const current = dataRef.current;
+            const patches = dedupeJsonPatchOperations(pendingOpsRef.current);
+            pendingOpsRef.current = [];
+            if (patches.length && current) {
+              const next = structuredClone(current);
+              applyPatch(next, patches);
+              dataRef.current = next;
+              setData(next);
+            }
             finishedRef.current = true;
             optionsRef.current?.onFinished?.();
             ws.close(1000, "finished");

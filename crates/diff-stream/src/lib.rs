@@ -1,5 +1,5 @@
 pub use log_types::{
-    Diff, DiffChangeKind, compute_line_change_counts, create_unified_diff, create_unified_diff_hunk,
+    compute_line_change_counts, create_unified_diff, create_unified_diff_hunk, Diff, DiffChangeKind,
 };
 
 use std::{

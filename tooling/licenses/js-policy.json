@@ -31,10 +31,6 @@
     "WTFPL": "Not on the approved allowlist."
   },
   "overrides": {
-    "@excalidraw/mermaid-to-excalidraw@1.1.2": {
-      "license": "MIT",
-      "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."
-    },
     "khroma@2.1.0": {
       "license": "MIT",
       "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."

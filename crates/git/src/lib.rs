@@ -92,6 +92,10 @@ impl GitService {
         Self
     }
 
+    pub fn is_repository(&self, path: impl AsRef<Path>) -> bool {
+        Repository::open(path.as_ref()).is_ok()
+    }
+
     fn ensure_cli_commit_identity(&self, repo_path: &Path) -> Result<(), GitServiceError> {
         let repo = self.open_repo(repo_path)?;
         let cfg = repo.config()?;
@@ -111,8 +115,9 @@ impl GitService {
     ) -> Result<git2::Signature<'repo>, GitServiceError> {
         match repo.signature() {
             Ok(sig) => Ok(sig),
-            Err(_) => git2::Signature::now("Chro", "noreply@chro-ai.com")
-                .map_err(GitServiceError::from),
+            Err(_) => {
+                git2::Signature::now("Chro", "noreply@chro-ai.com").map_err(GitServiceError::from)
+            }
         }
     }
 
@@ -1155,8 +1160,9 @@ fn build_worktree_diffs(
         let change = map_status(delta.status());
         let old_path = delta.old_file().path().map(normalize_path);
         let new_path = delta.new_file().path().map(normalize_path);
-        let is_binary =
-            delta.old_file().is_binary() || delta.new_file().is_binary() || is_binary_path(&old_path, &new_path);
+        let is_binary = delta.old_file().is_binary()
+            || delta.new_file().is_binary()
+            || is_binary_path(&old_path, &new_path);
 
         let (old_content, new_content) = if is_binary {
             (None, None)
@@ -1200,8 +1206,9 @@ fn build_tree_diffs(
         let change = map_status(delta.status());
         let old_path = delta.old_file().path().map(normalize_path);
         let new_path = delta.new_file().path().map(normalize_path);
-        let is_binary =
-            delta.old_file().is_binary() || delta.new_file().is_binary() || is_binary_path(&old_path, &new_path);
+        let is_binary = delta.old_file().is_binary()
+            || delta.new_file().is_binary()
+            || is_binary_path(&old_path, &new_path);
 
         let (old_content, new_content) = if is_binary {
             (None, None)
@@ -1263,12 +1270,10 @@ fn normalize_path(path: &Path) -> String {
 }
 
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "svg", "tiff", "tif",
-    "pdf", "zip", "gz", "tar", "bz2", "xz", "7z", "rar",
-    "mp3", "mp4", "wav", "ogg", "webm", "avi", "mov", "flac",
-    "woff", "woff2", "ttf", "otf", "eot",
-    "exe", "dll", "so", "dylib", "bin",
-    "psd", "ai", "sketch", "fig",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "svg", "tiff", "tif", "pdf", "zip",
+    "gz", "tar", "bz2", "xz", "7z", "rar", "mp3", "mp4", "wav", "ogg", "webm", "avi", "mov",
+    "flac", "woff", "woff2", "ttf", "otf", "eot", "exe", "dll", "so", "dylib", "bin", "psd", "ai",
+    "sketch", "fig",
 ];
 
 fn is_binary_path(old_path: &Option<String>, new_path: &Option<String>) -> bool {

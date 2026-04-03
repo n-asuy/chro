@@ -250,10 +250,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
 
     fn get_availability_info(&self) -> AvailabilityInfo {
         let config_path = dirs::home_dir().map(|home| home.join(".claude.json"));
-        let config_exists = config_path
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(false);
+        let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
 
         if !config_exists {
             return AvailabilityInfo::NotFound;

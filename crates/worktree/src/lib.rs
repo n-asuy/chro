@@ -196,8 +196,9 @@ impl WorktreeManager {
             .unwrap_or_else(|| self.base_dir.join(&options.branch_name));
         let use_default_path = requested_path.is_none();
 
-        if let Some(existing_path) =
-            self.find_worktree_for_branch(&repo_path, &options.branch_name).await?
+        if let Some(existing_path) = self
+            .find_worktree_for_branch(&repo_path, &options.branch_name)
+            .await?
         {
             let existing_normalized =
                 canonicalize_if_exists(&existing_path).unwrap_or(existing_path.clone());

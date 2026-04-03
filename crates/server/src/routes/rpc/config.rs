@@ -428,9 +428,7 @@ struct UiStateEnvelope {
     ui_state: serde_json::Map<String, Value>,
 }
 
-async fn get_ui_state(
-    State(state): State<AppState>,
-) -> Result<Json<UiStateEnvelope>, ApiError> {
+async fn get_ui_state(State(state): State<AppState>) -> Result<Json<UiStateEnvelope>, ApiError> {
     let config = state.runtime().current_config().await;
     Ok(Json(UiStateEnvelope {
         ui_state: config.ui_state,

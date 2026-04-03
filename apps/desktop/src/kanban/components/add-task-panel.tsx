@@ -190,6 +190,7 @@ export const AddTaskPanel: React.FC<AddTaskPanelProps> = ({
 }) => {
   const { t } = useLanguage();
   const [useWorktree, setUseWorktree] = useState(true);
+  const [isGitRepository, setIsGitRepository] = useState(true);
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [baseBranchCandidates, setBaseBranchCandidates] = useState<
     BranchInfo[]
@@ -262,17 +263,30 @@ export const AddTaskPanel: React.FC<AddTaskPanelProps> = ({
   }, [isOpen, onClose, atOpen]);
 
   useEffect(() => {
+    setUseWorktree(true);
+    setIsGitRepository(true);
+  }, [projectId]);
+
+  useEffect(() => {
     if (!isOpen || !projectId) {
       setBaseBranchCandidates([]);
       setBaseBranch(null);
+      setIsGitRepository(true);
       return;
     }
     let cancelled = false;
     setIsLoadingBaseBranches(true);
     listGitBranches(projectId)
-      .then((result) => {
+      .then(({ branches, isRepository }) => {
         if (cancelled) return;
-        const localBranches = result.filter((b) => !b.is_remote);
+        setIsGitRepository(isRepository);
+        if (!isRepository) {
+          setUseWorktree(false);
+          setBaseBranchCandidates([]);
+          setBaseBranch(null);
+          return;
+        }
+        const localBranches = branches.filter((b) => !b.is_remote);
         setBaseBranchCandidates(localBranches);
         const current = localBranches.find((b) => b.is_current);
         if (current && !baseBranch) {
@@ -723,139 +737,150 @@ export const AddTaskPanel: React.FC<AddTaskPanelProps> = ({
           <div className="h-px bg-border -mx-0" />
           <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-4">
-              <TooltipProvider delayDuration={120}>
-                <Tooltip>
-                  <DropdownMenu modal={false}>
-                    <TooltipTrigger asChild>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          type="button"
-                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground"
+              {isGitRepository ? (
+                <TooltipProvider delayDuration={120}>
+                  <Tooltip>
+                    <DropdownMenu modal={false}>
+                      <TooltipTrigger asChild>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground"
+                          >
+                            <Laptop className="h-3 w-3" />
+                            <span>{useWorktree ? "Worktree" : "Local"}</span>
+                            <ChevronDown className="h-2.5 w-2.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-[11px]">
+                        Worktree isolates changes, Local edits in place
+                      </TooltipContent>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem
+                          onClick={() => setUseWorktree(true)}
+                          className="flex items-center justify-between gap-3 text-[11px]"
                         >
-                          <Laptop className="h-3 w-3" />
-                          <span>{useWorktree ? "Worktree" : "Local"}</span>
-                          <ChevronDown className="h-2.5 w-2.5" />
-                        </button>
-                      </DropdownMenuTrigger>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="text-[11px]">
-                      Worktree isolates changes, Local edits in place
-                    </TooltipContent>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem
-                        onClick={() => setUseWorktree(true)}
-                        className="flex items-center justify-between gap-3 text-[11px]"
-                      >
-                        <span>Worktree</span>
-                        {useWorktree ? <Check className="h-3.5 w-3.5" /> : null}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => setUseWorktree(false)}
-                        className="flex items-center justify-between gap-3 text-[11px]"
-                      >
-                        <span>Local</span>
-                        {!useWorktree ? (
-                          <Check className="h-3.5 w-3.5" />
-                        ) : null}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </Tooltip>
-              </TooltipProvider>
+                          <span>Worktree</span>
+                          {useWorktree ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : null}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => setUseWorktree(false)}
+                          className="flex items-center justify-between gap-3 text-[11px]"
+                        >
+                          <span>Local</span>
+                          {!useWorktree ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : null}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <Laptop className="h-3 w-3" />
+                  <span>Local</span>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-3">
-              <TooltipProvider delayDuration={120}>
-                <Tooltip>
-                  <DropdownMenu
-                    modal={false}
-                    onOpenChange={(next) => {
-                      if (!next) setBaseBranchSearch("");
-                    }}
-                  >
-                    <TooltipTrigger asChild>
-                      <DropdownMenuTrigger
-                        asChild
-                        disabled={
-                          isLoadingBaseBranches ||
-                          baseBranchCandidates.length === 0
-                        }
-                      >
-                        <button
-                          type="button"
-                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-50"
+              {!isGitRepository ? null : (
+                <TooltipProvider delayDuration={120}>
+                  <Tooltip>
+                    <DropdownMenu
+                      modal={false}
+                      onOpenChange={(next) => {
+                        if (!next) setBaseBranchSearch("");
+                      }}
+                    >
+                      <TooltipTrigger asChild>
+                        <DropdownMenuTrigger
+                          asChild
+                          disabled={
+                            isLoadingBaseBranches ||
+                            baseBranchCandidates.length === 0
+                          }
                         >
-                          <GitBranch className="h-3 w-3" />
-                          <span>From</span>
-                          <span className="max-w-[120px] truncate">
-                            {isLoadingBaseBranches
-                              ? "..."
-                              : baseBranch ?? "main"}
-                          </span>
-                          <ChevronDown className="h-2.5 w-2.5" />
-                        </button>
-                      </DropdownMenuTrigger>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="text-[11px]">
-                      Base branch to start working from
-                    </TooltipContent>
-                    <DropdownMenuContent align="end" className="w-64">
-                      <div className="p-2">
-                        <div className="relative">
-                          <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                          <input
-                            type="text"
-                            placeholder="Search branches..."
-                            value={baseBranchSearch}
-                            onChange={(e) =>
-                              setBaseBranchSearch(e.target.value)
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === "Escape") {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                return;
+                          <button
+                            type="button"
+                            className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-50"
+                          >
+                            <GitBranch className="h-3 w-3" />
+                            <span>From</span>
+                            <span className="max-w-[120px] truncate">
+                              {isLoadingBaseBranches
+                                ? "..."
+                                : baseBranch ?? "main"}
+                            </span>
+                            <ChevronDown className="h-2.5 w-2.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-[11px]">
+                        Base branch to start working from
+                      </TooltipContent>
+                      <DropdownMenuContent align="end" className="w-64">
+                        <div className="p-2">
+                          <div className="relative">
+                            <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+                            <input
+                              type="text"
+                              placeholder="Search branches..."
+                              value={baseBranchSearch}
+                              onChange={(e) =>
+                                setBaseBranchSearch(e.target.value)
                               }
-                              e.stopPropagation();
-                            }}
-                            className="w-full rounded-sm border border-border bg-background py-1.5 pl-7 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-                          />
-                        </div>
-                      </div>
-                      <DropdownMenuSeparator />
-                      <div className="max-h-48 overflow-y-auto">
-                        {filteredBaseBranches.length === 0 ? (
-                          <div className="p-2 text-center text-[11px] text-muted-foreground">
-                            No branches found
+                              onKeyDown={(e) => {
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  return;
+                                }
+                                e.stopPropagation();
+                              }}
+                              className="w-full rounded-sm border border-border bg-background py-1.5 pl-7 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                            />
                           </div>
-                        ) : (
-                          filteredBaseBranches.map((branch) => (
-                            <DropdownMenuItem
-                              key={branch.name}
-                              onClick={() => setBaseBranch(branch.name)}
-                              className="flex items-center justify-between gap-3 text-[11px]"
-                            >
-                              <span className="min-w-0 truncate">
-                                {branch.name}
-                              </span>
-                              <div className="flex flex-shrink-0 items-center gap-1">
-                                {branch.is_current && (
-                                  <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                                    current
-                                  </span>
-                                )}
-                                {baseBranch === branch.name && (
-                                  <Check className="h-3.5 w-3.5" />
-                                )}
-                              </div>
-                            </DropdownMenuItem>
-                          ))
-                        )}
-                      </div>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </Tooltip>
-              </TooltipProvider>
+                        </div>
+                        <DropdownMenuSeparator />
+                        <div className="max-h-48 overflow-y-auto">
+                          {filteredBaseBranches.length === 0 ? (
+                            <div className="p-2 text-center text-[11px] text-muted-foreground">
+                              No branches found
+                            </div>
+                          ) : (
+                            filteredBaseBranches.map((branch) => (
+                              <DropdownMenuItem
+                                key={branch.name}
+                                onClick={() => setBaseBranch(branch.name)}
+                                className="flex items-center justify-between gap-3 text-[11px]"
+                              >
+                                <span className="min-w-0 truncate">
+                                  {branch.name}
+                                </span>
+                                <div className="flex flex-shrink-0 items-center gap-1">
+                                  {branch.is_current && (
+                                    <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                                      current
+                                    </span>
+                                  )}
+                                  {baseBranch === branch.name && (
+                                    <Check className="h-3.5 w-3.5" />
+                                  )}
+                                </div>
+                              </DropdownMenuItem>
+                            ))
+                          )}
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
             </div>
           </div>
         </div>

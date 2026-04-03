@@ -398,6 +398,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             return Err(RuntimeError::BadRequest("workspace path is invalid"));
         }
 
+        let is_git_repository = self.runtime().git().is_repository(&workspace_path);
+        let use_worktree = resolve_use_worktree_mode(is_git_repository, use_worktree);
+
         let repo_path = workspace_path.clone();
         let repo_path_str = repo_path.to_string_lossy().into_owned();
         let project =
@@ -488,27 +491,42 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             }
         }
 
-        let base_branch = if let Some(specified) = target_branch {
-            specified
-        } else {
-            self.runtime()
-                .git()
-                .get_current_branch(&repo_path)
-                .unwrap_or_else(|_| "main".to_string())
-        };
+        let (branch_name, target_branch, is_new_branch) = if is_git_repository {
+            let resolved_target_branch = if let Some(specified) = target_branch {
+                Some(specified)
+            } else {
+                Some(
+                    self.runtime()
+                        .git()
+                        .get_current_branch(&repo_path)
+                        .unwrap_or_else(|_| "main".to_string()),
+                )
+            };
 
-        let (branch_name, is_new_branch) = if let Some(ref existing) = run.branch_name {
-            (existing.clone(), false)
-        } else {
-            let new_branch = generate_attempt_branch_name(&task.title, &run.id.to_string());
-            (new_branch, true)
-        };
+            let resolved_branch_name = if let Some(ref existing) = run.branch_name {
+                Some(existing.clone())
+            } else {
+                Some(generate_attempt_branch_name(
+                    &task.title,
+                    &run.id.to_string(),
+                ))
+            };
 
-        let use_worktree = use_worktree.unwrap_or(true);
+            let is_new_branch = run.branch_name.is_none();
+            (resolved_branch_name, resolved_target_branch, is_new_branch)
+        } else {
+            (None, None, false)
+        };
 
         let (worktree_path, container_ref) = if use_worktree {
+            let branch_name = branch_name.as_deref().ok_or(RuntimeError::BadRequest(
+                "branch name is required for worktree execution",
+            ))?;
+            let target_branch = target_branch.as_deref().ok_or(RuntimeError::BadRequest(
+                "target branch is required for worktree execution",
+            ))?;
             let mut ensure_options =
-                EnsureOptions::new(&branch_name).with_base_branch(&base_branch);
+                EnsureOptions::new(branch_name).with_base_branch(target_branch);
             if is_new_branch {
                 ensure_options = ensure_options.create_branch();
             }
@@ -553,8 +571,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         sqlx::query(
             "UPDATE task_runs SET branch_name = ?, target_branch = ?, container_ref = ?, workspace_path = ?, resume_session_id = ?, updated_at = datetime('now') WHERE id = ?",
         )
-        .bind(&branch_name)
-        .bind(&base_branch)
+        .bind(branch_name.clone())
+        .bind(target_branch.clone())
         .bind(&container_ref)
         .bind(&container_ref)
         .bind(resume_session_id.clone())
@@ -570,7 +588,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             true,
         )
         .await?;
-        TaskRecord::update_branch(self.pool(), task.id, Some(branch_name.clone())).await?;
+        TaskRecord::update_branch(self.pool(), task.id, branch_name.clone()).await?;
 
         let now = Utc::now();
         sqlx::query(
@@ -1430,6 +1448,14 @@ fn build_merge_commit_message(
     )
 }
 
+fn resolve_use_worktree_mode(is_git_repository: bool, requested: Option<bool>) -> bool {
+    if !is_git_repository {
+        return false;
+    }
+
+    requested.unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,5 +1565,20 @@ mod tests {
             LogEntry::Finished,
         ];
         assert_eq!(extract_session_id_from_entries(&entries), None);
+    }
+
+    #[test]
+    fn forces_local_mode_for_non_git_workspace_when_requested() {
+        assert!(!resolve_use_worktree_mode(false, Some(true)));
+    }
+
+    #[test]
+    fn defaults_to_worktree_mode_for_git_workspace() {
+        assert!(resolve_use_worktree_mode(true, None));
+    }
+
+    #[test]
+    fn respects_explicit_local_mode_for_git_workspace() {
+        assert!(!resolve_use_worktree_mode(true, Some(false)));
     }
 }

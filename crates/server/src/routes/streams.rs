@@ -137,7 +137,11 @@ async fn handle_stream_task_sessions_ws(socket: WebSocket, state: AppState, task
 
     tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
 
-    let stream_result: StreamResult = state.runtime().events().stream_task_sessions_raw(task_id).await;
+    let stream_result: StreamResult = state
+        .runtime()
+        .events()
+        .stream_task_sessions_raw(task_id)
+        .await;
     let mut stream = match stream_result {
         Ok(s) => s,
         Err(err) => {
@@ -212,8 +216,7 @@ async fn stream_task_run_logs(
     ws.on_upgrade(move |socket| handle_stream_task_run_logs_ws(socket, state, id))
 }
 
-async fn handle_stream_task_run_logs_ws(socket: WebSocket, state: AppState, task_run_id: Uuid) {
-    let (mut sender, mut ws_receiver) = socket.split();
+async fn handle_stream_task_run_logs_ws(mut socket: WebSocket, state: AppState, task_run_id: Uuid) {
     let stream_opened_at = std::time::Instant::now();
     let first_patch_seen = Arc::new(AtomicBool::new(false));
     let first_patch_seen_for_timer = Arc::clone(&first_patch_seen);
@@ -238,8 +241,6 @@ async fn handle_stream_task_run_logs_ws(socket: WebSocket, state: AppState, task
         }),
     );
 
-    tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
-
     let stream_result = state.runtime().stream_logs(task_run_id).await;
     let mut stream = match stream_result {
         Ok(s) => s,
@@ -255,7 +256,8 @@ async fn handle_stream_task_run_logs_ws(socket: WebSocket, state: AppState, task
             );
             tracing::warn!(%task_run_id, error = %err, "[stream_task_run_logs] failed to create stream");
             let error_json = serde_json::json!({"error": err.to_string()}).to_string();
-            let _ = sender.send(Message::Text(error_json.into())).await;
+            let _ = socket.send(Message::Text(error_json.into())).await;
+            let _ = SinkExt::close(&mut socket).await;
             return;
         }
     };
@@ -265,56 +267,77 @@ async fn handle_stream_task_run_logs_ws(socket: WebSocket, state: AppState, task
     let mut finished = false;
     let mut closed_by_client = false;
 
-    while let Some(result) = stream.next().await {
-        let msg = match result {
-            Ok(entry) => {
-                if let LogEntry::JsonPatch(value) = &entry {
-                    patch_messages += 1;
-                    let (ops, contains_entry_patch) = parse_patch_stats(value);
-                    patch_ops += ops;
-                    if contains_entry_patch && !first_patch_seen.swap(true, Ordering::Relaxed) {
+    loop {
+        tokio::select! {
+            result = stream.next() => {
+                let Some(result) = result else {
+                    break;
+                };
+
+                let msg = match result {
+                    Ok(entry) => {
+                        if let LogEntry::JsonPatch(value) = &entry {
+                            patch_messages += 1;
+                            let (ops, contains_entry_patch) = parse_patch_stats(value);
+                            patch_ops += ops;
+                            if contains_entry_patch && !first_patch_seen.swap(true, Ordering::Relaxed) {
+                                perf::record_backend_event(
+                                    "task_run_logs_stream_first_patch",
+                                    json!({
+                                        "task_run_id": task_run_id,
+                                        "time_to_first_patch_ms": perf::elapsed_ms(stream_opened_at),
+                                    }),
+                                );
+                            }
+                        } else if matches!(entry, LogEntry::Finished) {
+                            finished = true;
+                            first_patch_seen.store(true, Ordering::Relaxed);
+                            perf::record_backend_event(
+                                "task_run_logs_stream_finished",
+                                json!({
+                                    "task_run_id": task_run_id,
+                                    "elapsed_ms": perf::elapsed_ms(stream_opened_at),
+                                    "patch_messages": patch_messages,
+                                    "patch_ops": patch_ops,
+                                }),
+                            );
+                        }
+
+                        log_entry_to_vk_message(entry)
+                    }
+                    Err(err) => {
                         perf::record_backend_event(
-                            "task_run_logs_stream_first_patch",
+                            "task_run_logs_stream_error",
                             json!({
                                 "task_run_id": task_run_id,
-                                "time_to_first_patch_ms": perf::elapsed_ms(stream_opened_at),
+                                "error": err.to_string(),
                             }),
                         );
+                        Some(Message::Text(
+                            json!({"error": err.to_string()}).to_string().into(),
+                        ))
                     }
-                } else if matches!(entry, LogEntry::Finished) {
-                    finished = true;
-                    first_patch_seen.store(true, Ordering::Relaxed);
-                    perf::record_backend_event(
-                        "task_run_logs_stream_finished",
-                        json!({
-                            "task_run_id": task_run_id,
-                            "elapsed_ms": perf::elapsed_ms(stream_opened_at),
-                            "patch_messages": patch_messages,
-                            "patch_ops": patch_ops,
-                        }),
-                    );
+                };
+
+                if let Some(message) = msg {
+                    if socket.send(message).await.is_err() {
+                        closed_by_client = true;
+                        break;
+                    }
                 }
-
-                log_entry_to_vk_message(entry)
             }
-            Err(err) => {
-                perf::record_backend_event(
-                    "task_run_logs_stream_error",
-                    json!({
-                        "task_run_id": task_run_id,
-                        "error": err.to_string(),
-                    }),
-                );
-                Some(Message::Text(
-                    json!({"error": err.to_string()}).to_string().into(),
-                ))
-            }
-        };
-
-        if let Some(message) = msg {
-            if sender.send(message).await.is_err() {
-                closed_by_client = true;
-                break;
+            inbound = socket.next() => {
+                match inbound {
+                    Some(Ok(Message::Close(_))) => {
+                        closed_by_client = true;
+                        break;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => {
+                        closed_by_client = true;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -338,6 +361,10 @@ async fn handle_stream_task_run_logs_ws(socket: WebSocket, state: AppState, task
             }),
         );
     }
+
+    // Send a proper close frame so the client sees code 1000 (normal closure)
+    // instead of an abnormal TCP drop that triggers reconnection attempts.
+    let _ = SinkExt::close(&mut socket).await;
 }
 
 fn log_entry_to_vk_message(entry: LogEntry) -> Option<Message> {

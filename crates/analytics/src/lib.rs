@@ -94,10 +94,7 @@ pub fn init(config: AnalyticsConfig) {
         app_version: config.app_version,
     });
 
-    debug!(
-        enabled = config.enabled,
-        "analytics initialized"
-    );
+    debug!(enabled = config.enabled, "analytics initialized");
 }
 
 /// Update the enabled state at runtime (e.g. when user toggles telemetry).

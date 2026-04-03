@@ -21,11 +21,12 @@ mod routes;
 mod shutdown;
 
 pub(crate) use app_state::AppState;
+pub use args::Args as ServerArgs;
 pub(crate) use constants::MAX_IMAGE_UPLOAD_BYTES;
 pub(crate) use errors::ApiError;
 pub(crate) use helpers::format_system_time;
-pub use args::Args as ServerArgs;
 
+#[cfg(unix)]
 fn raise_fd_limit() {
     match rlimit::Resource::NOFILE.get() {
         Ok((soft, hard)) => {
@@ -44,6 +45,9 @@ fn raise_fd_limit() {
         }
     }
 }
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
     tracing_subscriber::fmt()

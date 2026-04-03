@@ -97,7 +97,8 @@ Chro is a monorepo with an Electron desktop shell, a React SPA frontend, and a R
 chro/
 ├── apps/
 │   ├── desktop/          # Electron + React desktop app
-│   ├── api/              # Backend API server
+│   ├── api/              # Cloudflare Workers API (Rust → WASM, D1)
+│   └── cli/              # CLI launcher for dev services (Rust)
 ├── crates/               # Rust backend libraries
 │   ├── server/           # Axum HTTP/WebSocket server
 │   ├── db/               # SQLite database layer (SQLx)
@@ -107,19 +108,21 @@ chro/
 │   ├── worktree/         # Git worktree management
 │   ├── git/              # Git operations
 │   ├── filesystem/       # File I/O operations
+│   ├── napi-filesystem/  # N-API bindings for filesystem
 │   ├── events/           # Event system
 │   ├── approvals/        # Approval gate logic
+│   ├── analytics/        # Analytics
 │   ├── diff-stream/      # Real-time diff streaming
 │   ├── file-search-cache/# File search indexing
 │   ├── image/            # Image processing
 │   ├── config/           # Configuration management
 │   └── log-types/        # Log type definitions
 ├── packages/
-│   ├── ui/               # Shared UI components
-│   └── kv/               # Key-value store utilities
+│   └── ui/               # Shared UI components
 ├── tooling/
 │   ├── scripts/          # Build & deployment scripts
-│   └── typescript/       # Shared TS config
+│   ├── typescript/       # Shared TS config
+│   └── licenses/         # License checking utilities
 └── docs/                 # Architecture and design documents
 ```
 
@@ -132,6 +135,7 @@ chro/
 | Editors | CodeMirror 6, Monaco Editor |
 | Backend | Rust, Axum 0.7, Tokio, SQLx (SQLite) |
 | Build | Bun, Turbo, Biome |
+| CLI | Rust (clap), launches dev services |
 | Packaging | electron-builder (macOS dmg, Windows nsis/zip, Linux AppImage) |
 
 ## Development
@@ -198,9 +202,8 @@ bun format                 # Format with Biome
 
 | Plan | Price | Features |
 |------|-------|----------|
-| **Free** | $0 forever | Full source code access, self-hosted, community support |
-| **Pro** | $20/month | Unlimited macOS & Windows apps, built-in editor & git, full diff & PR workflow |
-| **Max** | $200/month | Everything in Pro + private resources, personal support, priority feature requests |
+| Free | $0 forever | Full source code access, self-hosted, community support |
+| Pro | $20/month | Unlimited macOS & Windows apps, built-in editor & git, full diff & PR workflow |
 
 Free during beta. Works with your Claude Code / Codex subscription.
 
@@ -220,4 +223,4 @@ Chro is local-first. Your knowledge, notes, and code stay on your machine. Only 
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE.md) for details.
