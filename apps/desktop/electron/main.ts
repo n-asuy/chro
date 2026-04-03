@@ -1,16 +1,8 @@
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises as fsPromises } from "node:fs";
-import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
-import { randomUUID } from "node:crypto";
 import path from "node:path";
-import {
-  type SessionDatabase,
-  configureSharedUserData,
-  createSessionDatabase,
-} from "./db";
 import {
   BrowserWindow,
   type IpcMainInvokeEvent,
@@ -22,24 +14,29 @@ import {
   ipcMain,
   screen,
 } from "electron";
-import { autoUpdater, type UpdateInfo } from "electron-updater";
+import { type UpdateInfo, autoUpdater } from "electron-updater";
+import {
+  type SessionDatabase,
+  configureSharedUserData,
+  createSessionDatabase,
+} from "./db";
+import { type DesktopExecutor, installExecutor } from "./executor-installer";
+import { migrateLegacyUserData } from "./migration";
 import { findAvailablePort } from "./port-utils";
 import {
   APP_PROTOCOL_SCHEME,
-  registerAppProtocolScheme,
   registerAppProtocolHandler,
+  registerAppProtocolScheme,
   resolveDistDir,
 } from "./protocol";
 import { openExternalUrl } from "./shell-utils";
 import {
   destroyTray,
-  getTrayState,
   initTray,
   refreshTrayMenu,
   updateTrayState,
-  type TrayWorkspaceWindow,
 } from "./tray";
-import { migrateLegacyUserData } from "./migration";
+import type { TrayWorkspaceWindow } from "./tray";
 
 app.setName("Chro");
 
@@ -58,7 +55,7 @@ type DesktopErrorCode =
   | "SELECTION_CANCELED"
   | "INVALID_PATH";
 
-type TrayStatus = ReturnType<typeof getTrayState>["status"];
+type TrayStatus = ReturnType<typeof import("./tray").getTrayState>["status"];
 
 const isDev = !app.isPackaged && process.env.NODE_ENV !== "production";
 const isAutoUpdaterEnabled = (() => {
@@ -112,7 +109,6 @@ const WINDOW_PRESETS: Record<WindowMode, WindowPreset> = {
 };
 
 const DEFAULT_WINDOW_PRESET: WindowPreset = WINDOW_PRESETS.session;
-
 
 type RuntimeContext = {
   id: string;
@@ -293,11 +289,10 @@ const launchRuntime = async (
     chunk: Buffer,
     method: (msg?: unknown, ...args: unknown[]) => void,
   ) => {
-    chunk
-      .toString()
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .forEach((line) => method(`[chro-server:${runtimeId}] ${line}`));
+    const lines = chunk.toString().split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      method(`[chro-server:${runtimeId}] ${line}`);
+    }
   };
 
   processHandle.stdout?.on("data", (chunk) => forwardLogs(chunk, console.log));
@@ -373,9 +368,9 @@ const sendWindowState = (window: BrowserWindow | null) => {
 };
 
 const sendToRenderer = (channel: string, payload: unknown) => {
-  BrowserWindow.getAllWindows().forEach((window) => {
+  for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send(channel, payload);
-  });
+  }
 };
 
 const createDesktopError = (code: DesktopErrorCode, message: string) => {
@@ -782,6 +777,20 @@ function registerIpcHandlers() {
     },
   );
 
+  ipcMain.handle(
+    "desktop:install-executor",
+    async (_event, payload: { executor?: DesktopExecutor | null }) => {
+      if (
+        payload?.executor !== "CLAUDE_CODE" &&
+        payload?.executor !== "CODEX"
+      ) {
+        throw new Error("Invalid executor install request.");
+      }
+
+      return installExecutor(payload.executor);
+    },
+  );
+
   ipcMain.handle("window:set-mode", (event, mode: WindowMode) => {
     const target = getWindowFromEvent(event);
     if (mode !== "onboarding" && mode !== "session") {
@@ -1075,13 +1084,11 @@ async function bootstrap() {
 
   app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      const runtimeDir =
-        primaryRuntimeDir ?? path.join(userDataDir, "chro");
+      const runtimeDir = primaryRuntimeDir ?? path.join(userDataDir, "chro");
       const runtime = await prepareRuntime(runtimeDir, true);
       mainWindow = await createRendererWindow(runtime, "onboarding");
     }
   });
-
 }
 
 app.on("window-all-closed", () => {
@@ -1091,16 +1098,16 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  runtimeContexts.forEach((runtime, runtimeId) => {
+  for (const [runtimeId, runtime] of runtimeContexts) {
     console.log(`[desktop] Stopping runtime ${runtimeId}`);
     runtime.process.kill();
-  });
+  }
 });
 
 app.on("will-quit", () => {
-  runtimeContexts.forEach((runtime) => {
+  for (const runtime of runtimeContexts.values()) {
     runtime.sessionDatabase.close();
-  });
+  }
   runtimeContexts.clear();
   destroyTray();
 });

@@ -1,16 +1,17 @@
-import { ExecutorInstallDialog } from "@/components/dialogs/executor-install-dialog";
 import {
   type AvailabilityInfo,
   type BaseCodingAgent,
   type ExecutorInstallInfo,
+  type InstallableTool,
   fetchAuthStatus,
   fetchExecutorInstallStatus,
   triggerAuthLogin,
   updateExecutorProfile,
 } from "@/lib/executor-client";
+import { installTool } from "@/lib/executor-install";
 import { getUiValue, removeUiValue, setUiValue } from "@/lib/ui-state-client";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Check, ExternalLink, Loader2 } from "lucide-react";
+import { Check, ExternalLink, GitBranch, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const EXECUTOR_STORAGE_KEY = "chro:selected-executor";
@@ -33,28 +34,43 @@ const DEFAULT_INSTALL_STATUS: Record<BaseCodingAgent, ExecutorInstallInfo> = {
   },
 };
 
+const DEFAULT_GIT_INSTALL_STATUS: ExecutorInstallInfo = {
+  installed: false,
+  command: "git",
+  resolved_path: null,
+};
+
 type AgentCardState =
   | "checking"
   | "install"
+  | "installing"
   | "sign_in"
   | "signing_in"
   | "signed_in";
+
+type ToolCardState = "checking" | "install" | "installing" | "installed";
 
 const getAgentCardState = ({
   executor,
   authStatus,
   installStatus,
+  installingTool,
   signingInExecutor,
   loading,
 }: {
   executor: BaseCodingAgent;
   authStatus: Record<BaseCodingAgent, AvailabilityInfo>;
   installStatus: Record<BaseCodingAgent, ExecutorInstallInfo>;
+  installingTool: InstallableTool | null;
   signingInExecutor: BaseCodingAgent | null;
   loading: boolean;
 }): AgentCardState => {
   if (loading) {
     return "checking";
+  }
+
+  if (installingTool === executor) {
+    return "installing";
   }
 
   if (signingInExecutor === executor) {
@@ -70,6 +86,23 @@ const getAgentCardState = ({
   }
 
   return "sign_in";
+};
+
+const getToolCardState = ({
+  installed,
+  installingTool,
+  tool,
+  loading,
+}: {
+  installed: boolean;
+  installingTool: InstallableTool | null;
+  tool: InstallableTool;
+  loading: boolean;
+}): ToolCardState => {
+  if (loading) return "checking";
+  if (installingTool === tool) return "installing";
+  if (installed) return "installed";
+  return "install";
 };
 
 export const Route = createFileRoute("/")({
@@ -104,9 +137,12 @@ function ProviderSelectionPage() {
   const [installStatus, setInstallStatus] = useState<
     Record<BaseCodingAgent, ExecutorInstallInfo>
   >(DEFAULT_INSTALL_STATUS);
+  const [gitInstallStatus, setGitInstallStatus] = useState<ExecutorInstallInfo>(
+    DEFAULT_GIT_INSTALL_STATUS,
+  );
+  const [installingTool, setInstallingTool] =
+    useState<InstallableTool | null>(null);
   const [signingInExecutor, setSigningInExecutor] =
-    useState<BaseCodingAgent | null>(null);
-  const [installDialogExecutor, setInstallDialogExecutor] =
     useState<BaseCodingAgent | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -134,8 +170,14 @@ function ProviderSelectionPage() {
           }
         : DEFAULT_INSTALL_STATUS;
 
+    const nextGitInstallStatus =
+      installResult.status === "fulfilled"
+        ? installResult.value.git
+        : DEFAULT_GIT_INSTALL_STATUS;
+
     setAuthStatus(nextAuthStatus);
     setInstallStatus(nextInstallStatus);
+    setGitInstallStatus(nextGitInstallStatus);
     setAvailabilityLoading(false);
 
     return {
@@ -158,6 +200,7 @@ function ProviderSelectionPage() {
           executor: savedExecutor,
           authStatus: availability.authStatus,
           installStatus: availability.installStatus,
+          installingTool: null,
           signingInExecutor: null,
           loading: false,
         });
@@ -190,6 +233,23 @@ function ProviderSelectionPage() {
       window.removeEventListener("focus", handleFocus);
     };
   }, [hasSavedExecutor, loadAvailability, navigate, savedExecutor]);
+
+  const handleInstall = useCallback(
+    async (tool: InstallableTool) => {
+      setInstallingTool(tool);
+      try {
+        const result = await installTool(tool);
+        if (result.ok) {
+          await loadAvailability();
+        }
+      } catch {
+        /* install failed */
+      } finally {
+        setInstallingTool(null);
+      }
+    },
+    [loadAvailability],
+  );
 
   const handleSignIn = useCallback(
     async (executor: BaseCodingAgent) => {
@@ -239,18 +299,19 @@ function ProviderSelectionPage() {
     [loadAvailability],
   );
 
-  const handlePrimaryAction = useCallback(
+  const handleAgentPrimaryAction = useCallback(
     async (executor: BaseCodingAgent) => {
       const cardState = getAgentCardState({
         executor,
         authStatus,
         installStatus,
+        installingTool,
         signingInExecutor,
         loading: availabilityLoading,
       });
 
       if (cardState === "install") {
-        setInstallDialogExecutor(executor);
+        await handleInstall(executor);
         return;
       }
 
@@ -261,8 +322,10 @@ function ProviderSelectionPage() {
     [
       authStatus,
       availabilityLoading,
+      handleInstall,
       handleSignIn,
       installStatus,
+      installingTool,
       signingInExecutor,
     ],
   );
@@ -271,6 +334,7 @@ function ProviderSelectionPage() {
     executor: "CLAUDE_CODE",
     authStatus,
     installStatus,
+    installingTool,
     signingInExecutor,
     loading: availabilityLoading,
   });
@@ -278,7 +342,14 @@ function ProviderSelectionPage() {
     executor: "CODEX",
     authStatus,
     installStatus,
+    installingTool,
     signingInExecutor,
+    loading: availabilityLoading,
+  });
+  const gitCardState = getToolCardState({
+    installed: gitInstallStatus.installed,
+    installingTool,
+    tool: "GIT",
     loading: availabilityLoading,
   });
 
@@ -322,30 +393,52 @@ function ProviderSelectionPage() {
               className="h-9 w-auto"
             />
             <p className="text-sm font-light text-white/55">
-              Install the CLI, then sign in to your coding agent
+              Install the CLI and sign in to your coding agent
             </p>
           </div>
 
-          <div className="space-y-3">
-            <AgentCard
-              icon={<img src="/icon_claude.png" alt="" className="size-8" />}
-              name="Claude Code"
-              description="Anthropic CLI agent"
-              state={claudeCardState}
-              selected={selectedExecutor === "CLAUDE_CODE"}
-              onSelect={() => setSelectedExecutor("CLAUDE_CODE")}
-              onPrimaryAction={() => void handlePrimaryAction("CLAUDE_CODE")}
-            />
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <p className="text-xs font-light uppercase tracking-wider text-white/30">
+                Tools
+              </p>
+              <ToolCard
+                icon={<GitBranch className="size-7 text-white/60" />}
+                name="Git"
+                description="Version control system"
+                state={gitCardState}
+                onInstall={() => void handleInstall("GIT")}
+              />
+            </div>
 
-            <AgentCard
-              icon={<OpenAiIcon className="size-7 text-white/60" />}
-              name="Codex"
-              description="OpenAI CLI agent"
-              state={codexCardState}
-              selected={selectedExecutor === "CODEX"}
-              onSelect={() => setSelectedExecutor("CODEX")}
-              onPrimaryAction={() => void handlePrimaryAction("CODEX")}
-            />
+            <div className="space-y-3">
+              <p className="text-xs font-light uppercase tracking-wider text-white/30">
+                Agent
+              </p>
+              <AgentCard
+                icon={<img src="/icon_claude.png" alt="" className="size-8" />}
+                name="Claude Code"
+                description="Anthropic CLI agent"
+                state={claudeCardState}
+                selected={selectedExecutor === "CLAUDE_CODE"}
+                onSelect={() => setSelectedExecutor("CLAUDE_CODE")}
+                onPrimaryAction={() =>
+                  void handleAgentPrimaryAction("CLAUDE_CODE")
+                }
+              />
+
+              <AgentCard
+                icon={<OpenAiIcon className="size-7 text-white/60" />}
+                name="Codex"
+                description="OpenAI CLI agent"
+                state={codexCardState}
+                selected={selectedExecutor === "CODEX"}
+                onSelect={() => setSelectedExecutor("CODEX")}
+                onPrimaryAction={() =>
+                  void handleAgentPrimaryAction("CODEX")
+                }
+              />
+            </div>
           </div>
 
           <button
@@ -362,18 +455,54 @@ function ProviderSelectionPage() {
           </button>
         </div>
       </div>
-      <ExecutorInstallDialog
-        open={installDialogExecutor !== null}
-        executor={installDialogExecutor}
-        installInfo={
-          installDialogExecutor ? installStatus[installDialogExecutor] : null
-        }
-        onOpenChange={(open) => {
-          if (!open) {
-            setInstallDialogExecutor(null);
-          }
-        }}
-      />
+    </div>
+  );
+}
+
+function ToolCard({
+  icon,
+  name,
+  description,
+  state,
+  onInstall,
+}: {
+  icon: React.ReactNode;
+  name: string;
+  description: string;
+  state: ToolCardState;
+  onInstall: () => void;
+}) {
+  return (
+    <div className="flex w-full items-center gap-4 border border-white/10 bg-[#0a0a0a] p-5 transition-colors">
+      <div className="flex flex-1 items-center gap-4">
+        <div className="flex size-10 shrink-0 items-center justify-center">
+          {icon}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-white">{name}</p>
+          <p className="text-xs font-light text-white/40">{description}</p>
+        </div>
+      </div>
+
+      <div className="shrink-0">
+        {state === "installed" ? (
+          <span className="flex items-center gap-1.5 text-xs font-light text-emerald-400">
+            <Check className="size-3.5" />
+            Installed
+          </span>
+        ) : state === "checking" || state === "installing" ? (
+          <Loader2 className="size-4 animate-spin text-white/40" />
+        ) : (
+          <button
+            type="button"
+            className="border border-white/15 bg-white/[0.04] px-3 py-1.5 text-xs font-light text-white/60 transition-colors hover:bg-white/10 hover:text-white/80"
+            onClick={onInstall}
+          >
+            Install
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -436,11 +565,8 @@ function AgentCard({
           </span>
         ) : state === "checking" ? (
           <Loader2 className="size-4 animate-spin text-white/30" />
-        ) : state === "signing_in" ? (
-          <span className="flex items-center gap-1.5 text-xs font-light text-white/40">
-            <ExternalLink className="size-3 text-white/30" />
-            <Loader2 className="size-3.5 animate-spin" />
-          </span>
+        ) : state === "signing_in" || state === "installing" ? (
+          <Loader2 className="size-4 animate-spin text-white/40" />
         ) : (
           <button
             type="button"

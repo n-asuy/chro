@@ -8,10 +8,10 @@ use axum::{
 use config::{AppTheme, EditorConfig, LanguagePreference, DEFAULT_MERGE_COMMIT_TEMPLATE};
 use executors::{
     anthropic_model_presets, check_mcp_status, detect_claude_version, get_auth_status_all,
-    get_install_status_all, load_mcp_config, save_mcp_config, trigger_auth_login, AuthLoginResult,
-    AuthStatusResult, BaseCodingAgent, ClaudeVersionResult, ExecutorConfigs,
-    ExecutorInstallStatusResult, ExecutorProfileId, LoadedMcpConfig, McpConfigPayload,
-    McpStatusResult, ModelPreset, SavedMcpConfig,
+    get_install_status_all, install_tool, load_mcp_config, save_mcp_config, trigger_auth_login,
+    AuthLoginResult, AuthStatusResult, BaseCodingAgent, ClaudeVersionResult, ExecutorConfigs,
+    ExecutorInstallStatusResult, ExecutorProfileId, InstallableTool, LoadedMcpConfig,
+    McpConfigPayload, McpStatusResult, ModelPreset, SavedMcpConfig, ToolInstallResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +37,7 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/executor/detect", get(detect_executor_handler))
         .route("/executor/install-status", get(get_install_status_handler))
+        .route("/executor/install", post(install_executor_handler))
         .route("/executor/mcp-status", get(check_mcp_status_handler))
         .route("/executor/auth-status", get(get_auth_status_handler))
         .route("/executor/auth", post(start_auth_handler))
@@ -413,6 +414,17 @@ async fn get_auth_status_handler() -> Json<AuthStatusResult> {
 
 async fn get_install_status_handler() -> Json<ExecutorInstallStatusResult> {
     Json(get_install_status_all().await)
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallToolRequest {
+    tool: InstallableTool,
+}
+
+async fn install_executor_handler(
+    Json(payload): Json<InstallToolRequest>,
+) -> Json<ToolInstallResult> {
+    Json(install_tool(payload.tool).await)
 }
 
 #[derive(Debug, Deserialize)]

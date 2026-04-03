@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 type WindowMode = "onboarding" | "session";
+type DesktopExecutor = "CLAUDE_CODE" | "CODEX";
 
 export type UpdateStatus =
   | { type: "checking" }
@@ -15,6 +16,16 @@ type RuntimeInfoPayload = {
   backendUrl: string;
   workspacePath: string | null;
   platform: string;
+};
+
+export type ExecutorInstallResult = {
+  ok: boolean;
+  executor: DesktopExecutor;
+  command: string;
+  strategy: string;
+  stdout: string;
+  stderr: string;
+  message: string;
 };
 
 const runtimeInfo = ipcRenderer.sendSync(
@@ -39,6 +50,10 @@ contextBridge.exposeInMainWorld("desktop", {
     ipcRenderer.invoke("desktop:show-notification", payload) as Promise<void>,
   openExternalUrl: (url: string) =>
     ipcRenderer.invoke("desktop:open-external", { url }) as Promise<void>,
+  installExecutor: (executor: DesktopExecutor) =>
+    ipcRenderer.invoke("desktop:install-executor", {
+      executor,
+    }) as Promise<ExecutorInstallResult>,
 
   update: {
     check: () =>

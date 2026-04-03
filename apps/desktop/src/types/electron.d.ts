@@ -1,4 +1,4 @@
-export {};
+export type {};
 
 declare global {
   interface DesktopRuntimeInfo {
@@ -33,6 +33,18 @@ declare global {
     | { type: "downloaded"; version: string }
     | { type: "error"; message: string };
 
+  type DesktopExecutor = "CLAUDE_CODE" | "CODEX";
+
+  type ExecutorInstallResult = {
+    ok: boolean;
+    executor: DesktopExecutor;
+    command: string;
+    strategy: string;
+    stdout: string;
+    stderr: string;
+    message: string;
+  };
+
   interface Window {
     desktop?: {
       getVersion?: () => Promise<string>;
@@ -48,6 +60,9 @@ declare global {
         body?: string;
       }) => Promise<void>;
       openExternalUrl?: (url: string) => Promise<void>;
+      installExecutor?: (
+        executor: DesktopExecutor,
+      ) => Promise<ExecutorInstallResult>;
       update?: {
         check: () => Promise<{
           status: string;

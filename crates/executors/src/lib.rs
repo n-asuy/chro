@@ -28,10 +28,11 @@ pub use mcp_config::{
 };
 pub use profile::{
     AuthLoginResult, AuthStatusResult, ClaudeVersionResult, ExecutorConfig, ExecutorConfigs,
-    ExecutorInstallInfo, ExecutorInstallStatusResult, ExecutorProfileId, McpServerStatus,
-    McpStatusResult, ModelPreset, PermissionMode, PermissionRuntimeConfig, ProfileError,
-    anthropic_model_presets, canonical_variant_key, check_mcp_status, detect_claude_version,
-    get_auth_status_all, get_install_status_all, to_default_variant, trigger_auth_login,
+    ExecutorInstallInfo, ExecutorInstallStatusResult, ExecutorProfileId, InstallableTool,
+    McpServerStatus, McpStatusResult, ModelPreset, PermissionMode, PermissionRuntimeConfig,
+    ProfileError, ToolInstallResult, anthropic_model_presets, canonical_variant_key,
+    check_mcp_status, detect_claude_version, get_auth_status_all, get_install_status_all,
+    install_tool, to_default_variant, trigger_auth_login,
 };
 
 pub use approvals::{

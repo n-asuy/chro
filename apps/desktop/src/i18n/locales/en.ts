@@ -391,10 +391,31 @@ const en = {
     "Continue to open the official installation guide in your browser. After the CLI is installed, return here and click Sign in.",
   authInstallDialogSafety:
     "No package manager commands will be run and your PATH will not be changed automatically.",
+  authInstallDialogInstallingTitle: "Installing {executor}",
+  authInstallDialogInstallingDescription:
+    "Chro is running the official installer for {executor}. This may take a minute.",
+  authInstallDialogInstallingBody:
+    "The installation is running in the background. Keep this window open until it finishes.",
+  authInstallDialogSuccessTitle: "{executor} installed",
+  authInstallDialogSuccessDescription:
+    "The CLI finished installing successfully.",
+  authInstallDialogSuccessBody:
+    "Chro detected the installation and can use this CLI now.",
+  authInstallDialogSuccessNextStep:
+    "Close this dialog and continue with Sign in.",
+  authInstallDialogFailureTitle: "Could not install {executor}",
+  authInstallDialogFailureDescription:
+    "Automatic installation failed. You can review the error below or continue with the official guide.",
+  authInstallDialogFailureBody:
+    "Automatic installation is best-effort. If your environment needs extra setup, use the official guide instead.",
   authInstallDialogGuideLabel: "Official guide",
+  authInstallDialogMethodLabel: "Install method",
   authInstallDialogCommandLabel: "Expected command",
   authInstallDialogOpenGuide: "Open guide",
+  authInstallDialogOpenGuideSecondary: "Open guide instead",
   authInstallDialogCancel: "Cancel",
+  authInstallDialogDone: "Done",
+  authInstallDialogErrorLabel: "Installer output",
   authClaudeInstallDescription:
     "Install the Claude CLI, then return here to sign in.",
   authCodexInstallDescription:

@@ -398,10 +398,31 @@ const ja = {
     "公式インストールガイドをブラウザで開きます。CLI のインストール後、この画面に戻ってサインインしてください。",
   authInstallDialogSafety:
     "パッケージマネージャーのコマンド実行や PATH の変更は自動では行いません。",
+  authInstallDialogInstallingTitle: "{executor} をインストール中",
+  authInstallDialogInstallingDescription:
+    "Chro が {executor} の公式インストール手順を実行しています。完了まで少し時間がかかることがあります。",
+  authInstallDialogInstallingBody:
+    "インストールをバックグラウンドで実行しています。完了するまでこのウィンドウを閉じないでください。",
+  authInstallDialogSuccessTitle: "{executor} をインストールしました",
+  authInstallDialogSuccessDescription:
+    "CLI のインストールが正常に完了しました。",
+  authInstallDialogSuccessBody:
+    "Chro がインストールを検出し、この CLI を使える状態になりました。",
+  authInstallDialogSuccessNextStep:
+    "このダイアログを閉じて、続けてサインインしてください。",
+  authInstallDialogFailureTitle: "{executor} をインストールできませんでした",
+  authInstallDialogFailureDescription:
+    "自動インストールに失敗しました。下のエラーを確認するか、公式ガイドに進んでください。",
+  authInstallDialogFailureBody:
+    "自動インストールはベストエフォートです。追加セットアップが必要な環境では、公式ガイドを使ってください。",
   authInstallDialogGuideLabel: "公式ガイド",
+  authInstallDialogMethodLabel: "インストール方法",
   authInstallDialogCommandLabel: "想定コマンド",
   authInstallDialogOpenGuide: "ガイドを開く",
+  authInstallDialogOpenGuideSecondary: "代わりにガイドを開く",
   authInstallDialogCancel: "キャンセル",
+  authInstallDialogDone: "閉じる",
+  authInstallDialogErrorLabel: "インストーラー出力",
   authClaudeInstallDescription:
     "Claude CLI をインストールしてから、ここに戻ってサインインしてください。",
   authCodexInstallDescription:

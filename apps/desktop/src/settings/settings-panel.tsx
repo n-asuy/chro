@@ -404,6 +404,10 @@ export function SettingsPanel({
     setInstallDialogExecutor(executor);
   }, []);
 
+  const handleInstallCompleted = useCallback(() => {
+    void loadAgentAvailability();
+  }, [loadAgentAvailability]);
+
   const languageLabelId = "display-language-label";
   const selectedLanguageOption = useMemo(
     () => LANGUAGE_OPTIONS.find((option) => option.value === language),
@@ -1652,6 +1656,7 @@ export function SettingsPanel({
         installInfo={
           installDialogExecutor ? installStatus?.[installDialogExecutor] : null
         }
+        onInstalled={handleInstallCompleted}
         onOpenChange={(open) => {
           if (!open) {
             setInstallDialogExecutor(null);

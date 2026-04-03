@@ -11,6 +11,7 @@
     "test": "cargo test --manifest-path ../../crates/server/Cargo.toml",
     "lint": "cargo fmt --manifest-path ../../crates/server/Cargo.toml -- --check",
     "format": "cargo fmt --manifest-path ../../crates/server/Cargo.toml",
-    "typecheck": "cargo check --manifest-path ../../crates/server/Cargo.toml"
+    "typecheck": "cargo check --manifest-path ../../crates/server/Cargo.toml",
+    "release": "sh -c 'gh workflow run cli-release.yml -f version_type=${1:-patch}' --"
   }
 }

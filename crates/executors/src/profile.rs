@@ -911,11 +911,12 @@ pub struct ExecutorInstallInfo {
     pub resolved_path: Option<String>,
 }
 
-/// Aggregated install status for all known executors.
+/// Aggregated install status for all known executors and tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorInstallStatusResult {
     pub claude_code: ExecutorInstallInfo,
     pub codex: ExecutorInstallInfo,
+    pub git: ExecutorInstallInfo,
 }
 
 /// Result of triggering an auth login flow for an executor.
@@ -968,8 +969,147 @@ async fn detect_install_info(command: &'static str) -> ExecutorInstallInfo {
 pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
     let claude_code = detect_install_info("claude").await;
     let codex = detect_install_info("codex").await;
+    let git = detect_install_info("git").await;
 
-    ExecutorInstallStatusResult { claude_code, codex }
+    ExecutorInstallStatusResult {
+        claude_code,
+        codex,
+        git,
+    }
+}
+
+/// Tools that can be installed via the onboarding install endpoint.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InstallableTool {
+    ClaudeCode,
+    Codex,
+    Git,
+}
+
+impl std::fmt::Display for InstallableTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClaudeCode => write!(f, "CLAUDE_CODE"),
+            Self::Codex => write!(f, "CODEX"),
+            Self::Git => write!(f, "GIT"),
+        }
+    }
+}
+
+/// Result of attempting to install a tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInstallResult {
+    pub ok: bool,
+    pub tool: InstallableTool,
+    pub command: String,
+    pub strategy: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub message: String,
+}
+
+/// Determine the install command for the given tool.
+async fn get_install_strategy(tool: InstallableTool) -> Result<(&'static str, &'static str), String> {
+    match tool {
+        InstallableTool::ClaudeCode => {
+            if cfg!(target_os = "windows") {
+                if resolve_executable_path("npm").await.is_some() {
+                    return Ok(("npm", "npm install -g @anthropic-ai/claude-code"));
+                }
+                return Err("Automatic install requires npm on Windows.".into());
+            }
+            if resolve_executable_path("curl").await.is_some() {
+                return Ok(("official installer", "curl -fsSL https://claude.ai/install.sh | bash"));
+            }
+            if resolve_executable_path("npm").await.is_some() {
+                return Ok(("npm", "npm install -g @anthropic-ai/claude-code"));
+            }
+            Err("Automatic install requires curl or npm. Open the install guide to continue manually.".into())
+        }
+        InstallableTool::Codex => {
+            if cfg!(target_os = "macos") && resolve_executable_path("brew").await.is_some() {
+                return Ok(("Homebrew", "brew install --cask codex"));
+            }
+            if resolve_executable_path("npm").await.is_some() {
+                return Ok(("npm", "npm install -g @openai/codex"));
+            }
+            Err("Automatic install requires Homebrew or npm. Open the install guide to continue manually.".into())
+        }
+        InstallableTool::Git => {
+            if cfg!(target_os = "macos") {
+                return Ok(("Xcode CLT", "xcode-select --install"));
+            }
+            if cfg!(target_os = "windows") {
+                if resolve_executable_path("winget").await.is_some() {
+                    return Ok(("winget", "winget install --id Git.Git -e --source winget"));
+                }
+                return Err("Automatic install requires winget. Download Git from https://git-scm.com".into());
+            }
+            if resolve_executable_path("apt-get").await.is_some() {
+                return Ok(("apt", "sudo apt-get install -y git"));
+            }
+            if resolve_executable_path("brew").await.is_some() {
+                return Ok(("Homebrew", "brew install git"));
+            }
+            Err("Automatic install requires Xcode CLI Tools, apt, or Homebrew.".into())
+        }
+    }
+}
+
+/// Install a tool using the best available strategy.
+pub async fn install_tool(tool: InstallableTool) -> ToolInstallResult {
+    let (strategy_label, command) = match get_install_strategy(tool).await {
+        Ok(pair) => pair,
+        Err(msg) => {
+            return ToolInstallResult {
+                ok: false,
+                tool,
+                command: String::new(),
+                strategy: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                message: msg,
+            };
+        }
+    };
+
+    let cwd = std::env::temp_dir();
+    match crate::shell::run_script(command, &cwd).await {
+        Ok(output) if output.status.success() => ToolInstallResult {
+            ok: true,
+            tool,
+            command: command.to_string(),
+            strategy: strategy_label.to_string(),
+            stdout: output.stdout.trim().to_string(),
+            stderr: output.stderr.trim().to_string(),
+            message: format!("Installed via {strategy_label}."),
+        },
+        Ok(output) => ToolInstallResult {
+            ok: false,
+            tool,
+            command: command.to_string(),
+            strategy: strategy_label.to_string(),
+            stdout: output.stdout.trim().to_string(),
+            stderr: output.stderr.trim().to_string(),
+            message: output
+                .stderr
+                .lines()
+                .last()
+                .unwrap_or("Installation failed.")
+                .trim()
+                .to_string(),
+        },
+        Err(err) => ToolInstallResult {
+            ok: false,
+            tool,
+            command: command.to_string(),
+            strategy: strategy_label.to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            message: format!("Failed to run installer: {err}"),
+        },
+    }
 }
 
 /// Extract a non-localhost URL from text output.

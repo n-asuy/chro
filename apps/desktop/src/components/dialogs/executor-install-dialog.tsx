@@ -5,6 +5,7 @@ import type {
 } from "@/lib/executor-client";
 import {
   EXECUTOR_INSTALL_GUIDE_URLS,
+  installTool,
   openExecutorInstallGuide,
 } from "@/lib/executor-install";
 import {
@@ -17,14 +18,15 @@ import {
   AlertDialogTitle,
 } from "@chro/ui/alert-dialog";
 import { Button } from "@chro/ui/button";
-import { ExternalLink, Loader2 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { Check, ExternalLink, Loader2, TriangleAlert } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 
 type ExecutorInstallDialogProps = {
   executor: BaseCodingAgent | null;
   installInfo?: ExecutorInstallInfo | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onInstalled?: (executor: BaseCodingAgent) => void;
 };
 
 const FALLBACK_COMMANDS: Record<BaseCodingAgent, string> = {
@@ -42,9 +44,13 @@ export function ExecutorInstallDialog({
   installInfo,
   open,
   onOpenChange,
+  onInstalled,
 }: ExecutorInstallDialogProps) {
   const { t } = useLanguage();
   const [openingGuide, setOpeningGuide] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installResult, setInstallResult] =
+    useState<ExecutorInstallResult | null>(null);
 
   const executorLabel = executor ? EXECUTOR_LABELS[executor] : "";
   const expectedCommand = executor
@@ -59,6 +65,39 @@ export function ExecutorInstallDialog({
       guideHost = guideUrl;
     }
   }
+
+  useEffect(() => {
+    if (!open || !executor) {
+      setInstalling(false);
+      setInstallResult(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const runInstall = async () => {
+      setInstalling(true);
+      setInstallResult(null);
+
+      const result = await installTool(executor) as ExecutorInstallResult;
+      if (cancelled) {
+        return;
+      }
+
+      setInstallResult(result);
+      setInstalling(false);
+
+      if (result.ok) {
+        onInstalled?.(executor);
+      }
+    };
+
+    void runInstall();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [executor, onInstalled, open]);
 
   const handleOpenGuide = useCallback(async () => {
     if (!executor) {
@@ -80,29 +119,82 @@ export function ExecutorInstallDialog({
     return null;
   }
 
+  const installSucceeded = installResult?.ok === true;
+  const installFailed = installResult?.ok === false;
+  const strategyLabel = installResult?.strategy || expectedCommand;
+  const commandLabel = installResult?.command || expectedCommand;
+  const installOutput = installResult?.stderr || installResult?.stdout || "";
+
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent className="border border-border/60 bg-custom-background-100 text-foreground">
         <AlertDialogHeader>
           <AlertDialogTitle className="font-workspace text-[18px]">
-            {t("authInstallDialogTitle", { executor: executorLabel })}
+            {installSucceeded
+              ? t("authInstallDialogSuccessTitle", { executor: executorLabel })
+              : installFailed
+                ? t("authInstallDialogFailureTitle", {
+                    executor: executorLabel,
+                  })
+                : t("authInstallDialogInstallingTitle", {
+                    executor: executorLabel,
+                  })}
           </AlertDialogTitle>
           <AlertDialogDescription className="font-workspace text-[13px] leading-6 text-muted-foreground">
-            {t("authInstallDialogDescription", { executor: executorLabel })}
+            {installSucceeded
+              ? t("authInstallDialogSuccessDescription", {
+                  executor: executorLabel,
+                })
+              : installFailed
+                ? installResult.message
+                : t("authInstallDialogInstallingDescription", {
+                    executor: executorLabel,
+                  })}
           </AlertDialogDescription>
         </AlertDialogHeader>
 
         <div className="space-y-3">
           <div className="rounded-md border border-border/60 bg-custom-background-90 p-3">
-            <p className="font-workspace text-[13px] leading-6 text-foreground">
-              {t("authInstallDialogBody")}
-            </p>
-            <p className="mt-2 font-workspace text-[12px] leading-5 text-muted-foreground">
-              {t("authInstallDialogSafety")}
-            </p>
+            <div className="flex items-start gap-3">
+              {installSucceeded ? (
+                <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+              ) : installFailed ? (
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              ) : (
+                <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+              )}
+              <div className="space-y-2">
+                <p className="font-workspace text-[13px] leading-6 text-foreground">
+                  {installSucceeded
+                    ? t("authInstallDialogSuccessBody")
+                    : installFailed
+                      ? t("authInstallDialogFailureBody")
+                      : t("authInstallDialogInstallingBody")}
+                </p>
+                <p className="font-workspace text-[12px] leading-5 text-muted-foreground">
+                  {installSucceeded
+                    ? t("authInstallDialogSuccessNextStep")
+                    : t("authInstallDialogSafety")}
+                </p>
+              </div>
+            </div>
           </div>
 
           <dl className="grid gap-3 rounded-md border border-border/60 bg-custom-background-90 p-3 font-workspace">
+            <div className="space-y-1">
+              <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                {t("authInstallDialogMethodLabel")}
+              </dt>
+              <dd className="text-[13px] text-foreground">{strategyLabel}</dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                {t("authInstallDialogCommandLabel")}
+              </dt>
+              <dd className="font-mono text-[12px] text-foreground break-all">
+                {commandLabel}
+              </dd>
+            </div>
             <div className="space-y-1">
               <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
                 {t("authInstallDialogGuideLabel")}
@@ -112,15 +204,18 @@ export function ExecutorInstallDialog({
                 <span className="truncate">{guideHost}</span>
               </dd>
             </div>
-            <div className="space-y-1">
-              <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {t("authInstallDialogCommandLabel")}
-              </dt>
-              <dd className="font-mono text-[12px] text-foreground">
-                {expectedCommand}
-              </dd>
-            </div>
           </dl>
+
+          {installFailed && installOutput ? (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+              <p className="font-workspace text-[11px] uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                {t("authInstallDialogErrorLabel")}
+              </p>
+              <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-amber-900 dark:text-amber-100">
+                {installOutput}
+              </pre>
+            </div>
+          ) : null}
         </div>
 
         <AlertDialogFooter>
@@ -128,23 +223,30 @@ export function ExecutorInstallDialog({
             <Button
               variant="outline"
               className="font-workspace"
-              disabled={openingGuide}
+              disabled={openingGuide || installing}
             >
-              {t("authInstallDialogCancel")}
+              {installSucceeded
+                ? t("authInstallDialogDone")
+                : t("authInstallDialogCancel")}
             </Button>
           </AlertDialogCancel>
-          <Button
-            className="font-workspace"
-            onClick={() => void handleOpenGuide()}
-            disabled={openingGuide}
-          >
-            {openingGuide ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <ExternalLink className="mr-2 h-4 w-4" />
-            )}
-            {t("authInstallDialogOpenGuide")}
-          </Button>
+          {!installSucceeded ? (
+            <Button
+              className="font-workspace"
+              onClick={() => void handleOpenGuide()}
+              disabled={openingGuide || installing}
+              variant={installFailed ? "default" : "outline"}
+            >
+              {openingGuide ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ExternalLink className="mr-2 h-4 w-4" />
+              )}
+              {installFailed
+                ? t("authInstallDialogOpenGuide")
+                : t("authInstallDialogOpenGuideSecondary")}
+            </Button>
+          ) : null}
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

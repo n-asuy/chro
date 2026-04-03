@@ -115,7 +115,10 @@ export type ExecutorInstallInfo = {
 export type ExecutorInstallStatusResult = {
   claude_code: ExecutorInstallInfo;
   codex: ExecutorInstallInfo;
+  git: ExecutorInstallInfo;
 };
+
+export type InstallableTool = BaseCodingAgent | "GIT";
 
 export type AuthLoginResult = {
   ok: boolean;
