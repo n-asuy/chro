@@ -387,9 +387,25 @@ const ja = {
   globalSearchFiles: "ファイル",
   globalSearchSelectProject: "プロジェクトを選択してください",
   authSignedIn: "認証済み",
+  authInstall: "インストール",
   authSignIn: "サインイン",
   authSigningIn: "サインイン中...",
   authReAuthenticate: "再認証",
+  authInstallDialogTitle: "{executor} をインストール",
+  authInstallDialogDescription:
+    "Chro は外部の {executor} CLI を使用し、自動でインストールや更新は行いません。",
+  authInstallDialogBody:
+    "公式インストールガイドをブラウザで開きます。CLI のインストール後、この画面に戻ってサインインしてください。",
+  authInstallDialogSafety:
+    "パッケージマネージャーのコマンド実行や PATH の変更は自動では行いません。",
+  authInstallDialogGuideLabel: "公式ガイド",
+  authInstallDialogCommandLabel: "想定コマンド",
+  authInstallDialogOpenGuide: "ガイドを開く",
+  authInstallDialogCancel: "キャンセル",
+  authClaudeInstallDescription:
+    "Claude CLI をインストールしてから、ここに戻ってサインインしてください。",
+  authCodexInstallDescription:
+    "Codex CLI をインストールしてから、ここに戻ってサインインしてください。",
   authClaudeDescription:
     "Claude Code を使用するには Anthropic にサインインしてください。",
   authCodexDescription:

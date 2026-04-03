@@ -380,9 +380,25 @@ const en = {
   globalSearchFiles: "Files",
   globalSearchSelectProject: "Select a project to search",
   authSignedIn: "Signed in",
+  authInstall: "Install",
   authSignIn: "Sign in",
   authSigningIn: "Signing in...",
   authReAuthenticate: "Re-authenticate",
+  authInstallDialogTitle: "Install {executor}",
+  authInstallDialogDescription:
+    "Chro uses the external {executor} CLI and will not install or update it automatically.",
+  authInstallDialogBody:
+    "Continue to open the official installation guide in your browser. After the CLI is installed, return here and click Sign in.",
+  authInstallDialogSafety:
+    "No package manager commands will be run and your PATH will not be changed automatically.",
+  authInstallDialogGuideLabel: "Official guide",
+  authInstallDialogCommandLabel: "Expected command",
+  authInstallDialogOpenGuide: "Open guide",
+  authInstallDialogCancel: "Cancel",
+  authClaudeInstallDescription:
+    "Install the Claude CLI, then return here to sign in.",
+  authCodexInstallDescription:
+    "Install the Codex CLI, then return here to sign in.",
   authClaudeDescription: "Sign in to Anthropic to use Claude Code.",
   authCodexDescription: "Sign in to OpenAI to use Codex.",
   authNotSignedIn: "Not signed in",

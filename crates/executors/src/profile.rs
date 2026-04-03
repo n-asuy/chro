@@ -903,6 +903,21 @@ pub struct AuthStatusResult {
     pub codex: AvailabilityInfo,
 }
 
+/// Installation info for executor CLIs required by onboarding and auth flows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorInstallInfo {
+    pub installed: bool,
+    pub command: String,
+    pub resolved_path: Option<String>,
+}
+
+/// Aggregated install status for all known executors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorInstallStatusResult {
+    pub claude_code: ExecutorInstallInfo,
+    pub codex: ExecutorInstallInfo,
+}
+
 /// Result of triggering an auth login flow for an executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthLoginResult {
@@ -932,6 +947,29 @@ pub fn get_auth_status_all() -> AuthStatusResult {
         claude_code: availability_for(BaseCodingAgent::ClaudeCode),
         codex: availability_for(BaseCodingAgent::Codex),
     }
+}
+
+async fn detect_install_info(command: &'static str) -> ExecutorInstallInfo {
+    let resolved_path = resolve_executable_path(command)
+        .await
+        .map(|path| path.to_string_lossy().into_owned());
+
+    ExecutorInstallInfo {
+        installed: resolved_path.is_some(),
+        command: command.to_string(),
+        resolved_path,
+    }
+}
+
+/// Query install status for all executors.
+///
+/// This checks whether the CLI command required by the renderer auth flow can
+/// actually be resolved from the current environment.
+pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
+    let claude_code = detect_install_info("claude").await;
+    let codex = detect_install_info("codex").await;
+
+    ExecutorInstallStatusResult { claude_code, codex }
 }
 
 /// Extract a non-localhost URL from text output.

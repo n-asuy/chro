@@ -1,5 +1,7 @@
+import { ExecutorInstallDialog } from "@/components/dialogs/executor-install-dialog";
 import {
   type SupportedLanguage,
+  type TranslationFunction,
   type TranslationKey,
   useLanguage,
 } from "@/i18n";
@@ -8,7 +10,9 @@ import { getVersion } from "@/lib/desktop-bridge";
 import {
   type AvailabilityInfo,
   type BaseCodingAgent,
+  type ExecutorInstallInfo,
   fetchAuthStatus,
+  fetchExecutorInstallStatus,
   triggerAuthLogin,
   updateExecutorProfile,
 } from "@/lib/executor-client";
@@ -116,18 +120,23 @@ const formatAppVersion = (version: string) =>
   version.startsWith("v") ? version : `v${version}`;
 
 function AuthStatusControl({
+  t,
   info,
+  installInfo,
   loading,
   triggering,
   onTrigger,
+  onInstall,
 }: {
-  executor: BaseCodingAgent;
+  t: TranslationFunction;
   info: AvailabilityInfo | null;
+  installInfo: ExecutorInstallInfo | null;
   loading: boolean;
   triggering: boolean;
   onTrigger: () => void;
+  onInstall: () => void;
 }) {
-  if (loading || !info) {
+  if (loading || !info || !installInfo) {
     return (
       <div className="flex items-center gap-2">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
@@ -135,11 +144,24 @@ function AuthStatusControl({
     );
   }
 
+  if (!installInfo.installed) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        className="font-workspace h-8 px-3 text-[12px]"
+        onClick={onInstall}
+      >
+        {t("authInstall")}
+      </Button>
+    );
+  }
+
   if (info.type === "LOGIN_DETECTED") {
     return (
       <div className="flex items-center gap-2">
         <Badge className="font-workspace text-[11px] bg-emerald-500/20 text-emerald-600 border-emerald-500/40">
-          Signed in
+          {t("authSignedIn")}
         </Badge>
         <Button
           variant="ghost"
@@ -153,7 +175,7 @@ function AuthStatusControl({
           ) : (
             <RefreshCcw className="mr-1 h-3 w-3" />
           )}
-          Re-authenticate
+          {t("authReAuthenticate")}
         </Button>
       </div>
     );
@@ -170,7 +192,7 @@ function AuthStatusControl({
       {triggering ? (
         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
       ) : null}
-      {triggering ? "Signing in..." : "Sign in"}
+      {triggering ? t("authSigningIn") : t("authSignIn")}
     </Button>
   );
 }
@@ -287,18 +309,31 @@ export function SettingsPanel({
     BaseCodingAgent,
     AvailabilityInfo
   > | null>(null);
+  const [installStatus, setInstallStatus] = useState<Record<
+    BaseCodingAgent,
+    ExecutorInstallInfo
+  > | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authTriggering, setAuthTriggering] = useState<BaseCodingAgent | null>(
     null,
   );
+  const [installDialogExecutor, setInstallDialogExecutor] =
+    useState<BaseCodingAgent | null>(null);
 
-  const loadAuthStatus = useCallback(async () => {
+  const loadAgentAvailability = useCallback(async () => {
     setAuthLoading(true);
     try {
-      const result = await fetchAuthStatus();
+      const [authResult, installResult] = await Promise.all([
+        fetchAuthStatus(),
+        fetchExecutorInstallStatus(),
+      ]);
       setAuthStatus({
-        CLAUDE_CODE: result.claude_code,
-        CODEX: result.codex,
+        CLAUDE_CODE: authResult.claude_code,
+        CODEX: authResult.codex,
+      });
+      setInstallStatus({
+        CLAUDE_CODE: installResult.claude_code,
+        CODEX: installResult.codex,
       });
     } catch {
       // Silently fail — status will show as unknown
@@ -309,9 +344,24 @@ export function SettingsPanel({
 
   useEffect(() => {
     if (activeTab === "agents") {
-      void loadAuthStatus();
+      void loadAgentAvailability();
     }
-  }, [activeTab, loadAuthStatus]);
+  }, [activeTab, loadAgentAvailability]);
+
+  useEffect(() => {
+    if (activeTab !== "agents") {
+      return undefined;
+    }
+
+    const handleFocus = () => {
+      void loadAgentAvailability();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [activeTab, loadAgentAvailability]);
 
   const handleTriggerAuth = useCallback(async (executor: BaseCodingAgent) => {
     setAuthTriggering(executor);
@@ -348,6 +398,10 @@ export function SettingsPanel({
     } catch {
       setAuthTriggering(null);
     }
+  }, []);
+
+  const handleOpenInstallDialog = useCallback((executor: BaseCodingAgent) => {
+    setInstallDialogExecutor(executor);
   }, []);
 
   const languageLabelId = "display-language-label";
@@ -1055,14 +1109,20 @@ export function SettingsPanel({
       <SettingsSection heading={t("agentsClaudeCodeTitle")}>
         <SettingsRow
           title="Authentication"
-          description="Sign in to Anthropic to use Claude Code."
+          description={
+            installStatus?.CLAUDE_CODE?.installed
+              ? t("authClaudeDescription")
+              : t("authClaudeInstallDescription")
+          }
           control={
             <AuthStatusControl
-              executor="CLAUDE_CODE"
+              t={t}
               info={authStatus?.CLAUDE_CODE ?? null}
+              installInfo={installStatus?.CLAUDE_CODE ?? null}
               loading={authLoading}
               triggering={authTriggering === "CLAUDE_CODE"}
               onTrigger={() => void handleTriggerAuth("CLAUDE_CODE")}
+              onInstall={() => handleOpenInstallDialog("CLAUDE_CODE")}
             />
           }
         />
@@ -1128,14 +1188,20 @@ export function SettingsPanel({
       <SettingsSection heading={t("agentsCodexTitle")}>
         <SettingsRow
           title="Authentication"
-          description="Sign in to OpenAI to use Codex."
+          description={
+            installStatus?.CODEX?.installed
+              ? t("authCodexDescription")
+              : t("authCodexInstallDescription")
+          }
           control={
             <AuthStatusControl
-              executor="CODEX"
+              t={t}
               info={authStatus?.CODEX ?? null}
+              installInfo={installStatus?.CODEX ?? null}
               loading={authLoading}
               triggering={authTriggering === "CODEX"}
               onTrigger={() => void handleTriggerAuth("CODEX")}
+              onInstall={() => handleOpenInstallDialog("CODEX")}
             />
           }
         />
@@ -1410,11 +1476,19 @@ export function SettingsPanel({
                 {worktreeInfo.entries.map((entry) => (
                   <div
                     key={entry.path}
+                    role="button"
+                    tabIndex={0}
                     className={cn(
                       "flex items-center gap-3 px-5 py-4 cursor-pointer transition-colors",
                       selectedPaths.has(entry.path) && "bg-accent/50",
                     )}
                     onClick={() => toggleSelection(entry.path)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleSelection(entry.path);
+                      }
+                    }}
                   >
                     <input
                       type="checkbox"
@@ -1572,6 +1646,18 @@ export function SettingsPanel({
           </main>
         </div>
       </div>
+      <ExecutorInstallDialog
+        open={installDialogExecutor !== null}
+        executor={installDialogExecutor}
+        installInfo={
+          installDialogExecutor ? installStatus?.[installDialogExecutor] : null
+        }
+        onOpenChange={(open) => {
+          if (!open) {
+            setInstallDialogExecutor(null);
+          }
+        }}
+      />
     </div>
   );
 }

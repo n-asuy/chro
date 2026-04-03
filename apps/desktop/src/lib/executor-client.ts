@@ -106,6 +106,17 @@ export type AuthStatusResult = {
   codex: AvailabilityInfo;
 };
 
+export type ExecutorInstallInfo = {
+  installed: boolean;
+  command: string;
+  resolved_path: string | null;
+};
+
+export type ExecutorInstallStatusResult = {
+  claude_code: ExecutorInstallInfo;
+  codex: ExecutorInstallInfo;
+};
+
 export type AuthLoginResult = {
   ok: boolean;
   executor: BaseCodingAgent;
@@ -116,6 +127,13 @@ export type AuthLoginResult = {
 export const fetchAuthStatus = async (): Promise<AuthStatusResult> => {
   return desktopFetch<AuthStatusResult>("/rpc/executor/auth-status");
 };
+
+export const fetchExecutorInstallStatus =
+  async (): Promise<ExecutorInstallStatusResult> => {
+    return desktopFetch<ExecutorInstallStatusResult>(
+      "/rpc/executor/install-status",
+    );
+  };
 
 export const triggerAuthLogin = async (
   executor: BaseCodingAgent,
