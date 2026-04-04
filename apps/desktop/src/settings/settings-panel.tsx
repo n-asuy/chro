@@ -119,6 +119,17 @@ type AppVersionStatus = "loading" | "ready" | "unavailable" | "error";
 const formatAppVersion = (version: string) =>
   version.startsWith("v") ? version : `v${version}`;
 
+const formatDetectedVersion = (
+  t: TranslationFunction,
+  installInfo: ExecutorInstallInfo | null,
+) => {
+  if (!installInfo?.detected_version) {
+    return null;
+  }
+
+  return t("authDetectedVersion", { version: installInfo.detected_version });
+};
+
 function AuthStatusControl({
   t,
   info,
@@ -248,6 +259,7 @@ export function SettingsPanel({
     profileSaving,
     availableExecutors,
     handleExecutorSelect,
+    handleClaudeVersionReload,
   } = useExecutorProfileSettings({ t });
   const {
     configPath,
@@ -351,8 +363,9 @@ export function SettingsPanel({
   useEffect(() => {
     if (activeTab === "agents") {
       void loadAgentAvailability();
+      handleClaudeVersionReload();
     }
-  }, [activeTab, loadAgentAvailability]);
+  }, [activeTab, handleClaudeVersionReload, loadAgentAvailability]);
 
   useEffect(() => {
     if (activeTab !== "agents") {
@@ -361,13 +374,14 @@ export function SettingsPanel({
 
     const handleFocus = () => {
       void loadAgentAvailability();
+      handleClaudeVersionReload();
     };
 
     window.addEventListener("focus", handleFocus);
     return () => {
       window.removeEventListener("focus", handleFocus);
     };
-  }, [activeTab, loadAgentAvailability]);
+  }, [activeTab, handleClaudeVersionReload, loadAgentAvailability]);
 
   const handleTriggerAuth = useCallback(async (executor: BaseCodingAgent) => {
     setAuthTriggering(executor);
@@ -413,6 +427,9 @@ export function SettingsPanel({
         const result = await installTool(executor);
         if (result.ok) {
           await loadAgentAvailability();
+          if (executor === "CLAUDE_CODE") {
+            handleClaudeVersionReload();
+          }
         }
       } catch {
         /* install failed */
@@ -420,7 +437,7 @@ export function SettingsPanel({
         setInstallingExecutor(null);
       }
     },
-    [loadAgentAvailability],
+    [handleClaudeVersionReload, loadAgentAvailability],
   );
 
   const languageLabelId = "display-language-label";
@@ -1130,7 +1147,9 @@ export function SettingsPanel({
           title="Authentication"
           description={
             installStatus?.CLAUDE_CODE?.installed
-              ? t("authClaudeDescription")
+              ? [t("authClaudeDescription"), formatDetectedVersion(t, installStatus?.CLAUDE_CODE ?? null)]
+                  .filter(Boolean)
+                  .join(" ")
               : t("authClaudeInstallDescription")
           }
           control={
@@ -1210,7 +1229,9 @@ export function SettingsPanel({
           title="Authentication"
           description={
             installStatus?.CODEX?.installed
-              ? t("authCodexDescription")
+              ? [t("authCodexDescription"), formatDetectedVersion(t, installStatus?.CODEX ?? null)]
+                  .filter(Boolean)
+                  .join(" ")
               : t("authCodexInstallDescription")
           }
           control={

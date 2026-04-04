@@ -17,6 +17,10 @@ type ShellCommandResult = {
   stderr: string;
 };
 
+type RunShellCommandOptions = {
+  logLabel?: string;
+};
+
 class ShellCommandError extends Error {
   stdout: string;
   stderr: string;
@@ -41,8 +45,15 @@ const hasLoginShell = (shellPath: string) =>
 
 const runShellCommand = async (
   command: string,
+  options?: RunShellCommandOptions,
 ): Promise<ShellCommandResult> => {
+  const logLabel = options?.logLabel;
+
   if (process.platform === "win32") {
+    if (logLabel) {
+      console.log(`[install:${logLabel}] $ ${command}`);
+    }
+
     return new Promise((resolve, reject) => {
       const child = spawn(
         "powershell.exe",
@@ -63,19 +74,35 @@ const runShellCommand = async (
       let stdout = "";
       let stderr = "";
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
+      child.stdout.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (logLabel) {
+          process.stdout.write(text);
+        }
       });
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
+      child.stderr.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        stderr += text;
+        if (logLabel) {
+          process.stderr.write(text);
+        }
       });
       child.on("error", reject);
-      child.on("close", (code) => {
+      child.on("close", (code: number | null) => {
         if (code === 0) {
+          if (logLabel) {
+            console.log(`[install:${logLabel}] completed successfully`);
+          }
           resolve({ stdout, stderr });
           return;
         }
 
+        if (logLabel) {
+          console.error(
+            `[install:${logLabel}] exited with code ${code ?? "unknown"}`,
+          );
+        }
         reject(
           new ShellCommandError(
             stderr.trim() ||
@@ -95,6 +122,10 @@ const runShellCommand = async (
     ? ["-lc", command]
     : ["-c", command];
 
+  if (logLabel) {
+    console.log(`[install:${logLabel}] $ ${command}`);
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(shellPath, shellArgs, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -104,19 +135,35 @@ const runShellCommand = async (
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (logLabel) {
+        process.stdout.write(text);
+      }
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (logLabel) {
+        process.stderr.write(text);
+      }
     });
     child.on("error", reject);
-    child.on("close", (code) => {
+    child.on("close", (code: number | null) => {
       if (code === 0) {
+        if (logLabel) {
+          console.log(`[install:${logLabel}] completed successfully`);
+        }
         resolve({ stdout, stderr });
         return;
       }
 
+      if (logLabel) {
+        console.error(
+          `[install:${logLabel}] exited with code ${code ?? "unknown"}`,
+        );
+      }
       reject(
         new ShellCommandError(
           stderr.trim() ||
@@ -207,7 +254,9 @@ export const installExecutor = async (
 
   try {
     strategy = await getInstallStrategy(executor);
-    const output = await runShellCommand(strategy.command);
+    const output = await runShellCommand(strategy.command, {
+      logLabel: executor,
+    });
 
     return {
       ok: true,

@@ -423,6 +423,7 @@ const en = {
     "Install the Codex CLI, then return here to sign in.",
   authClaudeDescription: "Sign in to Anthropic to use Claude Code.",
   authCodexDescription: "Sign in to OpenAI to use Codex.",
+  authDetectedVersion: "Detected version: {version}",
   authNotSignedIn: "Not signed in",
 } satisfies TranslationDictionary;
 

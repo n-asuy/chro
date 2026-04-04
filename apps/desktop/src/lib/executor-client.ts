@@ -110,6 +110,7 @@ export type ExecutorInstallInfo = {
   installed: boolean;
   command: string;
   resolved_path: string | null;
+  detected_version: string | null;
 };
 
 export type ExecutorInstallStatusResult = {

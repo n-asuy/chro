@@ -34,6 +34,7 @@ type ExecutorProfileState = {
   currentExecutorLabel: string;
   handleExecutorSelect: (executor: BaseCodingAgent) => Promise<void>;
   handleVariantSelect: (variant: string) => Promise<void>;
+  handleClaudeVersionReload: () => void;
   handleExecutorProfileReload: () => void;
 };
 
@@ -210,6 +211,10 @@ export function useExecutorProfileSettings({
     void loadExecutorProfile();
   }, [loadExecutorProfile]);
 
+  const handleClaudeVersionReload = useCallback(() => {
+    void loadClaudeVersion();
+  }, [loadClaudeVersion]);
+
   useEffect(() => {
     void loadClaudeVersion();
   }, [loadClaudeVersion]);
@@ -235,6 +240,7 @@ export function useExecutorProfileSettings({
     currentExecutorLabel,
     handleExecutorSelect,
     handleVariantSelect,
+    handleClaudeVersionReload,
     handleExecutorProfileReload,
   };
 }

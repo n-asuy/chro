@@ -57,7 +57,43 @@ pub async fn resolve_executable_path(executable: &str) -> Option<PathBuf> {
         }
     }
 
+    if let Some(found) = find_executable_in_known_locations(executable) {
+        return Some(found);
+    }
+
     None
+}
+
+fn find_executable_in_known_locations(executable: &str) -> Option<PathBuf> {
+    known_executable_locations(executable)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn known_executable_locations(executable: &str) -> Vec<PathBuf> {
+    match executable {
+        "claude" => dirs::home_dir()
+            .map(|home| claude_known_locations(&home))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(not(windows))]
+fn claude_known_locations(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local").join("bin").join("claude"),
+        home.join(".claude").join("bin").join("claude"),
+    ]
+}
+
+#[cfg(windows)]
+fn claude_known_locations(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local").join("bin").join("claude.exe"),
+        home.join(".local").join("bin").join("claude.cmd"),
+        home.join(".claude").join("bin").join("claude.exe"),
+    ]
 }
 
 async fn which_async(executable: &str) -> Option<PathBuf> {
@@ -362,6 +398,7 @@ pub async fn run_script_logged(
         .stderr(Stdio::piped());
 
     tracing::info!("[install:{label}] $ {script}");
+    println!("[install:{label}] $ {script}");
 
     let mut child = cmd.spawn()?;
 
@@ -370,6 +407,7 @@ pub async fn run_script_logged(
         let label = label_out.clone();
         spawn_collecting_reader(r, move |line| {
             tracing::info!("[install:{label}] {line}");
+            println!("[install:{label}] {line}");
         })
     });
     let label_err = label.to_string();
@@ -377,6 +415,7 @@ pub async fn run_script_logged(
         let label = label_err.clone();
         spawn_collecting_reader(r, move |line| {
             tracing::warn!("[install:{label}] {line}");
+            eprintln!("[install:{label}] {line}");
         })
     });
 
@@ -395,8 +434,13 @@ pub async fn run_script_logged(
 
     if status.success() {
         tracing::info!("[install:{label_out}] completed successfully");
+        println!("[install:{label_out}] completed successfully");
     } else {
         tracing::warn!(
+            "[install:{label_out}] exited with code {}",
+            status.code().unwrap_or(-1)
+        );
+        eprintln!(
             "[install:{label_out}] exited with code {}",
             status.code().unwrap_or(-1)
         );
@@ -462,5 +506,31 @@ pub fn detect_shell() -> (&'static str, &'static str) {
         ("/bin/bash", "-c")
     } else {
         ("/bin/sh", "-c")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn claude_known_locations_include_official_installer_path() {
+        let home = PathBuf::from("/tmp/chro-home");
+        let candidates = claude_known_locations(&home);
+
+        assert!(candidates.contains(&home.join(".local").join("bin").join("claude")));
+        assert!(candidates.contains(&home.join(".claude").join("bin").join("claude")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_known_locations_include_official_installer_path() {
+        let home = PathBuf::from(r"C:\Users\chro");
+        let candidates = claude_known_locations(&home);
+
+        assert!(candidates.contains(&home.join(".local").join("bin").join("claude.exe")));
+        assert!(candidates.contains(&home.join(".local").join("bin").join("claude.cmd")));
+        assert!(candidates.contains(&home.join(".claude").join("bin").join("claude.exe")));
     }
 }

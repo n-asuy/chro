@@ -8,7 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::RwLock,
 };
@@ -473,8 +473,11 @@ fn find_claude_executable() -> Option<std::path::PathBuf> {
 fn find_claude_in_known_locations_windows() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
 
-    let mut candidates: Vec<std::path::PathBuf> =
-        vec![home.join(".claude").join("bin").join("claude.exe")];
+    let mut candidates: Vec<std::path::PathBuf> = vec![
+        home.join(".local").join("bin").join("claude.exe"),
+        home.join(".local").join("bin").join("claude.cmd"),
+        home.join(".claude").join("bin").join("claude.exe"),
+    ];
 
     // %APPDATA%\npm (global npm packages)
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -553,6 +556,7 @@ fn find_claude_in_known_locations_windows() -> Option<std::path::PathBuf> {
 fn find_claude_in_known_locations() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
     let mut candidates = vec![
+        home.join(".local").join("bin").join("claude"),
         home.join(".claude").join("bin").join("claude"),
         home.join(".npm-global").join("bin").join("claude"),
         home.join(".nodebrew")
@@ -909,6 +913,7 @@ pub struct ExecutorInstallInfo {
     pub installed: bool,
     pub command: String,
     pub resolved_path: Option<String>,
+    pub detected_version: Option<String>,
 }
 
 /// Aggregated install status for all known executors and tools.
@@ -951,15 +956,48 @@ pub fn get_auth_status_all() -> AuthStatusResult {
 }
 
 async fn detect_install_info(command: &'static str) -> ExecutorInstallInfo {
-    let resolved_path = resolve_executable_path(command)
-        .await
-        .map(|path| path.to_string_lossy().into_owned());
+    let resolved_path = resolve_executable_path(command).await;
+    let detected_version = match resolved_path.as_ref() {
+        Some(path) => detect_installed_version(path).await,
+        None => None,
+    };
+    let resolved_path = resolved_path.map(|path| path.to_string_lossy().into_owned());
 
     ExecutorInstallInfo {
         installed: resolved_path.is_some(),
         command: command.to_string(),
         resolved_path,
+        detected_version,
     }
+}
+
+async fn detect_installed_version(resolved_path: &Path) -> Option<String> {
+    let output = tokio::process::Command::new(resolved_path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    extract_detected_version(&output.stdout, &output.stderr)
+}
+
+fn extract_detected_version(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    for candidate in [stdout, stderr] {
+        let text = String::from_utf8_lossy(candidate);
+        let version = text.lines().map(str::trim).find(|line| !line.is_empty());
+        if let Some(version) = version {
+            return Some(version.to_string());
+        }
+    }
+
+    None
 }
 
 /// Query install status for all executors.
@@ -1010,7 +1048,9 @@ pub struct ToolInstallResult {
 }
 
 /// Determine the install command for the given tool.
-async fn get_install_strategy(tool: InstallableTool) -> Result<(&'static str, &'static str), String> {
+async fn get_install_strategy(
+    tool: InstallableTool,
+) -> Result<(&'static str, &'static str), String> {
     match tool {
         InstallableTool::ClaudeCode => {
             if cfg!(target_os = "windows") {
@@ -1020,7 +1060,10 @@ async fn get_install_strategy(tool: InstallableTool) -> Result<(&'static str, &'
                 return Err("Automatic install requires npm on Windows.".into());
             }
             if resolve_executable_path("curl").await.is_some() {
-                return Ok(("official installer", "curl -fsSL https://claude.ai/install.sh | bash"));
+                return Ok((
+                    "official installer",
+                    "curl -fsSL https://claude.ai/install.sh | bash",
+                ));
             }
             if resolve_executable_path("npm").await.is_some() {
                 return Ok(("npm", "npm install -g @anthropic-ai/claude-code"));
@@ -1044,7 +1087,10 @@ async fn get_install_strategy(tool: InstallableTool) -> Result<(&'static str, &'
                 if resolve_executable_path("winget").await.is_some() {
                     return Ok(("winget", "winget install --id Git.Git -e --source winget"));
                 }
-                return Err("Automatic install requires winget. Download Git from https://git-scm.com".into());
+                return Err(
+                    "Automatic install requires winget. Download Git from https://git-scm.com"
+                        .into(),
+                );
             }
             if resolve_executable_path("apt-get").await.is_some() {
                 return Ok(("apt", "sudo apt-get install -y git"));
@@ -1222,4 +1268,23 @@ async fn read_auth_url(
         result = stderr_fut => if result.is_some() { return result; },
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_detected_version;
+
+    #[test]
+    fn extract_detected_version_prefers_stdout() {
+        let version = extract_detected_version(b"claude 1.0.72\n", b"warning");
+
+        assert_eq!(version.as_deref(), Some("claude 1.0.72"));
+    }
+
+    #[test]
+    fn extract_detected_version_falls_back_to_stderr() {
+        let version = extract_detected_version(b"", b"codex 0.1.0\n");
+
+        assert_eq!(version.as_deref(), Some("codex 0.1.0"));
+    }
 }

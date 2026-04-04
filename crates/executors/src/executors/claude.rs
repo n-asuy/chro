@@ -320,8 +320,16 @@ fn check_claude_auth_status() -> Option<bool> {
 fn build_claude_path_env() -> Option<String> {
     let mut combined = String::new();
     if let Some(home) = dirs::home_dir() {
-        let bin = home.join(".claude").join("bin");
-        if bin.exists() {
+        for bin in [
+            home.join(".local").join("bin"),
+            home.join(".claude").join("bin"),
+        ] {
+            if !bin.exists() {
+                continue;
+            }
+            if !combined.is_empty() {
+                combined.push(if cfg!(windows) { ';' } else { ':' });
+            }
             combined.push_str(&bin.to_string_lossy());
         }
     }

@@ -1,3 +1,4 @@
+import { useLanguage } from "@/i18n";
 import {
   type AvailabilityInfo,
   type BaseCodingAgent,
@@ -26,11 +27,13 @@ const DEFAULT_INSTALL_STATUS: Record<BaseCodingAgent, ExecutorInstallInfo> = {
     installed: false,
     command: "claude",
     resolved_path: null,
+    detected_version: null,
   },
   CODEX: {
     installed: false,
     command: "codex",
     resolved_path: null,
+    detected_version: null,
   },
 };
 
@@ -38,6 +41,7 @@ const DEFAULT_GIT_INSTALL_STATUS: ExecutorInstallInfo = {
   installed: false,
   command: "git",
   resolved_path: null,
+  detected_version: null,
 };
 
 type AgentCardState =
@@ -123,6 +127,7 @@ function OpenAiIcon({ className }: { className?: string }) {
 }
 
 function ProviderSelectionPage() {
+  const { t } = useLanguage();
   const navigate = useNavigate();
   const savedExecutor = getUiValue<string>(EXECUTOR_STORAGE_KEY);
   const hasSavedExecutor =
@@ -356,6 +361,21 @@ function ProviderSelectionPage() {
   const canContinue =
     (selectedExecutor === "CLAUDE_CODE" && claudeCardState === "signed_in") ||
     (selectedExecutor === "CODEX" && codexCardState === "signed_in");
+  const gitDescription = gitInstallStatus.detected_version
+    ? t("authDetectedVersion", {
+        version: gitInstallStatus.detected_version,
+      })
+    : "Version control system";
+  const claudeDescription = installStatus.CLAUDE_CODE.detected_version
+    ? t("authDetectedVersion", {
+        version: installStatus.CLAUDE_CODE.detected_version,
+      })
+    : "Anthropic CLI agent";
+  const codexDescription = installStatus.CODEX.detected_version
+    ? t("authDetectedVersion", {
+        version: installStatus.CODEX.detected_version,
+      })
+    : "OpenAI CLI agent";
 
   const handleContinue = useCallback(async () => {
     if (!selectedExecutor) return;
@@ -405,7 +425,7 @@ function ProviderSelectionPage() {
               <ToolCard
                 icon={<GitBranch className="size-7 text-white/60" />}
                 name="Git"
-                description="Version control system"
+                description={gitDescription}
                 state={gitCardState}
                 onInstall={() => void handleInstall("GIT")}
               />
@@ -418,7 +438,7 @@ function ProviderSelectionPage() {
               <AgentCard
                 icon={<img src="/icon_claude.png" alt="" className="size-8" />}
                 name="Claude Code"
-                description="Anthropic CLI agent"
+                description={claudeDescription}
                 state={claudeCardState}
                 selected={selectedExecutor === "CLAUDE_CODE"}
                 onSelect={() => setSelectedExecutor("CLAUDE_CODE")}
@@ -430,7 +450,7 @@ function ProviderSelectionPage() {
               <AgentCard
                 icon={<OpenAiIcon className="size-7 text-white/60" />}
                 name="Codex"
-                description="OpenAI CLI agent"
+                description={codexDescription}
                 state={codexCardState}
                 selected={selectedExecutor === "CODEX"}
                 onSelect={() => setSelectedExecutor("CODEX")}

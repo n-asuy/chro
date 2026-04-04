@@ -432,6 +432,7 @@ const ja = {
     "Claude Code を使用するには Anthropic にサインインしてください。",
   authCodexDescription:
     "Codex を使用するには OpenAI にサインインしてください。",
+  authDetectedVersion: "検出したバージョン: {version}",
   authNotSignedIn: "未認証",
 } as const;
 
