@@ -388,6 +388,7 @@ const ja = {
   globalSearchSelectProject: "プロジェクトを選択してください",
   authSignedIn: "認証済み",
   authInstall: "インストール",
+  authInstalling: "インストール中…",
   authSignIn: "サインイン",
   authSigningIn: "サインイン中...",
   authReAuthenticate: "再認証",

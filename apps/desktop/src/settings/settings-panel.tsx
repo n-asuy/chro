@@ -1,4 +1,4 @@
-import { ExecutorInstallDialog } from "@/components/dialogs/executor-install-dialog";
+import { installTool } from "@/lib/executor-install";
 import {
   type SupportedLanguage,
   type TranslationFunction,
@@ -124,6 +124,7 @@ function AuthStatusControl({
   info,
   installInfo,
   loading,
+  installing,
   triggering,
   onTrigger,
   onInstall,
@@ -132,6 +133,7 @@ function AuthStatusControl({
   info: AvailabilityInfo | null;
   installInfo: ExecutorInstallInfo | null;
   loading: boolean;
+  installing: boolean;
   triggering: boolean;
   onTrigger: () => void;
   onInstall: () => void;
@@ -151,8 +153,12 @@ function AuthStatusControl({
         size="sm"
         className="font-workspace h-8 px-3 text-[12px]"
         onClick={onInstall}
+        disabled={installing}
       >
-        {t("authInstall")}
+        {installing ? (
+          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+        ) : null}
+        {installing ? t("authInstalling") : t("authInstall")}
       </Button>
     );
   }
@@ -317,7 +323,7 @@ export function SettingsPanel({
   const [authTriggering, setAuthTriggering] = useState<BaseCodingAgent | null>(
     null,
   );
-  const [installDialogExecutor, setInstallDialogExecutor] =
+  const [installingExecutor, setInstallingExecutor] =
     useState<BaseCodingAgent | null>(null);
 
   const loadAgentAvailability = useCallback(async () => {
@@ -400,13 +406,22 @@ export function SettingsPanel({
     }
   }, []);
 
-  const handleOpenInstallDialog = useCallback((executor: BaseCodingAgent) => {
-    setInstallDialogExecutor(executor);
-  }, []);
-
-  const handleInstallCompleted = useCallback(() => {
-    void loadAgentAvailability();
-  }, [loadAgentAvailability]);
+  const handleInstall = useCallback(
+    async (executor: BaseCodingAgent) => {
+      setInstallingExecutor(executor);
+      try {
+        const result = await installTool(executor);
+        if (result.ok) {
+          await loadAgentAvailability();
+        }
+      } catch {
+        /* install failed */
+      } finally {
+        setInstallingExecutor(null);
+      }
+    },
+    [loadAgentAvailability],
+  );
 
   const languageLabelId = "display-language-label";
   const selectedLanguageOption = useMemo(
@@ -1124,9 +1139,10 @@ export function SettingsPanel({
               info={authStatus?.CLAUDE_CODE ?? null}
               installInfo={installStatus?.CLAUDE_CODE ?? null}
               loading={authLoading}
+              installing={installingExecutor === "CLAUDE_CODE"}
               triggering={authTriggering === "CLAUDE_CODE"}
               onTrigger={() => void handleTriggerAuth("CLAUDE_CODE")}
-              onInstall={() => handleOpenInstallDialog("CLAUDE_CODE")}
+              onInstall={() => void handleInstall("CLAUDE_CODE")}
             />
           }
         />
@@ -1203,9 +1219,10 @@ export function SettingsPanel({
               info={authStatus?.CODEX ?? null}
               installInfo={installStatus?.CODEX ?? null}
               loading={authLoading}
+              installing={installingExecutor === "CODEX"}
               triggering={authTriggering === "CODEX"}
               onTrigger={() => void handleTriggerAuth("CODEX")}
-              onInstall={() => handleOpenInstallDialog("CODEX")}
+              onInstall={() => void handleInstall("CODEX")}
             />
           }
         />
@@ -1650,19 +1667,6 @@ export function SettingsPanel({
           </main>
         </div>
       </div>
-      <ExecutorInstallDialog
-        open={installDialogExecutor !== null}
-        executor={installDialogExecutor}
-        installInfo={
-          installDialogExecutor ? installStatus?.[installDialogExecutor] : null
-        }
-        onInstalled={handleInstallCompleted}
-        onOpenChange={(open) => {
-          if (!open) {
-            setInstallDialogExecutor(null);
-          }
-        }}
-      />
     </div>
   );
 }

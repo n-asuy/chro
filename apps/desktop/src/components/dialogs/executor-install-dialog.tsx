@@ -79,16 +79,35 @@ export function ExecutorInstallDialog({
       setInstalling(true);
       setInstallResult(null);
 
-      const result = await installTool(executor) as ExecutorInstallResult;
-      if (cancelled) {
-        return;
-      }
+      try {
+        const result = (await installTool(executor)) as ExecutorInstallResult;
+        if (cancelled) {
+          return;
+        }
 
-      setInstallResult(result);
-      setInstalling(false);
+        setInstallResult(result);
+        setInstalling(false);
 
-      if (result.ok) {
-        onInstalled?.(executor);
+        if (result.ok) {
+          onInstalled?.(executor);
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setInstallResult({
+          ok: false,
+          executor,
+          command: "",
+          strategy: "",
+          stdout: "",
+          stderr: "",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Installation request failed.",
+        });
+        setInstalling(false);
       }
     };
 

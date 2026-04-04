@@ -1074,8 +1074,9 @@ pub async fn install_tool(tool: InstallableTool) -> ToolInstallResult {
         }
     };
 
+    let label = tool.to_string();
     let cwd = std::env::temp_dir();
-    match crate::shell::run_script(command, &cwd).await {
+    match crate::shell::run_script_logged(&label, command, &cwd).await {
         Ok(output) if output.status.success() => ToolInstallResult {
             ok: true,
             tool,

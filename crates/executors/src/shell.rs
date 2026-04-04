@@ -341,6 +341,117 @@ fn read_stream_to_string(
     })
 }
 
+/// Run a shell script in a **login** shell, streaming stdout/stderr to the
+/// terminal via tracing while also capturing the full output for the caller.
+///
+/// A login shell is used so that user PATH entries (nvm, Homebrew, etc.) are
+/// available — matching the behaviour of the Electron installer.
+pub async fn run_script_logged(
+    label: &str,
+    script: &str,
+    cwd: impl AsRef<Path>,
+) -> Result<ShellOutput, ShellError> {
+    let (program, args) = detect_login_shell();
+    let mut cmd = Command::new(program);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.arg(script)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    tracing::info!("[install:{label}] $ {script}");
+
+    let mut child = cmd.spawn()?;
+
+    let label_out = label.to_string();
+    let stdout_handle = child.stdout.take().map(|r| {
+        let label = label_out.clone();
+        spawn_collecting_reader(r, move |line| {
+            tracing::info!("[install:{label}] {line}");
+        })
+    });
+    let label_err = label.to_string();
+    let stderr_handle = child.stderr.take().map(|r| {
+        let label = label_err.clone();
+        spawn_collecting_reader(r, move |line| {
+            tracing::warn!("[install:{label}] {line}");
+        })
+    });
+
+    let status = child.wait().await?;
+
+    let stdout = if let Some(handle) = stdout_handle {
+        handle.await.unwrap_or_else(|_| String::new())
+    } else {
+        String::new()
+    };
+    let stderr = if let Some(handle) = stderr_handle {
+        handle.await.unwrap_or_else(|_| String::new())
+    } else {
+        String::new()
+    };
+
+    if status.success() {
+        tracing::info!("[install:{label_out}] completed successfully");
+    } else {
+        tracing::warn!(
+            "[install:{label_out}] exited with code {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    Ok(ShellOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_collecting_reader<R, F>(reader: R, mut on_line: F) -> JoinHandle<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    F: FnMut(&str) + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(reader);
+        let mut buf = String::new();
+        let mut collected = String::new();
+        while reader
+            .read_line(&mut buf)
+            .await
+            .map(|n| n > 0)
+            .unwrap_or(false)
+        {
+            let line = buf.trim_end_matches(['\n', '\r']);
+            on_line(line);
+            if !collected.is_empty() {
+                collected.push('\n');
+            }
+            collected.push_str(line);
+            buf.clear();
+        }
+        collected
+    })
+}
+
+/// Detect a login shell suitable for install commands.
+///
+/// Returns `(program, [flags])` where flags include `-l` (login) and `-c`
+/// so that user profile scripts are sourced before executing the command.
+fn detect_login_shell() -> (&'static str, &'static [&'static str]) {
+    if cfg!(windows) {
+        ("cmd", &["/C"])
+    } else if Path::new("/bin/zsh").exists() {
+        ("/bin/zsh", &["-l", "-c"])
+    } else if Path::new("/bin/bash").exists() {
+        ("/bin/bash", &["-l", "-c"])
+    } else {
+        ("/bin/sh", &["-c"])
+    }
+}
+
 /// Detect a reasonable interactive shell for executing scripts.
 pub fn detect_shell() -> (&'static str, &'static str) {
     if cfg!(windows) {

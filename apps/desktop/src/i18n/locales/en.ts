@@ -381,6 +381,7 @@ const en = {
   globalSearchSelectProject: "Select a project to search",
   authSignedIn: "Signed in",
   authInstall: "Install",
+  authInstalling: "Installing…",
   authSignIn: "Sign in",
   authSigningIn: "Signing in...",
   authReAuthenticate: "Re-authenticate",
