@@ -146,11 +146,12 @@ const en = {
   sessionTranscriptMissing: "No conversation history stored for this session.",
   sessionHistoryDisabled:
     "Session history storage is temporarily disabled. Conversations remain visible only in the main panel.",
+  sessionEmptyHeroTitle: "Turn knowledge into something",
   noSessionLabel: "No Session",
   rendererAccessError: "The renderer cannot reach the main process.",
   executionDisabledMessage:
     "Execution is temporarily disabled while the runtime migration is in progress.",
-  inputPlaceholder: "Type a message...",
+  inputPlaceholder: "Research, write, or ship from your notes...",
   attachButtonLabel: "Attach Image",
   sendShortcut: "Cmd / Ctrl + Enter to send / Enter for newline",
   sendingButtonLabel: "Send",

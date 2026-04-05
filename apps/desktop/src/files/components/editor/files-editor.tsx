@@ -561,7 +561,13 @@ export const FilesEditor = () => {
 
   // Handle .cbase files with BaseViewer
   if (isBase && loadedFilePath === currentFilePath) {
-    return <BaseViewer content={content} basePath={relativePath} />;
+    return (
+      <BaseViewer
+        content={content}
+        basePath={relativePath ?? undefined}
+        onContentChange={setContent}
+      />
+    );
   }
 
   // Show loading state when content hasn't been loaded yet for the current file

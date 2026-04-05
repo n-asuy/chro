@@ -143,11 +143,12 @@ const ja = {
   sessionTranscriptMissing: "このセッションの履歴は保存されていません。",
   sessionHistoryDisabled:
     "セッション履歴の保存機能は現在無効化されています。会話は右側のビューのみで確認できます。",
+  sessionEmptyHeroTitle: "Turn knowledge into something",
   noSessionLabel: "セッションなし",
   rendererAccessError: "レンダラーからメインプロセスにアクセスできません。",
   executionDisabledMessage:
     "ランタイム移行中のため、実行機能は一時的に無効化されています。",
-  inputPlaceholder: "メッセージを入力...",
+  inputPlaceholder: "Research, write, or ship from your notes...",
   attachButtonLabel: "画像を添付",
   sendShortcut: "Cmd / Ctrl + Enter で送信 / Enter で改行",
   sendingButtonLabel: "送信",

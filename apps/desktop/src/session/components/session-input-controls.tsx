@@ -6,14 +6,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
+import { ArrowUp, Command, Loader2, Square, X } from "lucide-react";
 import {
-  ArrowUp,
-  Command,
-  Loader2,
-  Square,
-  X,
-} from "lucide-react";
-import { AgentUserQuestion, type AgentUserQuestionHandle } from "./agent-user-question";
+  AgentUserQuestion,
+  type AgentUserQuestionHandle,
+} from "./agent-user-question";
 import { AtPopover, type AtPopoverHandle } from "./prompt-editor/at-popover";
 import { PromptEditor } from "./prompt-editor/prompt-editor";
 import type { StoredTask } from "../types";
@@ -92,7 +89,7 @@ export function PromptEditorWithPopover({
       <PromptEditor
         handle={editorHandle}
         disabled={disabled}
-        placeholder="Ask Agent anything, @ to add files"
+        placeholder={`${t("inputPlaceholder")} @ to add files`}
         onSubmit={onSubmit}
         onPopoverKeyDown={(e) =>
           atPopoverRef.current?.handleKeyDown(e) ?? false

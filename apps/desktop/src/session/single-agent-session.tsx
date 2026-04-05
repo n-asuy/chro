@@ -62,6 +62,7 @@ import {
   RebaseDialog,
   type RebaseDialogResult,
 } from "./components/rebase-dialog";
+import { SessionEmptyState } from "./components/session-empty-state";
 import { SessionHeader } from "./components/session-header";
 import {
   AgentUserQuestionWithEditorState,
@@ -1440,7 +1441,9 @@ export function SingleAgentSessionView({
             onWikilinkClick={navigateToWikilink}
             onFinished={handleStreamFinished}
           />
-        ) : null}
+        ) : (
+          <SessionEmptyState title={t("sessionEmptyHeroTitle")} />
+        )}
       </div>
     </div>
   );

@@ -48,6 +48,8 @@ interface BaseTableProps {
   quickFilters?: LensFilterCondition[];
   onQuickFiltersChange?: (filters: LensFilterCondition[]) => void;
   onRowClick?: (filePath: string) => void;
+  onColumnsChange?: (columnIds: string[]) => void;
+  onSortChange?: (sortKey: string | null, direction: SortDirection) => void;
 }
 
 type SortDirection = "asc" | "desc";
@@ -215,6 +217,8 @@ export const BaseTable: FC<BaseTableProps> = ({
   quickFilters = [],
   onQuickFiltersChange,
   onRowClick,
+  onColumnsChange,
+  onSortChange,
 }) => {
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [draft, setDraft] = useState<FilterDraft>(createDraft());
@@ -405,7 +409,11 @@ export const BaseTable: FC<BaseTableProps> = ({
   };
 
   const toggleDirection = () => {
-    setSortDirection((dir) => (dir === "asc" ? "desc" : "asc"));
+    setSortDirection((dir) => {
+      const next = dir === "asc" ? "desc" : "asc";
+      onSortChange?.(sortKey === QUERY_ORDER_SORT_KEY ? null : sortKey, next);
+      return next;
+    });
   };
 
   const setColumnSort = (key: string) => {
@@ -414,8 +422,10 @@ export const BaseTable: FC<BaseTableProps> = ({
       toggleDirection();
       return;
     }
+    const dir = defaultSortDirection(properties[key]);
     setSortKey(key);
-    setSortDirection(defaultSortDirection(properties[key]));
+    setSortDirection(dir);
+    onSortChange?.(key === QUERY_ORDER_SORT_KEY ? null : key, dir);
   };
 
   const sortIndicator = (key: string) => {
@@ -429,23 +439,28 @@ export const BaseTable: FC<BaseTableProps> = ({
 
   const setColumnVisible = (propertyId: string, visible: boolean) => {
     setVisibleColumnIds((current) => {
+      let next: string[];
       if (visible) {
         if (current.includes(propertyId)) return current;
-        return [...current, propertyId];
+        next = [...current, propertyId];
+      } else {
+        if (!current.includes(propertyId) || current.length === 1) {
+          return current;
+        }
+        next = current.filter((id) => id !== propertyId);
       }
-
-      if (!current.includes(propertyId) || current.length === 1) {
-        return current;
-      }
-
-      return current.filter((id) => id !== propertyId);
+      onColumnsChange?.(next);
+      return next;
     });
   };
 
   const addHiddenColumn = (propertyId: string) => {
-    setVisibleColumnIds((current) =>
-      current.includes(propertyId) ? current : [...current, propertyId],
-    );
+    setVisibleColumnIds((current) => {
+      if (current.includes(propertyId)) return current;
+      const next = [...current, propertyId];
+      onColumnsChange?.(next);
+      return next;
+    });
   };
 
   const rowHeightStyle =
@@ -683,11 +698,15 @@ export const BaseTable: FC<BaseTableProps> = ({
                   <Select
                     value={sortKey}
                     onValueChange={(value) => {
-                      setSortKey(value);
-                      setSortDirection(
+                      const dir =
                         value === QUERY_ORDER_SORT_KEY
                           ? "asc"
-                          : defaultSortDirection(properties[value]),
+                          : defaultSortDirection(properties[value]);
+                      setSortKey(value);
+                      setSortDirection(dir);
+                      onSortChange?.(
+                        value === QUERY_ORDER_SORT_KEY ? null : value,
+                        dir,
                       );
                     }}
                   >
@@ -708,9 +727,13 @@ export const BaseTable: FC<BaseTableProps> = ({
 
                   <Select
                     value={sortDirection}
-                    onValueChange={(value) =>
-                      setSortDirection(value as SortDirection)
-                    }
+                    onValueChange={(value) => {
+                      setSortDirection(value as SortDirection);
+                      onSortChange?.(
+                        sortKey === QUERY_ORDER_SORT_KEY ? null : sortKey,
+                        value as SortDirection,
+                      );
+                    }}
                     disabled={sortKey === QUERY_ORDER_SORT_KEY}
                   >
                     <SelectTrigger className="h-9 w-auto min-w-[132px] shrink-0 border-border bg-background text-sm text-foreground">

@@ -3,14 +3,22 @@
  * Parses the .cbase definition, indexes matching files, and renders the view.
  */
 
-import { type FC, useCallback, useEffect, useMemo, useState } from "react";
+import { type FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { writeProjectFile } from "@/lib/project-client";
 import { useProjectId } from "../../files/context/project-context";
 import { useFilesStore } from "../../files/state/files-store";
 import { executeView } from "../engine";
 import { indexWorkspaceFiles } from "../indexer";
 import { LensParseError, parseLens } from "../parser";
+import { looksLikeQueryLanguage } from "../query-language";
 import { mergeInferredProperties } from "../property-inference";
-import type { LensDefinition, LensFilterCondition, LensRow } from "../types";
+import { serializeLens } from "../serializer";
+import type {
+  LensDefinition,
+  LensFilterCondition,
+  LensRow,
+  SortDirection,
+} from "../types";
 import { BaseTable } from "./lens-table";
 
 interface BaseViewerProps {
@@ -20,12 +28,15 @@ interface BaseViewerProps {
   basePath?: string;
   /** Callback to navigate to a file */
   onFileOpen?: (relativePath: string) => void;
+  /** Callback when view state changes require persisting the .cbase file */
+  onContentChange?: (content: string) => void;
 }
 
 export const BaseViewer: FC<BaseViewerProps> = ({
   content,
   basePath,
   onFileOpen,
+  onContentChange,
 }) => {
   const projectId = useProjectId();
   const { openFile, selectNode } = useFilesStore();
@@ -36,10 +47,17 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const [indexError, setIndexError] = useState<string | null>(null);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
   const [quickFilters, setQuickFilters] = useState<LensFilterCondition[]>([]);
+  const isQueryLanguage = useRef(false);
+  const skipNextParse = useRef(false);
 
   // Parse .cbase content
   useEffect(() => {
+    if (skipNextParse.current) {
+      skipNextParse.current = false;
+      return;
+    }
     try {
+      isQueryLanguage.current = looksLikeQueryLanguage(content);
       const def = parseLens(content, { basePath });
       setDefinition(def);
       setParseError(null);
@@ -124,6 +142,76 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     );
   }, [rows, effectiveView, effectiveProperties, definition]);
 
+  const persistDefinition = useCallback(
+    (updated: LensDefinition) => {
+      if (isQueryLanguage.current) return;
+      const yaml = serializeLens(updated);
+      setDefinition(updated);
+      skipNextParse.current = true;
+      onContentChange?.(yaml);
+      if (projectId && basePath) {
+        void writeProjectFile(projectId, basePath, yaml);
+      }
+    },
+    [onContentChange, projectId, basePath],
+  );
+
+  const handleColumnsChange = useCallback(
+    (columnIds: string[]) => {
+      if (!definition || !activeViewId) return;
+      const updated: LensDefinition = {
+        ...definition,
+        properties: { ...definition.properties },
+        views: definition.views.map((v) => {
+          if (v.id !== activeViewId) return v;
+          return {
+            ...v,
+            table: { ...v.table, columns: columnIds },
+          };
+        }),
+      };
+      // Add inferred properties that are now referenced as columns
+      for (const colId of columnIds) {
+        if (!updated.properties[colId] && effectiveProperties[colId]) {
+          updated.properties[colId] = effectiveProperties[colId];
+        }
+      }
+      persistDefinition(updated);
+    },
+    [definition, activeViewId, effectiveProperties, persistDefinition],
+  );
+
+  const handleSortChange = useCallback(
+    (sortPropertyId: string | null, direction: SortDirection) => {
+      if (!definition || !activeViewId) return;
+      const updated: LensDefinition = {
+        ...definition,
+        views: definition.views.map((v) => {
+          if (v.id !== activeViewId) return v;
+          return {
+            ...v,
+            sort: sortPropertyId
+              ? [{ by: sortPropertyId, dir: direction }]
+              : undefined,
+          };
+        }),
+      };
+      // Add inferred property if referenced in sort
+      if (
+        sortPropertyId &&
+        !updated.properties[sortPropertyId] &&
+        effectiveProperties[sortPropertyId]
+      ) {
+        updated.properties = {
+          ...updated.properties,
+          [sortPropertyId]: effectiveProperties[sortPropertyId],
+        };
+      }
+      persistDefinition(updated);
+    },
+    [definition, activeViewId, effectiveProperties, persistDefinition],
+  );
+
   const handleRowClick = useCallback(
     (filePath: string) => {
       if (onFileOpen) {
@@ -183,6 +271,8 @@ export const BaseViewer: FC<BaseViewerProps> = ({
             ]}
             quickFilters={quickFilters}
             onQuickFiltersChange={setQuickFilters}
+            onColumnsChange={handleColumnsChange}
+            onSortChange={handleSortChange}
           />
         ) : null}
       </div>
