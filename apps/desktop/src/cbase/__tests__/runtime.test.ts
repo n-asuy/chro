@@ -6,9 +6,9 @@ import {
   isEmptyValue,
   resolvePropertyValue,
 } from "../runtime";
-import type { LensProperty, LensRow } from "../types";
+import type { CbaseProperty, CbaseRow } from "../types";
 
-const properties: Record<string, LensProperty> = {
+const properties: Record<string, CbaseProperty> = {
   p_title: { key: "title", type: "text" },
   p_file_name: { key: "file.name", type: "text" },
   p_file_path: { key: "file.path", type: "text" },
@@ -18,7 +18,7 @@ const properties: Record<string, LensProperty> = {
   p_done: { key: "done", type: "checkbox", label: "Done" },
 };
 
-const row: LensRow = {
+const row: CbaseRow = {
   filePath: "tasks/today.md",
   displayName: "today",
   modifiedAt: "2026-03-18T12:00:00.000Z",

@@ -29,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::images::{ImageListResponse, ImageResponse};
-use crate::{perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES};
+use crate::{
+    identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
+    perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES,
+};
 
 pub(super) fn router() -> Router<AppState> {
     use axum::extract::DefaultBodyLimit;
@@ -126,9 +129,10 @@ struct UpdateGitRequest {
 
 async fn update_task_run_git(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(identifier): Path<String>,
     Json(payload): Json<UpdateGitRequest>,
 ) -> Result<Json<TaskRunEnvelope>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &identifier).await?;
     let UpdateGitRequest {
         branch,
         target_branch,
@@ -221,9 +225,10 @@ fn start_execution_response(
 
 async fn start_execution_process(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<StartExecutionProcessRequest>,
 ) -> Result<Json<ExecutionEnvelope>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let run = TaskService::new(state.runtime())
         .start_execution_process(
             id,
@@ -328,9 +333,10 @@ struct UpdateStatusRequest {
 
 async fn update_execution_status(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<UpdateStatusRequest>,
 ) -> Result<Json<ExecutionEnvelope>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let run = TaskService::new(state.runtime())
         .update_execution_status(id, payload.status, payload.exit_code)
         .await?;
@@ -368,9 +374,10 @@ struct TaskRunLogsResponse {
 
 async fn append_task_run_logs(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<AppendLogsRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     if payload.entries.is_empty() {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -382,8 +389,9 @@ async fn append_task_run_logs(
 
 async fn get_task_run_logs(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<TaskRunLogsResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let entries = state.runtime().fetch_logs(id).await?;
     Ok(Json(TaskRunLogsResponse { entries }))
 }
@@ -404,9 +412,10 @@ struct GenerateTranscriptResponse {
 
 async fn generate_transcript(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
     Json(payload): Json<GenerateTranscriptRequest>,
 ) -> Result<Json<GenerateTranscriptResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let workspace_path = PathBuf::from(&payload.workspace_path);
     let file_path = state
         .runtime()
@@ -436,8 +445,9 @@ async fn generate_transcript(
 
 async fn cancel_execution(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     state.runtime().cancel_execution(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -449,10 +459,11 @@ struct FollowUpRequest {
 
 async fn follow_up_execution(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<FollowUpRequest>,
 ) -> Result<Json<StartExecutionSessionResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let request_started_at = Instant::now();
     let request_id = perf::request_id_from_headers(&headers);
 
@@ -514,10 +525,11 @@ async fn follow_up_execution(
 
 async fn send_task_message(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<SendTaskMessageRequest>,
 ) -> Result<Json<StartExecutionSessionResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let request_started_at = Instant::now();
     let request_id = perf::request_id_from_headers(&headers);
     let image_count = payload.image_ids.as_ref().map_or(0, Vec::len);
@@ -600,10 +612,11 @@ async fn send_task_message(
 
 async fn follow_up_by_task(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<FollowUpRequest>,
 ) -> Result<Json<StartExecutionSessionResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let request_started_at = Instant::now();
     let request_id = perf::request_id_from_headers(&headers);
 
@@ -680,11 +693,12 @@ struct DiffStreamQuery {
 async fn stream_task_run_diff(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Query(params): Query<DiffStreamQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let stats_only = params.stats_only.unwrap_or(false);
-    ws.on_upgrade(move |socket| handle_task_run_diff_ws(socket, state, id, stats_only))
+    Ok(ws.on_upgrade(move |socket| handle_task_run_diff_ws(socket, state, id, stats_only)))
 }
 
 async fn handle_task_run_diff_ws(
@@ -724,8 +738,9 @@ async fn handle_task_run_diff_ws(
 
 async fn mark_worktree_deleted(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     TaskService::new(state.runtime())
         .mark_worktree_deleted(id)
         .await?;
@@ -745,9 +760,10 @@ struct MergeTaskRunResponse {
 
 async fn merge_task_run(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<MergeTaskRunRequest>,
 ) -> Result<Json<MergeTaskRunResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let result = TaskService::new(state.runtime())
         .merge_task_run(id, payload.commit_message)
         .await?;
@@ -772,9 +788,10 @@ struct RebaseTaskRunResponse {
 
 async fn rebase_task_run(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<RebaseTaskRunRequest>,
 ) -> Result<Json<RebaseTaskRunResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let outcome = TaskService::new(state.runtime())
         .rebase_task_run(
             id,
@@ -791,8 +808,9 @@ async fn rebase_task_run(
 
 async fn abort_conflicts(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     TaskService::new(state.runtime())
         .abort_conflicts(id)
         .await?;
@@ -806,8 +824,9 @@ struct BranchListResponse {
 
 async fn list_task_run_branches(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<BranchListResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let branches = TaskService::new(state.runtime())
         .list_task_run_branches(id)
         .await?;
@@ -828,8 +847,9 @@ struct BranchStatusResponse {
 
 async fn get_task_run_branch_status(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<BranchStatusResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     let status = TaskService::new(state.runtime())
         .get_task_run_branch_status(id)
         .await?;
@@ -847,8 +867,9 @@ async fn get_task_run_branch_status(
 
 async fn get_task_runs(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
 ) -> Result<Json<TaskRunsResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let runs = TaskService::new(state.runtime())
         .list_task_runs(task_id)
         .await?;
@@ -857,8 +878,9 @@ async fn get_task_runs(
 
 async fn get_latest_active_run(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<TaskRunWithTaskResponse>, ApiError> {
+    let project_id = resolve_project_id(state.pool(), &project_id).await?;
     let bundle = TaskService::new(state.runtime())
         .latest_active_run(project_id)
         .await?;
@@ -881,8 +903,9 @@ async fn find_task_run_by_session_handler(
 
 async fn get_task_run_with_task(
     State(state): State<AppState>,
-    Path(run_id): Path<Uuid>,
+    Path(run_id): Path<String>,
 ) -> Result<Json<TaskRunTaskProjectResponse>, ApiError> {
+    let run_id = resolve_task_run_id(state.pool(), &run_id).await?;
     let bundle = TaskService::new(state.runtime())
         .fetch_run_task_project(run_id)
         .await?;
@@ -896,9 +919,10 @@ async fn get_task_run_with_task(
 
 async fn upload_task_run_image(
     State(state): State<AppState>,
-    Path(run_id): Path<Uuid>,
+    Path(run_id): Path<String>,
     multipart: axum::extract::Multipart,
 ) -> Result<Json<super::ImageEnvelope>, ApiError> {
+    let run_id = resolve_task_run_id(state.pool(), &run_id).await?;
     let run = TaskRun::get(state.pool(), run_id).await?;
     let image = super::process_image_upload(&state, multipart, Some(run.task_id)).await?;
 
@@ -919,9 +943,10 @@ async fn upload_task_run_image(
 
 async fn upload_task_image(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
     multipart: axum::extract::Multipart,
 ) -> Result<Json<super::ImageEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let _ = TaskRecord::get(state.pool(), task_id).await?;
     let image = super::process_image_upload(&state, multipart, Some(task_id)).await?;
 
@@ -944,8 +969,9 @@ async fn upload_task_image(
 
 async fn list_task_images(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(task_id): Path<String>,
 ) -> Result<Json<ImageListResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let _ = TaskRecord::get(state.pool(), task_id).await?;
     let image_service = state.runtime().image();
     let images = image_service.get_task_images(task_id).await?;
@@ -963,9 +989,10 @@ struct TaskRunFileQuery {
 
 async fn read_task_run_binary_file(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Query(query): Query<TaskRunFileQuery>,
 ) -> Result<Response, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
     if query.relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "query parameter 'relative_path' is required".into(),

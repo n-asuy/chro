@@ -43,6 +43,9 @@ export type { UsePromptEditorResult } from "./use-prompt-editor";
 export { useConversationHistory } from "./use-conversation-history";
 export type { UseConversationHistoryResult } from "./use-conversation-history";
 
+export { useSessionTaskState } from "./use-session-task-state";
+export type { UseSessionTaskStateResult } from "./use-session-task-state";
+
 export { useArchivedSessions } from "./use-archived-sessions";
 export type {
   ArchivedSession,

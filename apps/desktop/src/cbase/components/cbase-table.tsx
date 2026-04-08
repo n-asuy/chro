@@ -38,22 +38,22 @@ import {
 } from "../runtime";
 import type {
   FilterOperator,
-  LensFilter,
-  LensFilterCondition,
-  LensProperty,
-  LensRow,
-  LensView,
+  CbaseFilter,
+  CbaseFilterCondition,
+  CbaseProperty,
+  CbaseRow,
+  CbaseView,
 } from "../types";
 import { resolveTableColumns } from "../view-model";
 
 interface BaseTableProps {
-  rows: LensRow[];
+  rows: CbaseRow[];
   totalCount: number;
-  view: LensView;
-  properties: Record<string, LensProperty>;
-  definedFilters?: LensFilter[];
-  viewFilters?: LensFilter[];
-  onViewFiltersChange?: (filters: LensFilter[]) => void;
+  view: CbaseView;
+  properties: Record<string, CbaseProperty>;
+  definedFilters?: CbaseFilter[];
+  viewFilters?: CbaseFilter[];
+  onViewFiltersChange?: (filters: CbaseFilter[]) => void;
   onRowClick?: (filePath: string) => void;
   onColumnsChange?: (columnIds: string[]) => void;
   onSortChange?: (sortKey: string | null, direction: SortDirection) => void;
@@ -70,7 +70,7 @@ type FilterDraft = {
 type ColumnOption = {
   propertyId: string;
   label: string;
-  type: LensProperty["type"];
+  type: CbaseProperty["type"];
   width: number | undefined;
 };
 
@@ -97,7 +97,7 @@ function createDraft(): FilterDraft {
   return { propertyId: "", operator: "contains", value: "" };
 }
 
-function getAllowedFilterOperators(property?: LensProperty): FilterOperator[] {
+function getAllowedFilterOperators(property?: CbaseProperty): FilterOperator[] {
   if (!property) return ["contains", "is_empty", "is_not_empty"];
 
   if (property.type === "number" || property.type === "date") {
@@ -120,7 +120,7 @@ function getAllowedFilterOperators(property?: LensProperty): FilterOperator[] {
   ];
 }
 
-function defaultFilterOperator(property?: LensProperty): FilterOperator {
+function defaultFilterOperator(property?: CbaseProperty): FilterOperator {
   if (!property) return "contains";
   if (
     property.type === "number" ||
@@ -140,7 +140,7 @@ function filterValueToString(value: unknown): string {
 }
 
 function getSortDirectionLabels(
-  property?: LensProperty,
+  property?: CbaseProperty,
 ): Record<SortDirection, string> {
   if (!property) {
     return { asc: "As returned", desc: "As returned" };
@@ -159,15 +159,15 @@ function getSortDirectionLabels(
   return { asc: "A → Z", desc: "Z → A" };
 }
 
-function defaultSortDirection(property?: LensProperty): SortDirection {
+function defaultSortDirection(property?: CbaseProperty): SortDirection {
   return property?.type === "date" ? "desc" : "asc";
 }
 
-function isConditionFilter(filter: LensFilter): filter is LensFilterCondition {
+function isConditionFilter(filter: CbaseFilter): filter is CbaseFilterCondition {
   return !("and" in filter) && !("or" in filter) && !("not" in filter);
 }
 
-function countFilterConditions(filter: LensFilter): number {
+function countFilterConditions(filter: CbaseFilter): number {
   if ("and" in filter) {
     return filter.and.reduce(
       (count, entry) => count + countFilterConditions(entry),
@@ -187,8 +187,8 @@ function countFilterConditions(filter: LensFilter): number {
 }
 
 function formatConditionSummary(
-  filter: LensFilterCondition,
-  properties: Record<string, LensProperty>,
+  filter: CbaseFilterCondition,
+  properties: Record<string, CbaseProperty>,
 ): string {
   const property = properties[filter.property];
   const label = property?.label ?? property?.key ?? filter.property;
@@ -199,8 +199,8 @@ function formatConditionSummary(
 }
 
 function formatFilterSummary(
-  filter: LensFilter,
-  properties: Record<string, LensProperty>,
+  filter: CbaseFilter,
+  properties: Record<string, CbaseProperty>,
 ): string {
   if (isConditionFilter(filter)) {
     return formatConditionSummary(filter, properties);
@@ -218,7 +218,7 @@ function formatFilterSummary(
   return `None of: ${formatFilterSummary(filter.not, properties)}`;
 }
 
-function createFilterEntries(filters: LensFilter[]) {
+function createFilterEntries(filters: CbaseFilter[]) {
   const seen = new Map<string, number>();
   return filters.map((filter) => {
     const serialized = JSON.stringify(filter);
@@ -446,7 +446,7 @@ export const BaseTable: FC<BaseTableProps> = ({
   const handleAddFilter = () => {
     if (!onViewFiltersChange || !draft.propertyId || !canAddFilter) return;
 
-    const nextFilter: LensFilterCondition = {
+    const nextFilter: CbaseFilterCondition = {
       property: draft.propertyId,
       op: draft.operator,
     };

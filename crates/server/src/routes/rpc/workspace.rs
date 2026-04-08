@@ -15,9 +15,8 @@ use axum::{
 use db::models::ProjectRecord;
 use futures::{SinkExt, StreamExt};
 use std::path::PathBuf;
-use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{identifiers::resolve_project_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new().route(
@@ -30,8 +29,9 @@ pub(super) fn router() -> Router<AppState> {
 async fn stream_project_file_events(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let project_id = resolve_project_id(state.pool(), &identifier).await?;
     let project = ProjectRecord::get(state.pool(), project_id).await?;
     let project_path = PathBuf::from(&project.git_repo_path);
     let rx = state

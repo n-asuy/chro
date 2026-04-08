@@ -493,7 +493,7 @@ export function useTaskRunStream({
 
   useEffect(() => {
     let pendingOps: JsonPatchOperation[] = [];
-    let rafId: number | null = null;
+    let flushTimerId: number | null = null;
     let cancelled = false;
 
     if (!taskRunId || !endpoint) {
@@ -533,7 +533,7 @@ export function useTaskRunStream({
       let pendingReplace = isReconnect;
 
       const flushPendingOps = () => {
-        rafId = null;
+        flushTimerId = null;
         if (pendingOps.length === 0) {
           return;
         }
@@ -607,14 +607,14 @@ export function useTaskRunStream({
               });
             }
             pendingOps.push(...msg.JsonPatch);
-            if (rafId === null) {
-              rafId = requestAnimationFrame(flushPendingOps);
+            if (flushTimerId === null) {
+              flushTimerId = window.setTimeout(flushPendingOps, 0);
             }
           }
 
           if (msg.finished) {
-            if (rafId !== null) {
-              cancelAnimationFrame(rafId);
+            if (flushTimerId !== null) {
+              window.clearTimeout(flushTimerId);
             }
             flushPendingOps();
             finishedRef.current = true;
@@ -687,9 +687,9 @@ export function useTaskRunStream({
 
     return () => {
       cancelled = true;
-      if (typeof rafId === "number") {
-        cancelAnimationFrame(rafId);
-        rafId = null;
+      if (typeof flushTimerId === "number") {
+        window.clearTimeout(flushTimerId);
+        flushTimerId = null;
       }
       closeWebSocket();
       finishedRef.current = false;

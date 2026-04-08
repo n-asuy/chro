@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { LensProperty, LensView } from "../types";
+import type { CbaseProperty, CbaseView } from "../types";
 import { resolveTableColumns } from "../view-model";
 
-const properties: Record<string, LensProperty> = {
+const properties: Record<string, CbaseProperty> = {
   p_title: { key: "title", type: "text", label: "Title" },
   p_priority: { key: "priority", type: "number" },
 };
 
 describe("resolveTableColumns", () => {
   it("uses explicit table columns with labels and widths", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       id: "v",
       name: "V",
       type: "table",
@@ -31,7 +31,7 @@ describe("resolveTableColumns", () => {
   });
 
   it("falls back to all properties when columns are omitted", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       id: "v",
       name: "V",
       type: "table",

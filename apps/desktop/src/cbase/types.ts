@@ -1,11 +1,11 @@
 /**
  * .cbase file format types
- * A lens is a view definition over workspace files, treating rows as files
+ * A cbase is a view definition over workspace files, treating rows as files
  * and columns as frontmatter properties.
  */
 
-/** Property types supported in lens schema */
-export type LensPropertyType =
+/** Property types supported in cbase schema */
+export type CbasePropertyType =
   | "text"
   | "number"
   | "checkbox"
@@ -14,14 +14,14 @@ export type LensPropertyType =
   | "multi_select"
   | "url";
 
-/** A property definition in the lens schema */
-export interface LensProperty {
+/** A property definition in the cbase schema */
+export interface CbaseProperty {
   /** Frontmatter key this property maps to */
   key: string;
   /** Display label (defaults to key if not provided) */
   label?: string;
   /** Data type */
-  type: LensPropertyType;
+  type: CbasePropertyType;
   /** Whether this property is required */
   required?: boolean;
   /** Default value for new rows */
@@ -46,7 +46,7 @@ export type FilterOperator =
   | "is_not_empty";
 
 /** A single filter condition */
-export interface LensFilterCondition {
+export interface CbaseFilterCondition {
   /** Property ID to filter on */
   property: string;
   /** Comparison operator */
@@ -56,17 +56,17 @@ export interface LensFilterCondition {
 }
 
 /** Compound filter with logical operators */
-export type LensFilter =
-  | LensFilterCondition
-  | { and: LensFilter[] }
-  | { or: LensFilter[] }
-  | { not: LensFilter };
+export type CbaseFilter =
+  | CbaseFilterCondition
+  | { and: CbaseFilter[] }
+  | { or: CbaseFilter[] }
+  | { not: CbaseFilter };
 
 /** Sort direction */
 export type SortDirection = "asc" | "desc";
 
 /** Sort specification */
-export interface LensSort {
+export interface CbaseSort {
   /** Property ID to sort by */
   by: string;
   /** Sort direction */
@@ -74,7 +74,7 @@ export interface LensSort {
 }
 
 /** Table view configuration */
-export interface LensTableView {
+export interface CbaseTableView {
   /** Ordered list of property IDs to display as columns */
   columns: string[];
   /** Column widths in pixels */
@@ -84,7 +84,7 @@ export interface LensTableView {
 }
 
 /** View definition */
-export interface LensView {
+export interface CbaseView {
   /** View identifier */
   id: string;
   /** Display name */
@@ -94,17 +94,17 @@ export interface LensView {
   /** Whether this is the default view */
   default?: boolean;
   /** View-level filters (combined with global filters via AND) */
-  filters?: LensFilter[];
+  filters?: CbaseFilter[];
   /** View-level sort */
-  sort?: LensSort[];
+  sort?: CbaseSort[];
   /** Maximum rows to display */
   limit?: number;
   /** Table-specific configuration */
-  table?: LensTableView;
+  table?: CbaseTableView;
 }
 
 /** Template for creating new rows (files) */
-export interface LensTemplate {
+export interface CbaseTemplate {
   /** Target folder for new files */
   folder: string;
   /** Filename pattern (supports {{property_id}} and {{date:FORMAT}}) */
@@ -116,7 +116,7 @@ export interface LensTemplate {
 }
 
 /** Dataset definition - which files to include */
-export interface LensDataset {
+export interface CbaseDataset {
   /** Glob patterns for included files */
   include: string[];
   /** Glob patterns for excluded files */
@@ -124,29 +124,29 @@ export interface LensDataset {
 }
 
 /** Root .cbase file structure */
-export interface LensDefinition {
+export interface CbaseDefinition {
   /** Schema version */
   version: 1;
-  /** Display name of this lens */
+  /** Display name of this cbase */
   name: string;
   /** Optional description */
   description?: string;
   /** Dataset: which files are rows */
-  dataset: LensDataset;
+  dataset: CbaseDataset;
   /** Property definitions (key = property ID) */
-  properties: Record<string, LensProperty>;
+  properties: Record<string, CbaseProperty>;
   /** Global filters applied to all views */
-  filters?: LensFilter[];
+  filters?: CbaseFilter[];
   /** Global sort applied when view has no sort */
-  sort?: LensSort[];
+  sort?: CbaseSort[];
   /** View definitions */
-  views: LensView[];
+  views: CbaseView[];
   /** Template for new row creation */
-  template?: LensTemplate;
+  template?: CbaseTemplate;
 }
 
-/** A single row in the lens (represents a file) */
-export interface LensRow {
+/** A single row in the cbase (represents a file) */
+export interface CbaseRow {
   /** File path relative to workspace root */
   filePath: string;
   /** Display name of the file */
@@ -157,12 +157,12 @@ export interface LensRow {
   values: Record<string, unknown>;
 }
 
-/** Result of evaluating a lens view */
-export interface LensViewResult {
+/** Result of evaluating a cbase view */
+export interface CbaseViewResult {
   /** The view definition */
-  view: LensView;
+  view: CbaseView;
   /** Filtered and sorted rows */
-  rows: LensRow[];
+  rows: CbaseRow[];
   /** Total count before limit */
   totalCount: number;
 }

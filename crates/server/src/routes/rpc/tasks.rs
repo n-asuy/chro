@@ -11,7 +11,7 @@ use runtime::TaskService;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{identifiers::resolve_task_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -53,8 +53,9 @@ async fn create_task(
 
 async fn delete_task(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
     TaskService::new(state.runtime())
         .delete_task(task_id)
         .await?;
@@ -68,9 +69,10 @@ struct UpdateTaskStatusRequest {
 
 async fn update_task_status(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(identifier): Path<String>,
     Json(payload): Json<UpdateTaskStatusRequest>,
 ) -> Result<Json<TaskEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
     let task = TaskService::new(state.runtime())
         .update_task_status(task_id, payload.status)
         .await?;
@@ -84,9 +86,10 @@ struct UpdateTaskTitleRequest {
 
 async fn update_task_title(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(identifier): Path<String>,
     Json(payload): Json<UpdateTaskTitleRequest>,
 ) -> Result<Json<TaskEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
     let task = TaskService::new(state.runtime())
         .update_task_title(task_id, payload.title)
         .await?;

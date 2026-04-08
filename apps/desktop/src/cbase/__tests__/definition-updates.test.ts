@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { updateViewFilters } from "../definition-updates";
-import { parseLens } from "../parser";
-import type { LensProperty } from "../types";
+import { parseCbase } from "../parser";
+import type { CbaseProperty } from "../types";
 
 const BASE_YAML = `
 version: 1
@@ -35,7 +35,7 @@ views:
 
 describe("updateViewFilters", () => {
   it("updates only the active view filters", () => {
-    const definition = parseLens(BASE_YAML);
+    const definition = parseCbase(BASE_YAML);
 
     const updated = updateViewFilters(definition, "all", [
       { property: "file_path", op: "contains", value: "roadmap" },
@@ -50,7 +50,7 @@ describe("updateViewFilters", () => {
   });
 
   it("removes view filters when cleared", () => {
-    const definition = parseLens(BASE_YAML);
+    const definition = parseCbase(BASE_YAML);
 
     const updated = updateViewFilters(definition, "done", []);
 
@@ -58,8 +58,8 @@ describe("updateViewFilters", () => {
   });
 
   it("adds inferred properties referenced by nested filters", () => {
-    const definition = parseLens(BASE_YAML);
-    const inferredProperties: Record<string, LensProperty> = {
+    const definition = parseCbase(BASE_YAML);
+    const inferredProperties: Record<string, CbaseProperty> = {
       file_path: { key: "file.path", type: "text" },
       status: {
         key: "status",

@@ -1,9 +1,9 @@
 import type {
-  LensDefinition,
-  LensFilter,
-  LensProperty,
-  LensPropertyType,
-  LensSort,
+  CbaseDefinition,
+  CbaseFilter,
+  CbaseProperty,
+  CbasePropertyType,
+  CbaseSort,
 } from "./types";
 
 export class QueryLanguageParseError extends Error {
@@ -120,11 +120,11 @@ export function looksLikeQueryLanguage(content: string): boolean {
   return QUERY_LANGUAGE_START.test(lines[0] ?? "");
 }
 
-export function parseQueryLanguageToLensDefinition(
+export function parseQueryLanguageToCbaseDefinition(
   rawQuery: string,
   meta?: { name?: string; description?: string },
   options?: ParseQueryLanguageOptions,
-): LensDefinition {
+): CbaseDefinition {
   const parsed = parseQueryLanguage(rawQuery);
   if (parsed.type !== "table") {
     throw new QueryLanguageParseError(
@@ -133,7 +133,7 @@ export function parseQueryLanguageToLensDefinition(
   }
 
   const registry = new PropertyRegistry();
-  const filters: LensFilter[] = [];
+  const filters: CbaseFilter[] = [];
 
   if (parsed.source) {
     const sourceFilter = sourceNodeToFilter(parsed.source, registry);
@@ -145,7 +145,7 @@ export function parseQueryLanguageToLensDefinition(
     if (whereFilter) filters.push(whereFilter);
   }
 
-  const sort: LensSort[] = parsed.sort.map((entry) => ({
+  const sort: CbaseSort[] = parsed.sort.map((entry) => ({
     by: registry.ensure(entry.raw),
     dir: entry.dir,
   }));
@@ -365,7 +365,7 @@ function parseSortFields(raw: string): ParsedSortField[] {
 function sourceNodeToFilter(
   node: SourceNode,
   registry: PropertyRegistry,
-): LensFilter | null {
+): CbaseFilter | null {
   switch (node.type) {
     case "tag": {
       const property = registry.ensure("tags", "multi_select");
@@ -808,7 +808,7 @@ function tokenizeWhere(text: string): WhereToken[] {
 function whereNodeToFilter(
   node: WhereNode,
   registry: PropertyRegistry,
-): LensFilter | null {
+): CbaseFilter | null {
   switch (node.type) {
     case "binary": {
       if (node.op === "and" || node.op === "or") {
@@ -860,7 +860,7 @@ function whereNodeToFilter(
 function comparisonToFilter(
   node: ComparisonBinaryNode,
   registry: PropertyRegistry,
-): LensFilter {
+): CbaseFilter {
   const leftField = node.left.type === "field" ? node.left.name : null;
   const rightField = node.right.type === "field" ? node.right.name : null;
   const leftLiteral =
@@ -899,7 +899,7 @@ function isComparisonBinaryNode(node: WhereNode): node is ComparisonBinaryNode {
 function functionCallToFilter(
   node: Extract<WhereNode, { type: "call" }>,
   registry: PropertyRegistry,
-): LensFilter {
+): CbaseFilter {
   const name = node.name.toLowerCase();
 
   if (
@@ -965,7 +965,7 @@ function buildComparisonFilter(
   op: "=" | "!=" | "<" | ">" | "<=" | ">=",
   value: unknown,
   registry: PropertyRegistry,
-): LensFilter {
+): CbaseFilter {
   const property = registry.ensure(field, inferTypeFromLiteral(value));
 
   if (value === null) {
@@ -1000,17 +1000,17 @@ function reverseComparisonOp(
   }
 }
 
-function inferTypeFromLiteral(value: unknown): LensPropertyType | undefined {
+function inferTypeFromLiteral(value: unknown): CbasePropertyType | undefined {
   if (typeof value === "number") return "number";
   if (typeof value === "boolean") return "checkbox";
   return undefined;
 }
 
 class PropertyRegistry {
-  readonly properties: Record<string, LensProperty> = {};
+  readonly properties: Record<string, CbaseProperty> = {};
   private readonly byKey = new Map<string, string>();
 
-  ensure(key: string, hintType?: LensPropertyType): string {
+  ensure(key: string, hintType?: CbasePropertyType): string {
     const normalizedKey = key.trim();
     const existing = this.byKey.get(normalizedKey);
     if (existing) {
@@ -1036,7 +1036,7 @@ class PropertyRegistry {
     return id;
   }
 
-  private applyTypeHint(id: string, hintType?: LensPropertyType): void {
+  private applyTypeHint(id: string, hintType?: CbasePropertyType): void {
     if (!hintType) return;
     const prop = this.properties[id];
     if (!prop) return;
@@ -1049,7 +1049,7 @@ class PropertyRegistry {
   }
 }
 
-function inferTypeFromKey(key: string): LensPropertyType {
+function inferTypeFromKey(key: string): CbasePropertyType {
   const lower = key.toLowerCase();
   if (lower === "tags" || lower.endsWith(".tags")) return "multi_select";
   if (lower === "file.mtime" || lower.endsWith(".date")) return "date";

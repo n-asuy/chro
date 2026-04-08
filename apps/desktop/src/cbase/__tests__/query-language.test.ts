@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { executeView } from "../engine";
-import { parseLens } from "../parser";
-import type { LensRow } from "../types";
+import { parseCbase } from "../parser";
+import type { CbaseRow } from "../types";
 
 const row = (
   filePath: string,
   values: Record<string, unknown>,
   modifiedAt?: string,
-): LensRow => ({
+): CbaseRow => ({
   filePath,
   displayName: filePath.split("/").pop()?.replace(/\.md$/i, "") ?? filePath,
   ...(modifiedAt ? { modifiedAt } : {}),
@@ -24,7 +24,7 @@ SORT priority DESC
 LIMIT 10
 `;
 
-    const definition = parseLens(query);
+    const definition = parseCbase(query);
     const view = definition.views[0]!;
 
     const rows = [
@@ -53,7 +53,7 @@ WHERE contains(title, "Roadmap")
 SORT file.mtime DESC
 `;
 
-    const definition = parseLens(query);
+    const definition = parseCbase(query);
     const view = definition.views[0]!;
 
     const rows = [
@@ -91,15 +91,15 @@ SORT file.mtime DESC
   it("parses YAML query mode", () => {
     const yaml = `
 version: 1
-name: "Query Lens"
+name: "Query Cbase"
 query: |
   TABLE title
   FROM "notes"
   WHERE done = false
 `;
 
-    const definition = parseLens(yaml);
-    expect(definition.name).toBe("Query Lens");
+    const definition = parseCbase(yaml);
+    expect(definition.name).toBe("Query Cbase");
     expect(definition.dataset.include).toEqual(["**/*.md"]);
     expect(definition.views[0]?.default).toBe(true);
   });
@@ -110,7 +110,7 @@ TABLE title
 GROUP BY status
 `;
 
-    expect(() => parseLens(query)).toThrow(/GROUP BY/);
+    expect(() => parseCbase(query)).toThrow(/GROUP BY/);
   });
 
   it("parses fenced query block", () => {
@@ -121,7 +121,7 @@ WHERE title
 \`\`\`
 `;
 
-    const definition = parseLens(query);
+    const definition = parseCbase(query);
     expect(definition.views).toHaveLength(1);
   });
 
@@ -131,7 +131,7 @@ TABLE title, status
 WHERE status != "done"
 `;
 
-    const definition = parseLens(query, {
+    const definition = parseCbase(query, {
       basePath: "tasks/overview/my-table.cbase",
     });
 
@@ -144,7 +144,7 @@ TABLE title
 FROM "tasks"
 `;
 
-    const definition = parseLens(query, {
+    const definition = parseCbase(query, {
       basePath: "tasks/overview/my-table.cbase",
     });
 

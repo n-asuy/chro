@@ -26,9 +26,12 @@ import {
   type RebaseDialogResult,
 } from "@/session/components/rebase-dialog";
 import { TaskConversation } from "@/session/components/task-conversation";
-import { useDiffStream, useTaskRunStream } from "@/session/hooks";
+import {
+  useConversationHistory,
+  useDiffStream,
+  useTaskRunStream,
+} from "@/session/hooks";
 import { useImageUploads } from "@/session/hooks/use-image-uploads";
-import type { TaskRunRecord } from "@/session/types";
 import { sendTaskMessage } from "@/session/utils/task-message-api";
 import { Button } from "@chro/ui/button";
 import {
@@ -118,12 +121,7 @@ export const TaskSessionPanel = ({
   const { workspacePath, projectId } = useWorkspaceBoardContext();
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
   const [input, setInput] = useState("");
-  const [taskRunId, setTaskRunId] = useState<string | null>(null);
-  const [isSending, setIsSending] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [diffViewerOpen, setDiffViewerOpen] = useState(false);
   const handleOpenDiffViewer = useCallback(() => setDiffViewerOpen(true), []);
   const [isMergingDiffs, setIsMergingDiffs] = useState(false);
@@ -141,14 +139,25 @@ export const TaskSessionPanel = ({
     useState<ExecutorProfileId | null>(null);
   const [branches, setBranches] = useState<GitBranchType[]>([]);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
-  const [currentTaskRunTargetBranch, setCurrentTaskRunTargetBranch] = useState<
-    string | null
-  >(null);
-  const currentExecutionRef = useRef<string | null>(null);
-  const isSendingRef = useRef(false);
   const forceNewAttemptRef = useRef(false);
   const isComposingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Single source of truth: WebSocket-based run discovery
+  const {
+    entries: conversationEntries,
+    isLoading: isConversationLoading,
+    error: conversationError,
+    activeRunId,
+    latestRunId,
+  } = useConversationHistory({
+    taskId: issue.id,
+    enabled: Boolean(issue.id),
+  });
+
+  // Derived from WebSocket — no REST fallback
+  const taskRunId = activeRunId ?? latestRunId;
+  const isSending = activeRunId !== null;
 
   useEffect(() => {
     setUseWorktree(true);
@@ -214,16 +223,10 @@ export const TaskSessionPanel = ({
     };
   }, [t]);
 
-  // Forward refs for callbacks used in hooks
-  const onLogStreamFinishedRef = useRef<() => void>(() => {});
-
-  // Log stream hook - receives entries from /logs stream
+  // Log stream hook — provides approvals and document for diffs
   const logStream = useTaskRunStream({
     taskRunId,
     callbacks: {
-      onFinished: () => {
-        onLogStreamFinishedRef.current();
-      },
       onError: (error) => {
         console.warn("[task-session-panel] LogStream error:", error);
       },
@@ -266,7 +269,6 @@ export const TaskSessionPanel = ({
   const executorSelectorLabel = executorProfileLoading
     ? t("loadingMessage")
     : executorDisplayLabel;
-  const waitingMessage = isSending ? t("waitingMessage") : null;
   const diffItems = useMemo(
     () =>
       Object.entries(diffStream.diffs)
@@ -359,7 +361,6 @@ export const TaskSessionPanel = ({
   const canSend = Boolean(workspacePath) && !isSending && !isUploading;
   const isSendButtonDisabled = isSending ? false : !canSend || !input.trim();
 
-  // When taskRunId changes, useTaskRunStream will reconnect and receive history
   const archiveCurrentEntries = useCallback(() => {
     logStream.resetEntries();
   }, [logStream.resetEntries]);
@@ -391,45 +392,7 @@ export const TaskSessionPanel = ({
 
   useGlobalFileDrop(handleFiles);
 
-  const resetConversation = useCallback(() => {
-    logStream.resetEntries();
-    currentExecutionRef.current = null;
-    isSendingRef.current = false;
-    setIsSending(false);
-    clearUploadItems();
-  }, [clearUploadItems, logStream.resetEntries]);
-
-  const detachActiveExecution = useCallback(() => {
-    logStream.closeSocket();
-    currentExecutionRef.current = null;
-    isSendingRef.current = false;
-    setIsSending(false);
-  }, [logStream.closeSocket]);
-
-  const verifyExecutionStillRunning = useCallback(
-    async (executionId: string): Promise<boolean | null> => {
-      try {
-        const response = await desktopFetch<{ task_run: TaskRunRecord }>(
-          `/rpc/task-runs/${encodeURIComponent(executionId)}/with-task`,
-        );
-        return response.task_run?.status === "running";
-      } catch (err) {
-        console.warn("[task-session-panel] failed to verify execution", err);
-        return null;
-      }
-    },
-    [],
-  );
-
-  // Note: Board refresh is automatic via stream updates, no manual refresh needed.
-
-  // Update ref after detachActiveExecution is defined
-  useEffect(() => {
-    onLogStreamFinishedRef.current = () => {
-      detachActiveExecution();
-      // Board data auto-refreshes via stream updates, no manual refresh needed
-    };
-  }, [detachActiveExecution]);
+  // No-op: board refresh is automatic via stream updates
 
   const handleCancel = useCallback(async () => {
     if (!isSending || isStopping) return;
@@ -445,8 +408,7 @@ export const TaskSessionPanel = ({
     } finally {
       setIsStopping(false);
     }
-    detachActiveExecution();
-  }, [isSending, isStopping, taskRunId, detachActiveExecution]);
+  }, [isSending, isStopping, taskRunId]);
 
   const { status: branchStatus, refetch: refetchBranchStatus } =
     useBranchStatus({
@@ -603,125 +565,42 @@ export const TaskSessionPanel = ({
     onDiffActionsChange,
   ]);
 
-  const loadRunsForIssue = useCallback(
-    async (selectedRunId?: string) => {
-      setIsLoading(true);
-      setError(null);
-      setStatusMessage(null);
-      setInput("");
-      setIsMerged(false);
-      clearUploadItems();
-      logStream.resetDocument();
-      try {
-        const response = await desktopFetch<{ runs: TaskRunRecord[] }>(
-          `/rpc/tasks/${issue.id}/runs`,
-        );
-        const runs = response.runs ?? [];
-        if (runs.length === 0) {
-          resetConversation();
-          setTaskRunId(null);
-          setSessionExecutorProfile(executorProfileId);
-          forceNewAttemptRef.current = true;
-          setStatusMessage(t("sessionTranscriptMissing"));
-          return;
-        }
-
-        const activeRun = runs.find((run) => run.status === "running");
-        let target: TaskRunRecord | undefined;
-        if (selectedRunId) {
-          target = runs.find((run) => run.id === selectedRunId);
-        } else {
-          target = activeRun ?? runs[0];
-        }
-
-        if (!target) {
-          setStatusMessage(t("sessionTranscriptMissing"));
-          return;
-        }
-
-        const runId = target.id;
-        const runExecutorProfile =
-          parseExecutorProfileId(target.executor_label) ??
-          executorProfileId ??
-          null;
-        setSessionExecutorProfile(runExecutorProfile);
-        setTaskRunId(runId);
-        setCurrentTaskRunTargetBranch(target.target_branch ?? null);
-
-        // Reset local state and let the stream populate entries
-        logStream.resetEntries();
-
-        forceNewAttemptRef.current = false;
-        if (target.status === "running") {
-          currentExecutionRef.current = runId;
-          isSendingRef.current = true;
-          setIsSending(true);
-          // useTaskRunStream will automatically connect when taskRunId changes
-        } else {
-          detachActiveExecution();
-        }
-      } catch (err) {
-        console.error("[task-session-panel] failed to load runs", err);
-        setError(
-          err instanceof Error ? err.message : t("sessionTranscriptMissing"),
-        );
-        resetConversation();
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [
-      clearUploadItems,
-      detachActiveExecution,
-      executorProfileId,
-      issue.id,
-      logStream.resetDocument,
-      logStream.resetEntries,
-      resetConversation,
-      setSessionExecutorProfile,
-      t,
-    ],
-  );
+  // Reset forceNewAttempt when runs arrive
+  useEffect(() => {
+    if (taskRunId) {
+      forceNewAttemptRef.current = false;
+    }
+  }, [taskRunId]);
 
   const handleSend = useCallback(async () => {
-    if (!input.trim()) {
-      return;
-    }
+    if (!input.trim()) return;
     if (!workspacePath) {
       addErrorMessage(t("workspaceNotSetError"));
       return;
     }
 
-    // Combine user text input with image markdown references
     const imagesMarkdown = getImagesMarkdown();
     const prompt = imagesMarkdown
       ? `${imagesMarkdown}\n${input.trim()}`
       : input.trim();
     const imageIds = getImageIds();
     archiveCurrentEntries();
-    setIsSending(true);
-    isSendingRef.current = true;
-    setStatusMessage(null);
 
     try {
       const taskMessageMode = forceNewAttemptRef.current ? "new" : "auto";
       const executorProfilePayload =
         sessionExecutorSelection ?? executorProfileId;
-      const response = await sendTaskMessage(issue.id, {
+      await sendTaskMessage(issue.id, {
         prompt,
         mode: taskMessageMode,
         executorProfileId: executorProfilePayload,
         imageIds,
         useWorktree,
       });
-
-      currentExecutionRef.current = response.execution_id;
-      setTaskRunId(response.task_run_id);
+      // WebSocket will pick up the new run automatically
       forceNewAttemptRef.current = false;
       setInput("");
       clearUploadItems();
-      // useTaskRunLogStream will automatically connect when taskRunId changes
-      // Stream updates automatically refresh the board
     } catch (err) {
       console.error("[task-session-panel] failed to send prompt", err);
       const fallback =
@@ -729,9 +608,6 @@ export const TaskSessionPanel = ({
           ? err.message
           : t("commandFailedError", { message: t("claudeCliHint") });
       addErrorMessage(fallback);
-      setIsSending(false);
-      isSendingRef.current = false;
-      currentExecutionRef.current = null;
     }
   }, [
     addErrorMessage,
@@ -777,16 +653,10 @@ export const TaskSessionPanel = ({
     [canSend, handleSend, input],
   );
 
+  // Reset merge state when switching issues
   useEffect(() => {
-    return () => {
-      logStream.closeSocket();
-    };
-  }, [logStream.closeSocket]);
-
-  useEffect(() => {
-    detachActiveExecution();
-    void loadRunsForIssue();
-  }, [detachActiveExecution, issue.id, loadRunsForIssue]);
+    setIsMerged(false);
+  }, [issue.id]);
 
   return (
     <>
@@ -809,31 +679,13 @@ export const TaskSessionPanel = ({
               />
             )}
 
-            {isLoading ? (
-              <div className="flex flex-1 items-center justify-center bg-background text-custom-text-300">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {t("sessionListLoading")}
-              </div>
-            ) : (
-              <TaskConversation
-                taskId={issue.id}
-                messagesEndRef={messagesEndRef}
-                onWikilinkClick={navigateToWikilink}
-                onFinished={() => {
-                  detachActiveExecution();
-                }}
-              />
-            )}
-            {statusMessage ? (
-              <div className="bg-background px-6 py-3">
-                <p className="text-xs text-custom-text-400">{statusMessage}</p>
-              </div>
-            ) : null}
-            {error ? (
-              <div className="bg-background px-6 py-3">
-                <p className="text-xs text-destructive">{error}</p>
-              </div>
-            ) : null}
+            <TaskConversation
+              entries={conversationEntries}
+              isLoading={isConversationLoading}
+              error={conversationError}
+              messagesEndRef={messagesEndRef}
+              onWikilinkClick={navigateToWikilink}
+            />
 
             <div
               className={cn(
@@ -1081,7 +933,7 @@ export const TaskSessionPanel = ({
                   </div>
                 </div>
 
-                {!workspacePath && !isLoading ? (
+                {!workspacePath && !isConversationLoading ? (
                   <p className="mt-2 text-xs text-destructive">
                     {t("workspaceNotSetError")}
                   </p>
@@ -1097,8 +949,8 @@ export const TaskSessionPanel = ({
         isRebasing={isRebasing}
         branches={branches}
         isLoadingBranches={isLoadingBranches}
-        initialTargetBranch={currentTaskRunTargetBranch ?? undefined}
-        initialUpstreamBranch={currentTaskRunTargetBranch ?? undefined}
+        initialTargetBranch={undefined}
+        initialUpstreamBranch={undefined}
         onConfirm={handleRebaseConfirm}
       />
     </>

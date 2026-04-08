@@ -1,9 +1,9 @@
-import type { LensProperty, LensRow } from "./types";
+import type { CbaseProperty, CbaseRow } from "./types";
 
 export function resolvePropertyValue(
-  row: LensRow,
+  row: CbaseRow,
   propertyId: string,
-  properties: Record<string, LensProperty>,
+  properties: Record<string, CbaseProperty>,
 ): unknown {
   const property = properties[propertyId];
   if (!property) return undefined;
@@ -106,7 +106,7 @@ export function formatPropertyValue(value: unknown): string {
 
 export function getColumnLabel(
   propertyId: string,
-  properties: Record<string, LensProperty>,
+  properties: Record<string, CbaseProperty>,
 ): string {
   const property = properties[propertyId];
   if (!property) return propertyId;

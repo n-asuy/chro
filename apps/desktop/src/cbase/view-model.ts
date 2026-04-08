@@ -1,17 +1,17 @@
 import { getColumnLabel } from "./runtime";
-import type { LensProperty, LensPropertyType, LensView } from "./types";
+import type { CbaseProperty, CbasePropertyType, CbaseView } from "./types";
 
-interface LensTableColumn {
+interface CbaseTableColumn {
   propertyId: string;
   label: string;
-  type: LensPropertyType;
+  type: CbasePropertyType;
   width?: number;
 }
 
 const DEFAULT_COLUMN_KEYS = ["file.path", "file.name", "file.mtime"];
 
 function resolveDefaultColumns(
-  properties: Record<string, LensProperty>,
+  properties: Record<string, CbaseProperty>,
 ): string[] {
   const keyToId = new Map<string, string>();
   for (const [id, prop] of Object.entries(properties)) {
@@ -27,9 +27,9 @@ function resolveDefaultColumns(
 }
 
 export function resolveTableColumns(
-  view: LensView,
-  properties: Record<string, LensProperty>,
-): LensTableColumn[] {
+  view: CbaseView,
+  properties: Record<string, CbaseProperty>,
+): CbaseTableColumn[] {
   const sourceColumns =
     view.table?.columns && view.table.columns.length > 0
       ? view.table.columns

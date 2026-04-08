@@ -1,23 +1,14 @@
 /**
- * Provider for workspace board data using WebSocket streaming.
- *
- * Replaces the Zustand store pattern with React Context + WebSocket hooks.
- * Child components use `useWorkspaceBoardContext()` to access board state.
+ * Thin wrapper that feeds ProjectContext-resolved identifiers into useWorkspaceBoard
+ * and exposes the result as React Context for kanban components.
  */
 
-import {
-  createContext,
-  useContext,
-  useState,
-  useEffect,
-  type ReactNode,
-} from "react";
-import { useParams } from "@tanstack/react-router";
+import { createContext, useContext, type ReactNode } from "react";
+import { useProjectContext } from "@/files/context/project-context";
 import {
   useWorkspaceBoard,
   type UseWorkspaceBoardResult,
 } from "../hooks/use-workspace-board";
-import { taskApi } from "../api/task-api";
 
 interface WorkspaceBoardContextValue extends UseWorkspaceBoardResult {
   workspacePath: string | null;
@@ -32,73 +23,13 @@ export interface WorkspaceBoardProviderProps {
   children: ReactNode;
 }
 
-/**
- * Provider that manages workspace path, project ID resolution, and WebSocket board data.
- *
- * Gets projectId from route params (/projects/:projectId/...) and resolves workspace path.
- *
- * Usage:
- * ```tsx
- * <WorkspaceBoardProvider>
- *   <YourComponent />
- * </WorkspaceBoardProvider>
- * ```
- */
 export function WorkspaceBoardProvider({
   children,
 }: WorkspaceBoardProviderProps) {
-  const params = useParams({ strict: false }) as { projectId?: string };
-  const routeIdentifier = params.projectId ?? null;
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [workspacePath, setWorkspacePath] = useState<string | null>(null);
-  const [projectError, setProjectError] = useState<string | null>(null);
+  const { projectId, workspacePath, error: projectError } = useProjectContext();
 
-  // Resolve slug/id → UUID + workspace path
-  useEffect(() => {
-    if (!routeIdentifier) {
-      setProjectId(null);
-      setWorkspacePath(null);
-      setProjectError(null);
-      return;
-    }
+  const boardData = useWorkspaceBoard({ projectId });
 
-    let cancelled = false;
-
-    const resolveProject = async () => {
-      try {
-        const project = await taskApi.getProject(routeIdentifier);
-        if (!cancelled) {
-          setProjectId(project.id);
-          setWorkspacePath(project.gitRepoPath);
-          setProjectError(null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("Failed to resolve project:", error);
-          setWorkspacePath(null);
-          setProjectError(
-            error instanceof Error
-              ? error.message
-              : "Failed to resolve project",
-          );
-        }
-      }
-    };
-
-    void resolveProject();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [routeIdentifier]);
-
-  // Get board data from WebSocket hook
-  const boardData = useWorkspaceBoard({
-    workspacePath,
-    projectId,
-  });
-
-  // Merge project error with stream error if present
   const error = projectError ?? boardData.error;
 
   const contextValue: WorkspaceBoardContextValue = {
@@ -117,10 +48,7 @@ export function WorkspaceBoardProvider({
 
 /**
  * Hook to access workspace board context.
- *
- * Must be used within a `WorkspaceBoardProvider`.
- *
- * @throws Error if used outside provider
+ * Must be used within a WorkspaceBoardProvider.
  */
 export function useWorkspaceBoardContext(): WorkspaceBoardContextValue {
   const context = useContext(WorkspaceBoardContext);
@@ -133,11 +61,7 @@ export function useWorkspaceBoardContext(): WorkspaceBoardContextValue {
 }
 
 /**
- * Optional version of useWorkspaceBoardContext that returns null
- * when used outside the provider.
- *
- * Use this for components that may be rendered both inside and outside
- * the WorkspaceBoardProvider (e.g., ElectronTitlebar).
+ * Optional version that returns null when used outside the provider.
  */
 export function useOptionalWorkspaceBoardContext(): WorkspaceBoardContextValue | null {
   return useContext(WorkspaceBoardContext);

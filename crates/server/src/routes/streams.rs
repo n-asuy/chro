@@ -5,7 +5,7 @@
 //! - Live filtered updates via JSON Patch (RFC 6902)
 //! - Automatic reconnection support on client side
 
-use crate::{perf, AppState};
+use crate::{identifiers, perf, ApiError, AppState};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -45,15 +45,16 @@ pub(crate) fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 struct StreamTasksQuery {
-    project_id: Uuid,
+    project_id: String,
 }
 
 async fn stream_tasks(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<StreamTasksQuery>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_tasks_ws(socket, state, params.project_id))
+) -> Result<impl IntoResponse, ApiError> {
+    let project_id = identifiers::resolve_project_id(state.pool(), &params.project_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_tasks_ws(socket, state, project_id)))
 }
 
 async fn handle_stream_tasks_ws(socket: WebSocket, state: AppState, project_id: Uuid) {
@@ -89,9 +90,10 @@ async fn handle_stream_tasks_ws(socket: WebSocket, state: AppState, project_id: 
 async fn stream_task_runs(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_task_runs_ws(socket, state, task_id))
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let task_id = identifiers::resolve_task_id(state.pool(), &task_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_task_runs_ws(socket, state, task_id)))
 }
 
 async fn handle_stream_task_runs_ws(socket: WebSocket, state: AppState, task_id: Uuid) {
@@ -127,9 +129,10 @@ async fn handle_stream_task_runs_ws(socket: WebSocket, state: AppState, task_id:
 async fn stream_task_sessions(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_task_sessions_ws(socket, state, task_id))
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let task_id = identifiers::resolve_task_id(state.pool(), &task_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_task_sessions_ws(socket, state, task_id)))
 }
 
 async fn handle_stream_task_sessions_ws(socket: WebSocket, state: AppState, task_id: Uuid) {
@@ -170,8 +173,9 @@ async fn stream_task_drafts(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Query(params): Query<StreamTasksQuery>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_task_drafts_ws(socket, state, params.project_id))
+) -> Result<impl IntoResponse, ApiError> {
+    let project_id = identifiers::resolve_project_id(state.pool(), &params.project_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_task_drafts_ws(socket, state, project_id)))
 }
 
 async fn handle_stream_task_drafts_ws(socket: WebSocket, state: AppState, project_id: Uuid) {
@@ -211,9 +215,10 @@ async fn handle_stream_task_drafts_ws(socket: WebSocket, state: AppState, projec
 async fn stream_task_run_logs(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_stream_task_run_logs_ws(socket, state, id))
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = identifiers::resolve_task_run_id(state.pool(), &id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_task_run_logs_ws(socket, state, id)))
 }
 
 async fn handle_stream_task_run_logs_ws(mut socket: WebSocket, state: AppState, task_run_id: Uuid) {

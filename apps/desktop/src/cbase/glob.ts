@@ -2,7 +2,7 @@
  * Glob pattern matching for .cbase dataset definitions
  */
 
-import type { LensDataset } from "./types";
+import type { CbaseDataset } from "./types";
 
 /** Match a relative path against a glob pattern (simplified) */
 export function matchGlob(pattern: string, path: string): boolean {
@@ -41,7 +41,7 @@ export function matchGlob(pattern: string, path: string): boolean {
 /** Check if a file path matches the dataset include/exclude patterns */
 export function matchesDataset(
   relativePath: string,
-  dataset: LensDataset,
+  dataset: CbaseDataset,
 ): boolean {
   const included = dataset.include.some((pattern) =>
     matchGlob(pattern, relativePath),

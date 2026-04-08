@@ -3,6 +3,9 @@
  *
  * - Uses dataRef + structuredClone for immutable patch application
  * - Uses rfc6902 library for RFC 6902 JSON Patch application
+ * - Batches patches via setTimeout(0) so updates fire even when the
+ *   window is in the background (requestAnimationFrame is completely
+ *   paused by Chromium/Electron when the window loses visibility)
  * - Exponential backoff for reconnection (1s, 2s, 4s, 8s max)
  * - Handles finished signal to prevent reconnection
  */
@@ -68,7 +71,7 @@ export function useJsonPatchWsStream<T extends object>(
   const retryCountRef = useRef<number>(0);
   const finishedRef = useRef<boolean>(false);
   const pendingOpsRef = useRef<Operation[]>([]);
-  const rafIdRef = useRef<number | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
 
   const optionsRef = useRef(options);
@@ -85,9 +88,9 @@ export function useJsonPatchWsStream<T extends object>(
   }, []);
 
   const closeWebSocket = useCallback(() => {
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
     }
     pendingOpsRef.current = [];
     if (wsRef.current) {
@@ -144,9 +147,9 @@ export function useJsonPatchWsStream<T extends object>(
 
           if (msg.type === "json_patch") {
             pendingOpsRef.current.push(...msg.payload);
-            if (rafIdRef.current === null) {
-              rafIdRef.current = requestAnimationFrame(() => {
-                rafIdRef.current = null;
+            if (flushTimerRef.current === null) {
+              flushTimerRef.current = window.setTimeout(() => {
+                flushTimerRef.current = null;
                 const current = dataRef.current;
                 const patches = dedupeJsonPatchOperations(
                   pendingOpsRef.current,
@@ -159,12 +162,12 @@ export function useJsonPatchWsStream<T extends object>(
 
                 dataRef.current = next;
                 setData(next);
-              });
+              }, 0);
             }
           } else if (msg.type === "finished") {
-            if (rafIdRef.current !== null) {
-              cancelAnimationFrame(rafIdRef.current);
-              rafIdRef.current = null;
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTimerRef.current = null;
             }
             const current = dataRef.current;
             const patches = dedupeJsonPatchOperations(pendingOpsRef.current);

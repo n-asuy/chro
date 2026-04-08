@@ -165,18 +165,18 @@ impl From<WorkspaceFile> for ProjectFileResponse {
     }
 }
 
-async fn get_project_path(state: &AppState, project_id: Uuid) -> Result<PathBuf, ApiError> {
-    let project = ProjectRecord::get(state.pool(), project_id).await?;
-    Ok(PathBuf::from(&project.git_repo_path))
+async fn resolve_project_path(state: &AppState, identifier: &str) -> Result<(Uuid, PathBuf), ApiError> {
+    let project = ProjectRecord::get_by_identifier(state.pool(), identifier).await?;
+    Ok((project.id, PathBuf::from(&project.git_repo_path)))
 }
 
 
 async fn list_project_entries(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Query(query): Query<ProjectEntriesQuery>,
 ) -> Result<Json<ProjectEntriesEnvelope>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let service = ProjectFileService::new(state.runtime(), project_path);
     let detail = match query.detail.as_deref() {
         None => WorkspaceEntryDetail::Full,
@@ -208,7 +208,7 @@ async fn list_project_entries(
 
 async fn read_project_file(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Query(query): Query<ProjectFileQuery>,
 ) -> Result<Json<ProjectFileEnvelope>, ApiError> {
     if query.relative_path.trim().is_empty() {
@@ -216,7 +216,7 @@ async fn read_project_file(
             "query parameter 'relative_path' is required".into(),
         ));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let file = ProjectFileService::new(state.runtime(), project_path)
         .read_file(&query.relative_path)
         .await?;
@@ -228,7 +228,7 @@ async fn read_project_file(
 
 async fn read_project_binary_file(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Query(query): Query<ProjectFileQuery>,
 ) -> Result<Response, ApiError> {
     if query.relative_path.trim().is_empty() {
@@ -236,7 +236,7 @@ async fn read_project_binary_file(
             "query parameter 'relative_path' is required".into(),
         ));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let binary_file = ProjectFileService::new(state.runtime(), project_path)
         .read_binary_file(&query.relative_path)
         .await?;
@@ -259,7 +259,7 @@ struct WriteBinaryFileResponse {
 
 async fn write_project_binary_file(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Json<WriteBinaryFileResponse>, ApiError> {
     let mut relative_path: Option<String> = None;
@@ -301,7 +301,7 @@ async fn write_project_binary_file(
         return Err(ApiError::BadRequest("relative_path cannot be empty".into()));
     }
 
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let binary_file = ProjectFileService::new(state.runtime(), project_path)
         .write_binary_file(&relative_path, data)
         .await?;
@@ -321,13 +321,13 @@ struct WriteProjectFileRequest {
 
 async fn write_project_file(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<WriteProjectFileRequest>,
 ) -> Result<Json<ProjectFileEnvelope>, ApiError> {
     if payload.relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("relative_path is required".into()));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let file = ProjectFileService::new(state.runtime(), project_path)
         .write_file(&payload.relative_path, &payload.content)
         .await?;
@@ -344,7 +344,7 @@ struct DeleteProjectFileResponse {
 
 async fn delete_project_file(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Query(query): Query<ProjectFileQuery>,
 ) -> Result<Json<DeleteProjectFileResponse>, ApiError> {
     if query.relative_path.trim().is_empty() {
@@ -352,7 +352,7 @@ async fn delete_project_file(
             "query parameter 'relative_path' is required".into(),
         ));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let deleted_path = ProjectFileService::new(state.runtime(), project_path)
         .delete_entry(&query.relative_path)
         .await?;
@@ -372,13 +372,13 @@ struct CreateDirectoryResponse {
 
 async fn create_project_directory(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<CreateDirectoryRequest>,
 ) -> Result<Json<CreateDirectoryResponse>, ApiError> {
     if payload.relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("relative_path is required".into()));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let entry = ProjectFileService::new(state.runtime(), project_path)
         .create_directory(&payload.relative_path)
         .await?;
@@ -401,7 +401,7 @@ struct RenameEntryResponse {
 
 async fn rename_project_entry(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<RenameEntryRequest>,
 ) -> Result<Json<RenameEntryResponse>, ApiError> {
     if payload.old_relative_path.trim().is_empty() || payload.new_relative_path.trim().is_empty() {
@@ -409,7 +409,7 @@ async fn rename_project_entry(
             "old_relative_path and new_relative_path are required".into(),
         ));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let result = ProjectFileService::new(state.runtime(), project_path)
         .rename_entry(&payload.old_relative_path, &payload.new_relative_path)
         .await?;
@@ -432,7 +432,7 @@ struct CopyEntryResponse {
 
 async fn copy_project_entry(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<CopyEntryRequest>,
 ) -> Result<Json<CopyEntryResponse>, ApiError> {
     if payload.source_relative_path.trim().is_empty()
@@ -442,7 +442,7 @@ async fn copy_project_entry(
             "source_relative_path and dest_relative_path are required".into(),
         ));
     }
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let entry = ProjectFileService::new(state.runtime(), project_path)
         .copy_entry(&payload.source_relative_path, &payload.dest_relative_path)
         .await?;
@@ -474,7 +474,7 @@ struct ProjectSearchResponse {
 
 async fn search_project_files(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Query(query): Query<ProjectSearchQuery>,
 ) -> Result<Json<ProjectSearchResponse>, ApiError> {
     use file_search_cache::{CacheError, SearchMatchType, SearchMode};
@@ -485,7 +485,7 @@ async fn search_project_files(
         ));
     }
 
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
     let mode = match query.mode.as_deref() {
         Some("settings") => SearchMode::Settings,
@@ -534,10 +534,10 @@ struct RevealInFinderRequest {
 
 async fn reveal_in_finder(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<RevealInFinderRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let full_path = project_path.join(payload.relative_path.trim_start_matches('/'));
 
     if !full_path.starts_with(&project_path) {

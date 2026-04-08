@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Error as SqlxError;
 use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{identifiers::resolve_task_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -57,8 +57,9 @@ struct UpdateMergeStatusRequest {
 
 async fn list_task_merges(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<MergeListResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
     TaskRecord::get(state.pool(), task_id).await?;
     let merges = TaskMerge::find_by_task(state.pool(), task_id).await?;
     Ok(Json(MergeListResponse { merges }))

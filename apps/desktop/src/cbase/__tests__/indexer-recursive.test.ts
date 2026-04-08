@@ -1,6 +1,6 @@
 import type { DesktopWorkspaceEntry } from "@/types/desktop";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { LensDataset } from "../types";
+import type { CbaseDataset } from "../types";
 
 vi.mock("@/lib/project-client", () => ({
   listProjectEntries: vi.fn(),
@@ -20,7 +20,7 @@ describe("indexWorkspaceFiles (recursive listing)", () => {
   });
 
   it("indexes nested files from recursive project entries", async () => {
-    const dataset: LensDataset = {
+    const dataset: CbaseDataset = {
       include: [".claude/skills/**/*.md"],
     };
     const entries: DesktopWorkspaceEntry[] = [
@@ -88,7 +88,7 @@ describe("indexWorkspaceFiles (recursive listing)", () => {
   });
 
   it("preserves modified timestamp metadata for table views", async () => {
-    const dataset: LensDataset = {
+    const dataset: CbaseDataset = {
       include: ["**/*.md"],
     };
     const entries: DesktopWorkspaceEntry[] = [
@@ -123,7 +123,7 @@ describe("indexWorkspaceFiles (recursive listing)", () => {
   });
 
   it("skips files that fail to read", async () => {
-    const dataset: LensDataset = {
+    const dataset: CbaseDataset = {
       include: ["**/*.md"],
     };
     const entries: DesktopWorkspaceEntry[] = [

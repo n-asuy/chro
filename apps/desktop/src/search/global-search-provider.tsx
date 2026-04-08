@@ -1,4 +1,3 @@
-import { useOptionalProjectContext } from "@/files/context/project-context";
 import {
   type FileSearchResult,
   MATCH_TYPE_LABELS,
@@ -6,10 +5,10 @@ import {
 } from "@/files/lib/file-search";
 import { useLanguage } from "@/i18n";
 import { searchProjectFiles } from "@/lib/project-client";
-import { isUuidIdentifier } from "@/lib/uuid";
+import { slugOrId } from "@/lib/slug";
 import { useProjectTasksStream } from "@/session/hooks/use-project-tasks-stream";
 import { Dialog, Transition } from "@headlessui/react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { Disc, FileText, Folder, Loader2, Search, X } from "lucide-react";
 import {
   Fragment,
@@ -35,10 +34,16 @@ import {
 // Context
 // ---------------------------------------------------------------------------
 
+type ActiveProject = {
+  projectId: string;
+  projectSlug: string | null;
+};
+
 type GlobalSearchContextValue = {
   isOpen: boolean;
   open: () => void;
   close: () => void;
+  setActiveProject: (project: ActiveProject | null) => void;
 };
 
 const GlobalSearchContext = createContext<GlobalSearchContextValue | null>(
@@ -62,6 +67,9 @@ export function useGlobalSearch() {
 export function GlobalSearchProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
   const [hasInitialized, setHasInitialized] = useState(false);
+  const [activeProject, setActiveProject] = useState<ActiveProject | null>(
+    null,
+  );
 
   const open = useCallback(() => {
     setHasInitialized(true);
@@ -91,7 +99,7 @@ export function GlobalSearchProvider({ children }: { children: ReactNode }) {
   }, [open]);
 
   const value = useMemo<GlobalSearchContextValue>(
-    () => ({ isOpen, open, close }),
+    () => ({ isOpen, open, close, setActiveProject }),
     [isOpen, open, close],
   );
 
@@ -99,10 +107,36 @@ export function GlobalSearchProvider({ children }: { children: ReactNode }) {
     <GlobalSearchContext.Provider value={value}>
       {children}
       {hasInitialized ? (
-        <GlobalSearchModal isOpen={isOpen} onClose={close} />
+        <GlobalSearchModal
+          isOpen={isOpen}
+          onClose={close}
+          activeProject={activeProject}
+        />
       ) : null}
     </GlobalSearchContext.Provider>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Sync — render inside ProjectProvider to push project info up to this context
+// ---------------------------------------------------------------------------
+
+export function GlobalSearchProjectSync({
+  projectId,
+  projectSlug,
+}: {
+  projectId: string | null;
+  projectSlug: string | null;
+}) {
+  const ctx = useContext(GlobalSearchContext);
+  useEffect(() => {
+    if (!ctx) return;
+    ctx.setActiveProject(
+      projectId ? { projectId, projectSlug } : null,
+    );
+    return () => ctx.setActiveProject(null);
+  }, [ctx, projectId, projectSlug]);
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,21 +149,16 @@ const FILE_SEARCH_LIMIT = 20;
 function GlobalSearchModal({
   isOpen,
   onClose,
+  activeProject,
 }: {
   isOpen: boolean;
   onClose: () => void;
+  activeProject: ActiveProject | null;
 }) {
   const { t } = useLanguage();
   const navigate = useNavigate();
-  const params = useParams({ strict: false }) as {
-    projectId?: string;
-  };
-  // Route param is slug for navigation; use project context UUID for API
-  const projectSlug = params.projectId;
-  const projectContext = useOptionalProjectContext();
-  const projectId =
-    projectContext?.projectId ??
-    (isUuidIdentifier(projectSlug) ? projectSlug : null);
+  const projectId = activeProject?.projectId ?? null;
+  const projectSlug = activeProject?.projectSlug ?? projectId;
 
   const [query, setQuery] = useState("");
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
@@ -245,7 +274,7 @@ function GlobalSearchModal({
           to: "/projects/$projectId/session/$taskId",
           params: {
             projectId: navProjectId,
-            taskId: item.task.slug ?? item.task.id,
+            taskId: slugOrId(item.task),
           },
         });
       } else {
@@ -257,7 +286,7 @@ function GlobalSearchModal({
       }
       handleClose();
     },
-    [handleClose, navigate, projectId],
+    [handleClose, navigate, projectId, projectSlug],
   );
 
   // Keyboard navigation

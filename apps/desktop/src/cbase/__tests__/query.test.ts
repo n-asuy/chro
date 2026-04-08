@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildLensQuery } from "../query";
-import type { LensFilter, LensSort, LensView } from "../types";
+import { buildCbaseQuery } from "../query";
+import type { CbaseFilter, CbaseSort, CbaseView } from "../types";
 
-describe("buildLensQuery", () => {
-  const baseView: LensView = {
+describe("buildCbaseQuery", () => {
+  const baseView: CbaseView = {
     id: "v_table",
     name: "Table",
     type: "table",
@@ -11,12 +11,12 @@ describe("buildLensQuery", () => {
   };
 
   it("builds query with header/source/operations", () => {
-    const globalFilters: LensFilter[] = [
+    const globalFilters: CbaseFilter[] = [
       { property: "p_status", op: "=", value: "todo" },
     ];
-    const globalSort: LensSort[] = [{ by: "p_priority", dir: "desc" }];
+    const globalSort: CbaseSort[] = [{ by: "p_priority", dir: "desc" }];
 
-    const query = buildLensQuery(baseView, globalFilters, globalSort);
+    const query = buildCbaseQuery(baseView, globalFilters, globalSort);
 
     expect(query.header).toEqual({
       type: "table",
@@ -39,16 +39,16 @@ describe("buildLensQuery", () => {
   });
 
   it("uses view sort over global sort, then applies limit", () => {
-    const globalSort: LensSort[] = [{ by: "p_priority", dir: "desc" }];
-    const viewSort: LensSort[] = [{ by: "p_title", dir: "asc" }];
+    const globalSort: CbaseSort[] = [{ by: "p_priority", dir: "desc" }];
+    const viewSort: CbaseSort[] = [{ by: "p_title", dir: "asc" }];
 
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       sort: viewSort,
       limit: 5,
     };
 
-    const query = buildLensQuery(view, undefined, globalSort);
+    const query = buildCbaseQuery(view, undefined, globalSort);
 
     expect(query.operations).toEqual([
       {
@@ -64,19 +64,19 @@ describe("buildLensQuery", () => {
   });
 
   it("includes global and view filters in order", () => {
-    const globalFilters: LensFilter[] = [
+    const globalFilters: CbaseFilter[] = [
       { property: "p_status", op: "=", value: "todo" },
     ];
-    const viewFilters: LensFilter[] = [
+    const viewFilters: CbaseFilter[] = [
       { property: "p_priority", op: ">", value: 1 },
     ];
 
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       filters: viewFilters,
     };
 
-    const query = buildLensQuery(view, globalFilters);
+    const query = buildCbaseQuery(view, globalFilters);
 
     expect(query.operations).toEqual([
       {

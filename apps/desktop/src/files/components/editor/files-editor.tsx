@@ -27,7 +27,7 @@ import { ImageViewer } from "./image-viewer";
 import { VideoViewer } from "./video-viewer";
 import { PdfViewer } from "./pdf-viewer";
 import { ExcalidrawEditor } from "./excalidraw-editor";
-import { BaseViewer } from "../../../cbase/components/lens-viewer";
+import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useAutoSave } from "../../hooks/use-auto-save";
 import {
   FrontmatterEditor,

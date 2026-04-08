@@ -3,6 +3,7 @@ import type { DisplayEntry, TaskSessionRecord } from "../../types";
 import {
   type TaskRunConversationState,
   buildTaskSessionPromptMap,
+  createLoadingEntry,
   createSyntheticUserMessageEntry,
   filterConversationLogEntries,
   flattenConversationEntries,
@@ -190,6 +191,47 @@ describe("flattenConversationEntries", () => {
       "run-1:assistant-1",
       "run-2:synthetic-user-session-2",
       "run-2:assistant-2",
+    ]);
+  });
+
+  it("applies prompt overrides for pending runs without sessions", () => {
+    const states = [
+      makeState("run-pending", "2025-01-01T00:00:00.000Z", [
+        makeAssistantEntry("run-pending", "assistant-pending", "Pending reply"),
+      ]),
+    ];
+
+    const flattened = flattenConversationEntries(states, [], {
+      promptOverridesByRun: new Map([
+        [
+          "run-pending",
+          {
+            prompt: "Pending prompt",
+          },
+        ],
+      ]),
+    });
+
+    expect(flattened).toEqual([
+      createSyntheticUserMessageEntry("run-pending", "Pending prompt"),
+      makeAssistantEntry("run-pending", "assistant-pending", "Pending reply"),
+    ]);
+  });
+
+  it("appends loading indicators for specified runs", () => {
+    const states = [
+      makeState("run-1", "2025-01-01T00:00:00.000Z", [
+        makeAssistantEntry("run-1"),
+      ]),
+    ];
+
+    const flattened = flattenConversationEntries(states, [], {
+      loadingRunIds: ["run-1"],
+    });
+
+    expect(flattened).toEqual([
+      makeAssistantEntry("run-1"),
+      createLoadingEntry("run-1"),
     ]);
   });
 });

@@ -6,6 +6,16 @@ export type TaskRunConversationState = {
   entries: DisplayEntry[];
 };
 
+export type TaskRunPromptOverride = {
+  prompt: string;
+  sessionId?: string | null;
+};
+
+type FlattenConversationEntriesOptions = {
+  promptOverridesByRun?: Map<string, TaskRunPromptOverride>;
+  loadingRunIds?: Iterable<string>;
+};
+
 const isNormalizedUserMessage = (entry: DisplayEntry): boolean =>
   entry.type === "NORMALIZED_ENTRY" &&
   entry.content.entry_type.type === "user_message";
@@ -56,11 +66,40 @@ export function createSyntheticUserMessageEntry(
   };
 }
 
+export function createLoadingEntry(taskRunId: string): DisplayEntry {
+  const id = `loading-${taskRunId}`;
+
+  return {
+    type: "NORMALIZED_ENTRY",
+    key: `${taskRunId}:${id}`,
+    content: {
+      id,
+      timestamp: null,
+      entry_type: { type: "loading" },
+      content: "",
+    },
+  };
+}
+
 export function flattenConversationEntries(
   states: TaskRunConversationState[],
   sessions: TaskSessionRecord[],
+  options?: FlattenConversationEntriesOptions,
 ): DisplayEntry[] {
-  const promptByRun = buildTaskSessionPromptMap(sessions);
+  const promptByRun = new Map<string, TaskRunPromptOverride>();
+  const loadingRunIds = new Set(options?.loadingRunIds ?? []);
+
+  for (const [taskRunId, override] of options?.promptOverridesByRun ?? []) {
+    if (!override.prompt.trim()) continue;
+    promptByRun.set(taskRunId, override);
+  }
+
+  for (const [taskRunId, session] of buildTaskSessionPromptMap(sessions)) {
+    promptByRun.set(taskRunId, {
+      prompt: session.prompt ?? "",
+      sessionId: session.id,
+    });
+  }
 
   return [...states]
     .sort(
@@ -69,15 +108,15 @@ export function flattenConversationEntries(
     )
     .flatMap((state) => {
       const result: DisplayEntry[] = [];
-      const session = promptByRun.get(state.taskRunId);
-      const sessionPrompt = session?.prompt;
+      const promptOverride = promptByRun.get(state.taskRunId);
+      const sessionPrompt = promptOverride?.prompt;
 
       if (sessionPrompt) {
         result.push(
           createSyntheticUserMessageEntry(
             state.taskRunId,
             sessionPrompt,
-            session?.id,
+            promptOverride?.sessionId ?? undefined,
           ),
         );
       }
@@ -87,6 +126,10 @@ export function flattenConversationEntries(
           excludeUserMessages: Boolean(sessionPrompt),
         }),
       );
+
+      if (loadingRunIds.has(state.taskRunId)) {
+        result.push(createLoadingEntry(state.taskRunId));
+      }
       return result;
     });
 }

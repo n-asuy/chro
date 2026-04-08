@@ -11,6 +11,7 @@ import { useLanguage } from "@/i18n";
 import { updateTaskTitle } from "@/kanban/state/task-store";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
+import { slugOrId } from "@/lib/slug";
 import {
   type BaseCodingAgent,
   type ExecutorConfigs,
@@ -46,7 +47,9 @@ import {
   Search,
 } from "lucide-react";
 import {
+  type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -72,14 +75,22 @@ import {
 } from "./components/session-input-controls";
 import { SessionSidebarContent } from "./components/session-sidebar-content";
 import { TaskConversation } from "./components/task-conversation";
-import { isWorktreeExecutionPath } from "./domain/execution-mode";
+import {
+  isWorktreeExecutionPath,
+  resolveUseWorktreeForRun,
+} from "./domain/execution-mode";
+import { selectTargetTaskRun } from "./domain/task-run-selection";
 import {
   useArchivedSessions,
+  useConversationHistory,
   useDiffStream,
   useProjectTasksStream,
+  useSessionTaskState,
   useSessionExecutionOptions,
   useSessionSidebarState,
   useSingleSessionController,
+  useTaskRunsStream,
+  useTaskSessionsStream,
 } from "./hooks";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
@@ -88,7 +99,6 @@ import {
   QUESTIONS_SKIPPED_MESSAGE,
   useUserQuestionStore,
 } from "./state/user-question-store";
-import type { TaskAttempt } from "./types";
 import type { StoredTask, UiEventMessage } from "./types";
 import { formatContextForPrompt } from "./types/context";
 import {
@@ -180,8 +190,6 @@ export function SingleAgentSessionView({
   const editor = usePromptEditorHandle();
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const atPopoverRef = useRef<AtPopoverHandle>(null);
-  // Use optimisticSending only during the brief window between API call and server update
-  const [optimisticSending, setOptimisticSending] = useState(false);
   // Track stopping state for immediate UI feedback
   const [isStopping, setIsStopping] = useState(false);
   const [diffViewerOpen, setDiffViewerOpen] = useState(false);
@@ -261,15 +269,9 @@ export function SingleAgentSessionView({
   const { archiveSession, restoreSession, isArchived } = useArchivedSessions();
 
   // Session state
-  // Current attempt for conversation
-  const [currentAttempt, setCurrentAttempt] = useState<TaskAttempt | null>(
-    null,
-  );
-
   // Ref to track the active taskRunId for cancellation
   // This is needed because URL params may not update immediately after sending
   const activeTaskRunIdRef = useRef<string | null>(null);
-  const taskRunLoadTokenRef = useRef(0);
   const [currentTaskRunTargetBranch, setCurrentTaskRunTargetBranch] = useState<
     string | null
   >(null);
@@ -359,7 +361,6 @@ export function SingleAgentSessionView({
 
   const {
     tasks: streamedTasks,
-    tasksById: streamedTasksById,
     isLoading: isTasksLoading,
     error: tasksStreamError,
   } = useProjectTasksStream({
@@ -370,23 +371,54 @@ export function SingleAgentSessionView({
   const isSessionsLoading = isTasksLoading;
   const sessionsError = tasksStreamError;
 
-  // Resolve task slug/UUID from route to UUID for API calls
-  const activeTaskId = useMemo(() => {
-    if (!routeTaskSlug) return null;
-    // Direct UUID match (backward compat or after navigation with UUID)
-    if (streamedTasksById[routeTaskSlug]) return routeTaskSlug;
-    // Slug lookup
-    const task = Object.values(streamedTasksById).find(
-      (t) => t.slug === routeTaskSlug,
-    );
-    return task?.id ?? null;
-  }, [routeTaskSlug, streamedTasksById]);
+  const {
+    tasks: displayedTasks,
+    activeTaskId,
+    activeStreamTaskId,
+    activeTask,
+    pendingSubmission,
+    beginPendingSubmission,
+    resolvePendingSubmission,
+    clearPendingSubmission,
+  } = useSessionTaskState({
+    projectId: routeProjectId,
+    routeTaskSlug,
+    streamedTasks,
+  });
 
-  // Guard against stale attempt state from a previously opened task.
-  // During route switches, currentAttempt can briefly point to another task.
-  // taskRunId is always a resolved UUID (not a slug).
-  const taskRunId =
-    currentAttempt?.task_id === activeTaskId ? currentAttempt.id : null;
+  const sidebarActiveTaskId = activeTaskId;
+
+  const {
+    runs: taskRuns,
+    isLoading: isTaskRunsLoading,
+    error: taskRunsError,
+  } = useTaskRunsStream({
+    taskId: activeStreamTaskId,
+    enabled: Boolean(activeStreamTaskId),
+  });
+
+  const {
+    sessions: taskSessions,
+    isLoading: isTaskSessionsLoading,
+    error: taskSessionsError,
+  } = useTaskSessionsStream({
+    taskId: activeStreamTaskId,
+    enabled: Boolean(activeStreamTaskId),
+  });
+
+  const selectedRun = useMemo(
+    () => selectTargetTaskRun(taskRuns, routeRunSlug ?? undefined),
+    [routeRunSlug, taskRuns],
+  );
+
+  const activeRunRecord = useMemo(() => {
+    if (pendingSubmission?.runId) {
+      return taskRuns.find((run) => run.id === pendingSubmission.runId) ?? null;
+    }
+    return selectedRun;
+  }, [pendingSubmission?.runId, selectedRun, taskRuns]);
+
+  const taskRunId = pendingSubmission?.runId ?? activeRunRecord?.id ?? null;
 
   // User question state from store
   const pendingQuestionsMap = useUserQuestionStore((s) => s.pendingQuestions);
@@ -397,23 +429,68 @@ export function SingleAgentSessionView({
   const pendingQuestions = taskRunId
     ? pendingQuestionsMap.get(taskRunId) ?? null
     : null;
-
-  // Resolve run slug to UUID (deferred until runs are loaded)
-  const routeRunId = routeRunSlug;
-
-  const activeTask = useMemo(
-    () => (activeTaskId ? streamedTasksById[activeTaskId] ?? null : null),
-    [streamedTasksById, activeTaskId],
-  );
   useDocumentTitle(activeTask?.title ?? null);
 
   const isTaskRunning = Boolean(activeTask?.active_session_id);
-  // Combined flag: server says running OR we just sent a request (optimistic)
-  const isSending = isTaskRunning || optimisticSending;
+  const isSending = isTaskRunning || Boolean(pendingSubmission);
   const isAttachingSession = pendingSessionDrops > 0;
   const canSend =
-    Boolean(activeTaskId || workspace) && !isSending && !isAttachingSession;
+    Boolean(activeStreamTaskId || workspace) &&
+    !isSending &&
+    !isAttachingSession;
   const isExecutorLocked = Boolean(taskRunId) || isSending;
+
+  useEffect(() => {
+    if (pendingSubmission && !pendingSubmission.runId) {
+      activeTaskRunIdRef.current = null;
+      return;
+    }
+    activeTaskRunIdRef.current = taskRunId;
+  }, [pendingSubmission, taskRunId]);
+
+  useEffect(() => {
+    if (!activeRunRecord) {
+      setCurrentTaskRunTargetBranch(null);
+      setCurrentContainerRef(null);
+      if (!activeTaskId) {
+        setSessionExecutorProfile(executorProfileId);
+      }
+      return;
+    }
+
+    setCurrentTaskRunTargetBranch(activeRunRecord.target_branch ?? null);
+    const runExecutionPath =
+      activeRunRecord.container_ref ?? activeRunRecord.workspace_path;
+    setCurrentContainerRef(runExecutionPath ?? null);
+    setUseWorktree(resolveUseWorktreeForRun(activeRunRecord, workspace));
+
+    const runExecutorProfile =
+      parseExecutorProfileId(activeRunRecord.executor_label) ??
+      executorProfileId ??
+      null;
+    setSessionExecutorProfile(runExecutorProfile);
+  }, [
+    activeRunRecord,
+    activeTaskId,
+    executorProfileId,
+    setUseWorktree,
+    workspace,
+  ]);
+
+  useEffect(() => {
+    if (!activeTaskId) {
+      return;
+    }
+    if (pendingSubmission) {
+      setForceNewAttempt(false);
+      return;
+    }
+    if (isTaskRunsLoading) {
+      setForceNewAttempt(null);
+      return;
+    }
+    setForceNewAttempt(activeRunRecord === null);
+  }, [activeRunRecord, activeTaskId, isTaskRunsLoading, pendingSubmission]);
 
   // Keep mode selector in sync with the currently loaded run.
   useEffect(() => {
@@ -422,13 +499,6 @@ export function SingleAgentSessionView({
     }
     setUseWorktree(isWorktreeExecutionPath(currentContainerRef, workspace));
   }, [currentContainerRef, workspace]);
-
-  // Fail-safe: release optimistic lock once server no longer marks the task running.
-  useEffect(() => {
-    if (!isTaskRunning && optimisticSending) {
-      setOptimisticSending(false);
-    }
-  }, [isTaskRunning, optimisticSending]);
 
   const diffStream = useDiffStream({
     taskRunId,
@@ -474,20 +544,17 @@ export function SingleAgentSessionView({
 
   // Full reset for new session
   const handleFullReset = useCallback(() => {
-    // Invalidate any in-flight /runs resolution tied to previous route state.
-    taskRunLoadTokenRef.current += 1;
     setCurrentTaskRunTargetBranch(null);
     setCurrentContainerRef(null);
     setUseWorktree(true);
     setForceNewAttempt(false);
-    setCurrentAttempt(null);
     setSessionExecutorProfile(executorProfileId);
-    setOptimisticSending(false);
+    clearPendingSubmission();
     editor.clear();
     // Clear active taskRunId ref
     activeTaskRunIdRef.current = null;
     // Note: activeTaskId and taskRunId are derived from URL, so navigation clears them
-  }, [executorProfileId]);
+  }, [clearPendingSubmission, executorProfileId, editor]);
 
   // Handle workspace change - reset session state when project changes
   useEffect(() => {
@@ -571,7 +638,7 @@ export function SingleAgentSessionView({
 
   // Handle new session link click (only reset state if not opening in new tab)
   const handleNewSessionClick = useCallback(
-    (event: React.MouseEvent<HTMLAnchorElement>) => {
+    (event: ReactMouseEvent<HTMLAnchorElement>) => {
       // If command/ctrl key is pressed, let the Link handle it (open in new tab)
       if (event.metaKey || event.ctrlKey) {
         return;
@@ -595,42 +662,33 @@ export function SingleAgentSessionView({
     [executorProfileId, isExecutorLocked],
   );
 
-  const { loadTaskRunData, submitPrompt, handleCancel } =
-    useSingleSessionController({
-      workspace,
-      routeProjectId,
-      activeTaskId,
-      taskRunId,
-      forceNewAttempt: shouldForceNewAttempt,
-      useWorktree,
-      baseBranch,
-      sessionExecutorSelection,
-      executorProfileId,
-      isSending,
-      isStopping,
-      t,
-      editor,
-      isSessionMountedRef,
-      latestRouteProjectIdRef,
-      activeTaskRunIdRef,
-      taskRunLoadTokenRef,
-      parseExecutorProfileId,
-      setCurrentTaskRunTargetBranch,
-      setCurrentContainerRef,
-      setUseWorktree,
-      setSessionExecutorProfile,
-      setCurrentAttempt,
-      setOptimisticSending,
-      setIsStopping,
-      addErrorMessage,
-      navigateToSession,
-      createPerfRequestId,
-    });
+  const { submitPrompt, handleCancel } = useSingleSessionController({
+    workspace,
+    routeProjectId,
+    activeTaskId: activeStreamTaskId,
+    taskRunId,
+    forceNewAttempt: shouldForceNewAttempt,
+    useWorktree,
+    baseBranch,
+    sessionExecutorSelection,
+    executorProfileId,
+    isSending,
+    isStopping,
+    t,
+    editor,
+    isSessionMountedRef,
+    latestRouteProjectIdRef,
+    activeTaskRunIdRef,
+    setIsStopping,
+    addErrorMessage,
+    navigateToSession,
+    createPerfRequestId,
+  });
 
   // Load task handler (user clicks on a task in the sidebar)
   const handleLoadTask = useCallback(
     (task: StoredTask, selectedRunId?: string) => {
-      if (task.id === activeTaskId && !selectedRunId) {
+      if (task.id === sidebarActiveTaskId && !selectedRunId) {
         return;
       }
       handleFullReset();
@@ -640,72 +698,16 @@ export function SingleAgentSessionView({
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-      // Navigate with slug for short URLs; fall back to id
-      const taskSlug = task.slug ?? task.id;
-      navigateToSession(taskSlug, selectedRunId ?? null);
+      navigateToSession(slugOrId(task), selectedRunId ?? null);
     },
     [
-      activeTaskId,
       handleFullReset,
       clearUploadItems,
       fileInputRef,
       navigateToSession,
+      sidebarActiveTaskId,
     ],
   );
-
-  useEffect(() => {
-    if (!activeTaskId) {
-      return;
-    }
-
-    if (
-      !routeRunId &&
-      currentAttempt?.task_id === activeTaskId &&
-      activeTaskRunIdRef.current
-    ) {
-      setForceNewAttempt(false);
-      return;
-    }
-
-    if (
-      routeRunId &&
-      activeTaskRunIdRef.current === routeRunId &&
-      currentAttempt?.task_id === activeTaskId
-    ) {
-      setForceNewAttempt(false);
-      return;
-    }
-
-    const requestId = createPerfRequestId();
-    taskRunLoadTokenRef.current += 1;
-    const loadToken = taskRunLoadTokenRef.current;
-    setForceNewAttempt(null);
-    // Resolve run data for the current route. When runId is omitted,
-    // select latest/active run into local state without changing URL.
-    void loadTaskRunData(activeTaskId, routeRunId ?? undefined, {
-      requestId,
-      loadToken,
-    })
-      .then((targetRun) => {
-        if (
-          !isSessionMountedRef.current ||
-          loadToken !== taskRunLoadTokenRef.current
-        ) {
-          return;
-        }
-        setForceNewAttempt(targetRun === null);
-      })
-      .catch((error) => {
-        if (
-          !isSessionMountedRef.current ||
-          loadToken !== taskRunLoadTokenRef.current
-        ) {
-          return;
-        }
-        console.error("[session] Failed to load task runs", error);
-        setForceNewAttempt(false);
-      });
-  }, [activeTaskId, routeRunId, currentAttempt?.task_id, loadTaskRunData]);
 
   const buildPromptPayload = useCallback((): PreparedPromptPayload | null => {
     const contextPrefix = formatContextForPrompt(editor.getContextEntries());
@@ -730,7 +732,7 @@ export function SingleAgentSessionView({
       return;
     }
 
-    if (!workspace && !activeTaskId) {
+    if (!workspace && !activeStreamTaskId) {
       addErrorMessage(t("workspaceNotSetError"));
       return;
     }
@@ -746,11 +748,35 @@ export function SingleAgentSessionView({
       return;
     }
 
-    // Clear prompt immediately before toggling sending state.
+    const requestId = createPerfRequestId();
+    const createdAt = new Date().toISOString();
+    beginPendingSubmission({
+      requestId,
+      prompt: payload.prompt,
+      createdAt,
+      taskId: activeStreamTaskId,
+      taskSlug: routeTaskSlug,
+    });
+    activeTaskRunIdRef.current = null;
+
     editor.clearWithSnapshot();
     clearUploadItems();
-    await submitPrompt(payload, { restoreOnError: true });
+    const accepted = await submitPrompt(payload, {
+      requestId,
+      restoreOnError: true,
+      onAccepted: (response) => {
+        resolvePendingSubmission(requestId, response);
+      },
+    });
+
+    if (!accepted) {
+      clearPendingSubmission(requestId);
+    }
   }, [
+    activeStreamTaskId,
+    beginPendingSubmission,
+    clearPendingSubmission,
+    createPerfRequestId,
     editor,
     workspace,
     addErrorMessage,
@@ -761,7 +787,8 @@ export function SingleAgentSessionView({
     isSending,
     clearUploadItems,
     submitPrompt,
-    activeTaskId,
+    resolvePendingSubmission,
+    routeTaskSlug,
   ]);
 
   // User question handlers
@@ -826,10 +853,41 @@ export function SingleAgentSessionView({
   }, [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions]);
 
   // Stream finished handler - called when task run completes
-  // The actual isTaskRunning state comes from server's active_session_id
   const handleStreamFinished = useCallback(() => {
-    setOptimisticSending(false);
-  }, []);
+    clearPendingSubmission();
+  }, [clearPendingSubmission]);
+
+  const { entries, isLoading: isConversationLoading, error: conversationError } =
+    useConversationHistory({
+      taskId: activeStreamTaskId,
+      enabled: Boolean(activeTaskId || pendingSubmission),
+      runs: taskRuns,
+      runsLoading: isTaskRunsLoading,
+      runsError: taskRunsError,
+      sessions: taskSessions,
+      sessionsLoading: isTaskSessionsLoading,
+      sessionsError: taskSessionsError,
+      pendingSubmission,
+      callbacks: {
+        onFinished: handleStreamFinished,
+      },
+    });
+
+  useEffect(() => {
+    if (!pendingSubmission?.runId) {
+      return;
+    }
+    const matchingRun = taskRuns.find(
+      (run) => run.id === pendingSubmission.runId,
+    );
+    if (
+      matchingRun &&
+      matchingRun.status !== "running" &&
+      matchingRun.status !== "pending"
+    ) {
+      clearPendingSubmission(pendingSubmission.requestId);
+    }
+  }, [clearPendingSubmission, pendingSubmission, taskRuns]);
 
   const { status: branchStatus, refetch: refetchBranchStatus } =
     useBranchStatus({
@@ -954,10 +1012,10 @@ export function SingleAgentSessionView({
 
   const handleTitleChange = useCallback(
     async (newTitle: string) => {
-      if (!activeTaskId) return;
-      await updateTaskTitle(activeTaskId, newTitle);
+      if (!activeStreamTaskId) return;
+      await updateTaskTitle(activeStreamTaskId, newTitle);
     },
-    [activeTaskId],
+    [activeStreamTaskId],
   );
 
   // Input handlers (keyDown, composition moved to PromptEditor / usePromptEditor)
@@ -1013,7 +1071,7 @@ export function SingleAgentSessionView({
   );
 
   const handlePasteFiles = useCallback(
-    (event: React.ClipboardEvent<HTMLElement>) => {
+    (event: ReactClipboardEvent<HTMLElement>) => {
       const files = extractFilesFromDataTransfer(event.clipboardData);
       if (files.length === 0) {
         return;
@@ -1032,7 +1090,7 @@ export function SingleAgentSessionView({
       behavior: "smooth",
       block: "end",
     });
-  }, [currentAttempt, isSending]);
+  }, [entries, isSending]);
 
   // Focus prompt editor when task/run session route changes
   useEffect(() => {
@@ -1098,10 +1156,16 @@ export function SingleAgentSessionView({
   );
 
   // Filter out archived tasks (now using status field)
-  const sortedTasks = useMemo(
-    () => streamedTasks.filter((task) => !isArchived(task)),
-    [streamedTasks, isArchived],
-  );
+  const sortedTasks = useMemo(() => {
+    const visibleTasks = displayedTasks.filter((task) => !isArchived(task));
+    return visibleTasks.sort((a, b) => {
+      const orderDiff = (a.sort_order ?? 0) - (b.sort_order ?? 0);
+      if (orderDiff !== 0) return orderDiff;
+      return (
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+    });
+  }, [displayedTasks, isArchived]);
 
   // Archived sessions for popover
   const archivedSessions = useMemo(
@@ -1155,7 +1219,7 @@ export function SingleAgentSessionView({
             tasks={sortedTasks}
             atActiveIndex={atActiveIndex}
             onActiveIndexChange={setAtActiveIndex}
-            disabled={!workspace && !activeTaskId}
+            disabled={!workspace && !activeStreamTaskId}
             isAttachingSession={isAttachingSession}
             onSubmit={handleSend}
             onDrop={handleDropFiles}
@@ -1459,13 +1523,14 @@ export function SingleAgentSessionView({
       className={cn("flex h-full max-w-full flex-col gap-4 min-h-0", "mx-auto")}
     >
       <div className="flex min-h-0 flex-1 flex-col">
-        {activeTaskId ? (
+        {activeTaskId || pendingSubmission ? (
           <TaskConversation
-            key={activeTaskId}
-            taskId={activeTaskId}
+            key={activeTaskId ?? pendingSubmission?.tempTaskId ?? "session"}
+            entries={entries}
+            isLoading={isConversationLoading}
+            error={conversationError}
             messagesEndRef={messagesEndRef}
             onWikilinkClick={navigateToWikilink}
-            onFinished={handleStreamFinished}
           />
         ) : (
           <SessionEmptyState title={t("sessionEmptyHeroTitle")} />
@@ -1509,7 +1574,7 @@ export function SingleAgentSessionView({
               showSessionListLoading={showSessionListLoading}
               sessionsError={sessionsError}
               sortedTasks={sortedTasks}
-              activeTaskId={activeTaskId}
+              activeTaskId={sidebarActiveTaskId}
               onLoadTask={handleLoadTask}
               onArchiveTask={archiveSession}
               onCloseSidebar={() => toggleSessionSidebarCollapsed(true)}
@@ -1519,7 +1584,7 @@ export function SingleAgentSessionView({
           </ResizableSidebar>
           <div className="flex min-w-0 flex-1 flex-col border-l border-border/60 bg-background">
             <SessionHeader
-              taskId={activeTaskId}
+              taskId={sidebarActiveTaskId}
               taskTitle={activeTaskTitle}
               taskBranch={activeTaskBranch}
               hasDiffs={hasDiffs}
@@ -1531,7 +1596,7 @@ export function SingleAgentSessionView({
               onOpenDiffViewer={() => setDiffViewerOpen(true)}
               onRebase={() => setRebaseDialogOpen(true)}
               onMergeDiffs={handleMergeDiffs}
-              onTitleChange={activeTaskId ? handleTitleChange : undefined}
+              onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
               isSidebarCollapsed={sessionSidebarCollapsed}
               onOpenSidebar={() => toggleSessionSidebarCollapsed(false)}
               t={t}

@@ -9,9 +9,8 @@ use db::models::ProjectRecord;
 use git::{BranchInfo, DiffSummary, GitService, GitStatus};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{identifiers::resolve_project_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -85,7 +84,8 @@ struct DiscardFilesRequest {
     paths: Vec<String>,
 }
 
-async fn get_project_path(state: &AppState, project_id: Uuid) -> Result<PathBuf, ApiError> {
+async fn get_project_path(state: &AppState, identifier: &str) -> Result<PathBuf, ApiError> {
+    let project_id = resolve_project_id(state.pool(), identifier).await?;
     let project = ProjectRecord::get(state.pool(), project_id).await?;
     Ok(PathBuf::from(&project.git_repo_path))
 }
@@ -113,9 +113,9 @@ fn build_git_status_response(
 
 async fn get_git_status(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
     Ok(Json(build_git_status_response(
         &git_service,
@@ -125,9 +125,9 @@ async fn get_git_status(
 
 async fn list_branches(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<BranchListResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     if !git_service.is_repository(&project_path) {
@@ -149,9 +149,9 @@ async fn list_branches(
 
 async fn get_current_branch(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<CurrentBranchResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     let branch = git_service.get_current_branch(&project_path).ok();
@@ -161,10 +161,10 @@ async fn get_current_branch(
 
 async fn stage_files(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<StageRequest>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -178,10 +178,10 @@ async fn stage_files(
 
 async fn unstage_files(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<UnstageRequest>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -195,14 +195,14 @@ async fn unstage_files(
 
 async fn commit_changes(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<CommitRequest>,
 ) -> Result<Json<CommitResponse>, ApiError> {
     if payload.message.trim().is_empty() {
         return Err(ApiError::BadRequest("commit message is required".into()));
     }
 
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     let commit_sha = git_service
@@ -214,9 +214,9 @@ async fn commit_changes(
 
 async fn get_diff(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<DiffResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     let diff = git_service
@@ -228,9 +228,9 @@ async fn get_diff(
 
 async fn push_changes(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -244,9 +244,9 @@ async fn push_changes(
 
 async fn pull_changes(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -260,9 +260,9 @@ async fn pull_changes(
 
 async fn discard_changes(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -276,9 +276,9 @@ async fn discard_changes(
 
 async fn init_repository(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
 ) -> Result<Json<CurrentBranchResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service
@@ -292,10 +292,10 @@ async fn init_repository(
 
 async fn discard_files(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<String>,
     Json(payload): Json<DiscardFilesRequest>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
-    let project_path = get_project_path(&state, project_id).await?;
+    let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
     git_service

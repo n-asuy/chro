@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Row, Sqlite};
 use uuid::Uuid;
 
-use crate::{ApiError, AppState};
+use crate::{identifiers::resolve_project_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -166,8 +166,9 @@ async fn list_tasks_by_workspace(
 
 async fn list_project_sessions(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<SessionsResponse>, ApiError> {
+    let project_id = resolve_project_id(state.pool(), &identifier).await?;
     let sessions = fetch_project_sessions(state.pool(), project_id).await?;
     Ok(Json(SessionsResponse { sessions }))
 }

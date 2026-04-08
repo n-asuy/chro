@@ -92,6 +92,10 @@ interface FilesState {
 
   // Incremented to trigger current-file reload when external modification is detected.
   fileContentVersion: number;
+
+  // Navigate callback registered by useFileUrlSync when the files route is active.
+  // openFile/closeFile call this to update the URL in addition to the store.
+  _onFilePathChange: ((path: string | null) => void) | null;
 }
 
 interface FilesActions {
@@ -156,6 +160,7 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   selectedPaths: [],
   fileTree: [],
   currentFilePath: null,
+  _onFilePathChange: null,
   editingPath: null,
   editingName: "",
   fileContentVersion: 0,
@@ -740,14 +745,18 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     }),
 
   // Current file
-  openFile: (path) =>
-    set(() => {
-      if (!path) {
-        return {};
-      }
-      return { currentFilePath: path };
-    }),
-  closeFile: () => set({ currentFilePath: null }),
+  openFile: (path) => {
+    if (!path) return;
+    const prev = get().currentFilePath;
+    if (prev === path) return;
+    set({ currentFilePath: path });
+    get()._onFilePathChange?.(path);
+  },
+  closeFile: () => {
+    if (get().currentFilePath === null) return;
+    set({ currentFilePath: null });
+    get()._onFilePathChange?.(null);
+  },
 
   // Inline editing
   startEditing: (path, initialName) => {

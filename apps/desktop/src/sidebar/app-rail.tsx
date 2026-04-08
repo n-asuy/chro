@@ -8,6 +8,7 @@ import {
 } from "@/kanban/components/add-task-panel";
 import { useOptionalWorkspaceBoardContext } from "@/kanban/providers";
 import { cn } from "@/lib/cn";
+import { slugOrId } from "@/lib/slug";
 import { isUuidIdentifier } from "@/lib/uuid";
 import {
   type RecentWorkspace,
@@ -178,20 +179,21 @@ export const AppRail = () => {
       const requestId = ++workspaceSwitchRequestIdRef.current;
       setDropdownOpen(false);
       try {
-        const { id, slug } = await taskApi.ensureProject(path);
+        const project = await taskApi.ensureProject(path);
         if (requestId !== workspaceSwitchRequestIdRef.current) {
           return;
         }
+        const projectNavId = slugOrId(project);
         if (
-          slug === routeProjectIdentifier ||
-          id === apiProjectId ||
-          slug === navigationProjectId
+          projectNavId === routeProjectIdentifier ||
+          project.id === apiProjectId ||
+          projectNavId === navigationProjectId
         ) {
           return;
         }
         navigate({
           to: "/projects/$projectId/tasks",
-          params: { projectId: slug },
+          params: { projectId: projectNavId },
         });
       } catch (error) {
         if (requestId !== workspaceSwitchRequestIdRef.current) {

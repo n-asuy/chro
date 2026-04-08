@@ -1,4 +1,7 @@
-use clap::Parser;
+mod client;
+mod task;
+
+use clap::{Parser, Subcommand};
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -17,15 +20,62 @@ const SERVER_READY_TIMEOUT_ENV: &str = "CHRO_SERVER_READY_TIMEOUT_SECS";
 #[command(name = "chro")]
 #[command(author = "Chro")]
 #[command(version)]
-#[command(about = "Launch Chro web development services", long_about = None)]
-struct Args {
-    /// Enable perf logging for server and Vite
-    #[arg(long)]
-    perf: bool,
+#[command(about = "Chro — AI-powered productivity tool", long_about = None)]
+struct Cli {
+    /// Git repository path (default: CWD's git root)
+    #[arg(short = 'w', long, global = true)]
+    project: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Launch development services (server + Vite)
+    Dev {
+        /// Enable perf logging for server and Vite
+        #[arg(long)]
+        perf: bool,
+    },
+
+    /// Task management
+    Task {
+        #[command(subcommand)]
+        command: task::TaskCommand,
+    },
 }
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    match &cli.command {
+        None | Some(Commands::Dev { .. }) => {
+            let perf = matches!(&cli.command, Some(Commands::Dev { perf: true }));
+            run_dev(perf);
+        }
+        Some(Commands::Task { command }) => {
+            let client = match client::ServerClient::connect() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            if let Err(e) = task::run(command, &client, cli.project.as_deref()) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dev launcher (original functionality)
+// ---------------------------------------------------------------------------
+
+fn run_dev(perf: bool) {
     let repo_root = locate_repo_root().unwrap_or_else(|message| {
         eprintln!("{}", message);
         std::process::exit(1);
@@ -41,9 +91,9 @@ fn main() {
 
     println!("Starting Chro...");
 
-    let mut server = spawn_server(&desktop_dir, &server_manifest, &repo_root, args.perf);
+    let mut server = spawn_server(&desktop_dir, &server_manifest, &repo_root, perf);
     wait_for_server_ready(&mut server, SERVER_PORT);
-    let mut vite = spawn_vite(&desktop_dir, args.perf);
+    let mut vite = spawn_vite(&desktop_dir, perf);
 
     let exit_code = wait_for_children(&mut server, &mut vite);
     terminate_child(&mut server);
@@ -88,7 +138,7 @@ fn spawn_vite(desktop_dir: &Path, perf: bool) -> Child {
     Command::new("bun")
         .arg("run")
         .arg(script)
-        .current_dir(&desktop_dir)
+        .current_dir(desktop_dir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

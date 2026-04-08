@@ -24,17 +24,17 @@ import { useFilesStore } from "../../files/state/files-store";
 import { updateViewFilters } from "../definition-updates";
 import { executeView } from "../engine";
 import { indexWorkspaceFiles } from "../indexer";
-import { LensParseError, parseLens } from "../parser";
+import { CbaseParseError, parseCbase } from "../parser";
 import { mergeInferredProperties } from "../property-inference";
 import { looksLikeQueryLanguage } from "../query-language";
-import { serializeLens } from "../serializer";
+import { serializeCbase } from "../serializer";
 import type {
-  LensDefinition,
-  LensFilter,
-  LensRow,
+  CbaseDefinition,
+  CbaseFilter,
+  CbaseRow,
   SortDirection,
 } from "../types";
-import { BaseTable } from "./lens-table";
+import { BaseTable } from "./cbase-table";
 
 interface BaseViewerProps {
   /** Raw YAML content of the .cbase file */
@@ -55,9 +55,9 @@ export const BaseViewer: FC<BaseViewerProps> = ({
 }) => {
   const projectId = useProjectId();
   const { openFile, selectNode } = useFilesStore();
-  const [definition, setDefinition] = useState<LensDefinition | null>(null);
+  const [definition, setDefinition] = useState<CbaseDefinition | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
-  const [rows, setRows] = useState<LensRow[]>([]);
+  const [rows, setRows] = useState<CbaseRow[]>([]);
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
@@ -72,7 +72,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     }
     try {
       isQueryLanguage.current = looksLikeQueryLanguage(content);
-      const def = parseLens(content, { basePath });
+      const def = parseCbase(content, { basePath });
       setDefinition(def);
       setParseError(null);
       // Set default active view
@@ -82,7 +82,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
       }
     } catch (e) {
       setDefinition(null);
-      setParseError(e instanceof LensParseError ? e.message : String(e));
+      setParseError(e instanceof CbaseParseError ? e.message : String(e));
     }
   }, [content, basePath]);
 
@@ -148,9 +148,9 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   }, [rows, activeView, effectiveProperties, definition]);
 
   const persistDefinition = useCallback(
-    (updated: LensDefinition) => {
+    (updated: CbaseDefinition) => {
       if (isQueryLanguage.current) return;
-      const yaml = serializeLens(updated);
+      const yaml = serializeCbase(updated);
       setDefinition(updated);
       skipNextParse.current = true;
       onContentChange?.(yaml);
@@ -164,7 +164,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const handleColumnsChange = useCallback(
     (columnIds: string[]) => {
       if (!definition || !activeViewId) return;
-      const updated: LensDefinition = {
+      const updated: CbaseDefinition = {
         ...definition,
         properties: { ...definition.properties },
         views: definition.views.map((v) => {
@@ -189,7 +189,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const handleSortChange = useCallback(
     (sortPropertyId: string | null, direction: SortDirection) => {
       if (!definition || !activeViewId) return;
-      const updated: LensDefinition = {
+      const updated: CbaseDefinition = {
         ...definition,
         views: definition.views.map((v) => {
           if (v.id !== activeViewId) return v;
@@ -220,7 +220,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const handleColumnWidthsChange = useCallback(
     (columnWidths: Record<string, number>) => {
       if (!definition || !activeViewId) return;
-      const updated: LensDefinition = {
+      const updated: CbaseDefinition = {
         ...definition,
         views: definition.views.map((v) => {
           if (v.id !== activeViewId) return v;
@@ -251,7 +251,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   );
 
   const handleViewFiltersChange = useCallback(
-    (filters: LensFilter[]) => {
+    (filters: CbaseFilter[]) => {
       if (!definition || !activeViewId) return;
       persistDefinition(
         updateViewFilters(
@@ -315,6 +315,3 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     </div>
   );
 };
-
-// Backward-compatible export while callers migrate to BaseViewer.
-export const LensViewer = BaseViewer;

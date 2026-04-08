@@ -1,57 +1,57 @@
-import type { LensFilter, LensSort, LensView } from "./types";
+import type { CbaseFilter, CbaseSort, CbaseView } from "./types";
 
-export type LensQueryType = "table";
+export type CbaseQueryType = "table";
 
-export interface LensQueryHeader {
-  type: LensQueryType;
+export interface CbaseQueryHeader {
+  type: CbaseQueryType;
   viewId: string;
   viewName: string;
 }
 
-export interface LensQuerySource {
+export interface CbaseQuerySource {
   type: "indexed_rows";
 }
 
-export interface LensWhereOperation {
+export interface CbaseWhereOperation {
   type: "where";
-  filters: LensFilter[];
+  filters: CbaseFilter[];
   scope: "global" | "view";
 }
 
-export interface LensSortOperation {
+export interface CbaseSortOperation {
   type: "sort";
-  sort: LensSort[];
+  sort: CbaseSort[];
   scope: "global" | "view";
 }
 
-export interface LensLimitOperation {
+export interface CbaseLimitOperation {
   type: "limit";
   limit: number;
 }
 
-export type LensQueryOperation =
-  | LensWhereOperation
-  | LensSortOperation
-  | LensLimitOperation;
+export type CbaseQueryOperation =
+  | CbaseWhereOperation
+  | CbaseSortOperation
+  | CbaseLimitOperation;
 
-export interface LensQuery {
-  header: LensQueryHeader;
-  source: LensQuerySource;
-  operations: LensQueryOperation[];
-  view: LensView;
+export interface CbaseQuery {
+  header: CbaseQueryHeader;
+  source: CbaseQuerySource;
+  operations: CbaseQueryOperation[];
+  view: CbaseView;
 }
 
 /**
- * Build a query-plan execution model from a lens view.
+ * Build a query-plan execution model from a cbase view.
  * This keeps cbase YAML syntax while aligning internals with
  * header/source/operations structure.
  */
-export function buildLensQuery(
-  view: LensView,
-  globalFilters?: LensFilter[],
-  globalSort?: LensSort[],
-): LensQuery {
-  const operations: LensQueryOperation[] = [];
+export function buildCbaseQuery(
+  view: CbaseView,
+  globalFilters?: CbaseFilter[],
+  globalSort?: CbaseSort[],
+): CbaseQuery {
+  const operations: CbaseQueryOperation[] = [];
 
   if (globalFilters && globalFilters.length > 0) {
     operations.push({

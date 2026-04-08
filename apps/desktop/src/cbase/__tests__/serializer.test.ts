@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { parseLens } from "../parser";
-import { serializeLens } from "../serializer";
-import type { LensDefinition } from "../types";
+import { parseCbase } from "../parser";
+import { serializeCbase } from "../serializer";
+import type { CbaseDefinition } from "../types";
 
 const MINIMAL_YAML = `
 version: 1
@@ -22,11 +22,11 @@ views:
         - title
 `.trim();
 
-describe("serializeLens", () => {
+describe("serializeCbase", () => {
   it("roundtrips a minimal definition", () => {
-    const original = parseLens(MINIMAL_YAML);
-    const serialized = serializeLens(original);
-    const reparsed = parseLens(serialized);
+    const original = parseCbase(MINIMAL_YAML);
+    const serialized = serializeCbase(original);
+    const reparsed = parseCbase(serialized);
 
     expect(reparsed.name).toBe(original.name);
     expect(reparsed.dataset).toEqual(original.dataset);
@@ -78,9 +78,9 @@ views:
         status: 200
 `.trim();
 
-    const original = parseLens(yaml);
-    const serialized = serializeLens(original);
-    const reparsed = parseLens(serialized);
+    const original = parseCbase(yaml);
+    const serialized = serializeCbase(original);
+    const reparsed = parseCbase(serialized);
 
     expect(reparsed.dataset.exclude).toEqual(["docs/drafts/**"]);
     expect(reparsed.filters).toHaveLength(1);
@@ -91,8 +91,8 @@ views:
   });
 
   it("handles column update for persistence", () => {
-    const original = parseLens(MINIMAL_YAML);
-    const updated: LensDefinition = {
+    const original = parseCbase(MINIMAL_YAML);
+    const updated: CbaseDefinition = {
       ...original,
       properties: {
         ...original.properties,
@@ -104,8 +104,8 @@ views:
       })),
     };
 
-    const serialized = serializeLens(updated);
-    const reparsed = parseLens(serialized);
+    const serialized = serializeCbase(updated);
+    const reparsed = parseCbase(serialized);
 
     expect(reparsed.views[0].table?.columns).toEqual(["title", "file_name"]);
     expect(reparsed.properties.file_name.key).toBe("file.name");

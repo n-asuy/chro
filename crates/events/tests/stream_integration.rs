@@ -947,3 +947,69 @@ async fn stream_task_sessions_receives_live_insert_via_hook() {
         panic!("expected to receive add patch for session insert");
     }
 }
+
+/// Reproduce the scenario: Kanban stream is open, then 3 tasks are inserted
+/// concurrently (simulating `cargo run task create "Hi" & ... & wait`).
+/// All 3 live add patches must arrive on the filtered stream.
+#[tokio::test]
+async fn stream_tasks_receives_concurrent_inserts_via_hook() {
+    let (event_service, db, _temp_dir) = setup_event_service_with_hook().await;
+
+    let project = create_project(&db, "concurrent-insert-project").await;
+
+    event_service.hydrate().await.unwrap();
+
+    // Simulate: Kanban board opens WebSocket and gets initial snapshot
+    let mut stream = event_service.stream_tasks_raw(project.id).await.unwrap();
+    let _ = stream.next().await; // consume initial snapshot
+
+    // Simulate: 3 concurrent CLI task creates
+    let pool = db.pool().clone();
+    let tasks: Vec<TaskRecord> = vec![
+        TaskRecord::new(project.id, "Hi", None),
+        TaskRecord::new(project.id, "Hi2", None),
+        TaskRecord::new(project.id, "Hi3", None),
+    ];
+    let expected_ids: std::collections::HashSet<Uuid> = tasks.iter().map(|t| t.id).collect();
+
+    let mut handles = Vec::new();
+    for task in &tasks {
+        let pool = pool.clone();
+        let task = task.clone();
+        handles.push(tokio::spawn(async move {
+            task.insert(&pool).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Collect all 3 live patches
+    let mut received_ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let received =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.next()).await;
+        match received {
+            Ok(Some(Ok(LogEntry::JsonPatch(patch_value)))) => {
+                let patch: Patch = serde_json::from_value(patch_value).unwrap();
+                match &patch.0[0] {
+                    json_patch::PatchOperation::Add(add_op) => {
+                        let uuid_str = add_op.path.strip_prefix("/tasks/").unwrap();
+                        let task_id = Uuid::parse_str(uuid_str).unwrap();
+                        received_ids.insert(task_id);
+                    }
+                    other => panic!("expected Add operation, got {:?}", other),
+                }
+            }
+            other => panic!(
+                "expected add patch for concurrent insert, got {:?}",
+                other
+            ),
+        }
+    }
+
+    assert_eq!(
+        received_ids, expected_ids,
+        "all 3 concurrently inserted tasks must arrive via filtered stream"
+    );
+}

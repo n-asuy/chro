@@ -144,6 +144,30 @@ impl TaskRecord {
             .await
     }
 
+    /// Fetch a task by slug.
+    pub async fn find_by_slug(
+        pool: &Pool<Sqlite>,
+        slug: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT * FROM task_records WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Fetch a task by either UUID string or slug.
+    pub async fn get_by_identifier(
+        pool: &Pool<Sqlite>,
+        identifier: &str,
+    ) -> Result<Self, sqlx::Error> {
+        if let Ok(uuid) = Uuid::parse_str(identifier) {
+            return Self::get(pool, uuid).await;
+        }
+        Self::find_by_slug(pool, identifier)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
     /// Return all tasks currently stored.
     pub async fn list_all(pool: &Pool<Sqlite>) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>("SELECT * FROM task_records")
@@ -643,6 +667,30 @@ impl TaskRun {
             .bind(run_id)
             .fetch_optional(pool)
             .await
+    }
+
+    /// Fetch a run by slug.
+    pub async fn find_by_slug(
+        pool: &Pool<Sqlite>,
+        slug: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT * FROM task_runs WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Fetch a task run by either UUID string or slug.
+    pub async fn get_by_identifier(
+        pool: &Pool<Sqlite>,
+        identifier: &str,
+    ) -> Result<Self, sqlx::Error> {
+        if let Ok(uuid) = Uuid::parse_str(identifier) {
+            return Self::get(pool, uuid).await;
+        }
+        Self::find_by_slug(pool, identifier)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
     }
 
     /// Return all runs.

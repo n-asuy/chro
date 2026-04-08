@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@chro/ui/button";
 import { taskApi } from "@/kanban/api/task-api";
+import { slugOrId } from "@/lib/slug";
 import {
   getRecentWorkspaces,
   touchRecentWorkspace,
@@ -80,10 +81,10 @@ function WorkspacePage() {
       setErrorMessage(null);
       try {
         setRecentWorkspaces(touchRecentWorkspace(path));
-        const { slug: projectSlug } = await taskApi.ensureProject(path);
+        const project = await taskApi.ensureProject(path);
         navigate({
           to: "/projects/$projectId/session",
-          params: { projectId: projectSlug },
+          params: { projectId: slugOrId(project) },
         });
       } catch (err) {
         console.error("[onboarding] Failed to ensure project", err);

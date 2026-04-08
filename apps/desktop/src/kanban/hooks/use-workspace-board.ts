@@ -7,6 +7,8 @@
  */
 import { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { useProjectContext } from "@/files/context/project-context";
+import { slugOrId } from "@/lib/slug";
 import type {
   BoardColumn,
   BoardFilterKey,
@@ -162,7 +164,6 @@ interface OptimisticUpdate {
 }
 
 export interface UseWorkspaceBoardParams {
-  workspacePath: string | null;
   projectId: string | null;
 }
 
@@ -219,9 +220,9 @@ export interface UseWorkspaceBoardResult {
  * - No polling or manual refresh needed
  */
 export function useWorkspaceBoard({
-  workspacePath,
   projectId,
 }: UseWorkspaceBoardParams): UseWorkspaceBoardResult {
+  const { workspacePath } = useProjectContext();
   const navigate = useNavigate();
   const params = useParams({ strict: false }) as { projectId?: string; taskId?: string };
   const routeTaskId = params.taskId ?? undefined;
@@ -239,8 +240,7 @@ export function useWorkspaceBoard({
 
   // Local UI state
   const [filters, setFilters] = useState<BoardFilters>(defaultFilters);
-  // peekIssueId is derived from URL
-  const [peekIssueId, setPeekIssueId] = useState<string | undefined>(routeTaskId);
+  const peekIssueId = routeTaskId;
   const [optimisticUpdates, setOptimisticUpdates] = useState<
     OptimisticUpdate[]
   >([]);
@@ -410,23 +410,17 @@ export function useWorkspaceBoard({
     [projectId],
   );
 
-  // Sync peekIssueId with URL param
-  useEffect(() => {
-    setPeekIssueId(routeTaskId);
-  }, [routeTaskId]);
-
   // Use route-level slug for navigation URLs (not the resolved UUID)
   const routeProjectSlug = params.projectId ?? projectId;
 
   const setPeekIssue = useCallback(
     (id?: string) => {
-      setPeekIssueId(id);
-      // Update URL to reflect the selected task (use slug for short URL)
       if (!routeProjectSlug) return;
       if (id) {
-        // Find the task's slug for the URL
-        const task = tasks.find((t) => t.id === id);
-        const taskSlug = task?.slug ?? id;
+        const issue = columns
+          .flatMap((c) => c.issues)
+          .find((i) => i.id === id);
+        const taskSlug = issue ? slugOrId(issue) : id;
         void navigate({
           to: `/projects/${routeProjectSlug}/tasks/${taskSlug}`,
         });
@@ -434,7 +428,7 @@ export function useWorkspaceBoard({
         void navigate({ to: `/projects/${routeProjectSlug}/tasks` });
       }
     },
-    [routeProjectSlug, tasks, navigate],
+    [routeProjectSlug, columns, navigate],
   );
 
   const toggleFilter = useCallback((key: BoardFilterKey, value: string) => {
@@ -670,7 +664,7 @@ export function useWorkspaceBoard({
 
       // Clear peek if deleting peeked issue
       if (peekIssueId === issueId) {
-        setPeekIssueId(undefined);
+        setPeekIssue(undefined);
       }
 
       const isTemporaryIssue = issueId.startsWith("temp-issue-");
@@ -701,7 +695,7 @@ export function useWorkspaceBoard({
         throw error;
       }
     },
-    [columns, peekIssueId],
+    [columns, peekIssueId, setPeekIssue],
   );
 
   const deleteArchivedIssues = useCallback(async () => {
@@ -720,7 +714,7 @@ export function useWorkspaceBoard({
 
     // Clear peek if deleting peeked issue
     if (peekIssueId && issueIds.includes(peekIssueId)) {
-      setPeekIssueId(undefined);
+      setPeekIssue(undefined);
     }
 
     // Add optimistic deletes for all archived issues
@@ -751,7 +745,7 @@ export function useWorkspaceBoard({
         ),
       );
     }
-  }, [columns, peekIssueId]);
+  }, [columns, peekIssueId, setPeekIssue]);
 
   return {
     workspace,

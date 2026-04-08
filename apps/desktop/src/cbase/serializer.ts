@@ -1,19 +1,19 @@
 /**
- * Serialize a LensDefinition back to .cbase YAML format.
+ * Serialize a CbaseDefinition back to .cbase YAML format.
  * Used to persist UI-driven view changes (column visibility, sort) to disk.
  */
 
 import { stringify as stringifyYaml } from "yaml";
 import type {
-  LensDefinition,
-  LensFilter,
-  LensFilterCondition,
-  LensProperty,
-  LensSort,
-  LensView,
+  CbaseDefinition,
+  CbaseFilter,
+  CbaseFilterCondition,
+  CbaseProperty,
+  CbaseSort,
+  CbaseView,
 } from "./types";
 
-function serializeProperty(property: LensProperty): Record<string, unknown> {
+function serializeProperty(property: CbaseProperty): Record<string, unknown> {
   const out: Record<string, unknown> = {
     key: property.key,
     type: property.type,
@@ -25,7 +25,7 @@ function serializeProperty(property: LensProperty): Record<string, unknown> {
   return out;
 }
 
-function serializeFilter(filter: LensFilter): Record<string, unknown> {
+function serializeFilter(filter: CbaseFilter): Record<string, unknown> {
   if ("and" in filter) {
     return { and: filter.and.map(serializeFilter) };
   }
@@ -35,7 +35,7 @@ function serializeFilter(filter: LensFilter): Record<string, unknown> {
   if ("not" in filter) {
     return { not: serializeFilter(filter.not) };
   }
-  const condition = filter as LensFilterCondition;
+  const condition = filter as CbaseFilterCondition;
   const out: Record<string, unknown> = {
     property: condition.property,
     op: condition.op,
@@ -44,11 +44,11 @@ function serializeFilter(filter: LensFilter): Record<string, unknown> {
   return out;
 }
 
-function serializeSort(sort: LensSort): Record<string, unknown> {
+function serializeSort(sort: CbaseSort): Record<string, unknown> {
   return { by: sort.by, dir: sort.dir };
 }
 
-function serializeView(view: LensView): Record<string, unknown> {
+function serializeView(view: CbaseView): Record<string, unknown> {
   const out: Record<string, unknown> = {
     id: view.id,
     name: view.name,
@@ -69,7 +69,7 @@ function serializeView(view: LensView): Record<string, unknown> {
   return out;
 }
 
-export function serializeLens(definition: LensDefinition): string {
+export function serializeCbase(definition: CbaseDefinition): string {
   const out: Record<string, unknown> = {
     version: definition.version,
     name: definition.name,

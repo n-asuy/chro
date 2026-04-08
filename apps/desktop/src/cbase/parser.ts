@@ -1,46 +1,46 @@
 /**
  * .cbase YAML parser
- * Parses and validates .cbase file content into a LensDefinition
+ * Parses and validates .cbase file content into a CbaseDefinition
  */
 
 import { parse as parseYaml } from "yaml";
 import {
   QueryLanguageParseError,
   looksLikeQueryLanguage,
-  parseQueryLanguageToLensDefinition,
+  parseQueryLanguageToCbaseDefinition,
 } from "./query-language";
 import type {
   FilterOperator,
-  LensDataset,
-  LensDefinition,
-  LensFilter,
-  LensFilterCondition,
-  LensProperty,
-  LensPropertyType,
-  LensSort,
-  LensTableView,
-  LensTemplate,
-  LensView,
+  CbaseDataset,
+  CbaseDefinition,
+  CbaseFilter,
+  CbaseFilterCondition,
+  CbaseProperty,
+  CbasePropertyType,
+  CbaseSort,
+  CbaseTableView,
+  CbaseTemplate,
+  CbaseView,
   SortDirection,
 } from "./types";
 
 /** Error thrown when .cbase file parsing or validation fails */
-export class LensParseError extends Error {
+export class CbaseParseError extends Error {
   constructor(
     message: string,
     public readonly path?: string,
   ) {
     super(message);
-    this.name = "LensParseError";
+    this.name = "CbaseParseError";
   }
 }
 
-interface ParseLensOptions {
+interface ParseCbaseOptions {
   /** Relative path of the .cbase file currently being parsed */
   basePath?: string;
 }
 
-const VALID_PROPERTY_TYPES: LensPropertyType[] = [
+const VALID_PROPERTY_TYPES: CbasePropertyType[] = [
   "text",
   "number",
   "checkbox",
@@ -68,19 +68,19 @@ const VALID_FILTER_OPERATORS: FilterOperator[] = [
 const VALID_SORT_DIRECTIONS: SortDirection[] = ["asc", "desc"];
 
 /**
- * Parse a .cbase YAML string into a validated LensDefinition
+ * Parse a .cbase YAML string into a validated CbaseDefinition
  */
-export function parseLens(
+export function parseCbase(
   content: string,
-  options?: ParseLensOptions,
-): LensDefinition {
+  options?: ParseCbaseOptions,
+): CbaseDefinition {
   if (looksLikeQueryLanguage(content)) {
     try {
-      return parseQueryLanguageToLensDefinition(content, undefined, {
+      return parseQueryLanguageToCbaseDefinition(content, undefined, {
         basePath: options?.basePath,
       });
     } catch (e) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         e instanceof QueryLanguageParseError ? e.message : String(e),
         "query",
       );
@@ -93,11 +93,11 @@ export function parseLens(
   } catch (e) {
     if (looksLikeQueryLanguage(content)) {
       try {
-        return parseQueryLanguageToLensDefinition(content, undefined, {
+        return parseQueryLanguageToCbaseDefinition(content, undefined, {
           basePath: options?.basePath,
         });
       } catch (queryError) {
-        throw new LensParseError(
+        throw new CbaseParseError(
           queryError instanceof QueryLanguageParseError
             ? queryError.message
             : String(queryError),
@@ -105,7 +105,7 @@ export function parseLens(
         );
       }
     }
-    throw new LensParseError(
+    throw new CbaseParseError(
       `Invalid YAML: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
@@ -113,18 +113,18 @@ export function parseLens(
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     if (typeof raw === "string" && looksLikeQueryLanguage(raw)) {
       try {
-        return parseQueryLanguageToLensDefinition(raw, undefined, {
+        return parseQueryLanguageToCbaseDefinition(raw, undefined, {
           basePath: options?.basePath,
         });
       } catch (e) {
-        throw new LensParseError(
+        throw new CbaseParseError(
           e instanceof QueryLanguageParseError ? e.message : String(e),
           "query",
         );
       }
     }
 
-    throw new LensParseError(
+    throw new CbaseParseError(
       "Base file must be a YAML object or a query block",
     );
   }
@@ -133,7 +133,7 @@ export function parseLens(
 
   // version
   if (obj.version !== 1) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       `Unsupported version: ${String(obj.version)}. Expected 1`,
       "version",
     );
@@ -141,7 +141,7 @@ export function parseLens(
 
   // name
   if (typeof obj.name !== "string" || !obj.name.trim()) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'name' is required and must be a non-empty string",
       "name",
     );
@@ -154,7 +154,7 @@ export function parseLens(
   // Query-language mode
   if (obj.query != null) {
     if (typeof obj.query !== "string" || !obj.query.trim()) {
-      throw new LensParseError("'query' must be a non-empty string", "query");
+      throw new CbaseParseError("'query' must be a non-empty string", "query");
     }
 
     const hasLegacyFields =
@@ -164,14 +164,14 @@ export function parseLens(
       obj.filters != null ||
       obj.sort != null;
     if (hasLegacyFields) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         "When 'query' is set, dataset/properties/views/filters/sort must be omitted",
         "query",
       );
     }
 
     try {
-      return parseQueryLanguageToLensDefinition(
+      return parseQueryLanguageToCbaseDefinition(
         obj.query,
         {
           name: obj.name as string,
@@ -182,7 +182,7 @@ export function parseLens(
         },
       );
     } catch (e) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         e instanceof QueryLanguageParseError ? e.message : String(e),
         "query",
       );
@@ -225,9 +225,9 @@ export function parseLens(
   };
 }
 
-function parseDataset(raw: unknown): LensDataset {
+function parseDataset(raw: unknown): CbaseDataset {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'dataset' is required and must be an object",
       "dataset",
     );
@@ -235,14 +235,14 @@ function parseDataset(raw: unknown): LensDataset {
   const obj = raw as Record<string, unknown>;
 
   if (!Array.isArray(obj.include) || obj.include.length === 0) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'dataset.include' must be a non-empty array of glob patterns",
       "dataset.include",
     );
   }
   const include = obj.include.map((v: unknown) => {
     if (typeof v !== "string") {
-      throw new LensParseError(
+      throw new CbaseParseError(
         "dataset.include items must be strings",
         "dataset.include",
       );
@@ -253,14 +253,14 @@ function parseDataset(raw: unknown): LensDataset {
   let exclude: string[] | undefined;
   if (obj.exclude != null) {
     if (!Array.isArray(obj.exclude)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         "dataset.exclude must be an array",
         "dataset.exclude",
       );
     }
     exclude = obj.exclude.map((v: unknown) => {
       if (typeof v !== "string") {
-        throw new LensParseError(
+        throw new CbaseParseError(
           "dataset.exclude items must be strings",
           "dataset.exclude",
         );
@@ -272,19 +272,19 @@ function parseDataset(raw: unknown): LensDataset {
   return { include, exclude };
 }
 
-function parseProperties(raw: unknown): Record<string, LensProperty> {
+function parseProperties(raw: unknown): Record<string, CbaseProperty> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'properties' is required and must be an object",
       "properties",
     );
   }
   const obj = raw as Record<string, unknown>;
-  const result: Record<string, LensProperty> = {};
+  const result: Record<string, CbaseProperty> = {};
 
   for (const [id, value] of Object.entries(obj)) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Property '${id}' must be an object`,
         `properties.${id}`,
       );
@@ -292,23 +292,23 @@ function parseProperties(raw: unknown): Record<string, LensProperty> {
     const prop = value as Record<string, unknown>;
 
     if (typeof prop.key !== "string" || !prop.key.trim()) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Property '${id}' must have a 'key' string`,
         `properties.${id}.key`,
       );
     }
 
     const type = prop.type as string;
-    if (!VALID_PROPERTY_TYPES.includes(type as LensPropertyType)) {
-      throw new LensParseError(
+    if (!VALID_PROPERTY_TYPES.includes(type as CbasePropertyType)) {
+      throw new CbaseParseError(
         `Property '${id}' has invalid type '${type}'. Valid: ${VALID_PROPERTY_TYPES.join(", ")}`,
         `properties.${id}.type`,
       );
     }
 
-    const property: LensProperty = {
+    const property: CbaseProperty = {
       key: prop.key as string,
-      type: type as LensPropertyType,
+      type: type as CbasePropertyType,
     };
 
     if (prop.label != null) property.label = String(prop.label);
@@ -316,7 +316,7 @@ function parseProperties(raw: unknown): Record<string, LensProperty> {
     if (prop.default !== undefined) property.default = prop.default;
     if (prop.options != null) {
       if (!Array.isArray(prop.options)) {
-        throw new LensParseError(
+        throw new CbaseParseError(
           `Property '${id}' options must be an array`,
           `properties.${id}.options`,
         );
@@ -333,10 +333,10 @@ function parseProperties(raw: unknown): Record<string, LensProperty> {
 function parseFilters(
   raw: unknown,
   path: string,
-  properties: Record<string, LensProperty>,
-): LensFilter[] {
+  properties: Record<string, CbaseProperty>,
+): CbaseFilter[] {
   if (!Array.isArray(raw)) {
-    throw new LensParseError(`'${path}' must be an array`, path);
+    throw new CbaseParseError(`'${path}' must be an array`, path);
   }
   return raw.map((item: unknown, i: number) =>
     parseFilter(item, `${path}[${i}]`, properties),
@@ -346,10 +346,10 @@ function parseFilters(
 function parseFilter(
   raw: unknown,
   path: string,
-  properties: Record<string, LensProperty>,
-): LensFilter {
+  properties: Record<string, CbaseProperty>,
+): CbaseFilter {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new LensParseError(`Filter at '${path}' must be an object`, path);
+    throw new CbaseParseError(`Filter at '${path}' must be an object`, path);
   }
   const obj = raw as Record<string, unknown>;
 
@@ -366,25 +366,25 @@ function parseFilter(
 
   // Simple condition
   if (typeof obj.property !== "string") {
-    throw new LensParseError(
+    throw new CbaseParseError(
       `Filter at '${path}' must have a 'property' string`,
       path,
     );
   }
   if (!Object.hasOwn(properties, obj.property)) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       `Filter at '${path}' references unknown property '${obj.property}'`,
       `${path}.property`,
     );
   }
   if (!VALID_FILTER_OPERATORS.includes(obj.op as FilterOperator)) {
-    throw new LensParseError(
+    throw new CbaseParseError(
       `Filter at '${path}' has invalid operator '${String(obj.op)}'`,
       path,
     );
   }
 
-  const condition: LensFilterCondition = {
+  const condition: CbaseFilterCondition = {
     property: obj.property as string,
     op: obj.op as FilterOperator,
   };
@@ -399,34 +399,34 @@ function parseFilter(
 function parseSortList(
   raw: unknown,
   path: string,
-  properties: Record<string, LensProperty>,
-): LensSort[] {
+  properties: Record<string, CbaseProperty>,
+): CbaseSort[] {
   if (!Array.isArray(raw)) {
-    throw new LensParseError(`'${path}' must be an array`, path);
+    throw new CbaseParseError(`'${path}' must be an array`, path);
   }
   return raw.map((item: unknown, i: number) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Sort at '${path}[${i}]' must be an object`,
         `${path}[${i}]`,
       );
     }
     const obj = item as Record<string, unknown>;
     if (typeof obj.by !== "string") {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Sort at '${path}[${i}]' must have a 'by' string`,
         `${path}[${i}].by`,
       );
     }
     if (!Object.hasOwn(properties, obj.by)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Sort at '${path}[${i}]' references unknown property '${obj.by}'`,
         `${path}[${i}].by`,
       );
     }
     const dir = (obj.dir as string) ?? "asc";
     if (!VALID_SORT_DIRECTIONS.includes(dir as SortDirection)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `Sort at '${path}[${i}]' has invalid direction '${dir}'`,
         `${path}[${i}].dir`,
       );
@@ -437,17 +437,17 @@ function parseSortList(
 
 function parseViews(
   raw: unknown,
-  properties: Record<string, LensProperty>,
-): LensView[] {
+  properties: Record<string, CbaseProperty>,
+): CbaseView[] {
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new LensParseError("'views' must be a non-empty array", "views");
+    throw new CbaseParseError("'views' must be a non-empty array", "views");
   }
 
-  const views: LensView[] = [];
+  const views: CbaseView[] = [];
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i];
     if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `View at index ${i} must be an object`,
         `views[${i}]`,
       );
@@ -455,25 +455,25 @@ function parseViews(
     const obj = item as Record<string, unknown>;
 
     if (typeof obj.id !== "string" || !obj.id.trim()) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `View at index ${i} must have an 'id' string`,
         `views[${i}].id`,
       );
     }
     if (typeof obj.name !== "string" || !obj.name.trim()) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `View at index ${i} must have a 'name' string`,
         `views[${i}].name`,
       );
     }
     if (obj.type !== "table") {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `View '${obj.id}' has unsupported type '${String(obj.type)}'. Currently only 'table' is supported`,
         `views[${i}].type`,
       );
     }
 
-    const view: LensView = {
+    const view: CbaseView = {
       id: obj.id as string,
       name: obj.name as string,
       type: "table",
@@ -490,7 +490,7 @@ function parseViews(
       view.sort = parseSortList(obj.sort, `views[${i}].sort`, properties);
     if (obj.limit != null) {
       if (typeof obj.limit !== "number" || obj.limit < 1) {
-        throw new LensParseError(
+        throw new CbaseParseError(
           `View '${obj.id}' limit must be a positive number`,
           `views[${i}].limit`,
         );
@@ -522,10 +522,10 @@ function parseViews(
 function parseTableView(
   raw: unknown,
   path: string,
-  properties: Record<string, LensProperty>,
-): LensTableView {
+  properties: Record<string, CbaseProperty>,
+): CbaseTableView {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new LensParseError(`'${path}' must be an object`, path);
+    throw new CbaseParseError(`'${path}' must be an object`, path);
   }
   const obj = raw as Record<string, unknown>;
 
@@ -536,21 +536,21 @@ function parseTableView(
   for (let i = 0; i < columns.length; i++) {
     const column = columns[i];
     if (!Object.hasOwn(properties, column)) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `'${path}.columns[${i}]' references unknown property '${column}'`,
         `${path}.columns[${i}]`,
       );
     }
   }
 
-  const result: LensTableView = { columns };
+  const result: CbaseTableView = { columns };
 
   if (obj.column_widths != null) {
     if (
       typeof obj.column_widths !== "object" ||
       Array.isArray(obj.column_widths)
     ) {
-      throw new LensParseError(
+      throw new CbaseParseError(
         `'${path}.column_widths' must be an object`,
         `${path}.column_widths`,
       );
@@ -570,26 +570,26 @@ function parseTableView(
   return result;
 }
 
-function parseTemplate(raw: unknown): LensTemplate {
+function parseTemplate(raw: unknown): CbaseTemplate {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new LensParseError("'template' must be an object", "template");
+    throw new CbaseParseError("'template' must be an object", "template");
   }
   const obj = raw as Record<string, unknown>;
 
   if (typeof obj.folder !== "string") {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'template.folder' must be a string",
       "template.folder",
     );
   }
   if (typeof obj.filename !== "string") {
-    throw new LensParseError(
+    throw new CbaseParseError(
       "'template.filename' must be a string",
       "template.filename",
     );
   }
 
-  const template: LensTemplate = {
+  const template: CbaseTemplate = {
     folder: obj.folder as string,
     filename: obj.filename as string,
   };

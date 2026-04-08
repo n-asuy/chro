@@ -1,56 +1,32 @@
-
 import { Loader2 } from "lucide-react";
-import { memo, useMemo, useRef } from "react";
+import { memo, useRef, type RefObject } from "react";
 import { ConversationEntries } from "../conversation-view";
-import { useConversationHistory } from "../hooks/use-conversation-history";
+import type { DisplayEntry } from "../types";
 
 /**
- * TaskConversation - Aggregates entries from ALL TaskRuns for a Task
+ * TaskConversation renders precomputed conversation entries.
  *
- * This component uses useConversationHistory to aggregate conversation entries
- * from all TaskRuns belonging to a Task. Each follow-up message creates a new
- * TaskRun, and this component shows the complete conversation.
- *
- * Features:
- * - Loads historic entries from completed TaskRuns
- * - Streams live entries from running TaskRun
- * - Displays user_message entries (from UserPrompt logs)
- * - Shows loading indicator when streaming
+ * Aggregation and pending-state reconciliation happen outside this component so
+ * every surface can read from the same session model.
  */
 interface TaskConversationProps {
-  taskId: string;
-  messagesEndRef?: React.RefObject<HTMLDivElement | null>;
+  entries: DisplayEntry[];
+  isLoading: boolean;
+  error: string | null;
+  messagesEndRef?: RefObject<HTMLDivElement | null>;
   onWikilinkClick?: (wikilink: string) => void;
-  onFinished?: () => void;
 }
 
 export const TaskConversation = memo(function TaskConversation({
-  taskId,
+  entries,
+  isLoading,
+  error,
   messagesEndRef,
   onWikilinkClick,
-  onFinished,
 }: TaskConversationProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const { entries, isLoading, error } = useConversationHistory({
-    taskId,
-    enabled: Boolean(taskId),
-    callbacks: {
-      onFinished,
-    },
-  });
 
-  // NOTE: useConversationHistory already adds loading-patch entry when streaming
-  const displayEntries = useMemo(() => {
-    return entries.filter((entry) => {
-      if (entry.type === "STDOUT" || entry.type === "STDERR") return true;
-      if (entry.type === "NORMALIZED_ENTRY") {
-        return entry.content && entry.content.entry_type;
-      }
-      return false;
-    });
-  }, [entries]);
-
-  if (error) {
+  if (error && entries.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2">
         <p className="text-sm text-muted-foreground">{error}</p>
@@ -73,7 +49,7 @@ export const TaskConversation = memo(function TaskConversation({
       style={{ contain: "strict" }}
     >
       <ConversationEntries
-        entries={displayEntries}
+        entries={entries}
         endRef={messagesEndRef}
         onWikilinkClick={onWikilinkClick}
         scrollContainerRef={scrollContainerRef}

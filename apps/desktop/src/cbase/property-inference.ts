@@ -1,9 +1,9 @@
-import type { LensProperty, LensPropertyType, LensRow } from "./types";
+import type { CbaseProperty, CbasePropertyType, CbaseRow } from "./types";
 
 const BUILT_IN_PROPERTIES: Array<{
   key: string;
   label: string;
-  type: LensPropertyType;
+  type: CbasePropertyType;
 }> = [
   { key: "file.name", label: "Name", type: "text" },
   { key: "file.path", label: "Path", type: "text" },
@@ -22,7 +22,7 @@ function sanitizePropertyId(key: string): string {
 
 function makeUniquePropertyId(
   key: string,
-  properties: Record<string, LensProperty>,
+  properties: Record<string, CbaseProperty>,
 ): string {
   const baseId = sanitizePropertyId(key);
   let propertyId = baseId;
@@ -51,7 +51,7 @@ function looksLikeUrl(value: string): boolean {
   }
 }
 
-function inferPropertyType(values: unknown[]): LensPropertyType {
+function inferPropertyType(values: unknown[]): CbasePropertyType {
   const samples = values.filter(
     (value) =>
       value !== null &&
@@ -82,10 +82,10 @@ function defaultLabel(key: string): string {
 }
 
 export function mergeInferredProperties(
-  explicitProperties: Record<string, LensProperty>,
-  rows: LensRow[],
-): Record<string, LensProperty> {
-  const merged: Record<string, LensProperty> = { ...explicitProperties };
+  explicitProperties: Record<string, CbaseProperty>,
+  rows: CbaseRow[],
+): Record<string, CbaseProperty> {
+  const merged: Record<string, CbaseProperty> = { ...explicitProperties };
   const knownKeys = new Set(
     Object.values(explicitProperties).map((property) => property.key),
   );

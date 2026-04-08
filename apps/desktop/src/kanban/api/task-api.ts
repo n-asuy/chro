@@ -94,7 +94,7 @@ export const taskApi = {
 
   ensureProject: async (
     gitRepoPath: string,
-  ): Promise<{ id: string; slug: string }> => {
+  ): Promise<{ id: string; slug?: string | null }> => {
     const response = await desktopFetch<EnsureProjectResponse>(
       "/rpc/projects/ensure",
       {
@@ -105,7 +105,7 @@ export const taskApi = {
     );
     return {
       id: response.project.id,
-      slug: response.project.slug ?? response.project.id,
+      slug: response.project.slug,
     };
   },
 

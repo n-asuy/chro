@@ -8,7 +8,7 @@ import { listProjectEntries, readProjectFile } from "@/lib/project-client";
 import type { DesktopWorkspaceEntry } from "@/types/desktop";
 import { parseFrontmatter } from "../files/lib/frontmatter";
 import { matchesDataset } from "./glob";
-import type { LensDataset, LensRow } from "./types";
+import type { CbaseDataset, CbaseRow } from "./types";
 
 export { matchesDataset } from "./glob";
 
@@ -46,18 +46,18 @@ function collectFileEntries(
 
 /**
  * Index workspace files matching the dataset patterns.
- * Reads each matching file's frontmatter and returns LensRow entries.
+ * Reads each matching file's frontmatter and returns CbaseRow entries.
  *
  * @param projectId - The project ID for API calls
  * @param dataset - Dataset definition with include/exclude patterns
  * @param signal - Optional AbortSignal for cancellation
- * @returns Array of LensRow with extracted property values
+ * @returns Array of CbaseRow with extracted property values
  */
 export async function indexWorkspaceFiles(
   projectId: string,
-  dataset: LensDataset,
+  dataset: CbaseDataset,
   signal?: AbortSignal,
-): Promise<LensRow[]> {
+): Promise<CbaseRow[]> {
   if (signal?.aborted) return [];
 
   const entries = await listProjectEntries(projectId, {
@@ -71,7 +71,7 @@ export async function indexWorkspaceFiles(
   });
 
   const CONCURRENCY = 10;
-  const rows: LensRow[] = [];
+  const rows: CbaseRow[] = [];
 
   for (let i = 0; i < matchingFiles.length; i += CONCURRENCY) {
     if (signal?.aborted) break;
@@ -94,7 +94,7 @@ export async function indexWorkspaceFiles(
             displayName: file.displayName,
             ...(modifiedAt ? { modifiedAt } : {}),
             values: frontmatter as Record<string, unknown>,
-          } satisfies LensRow;
+          } satisfies CbaseRow;
         } catch {
           return null;
         }

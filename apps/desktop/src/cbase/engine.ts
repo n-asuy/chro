@@ -3,26 +3,26 @@
  * Evaluates filter expressions against indexed rows and produces sorted results.
  */
 
-import { buildLensQuery } from "./query";
+import { buildCbaseQuery } from "./query";
 import {
   comparePropertyValues,
   isEmptyValue,
   resolvePropertyValue,
 } from "./runtime";
 import type {
-  LensFilter,
-  LensFilterCondition,
-  LensProperty,
-  LensRow,
-  LensSort,
-  LensView,
-  LensViewResult,
+  CbaseFilter,
+  CbaseFilterCondition,
+  CbaseProperty,
+  CbaseRow,
+  CbaseSort,
+  CbaseView,
+  CbaseViewResult,
 } from "./types";
 
 function evaluateCondition(
-  row: LensRow,
-  condition: LensFilterCondition,
-  properties: Record<string, LensProperty>,
+  row: CbaseRow,
+  condition: CbaseFilterCondition,
+  properties: Record<string, CbaseProperty>,
 ): boolean {
   const value = resolvePropertyValue(row, condition.property, properties);
   const target = condition.value;
@@ -87,9 +87,9 @@ function evaluateCondition(
  * Evaluate a filter expression recursively (and/or/not + leaf conditions).
  */
 export function evaluateFilter(
-  row: LensRow,
-  filter: LensFilter,
-  properties: Record<string, LensProperty>,
+  row: CbaseRow,
+  filter: CbaseFilter,
+  properties: Record<string, CbaseProperty>,
 ): boolean {
   if ("and" in filter) {
     return filter.and.every((f) => evaluateFilter(row, f, properties));
@@ -108,10 +108,10 @@ export function evaluateFilter(
  * Multiple filters at the same level are AND-combined.
  */
 export function filterRows(
-  rows: LensRow[],
-  filters: LensFilter[],
-  properties: Record<string, LensProperty>,
-): LensRow[] {
+  rows: CbaseRow[],
+  filters: CbaseFilter[],
+  properties: Record<string, CbaseProperty>,
+): CbaseRow[] {
   if (filters.length === 0) return rows;
   return rows.filter((row) =>
     filters.every((filter) => evaluateFilter(row, filter, properties)),
@@ -122,10 +122,10 @@ export function filterRows(
  * Sort rows by the given sort specifications.
  */
 export function sortRows(
-  rows: LensRow[],
-  sortSpecs: LensSort[],
-  properties: Record<string, LensProperty>,
-): LensRow[] {
+  rows: CbaseRow[],
+  sortSpecs: CbaseSort[],
+  properties: Record<string, CbaseProperty>,
+): CbaseRow[] {
   if (sortSpecs.length === 0) return rows;
 
   return [...rows].sort((a, b) => {
@@ -142,17 +142,17 @@ export function sortRows(
 }
 
 /**
- * Execute a lens view against indexed rows.
+ * Execute a cbase view against indexed rows.
  * Applies global filters, view filters, sort, and limit.
  */
 export function executeView(
-  rows: LensRow[],
-  view: LensView,
-  properties: Record<string, LensProperty>,
-  globalFilters?: LensFilter[],
-  globalSort?: LensSort[],
-): LensViewResult {
-  const query = buildLensQuery(view, globalFilters, globalSort);
+  rows: CbaseRow[],
+  view: CbaseView,
+  properties: Record<string, CbaseProperty>,
+  globalFilters?: CbaseFilter[],
+  globalSort?: CbaseSort[],
+): CbaseViewResult {
+  const query = buildCbaseQuery(view, globalFilters, globalSort);
   let result = rows;
   let totalCount = result.length;
 

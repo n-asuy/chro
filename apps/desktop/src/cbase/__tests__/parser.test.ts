@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { LensParseError, parseLens } from "../parser";
+import { CbaseParseError, parseCbase } from "../parser";
 
-const MINIMAL_LENS = `
+const MINIMAL_CBASE = `
 version: 1
 name: Tasks
 dataset:
@@ -17,9 +17,9 @@ views:
     type: table
 `;
 
-describe("parseLens", () => {
-  it("parses minimal valid lens", () => {
-    const result = parseLens(MINIMAL_LENS);
+describe("parseCbase", () => {
+  it("parses minimal valid cbase", () => {
+    const result = parseCbase(MINIMAL_CBASE);
     expect(result.version).toBe(1);
     expect(result.name).toBe("Tasks");
     expect(result.dataset.include).toEqual(["tasks/**/*.md"]);
@@ -30,7 +30,7 @@ describe("parseLens", () => {
     expect(result.views[0].default).toBe(true); // auto-set
   });
 
-  it("parses full lens with all features", () => {
+  it("parses full cbase with all features", () => {
     const yaml = `
 version: 1
 name: Project Tasks
@@ -96,7 +96,7 @@ template:
     done: false
   body: "# New Task\\n"
 `;
-    const result = parseLens(yaml);
+    const result = parseCbase(yaml);
     expect(result.name).toBe("Project Tasks");
     expect(result.description).toBe("All project tasks");
     expect(result.dataset.include).toHaveLength(2);
@@ -114,26 +114,26 @@ template:
   });
 
   it("rejects invalid YAML", () => {
-    expect(() => parseLens("{{invalid")).toThrow(LensParseError);
+    expect(() => parseCbase("{{invalid")).toThrow(CbaseParseError);
   });
 
   it("rejects missing version", () => {
-    expect(() => parseLens("name: Test")).toThrow(/version/);
+    expect(() => parseCbase("name: Test")).toThrow(/version/);
   });
 
   it("rejects unsupported version", () => {
-    expect(() => parseLens("version: 2\nname: Test")).toThrow(/version/);
+    expect(() => parseCbase("version: 2\nname: Test")).toThrow(/version/);
   });
 
   it("rejects missing name", () => {
-    expect(() => parseLens("version: 1\ndataset:\n  include: ['*']")).toThrow(
+    expect(() => parseCbase("version: 1\ndataset:\n  include: ['*']")).toThrow(
       /name/,
     );
   });
 
   it("rejects missing dataset", () => {
     expect(() =>
-      parseLens("version: 1\nname: T\nproperties: {}\nviews: []"),
+      parseCbase("version: 1\nname: T\nproperties: {}\nviews: []"),
     ).toThrow(/dataset/);
   });
 
@@ -150,7 +150,7 @@ views:
     name: V
     type: table
 `;
-    expect(() => parseLens(yaml)).toThrow(/include/);
+    expect(() => parseCbase(yaml)).toThrow(/include/);
   });
 
   it("rejects invalid property type", () => {
@@ -168,7 +168,7 @@ views:
     name: V
     type: table
 `;
-    expect(() => parseLens(yaml)).toThrow(/invalid_type/);
+    expect(() => parseCbase(yaml)).toThrow(/invalid_type/);
   });
 
   it("rejects unsupported view type", () => {
@@ -186,7 +186,7 @@ views:
     name: V
     type: board
 `;
-    expect(() => parseLens(yaml)).toThrow(/board/);
+    expect(() => parseCbase(yaml)).toThrow(/board/);
   });
 
   it("parses compound filters", () => {
@@ -214,7 +214,7 @@ views:
     name: V
     type: table
 `;
-    const result = parseLens(yaml);
+    const result = parseCbase(yaml);
     expect(result.filters).toHaveLength(1);
     const f = result.filters![0];
     expect("and" in f).toBe(true);
@@ -237,7 +237,7 @@ views:
     name: V
     type: table
 `;
-    expect(() => parseLens(yaml)).toThrow(/unknown property/);
+    expect(() => parseCbase(yaml)).toThrow(/unknown property/);
   });
 
   it("rejects sort specs that reference unknown properties", () => {
@@ -256,7 +256,7 @@ views:
     name: V
     type: table
 `;
-    expect(() => parseLens(yaml)).toThrow(/unknown property/);
+    expect(() => parseCbase(yaml)).toThrow(/unknown property/);
   });
 
   it("rejects table columns that reference unknown properties", () => {
@@ -274,11 +274,11 @@ views:
     table:
       columns: [p_title, p_missing]
 `;
-    expect(() => parseLens(yaml)).toThrow(/unknown property/);
+    expect(() => parseCbase(yaml)).toThrow(/unknown property/);
   });
 
   it("auto-generates table columns from properties when not specified", () => {
-    const result = parseLens(MINIMAL_LENS);
+    const result = parseCbase(MINIMAL_CBASE);
     expect(result.views[0].table?.columns).toEqual(["p_title"]);
   });
 });

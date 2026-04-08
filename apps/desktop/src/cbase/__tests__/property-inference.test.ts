@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { mergeInferredProperties } from "../property-inference";
-import type { LensRow } from "../types";
+import type { CbaseRow } from "../types";
 
-const rows: LensRow[] = [
+const rows: CbaseRow[] = [
   {
     filePath: "notes/alpha.md",
     displayName: "alpha",

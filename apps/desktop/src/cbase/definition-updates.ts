@@ -1,7 +1,7 @@
-import type { LensDefinition, LensFilter, LensProperty } from "./types";
+import type { CbaseDefinition, CbaseFilter, CbaseProperty } from "./types";
 
 function collectFilterPropertyIds(
-  filter: LensFilter,
+  filter: CbaseFilter,
   propertyIds: Set<string>,
 ): void {
   if ("and" in filter) {
@@ -26,7 +26,7 @@ function collectFilterPropertyIds(
   propertyIds.add(filter.property);
 }
 
-export function collectReferencedPropertyIds(filters: LensFilter[]): string[] {
+export function collectReferencedPropertyIds(filters: CbaseFilter[]): string[] {
   const propertyIds = new Set<string>();
 
   for (const filter of filters) {
@@ -37,13 +37,13 @@ export function collectReferencedPropertyIds(filters: LensFilter[]): string[] {
 }
 
 export function updateViewFilters(
-  definition: LensDefinition,
+  definition: CbaseDefinition,
   viewId: string,
-  filters: LensFilter[],
-  availableProperties?: Record<string, LensProperty>,
-): LensDefinition {
+  filters: CbaseFilter[],
+  availableProperties?: Record<string, CbaseProperty>,
+): CbaseDefinition {
   const nextFilters = filters.length > 0 ? filters : undefined;
-  const updated: LensDefinition = {
+  const updated: CbaseDefinition = {
     ...definition,
     views: definition.views.map((view) =>
       view.id === viewId ? { ...view, filters: nextFilters } : view,

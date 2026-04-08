@@ -8,7 +8,13 @@ import { recordPerfEvent } from "@/perf/recorder";
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flattenConversationEntries } from "../domain/conversation-history";
-import type { DisplayEntry, NormalizedEntry, TaskRunRecord } from "../types";
+import type { PendingSessionSubmission } from "../domain/session-task-state";
+import type {
+  DisplayEntry,
+  NormalizedEntry,
+  TaskRunRecord,
+  TaskSessionRecord,
+} from "../types";
 import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 import { useTaskRunsStream } from "./use-task-runs-stream";
 import { useTaskSessionsStream } from "./use-task-sessions-stream";
@@ -20,11 +26,20 @@ export interface UseConversationHistoryResult {
   error: string | null;
   /** ID of the currently running TaskRun (if any) */
   activeRunId: string | null;
+  /** ID of the most recent TaskRun (running or completed) */
+  latestRunId: string | null;
 }
 
 interface UseConversationHistoryParams {
   taskId: string | null;
   enabled?: boolean;
+  runs?: TaskRunRecord[];
+  runsLoading?: boolean;
+  runsError?: string | null;
+  sessions?: TaskSessionRecord[];
+  sessionsLoading?: boolean;
+  sessionsError?: string | null;
+  pendingSubmission?: PendingSessionSubmission | null;
   callbacks?: {
     onFinished?: () => void;
   };
@@ -285,10 +300,10 @@ function streamRunningTaskRunEntries(
   let patchMessages = 0;
   let patchOps = 0;
   let pendingOps: JsonPatchOperation[] = [];
-  let rafId: number | null = null;
+  let flushTimerId: number | null = null;
 
   const flushPendingOps = () => {
-    rafId = null;
+    flushTimerId = null;
     if (closed || pendingOps.length === 0) {
       pendingOps = [];
       return;
@@ -329,14 +344,14 @@ function streamRunningTaskRunEntries(
         }
 
         pendingOps.push(...msg.JsonPatch);
-        if (rafId === null) {
-          rafId = requestAnimationFrame(flushPendingOps);
+        if (flushTimerId === null) {
+          flushTimerId = window.setTimeout(flushPendingOps, 0);
         }
       }
 
       if (msg.finished) {
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId);
+        if (flushTimerId !== null) {
+          window.clearTimeout(flushTimerId);
         }
         flushPendingOps();
         recordPerfEvent("conv_stream_finished", {
@@ -382,9 +397,9 @@ function streamRunningTaskRunEntries(
   return {
     close: () => {
       closed = true;
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
+      if (flushTimerId !== null) {
+        window.clearTimeout(flushTimerId);
+        flushTimerId = null;
       }
       ws.onopen = null;
       ws.onmessage = null;
@@ -407,6 +422,13 @@ function streamRunningTaskRunEntries(
 export function useConversationHistory({
   taskId,
   enabled = true,
+  runs: providedRuns,
+  runsLoading: providedRunsLoading,
+  runsError: providedRunsError,
+  sessions: providedSessions,
+  sessionsLoading: providedSessionsLoading,
+  sessionsError: providedSessionsError,
+  pendingSubmission,
   callbacks,
 }: UseConversationHistoryParams): UseConversationHistoryResult {
   // State for entries from each TaskRun
@@ -416,24 +438,36 @@ export function useConversationHistory({
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const hasProvidedRuns = providedRuns !== undefined;
+  const hasProvidedSessions = providedSessions !== undefined;
+  const taskScopeId = taskId ?? pendingSubmission?.tempTaskId ?? null;
+
   // Stream of TaskRuns for this Task
-  const {
-    runs,
-    isLoading: runsLoading,
-    error: runsError,
-  } = useTaskRunsStream({
+  const streamedRuns = useTaskRunsStream({
     taskId,
-    enabled: enabled && !!taskId,
+    enabled: !hasProvidedRuns && enabled && !!taskId,
   });
 
-  const {
-    sessions,
-    isLoading: sessionsLoading,
-    error: sessionsError,
-  } = useTaskSessionsStream({
+  const streamedSessions = useTaskSessionsStream({
     taskId,
-    enabled: enabled && !!taskId,
+    enabled: !hasProvidedSessions && enabled && !!taskId,
   });
+
+  const runs = providedRuns ?? streamedRuns.runs;
+  const runsLoading = hasProvidedRuns
+    ? providedRunsLoading ?? false
+    : streamedRuns.isLoading;
+  const runsError = hasProvidedRuns
+    ? providedRunsError ?? null
+    : streamedRuns.error;
+
+  const sessions = providedSessions ?? streamedSessions.sessions;
+  const sessionsLoading = hasProvidedSessions
+    ? providedSessionsLoading ?? false
+    : streamedSessions.isLoading;
+  const sessionsError = hasProvidedSessions
+    ? providedSessionsError ?? null
+    : streamedSessions.error;
 
   // Track which TaskRuns we've loaded and which is actively streaming
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
@@ -450,15 +484,22 @@ export function useConversationHistory({
   );
   const activeRunId = activeRun?.id ?? null;
 
-  // Helper to update entries state (rAF-batched to avoid per-patch re-renders)
+  const latestRunId = useMemo(() => {
+    if (runs.length === 0) return null;
+    const sorted = sortRunsByCreatedAtAscending(runs);
+    return sorted[sorted.length - 1].id;
+  }, [runs]);
+
+  // Helper to update entries state (batched via setTimeout to avoid per-patch
+  // re-renders while still firing when the window is in the background)
   const pendingVersionUpdateRef = useRef(false);
   const updateEntriesVersion = useCallback(() => {
     if (pendingVersionUpdateRef.current) return;
     pendingVersionUpdateRef.current = true;
-    requestAnimationFrame(() => {
+    window.setTimeout(() => {
       pendingVersionUpdateRef.current = false;
       setEntriesVersion((v: number) => v + 1);
-    });
+    }, 0);
   }, []);
 
   // Reset state when taskId changes
@@ -469,15 +510,20 @@ export function useConversationHistory({
       activeStreamRef.current.close();
       activeStreamRef.current = null;
     }
-    setIsLoading(true);
+    setIsLoading(Boolean(taskId));
     setIsStreaming(false);
     setError(null);
     setEntriesVersion(0);
-  }, [taskId]);
+  }, [taskId, taskScopeId]);
 
   // Load historic TaskRuns and stream running TaskRun
   useEffect(() => {
-    if (!enabled || !taskId || runsLoading) return;
+    if (!enabled) return;
+    if (!taskId) {
+      setIsLoading(false);
+      return;
+    }
+    if (runsLoading) return;
 
     let cancelled = false;
 
@@ -678,25 +724,45 @@ export function useConversationHistory({
     const allStates: TaskRunEntriesState[] = Array.from(
       taskRunEntriesRef.current.values(),
     );
-    const result = flattenConversationEntries(allStates, sessions);
+    const pendingRunId = pendingSubmission?.runId ?? pendingSubmission?.tempRunId;
 
-    // Add loading indicator if streaming
-    if (isStreaming) {
-      result.push({
-        type: "NORMALIZED_ENTRY",
-        key: "loading-patch",
-        content: {
-          id: "loading-patch",
-          timestamp: null,
-          entry_type: { type: "loading" },
-          content: "",
-        },
+    if (
+      pendingSubmission &&
+      pendingRunId &&
+      !allStates.some((state) => state.taskRunId === pendingRunId)
+    ) {
+      allStates.push({
+        taskRunId: pendingRunId,
+        createdAt: pendingSubmission.createdAt,
+        entries: [],
+        finished: false,
       });
     }
 
-    return result;
+    const promptOverridesByRun = new Map<
+      string,
+      { prompt: string; sessionId?: string | null }
+    >();
+    if (pendingSubmission && pendingRunId) {
+      promptOverridesByRun.set(pendingRunId, {
+        prompt: pendingSubmission.prompt,
+      });
+    }
+
+    const loadingRunIds = new Set<string>();
+    if (isStreaming && activeRunId) {
+      loadingRunIds.add(activeRunId);
+    }
+    if (pendingRunId) {
+      loadingRunIds.add(pendingRunId);
+    }
+
+    return flattenConversationEntries(allStates, sessions, {
+      promptOverridesByRun,
+      loadingRunIds,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entriesVersion, isStreaming, sessions]);
+  }, [activeRunId, entriesVersion, isStreaming, pendingSubmission, sessions]);
 
   return {
     entries,
@@ -704,5 +770,6 @@ export function useConversationHistory({
     isStreaming,
     error: error || runsError || sessionsError,
     activeRunId,
+    latestRunId,
   };
 }

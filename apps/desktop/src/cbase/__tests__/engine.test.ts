@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { evaluateFilter, executeView, filterRows, sortRows } from "../engine";
 import type {
-  LensFilter,
-  LensProperty,
-  LensRow,
-  LensSort,
-  LensView,
+  CbaseFilter,
+  CbaseProperty,
+  CbaseRow,
+  CbaseSort,
+  CbaseView,
 } from "../types";
 
 // Helper to create a row
-const row = (filePath: string, values: Record<string, unknown>): LensRow => ({
+const row = (filePath: string, values: Record<string, unknown>): CbaseRow => ({
   filePath,
   displayName: filePath.split("/").pop()?.replace(".md", "") ?? filePath,
   values,
 });
 
 // Test property definitions
-const properties: Record<string, LensProperty> = {
+const properties: Record<string, CbaseProperty> = {
   p_title: { key: "title", type: "text" },
   p_status: {
     key: "status",
@@ -47,7 +47,7 @@ describe("evaluateFilter", () => {
 
   describe("equality operators", () => {
     it("= matches equal values", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_status",
         op: "=",
         value: "doing",
@@ -56,7 +56,7 @@ describe("evaluateFilter", () => {
     });
 
     it("= rejects non-equal values", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_status",
         op: "=",
         value: "done",
@@ -65,7 +65,7 @@ describe("evaluateFilter", () => {
     });
 
     it("!= matches non-equal values", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_status",
         op: "!=",
         value: "done",
@@ -76,29 +76,29 @@ describe("evaluateFilter", () => {
 
   describe("comparison operators", () => {
     it("> works with numbers", () => {
-      const filter: LensFilter = { property: "p_priority", op: ">", value: 1 };
+      const filter: CbaseFilter = { property: "p_priority", op: ">", value: 1 };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
 
     it("< works with numbers", () => {
-      const filter: LensFilter = { property: "p_priority", op: "<", value: 5 };
+      const filter: CbaseFilter = { property: "p_priority", op: "<", value: 5 };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
 
     it(">= works with numbers", () => {
-      const filter: LensFilter = { property: "p_priority", op: ">=", value: 2 };
+      const filter: CbaseFilter = { property: "p_priority", op: ">=", value: 2 };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
 
     it("<= works with numbers", () => {
-      const filter: LensFilter = { property: "p_priority", op: "<=", value: 2 };
+      const filter: CbaseFilter = { property: "p_priority", op: "<=", value: 2 };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
   });
 
   describe("string operators", () => {
     it("contains matches substring", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_title",
         op: "contains",
         value: "Test",
@@ -107,7 +107,7 @@ describe("evaluateFilter", () => {
     });
 
     it("contains is case-insensitive", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_title",
         op: "contains",
         value: "test",
@@ -116,7 +116,7 @@ describe("evaluateFilter", () => {
     });
 
     it("not_contains rejects substring", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_title",
         op: "not_contains",
         value: "Test",
@@ -125,7 +125,7 @@ describe("evaluateFilter", () => {
     });
 
     it("starts_with matches prefix", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_title",
         op: "starts_with",
         value: "Test",
@@ -134,7 +134,7 @@ describe("evaluateFilter", () => {
     });
 
     it("ends_with matches suffix", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_title",
         op: "ends_with",
         value: "Task",
@@ -146,17 +146,17 @@ describe("evaluateFilter", () => {
       const fileRow = row("tasks/Test Task.md", {
         title: "Test Task",
       });
-      const fileNameFilter: LensFilter = {
+      const fileNameFilter: CbaseFilter = {
         property: "p_file_name",
         op: "contains",
         value: "Test",
       };
-      const folderFilter: LensFilter = {
+      const folderFilter: CbaseFilter = {
         property: "p_file_folder",
         op: "=",
         value: "tasks",
       };
-      const pathFilter: LensFilter = {
+      const pathFilter: CbaseFilter = {
         property: "p_file_path",
         op: "starts_with",
         value: "tasks/",
@@ -170,25 +170,25 @@ describe("evaluateFilter", () => {
   describe("empty operators", () => {
     it("is_empty for null value", () => {
       const r = row("test.md", {});
-      const filter: LensFilter = { property: "p_title", op: "is_empty" };
+      const filter: CbaseFilter = { property: "p_title", op: "is_empty" };
       expect(evaluateFilter(r, filter, properties)).toBe(true);
     });
 
     it("is_not_empty for present value", () => {
-      const filter: LensFilter = { property: "p_title", op: "is_not_empty" };
+      const filter: CbaseFilter = { property: "p_title", op: "is_not_empty" };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
 
     it("is_empty for empty array", () => {
       const r = row("test.md", { tags: [] });
-      const filter: LensFilter = { property: "p_tags", op: "is_empty" };
+      const filter: CbaseFilter = { property: "p_tags", op: "is_empty" };
       expect(evaluateFilter(r, filter, properties)).toBe(true);
     });
   });
 
   describe("multi_select contains", () => {
     it("contains checks array items", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_tags",
         op: "contains",
         value: "urgent",
@@ -197,7 +197,7 @@ describe("evaluateFilter", () => {
     });
 
     it("contains rejects missing array items", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         property: "p_tags",
         op: "contains",
         value: "backend",
@@ -208,7 +208,7 @@ describe("evaluateFilter", () => {
 
   describe("compound filters", () => {
     it("and requires all conditions", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         and: [
           { property: "p_status", op: "=", value: "doing" },
           { property: "p_priority", op: ">", value: 1 },
@@ -218,7 +218,7 @@ describe("evaluateFilter", () => {
     });
 
     it("and fails if any condition fails", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         and: [
           { property: "p_status", op: "=", value: "doing" },
           { property: "p_priority", op: ">", value: 5 },
@@ -228,7 +228,7 @@ describe("evaluateFilter", () => {
     });
 
     it("or requires any condition", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         or: [
           { property: "p_status", op: "=", value: "done" },
           { property: "p_priority", op: "=", value: 2 },
@@ -238,14 +238,14 @@ describe("evaluateFilter", () => {
     });
 
     it("not negates condition", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         not: { property: "p_status", op: "=", value: "done" },
       };
       expect(evaluateFilter(testRow, filter, properties)).toBe(true);
     });
 
     it("nested compound filters", () => {
-      const filter: LensFilter = {
+      const filter: CbaseFilter = {
         and: [
           {
             or: [
@@ -331,7 +331,7 @@ describe("executeView", () => {
     row("4.md", { title: "Task 4", status: "doing", priority: 4 }),
   ];
 
-  const baseView: LensView = {
+  const baseView: CbaseView = {
     id: "v_table",
     name: "Table",
     type: "table",
@@ -345,7 +345,7 @@ describe("executeView", () => {
   });
 
   it("applies view filters", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       filters: [{ property: "p_status", op: "=", value: "doing" }],
     };
@@ -355,11 +355,11 @@ describe("executeView", () => {
   });
 
   it("applies global filters AND view filters", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       filters: [{ property: "p_status", op: "=", value: "doing" }],
     };
-    const globalFilters: LensFilter[] = [
+    const globalFilters: CbaseFilter[] = [
       { property: "p_priority", op: ">", value: 2 },
     ];
     const result = executeView(data, view, properties, globalFilters);
@@ -368,7 +368,7 @@ describe("executeView", () => {
   });
 
   it("applies sort", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       sort: [{ by: "p_priority", dir: "asc" }],
     };
@@ -377,7 +377,7 @@ describe("executeView", () => {
   });
 
   it("applies limit", () => {
-    const view: LensView = {
+    const view: CbaseView = {
       ...baseView,
       sort: [{ by: "p_priority", dir: "asc" }],
       limit: 2,
