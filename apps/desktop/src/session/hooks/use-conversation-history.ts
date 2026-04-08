@@ -5,10 +5,14 @@ import { recordPerfEvent } from "@/perf/recorder";
  *
  * User prompts come from task session metadata so follow-up turns remain
  * visible even if live log normalization drops a user_message patch.
+ *
+ * Also extracts approval records from `/approvals/*` patches in the active
+ * run's log stream, eliminating the need for a separate WebSocket connection.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flattenConversationEntries } from "../domain/conversation-history";
 import type { PendingSessionSubmission } from "../domain/session-task-state";
+import type { ApprovalRecord } from "../types/api";
 import type {
   DisplayEntry,
   NormalizedEntry,
@@ -28,6 +32,10 @@ export interface UseConversationHistoryResult {
   activeRunId: string | null;
   /** ID of the most recent TaskRun (running or completed) */
   latestRunId: string | null;
+  /** Approval records from the active run's log stream. */
+  approvals: Record<string, ApprovalRecord>;
+  /** Clear all approval records (e.g. after merge). */
+  resetApprovals: () => void;
 }
 
 interface UseConversationHistoryParams {
@@ -438,6 +446,12 @@ export function useConversationHistory({
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Approval records extracted from /approvals/* patches in the active stream
+  const approvalsRef = useRef<Record<string, ApprovalRecord>>({});
+  const [approvals, setApprovals] = useState<Record<string, ApprovalRecord>>(
+    {},
+  );
+
   const hasProvidedRuns = providedRuns !== undefined;
   const hasProvidedSessions = providedSessions !== undefined;
   const taskScopeId = taskId ?? pendingSubmission?.tempTaskId ?? null;
@@ -502,6 +516,37 @@ export function useConversationHistory({
     }, 0);
   }, []);
 
+  const applyApprovalPatches = useCallback(
+    (ops: JsonPatchOperation[]) => {
+      let changed = false;
+      const next = { ...approvalsRef.current };
+      for (const op of ops) {
+        const segments = op.path.split("/").filter(Boolean);
+        if (segments[0] !== "approvals" || segments.length < 2) continue;
+        const approvalId = segments[1];
+        if (op.op === "remove") {
+          if (approvalId in next) {
+            delete next[approvalId];
+            changed = true;
+          }
+        } else if (op.value !== undefined) {
+          next[approvalId] = op.value as unknown as ApprovalRecord;
+          changed = true;
+        }
+      }
+      if (changed) {
+        approvalsRef.current = next;
+        setApprovals(next);
+      }
+    },
+    [],
+  );
+
+  const resetApprovals = useCallback(() => {
+    approvalsRef.current = {};
+    setApprovals({});
+  }, []);
+
   // Reset state when taskId changes
   useEffect(() => {
     taskRunEntriesRef.current.clear();
@@ -514,200 +559,152 @@ export function useConversationHistory({
     setIsStreaming(false);
     setError(null);
     setEntriesVersion(0);
-  }, [taskId, taskScopeId]);
+    resetApprovals();
+  }, [taskId, taskScopeId, resetApprovals]);
 
-  // Load historic TaskRuns and stream running TaskRun
+  // Effect 1: Load historic (finished) TaskRuns.
+  // Uses cancelled flag — safe because historic loads are short-lived async ops.
   useEffect(() => {
-    if (!enabled) return;
-    if (!taskId) {
-      setIsLoading(false);
+    if (!enabled || !taskId || runsLoading) {
+      if (!runsLoading) setIsLoading(false);
       return;
     }
-    if (runsLoading) return;
 
     let cancelled = false;
 
-    const loadAndStream = async () => {
-      const loadStartedAt = performance.now();
+    const loadHistoric = async () => {
       const sortedRuns = sortRunsByCreatedAtAscending(runs);
+      const historicRuns = sortedRuns
+        .filter((r) => r.status !== "running" && !loadedRunIdsRef.current.has(r.id))
+        .reverse();
 
-      const historicRuns = sortedRuns.filter(
-        (r) => r.status !== "running" && !loadedRunIdsRef.current.has(r.id),
-      );
-      const newestHistoricRuns = [...historicRuns].reverse();
-      const hasRunningRun = sortedRuns.some((r) => r.status === "running");
-
-      if (historicRuns.length > 0 || hasRunningRun) {
-        recordPerfEvent("conv_load_and_stream_start", {
-          task_id: taskId,
-          total_runs: sortedRuns.length,
-          historic_to_load: historicRuns.length,
-          has_running_run: hasRunningRun,
-        });
+      if (historicRuns.length === 0) {
+        setIsLoading(false);
+        return;
       }
 
-      const loadHistoricRun = async (run: TaskRunRecord): Promise<boolean> => {
+      let loaded = countLoadedEntries(taskRunEntriesRef.current.values());
+
+      // Initial batch — newest first for fast render
+      for (const run of historicRuns) {
+        if (cancelled || loaded > MIN_INITIAL_HISTORY_ENTRIES) break;
         try {
           await loadHistoricTaskRunEntries(run.id, (entries) => {
             if (cancelled) return;
             taskRunEntriesRef.current.set(run.id, {
-              taskRunId: run.id,
-              createdAt: run.created_at,
-              entries,
-              finished: true,
+              taskRunId: run.id, createdAt: run.created_at, entries, finished: true,
             });
             loadedRunIdsRef.current.add(run.id);
             updateEntriesVersion();
           });
-          return true;
+          loaded = countLoadedEntries(taskRunEntriesRef.current.values());
         } catch (err) {
-          console.error(
-            `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
-            err,
-          );
-          return false;
+          console.error(`[useConversationHistory] Failed to load TaskRun ${run.id}:`, err);
         }
-      };
-
-      let initialEntriesLoaded = countLoadedEntries(
-        taskRunEntriesRef.current.values(),
-      );
-      let initialHistoricLoaded = 0;
-
-      // Load the newest finished runs first so the session can render quickly.
-      for (const run of newestHistoricRuns) {
-        if (cancelled) break;
-        if (initialEntriesLoaded > MIN_INITIAL_HISTORY_ENTRIES) break;
-
-        const loaded = await loadHistoricRun(run);
-        if (!loaded) continue;
-
-        initialHistoricLoaded += 1;
-        initialEntriesLoaded = countLoadedEntries(
-          taskRunEntriesRef.current.values(),
-        );
       }
 
       if (cancelled) return;
       setIsLoading(false);
 
-      const initialHistoricLoadMs =
-        Math.round((performance.now() - loadStartedAt) * 100) / 100;
-
-      // Stream running TaskRun
-      const runningRun = sortedRuns.find((r) => r.status === "running");
-      if (runningRun && activeStreamRef.current?.runId !== runningRun.id) {
-        recordPerfEvent("conv_running_stream_connect", {
-          task_id: taskId,
-          task_run_id: runningRun.id,
-          historic_load_ms: initialHistoricLoadMs,
-          historic_loaded: initialHistoricLoaded,
-        });
-        // Close previous stream if different
-        if (activeStreamRef.current) {
-          activeStreamRef.current.close();
-        }
-
-        // Initialize state for this run
-        if (!taskRunEntriesRef.current.has(runningRun.id)) {
-          taskRunEntriesRef.current.set(runningRun.id, {
-            taskRunId: runningRun.id,
-            createdAt: runningRun.created_at,
-            entries: [],
-            finished: false,
+      // Background batch — remaining runs
+      let batchLoaded = 0;
+      for (const run of historicRuns) {
+        if (cancelled || loadedRunIdsRef.current.has(run.id)) continue;
+        try {
+          const before = countLoadedEntries(taskRunEntriesRef.current.values());
+          await loadHistoricTaskRunEntries(run.id, (entries) => {
+            if (cancelled) return;
+            taskRunEntriesRef.current.set(run.id, {
+              taskRunId: run.id, createdAt: run.created_at, entries, finished: true,
+            });
+            loadedRunIdsRef.current.add(run.id);
+            updateEntriesVersion();
           });
-        }
-
-        setIsStreaming(true);
-
-        const controller = streamRunningTaskRunEntries(
-          runningRun.id,
-          (patchOps) => {
-            if (cancelled) return;
-            const state = taskRunEntriesRef.current.get(runningRun.id);
-            if (state) {
-              state.entries = applyEntriesPatches(
-                state.entries,
-                patchOps,
-                runningRun.id,
-              );
-              updateEntriesVersion();
-            }
-          },
-          () => {
-            if (cancelled) return;
-            loadedRunIdsRef.current.add(runningRun.id);
-            setIsStreaming(false);
-            activeStreamRef.current = null;
-
-            void loadHistoricTaskRunEntries(runningRun.id, (entries) => {
-              if (cancelled) return;
-              taskRunEntriesRef.current.set(runningRun.id, {
-                taskRunId: runningRun.id,
-                createdAt: runningRun.created_at,
-                entries,
-                finished: true,
-              });
-              updateEntriesVersion();
-            })
-              .catch((err) => {
-                console.error(
-                  `[useConversationHistory] Failed to replay finished TaskRun ${runningRun.id}:`,
-                  err,
-                );
-                const state = taskRunEntriesRef.current.get(runningRun.id);
-                if (state) {
-                  state.finished = true;
-                }
-              })
-              .finally(() => {
-                if (cancelled) return;
-                callbacksRef.current?.onFinished?.();
-                updateEntriesVersion();
-              });
-          },
-        );
-
-        activeStreamRef.current = {
-          runId: runningRun.id,
-          close: controller.close,
-        };
-      } else if (!runningRun && activeStreamRef.current) {
-        // No running run but we have an active stream - close it
-        activeStreamRef.current.close();
-        activeStreamRef.current = null;
-        setIsStreaming(false);
-      }
-
-      let backgroundEntriesLoaded = 0;
-      for (const run of newestHistoricRuns) {
-        if (cancelled) break;
-        if (loadedRunIdsRef.current.has(run.id)) continue;
-
-        const beforeCount = countLoadedEntries(
-          taskRunEntriesRef.current.values(),
-        );
-        const loaded = await loadHistoricRun(run);
-        if (!loaded) continue;
-
-        const afterCount = countLoadedEntries(
-          taskRunEntriesRef.current.values(),
-        );
-        backgroundEntriesLoaded += Math.max(0, afterCount - beforeCount);
-
-        if (backgroundEntriesLoaded >= REMAINING_HISTORY_BATCH_SIZE) {
-          backgroundEntriesLoaded = 0;
-          await new Promise((resolve) => setTimeout(resolve, 0));
+          batchLoaded += Math.max(0, countLoadedEntries(taskRunEntriesRef.current.values()) - before);
+          if (batchLoaded >= REMAINING_HISTORY_BATCH_SIZE) {
+            batchLoaded = 0;
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        } catch (err) {
+          console.error(`[useConversationHistory] Failed to load TaskRun ${run.id}:`, err);
         }
       }
     };
 
-    loadAndStream();
-
-    return () => {
-      cancelled = true;
-    };
+    loadHistoric();
+    return () => { cancelled = true; };
   }, [enabled, taskId, runs, runsLoading, updateEntriesVersion]);
+
+  // Effect 2: Stream the running TaskRun — fire-and-forget.
+  // No cancelled flag. The stream is autonomous and survives effect re-runs.
+  // Dedup via activeStreamRef prevents duplicate streams.
+  // Depends on activeRunId (primitive), not runs (object reference).
+  const activeRunCreatedAt = activeRun?.created_at ?? null;
+
+  useEffect(() => {
+    if (!enabled || !taskId) return;
+
+    if (activeRunId && activeStreamRef.current?.runId !== activeRunId) {
+      if (activeStreamRef.current) {
+        activeStreamRef.current.close();
+      }
+
+      const createdAt = activeRunCreatedAt ?? new Date().toISOString();
+
+      if (!taskRunEntriesRef.current.has(activeRunId)) {
+        taskRunEntriesRef.current.set(activeRunId, {
+          taskRunId: activeRunId,
+          createdAt: createdAt,
+          entries: [],
+          finished: false,
+        });
+      }
+
+      setIsStreaming(true);
+      resetApprovals();
+
+      const runId = activeRunId;
+      const controller = streamRunningTaskRunEntries(
+        runId,
+        (patchOps) => {
+          const state = taskRunEntriesRef.current.get(runId);
+          if (state) {
+            state.entries = applyEntriesPatches(state.entries, patchOps, runId);
+            updateEntriesVersion();
+          }
+          applyApprovalPatches(patchOps);
+        },
+        () => {
+          loadedRunIdsRef.current.add(runId);
+          setIsStreaming(false);
+          activeStreamRef.current = null;
+
+          void loadHistoricTaskRunEntries(runId, (entries) => {
+            taskRunEntriesRef.current.set(runId, {
+              taskRunId: runId, createdAt: createdAt, entries, finished: true,
+            });
+            updateEntriesVersion();
+          })
+            .catch((err) => {
+              console.error(`[useConversationHistory] Failed to replay finished TaskRun ${runId}:`, err);
+              const state = taskRunEntriesRef.current.get(runId);
+              if (state) state.finished = true;
+            })
+            .finally(() => {
+              callbacksRef.current?.onFinished?.();
+              updateEntriesVersion();
+            });
+        },
+      );
+
+      activeStreamRef.current = { runId, close: controller.close };
+    } else if (!activeRunId && activeStreamRef.current) {
+      activeStreamRef.current.close();
+      activeStreamRef.current = null;
+      setIsStreaming(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, taskId, activeRunId]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -771,5 +768,7 @@ export function useConversationHistory({
     error: error || runsError || sessionsError,
     activeRunId,
     latestRunId,
+    approvals,
+    resetApprovals,
   };
 }

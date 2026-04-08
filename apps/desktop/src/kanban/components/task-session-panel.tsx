@@ -29,7 +29,6 @@ import { TaskConversation } from "@/session/components/task-conversation";
 import {
   useConversationHistory,
   useDiffStream,
-  useTaskRunStream,
 } from "@/session/hooks";
 import { useImageUploads } from "@/session/hooks/use-image-uploads";
 import { sendTaskMessage } from "@/session/utils/task-message-api";
@@ -143,19 +142,20 @@ export const TaskSessionPanel = ({
   const isComposingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Single source of truth: WebSocket-based run discovery
+  // Single source of truth: WebSocket-based run discovery + inline approvals
   const {
     entries: conversationEntries,
     isLoading: isConversationLoading,
     error: conversationError,
     activeRunId,
     latestRunId,
+    approvals: streamApprovals,
+    resetApprovals,
   } = useConversationHistory({
     taskId: issue.id,
     enabled: Boolean(issue.id),
   });
 
-  // Derived from WebSocket — no REST fallback
   const taskRunId = activeRunId ?? latestRunId;
   const isSending = activeRunId !== null;
 
@@ -223,16 +223,6 @@ export const TaskSessionPanel = ({
     };
   }, [t]);
 
-  // Log stream hook — provides approvals and document for diffs
-  const logStream = useTaskRunStream({
-    taskRunId,
-    callbacks: {
-      onError: (error) => {
-        console.warn("[task-session-panel] LogStream error:", error);
-      },
-    },
-  });
-
   const diffStream = useDiffStream({
     taskRunId,
     enabled: Boolean(taskRunId),
@@ -282,16 +272,16 @@ export const TaskSessionPanel = ({
     () => diffItems.map((item) => ({ path: item.path, diff: item.entry })),
     [diffItems],
   );
-  const hasDiffs = diffItems.length > 0;
+  const hasDiffs = diffItems.length > 0 && !isMerged;
 
   const approvalItems = useMemo(
     () =>
-      Object.values(logStream.document.approvals).sort((a, b) => {
+      Object.values(streamApprovals).sort((a, b) => {
         const left = new Date(b.created_at).getTime();
         const right = new Date(a.created_at).getTime();
         return Number.isNaN(left) || Number.isNaN(right) ? 0 : left - right;
       }),
-    [logStream.document.approvals],
+    [streamApprovals],
   );
 
   const hasApprovals = approvalItems.length > 0;
@@ -361,9 +351,11 @@ export const TaskSessionPanel = ({
   const canSend = Boolean(workspacePath) && !isSending && !isUploading;
   const isSendButtonDisabled = isSending ? false : !canSend || !input.trim();
 
+  // No explicit reset needed: useConversationHistory manages entries per-run,
+  // so new runs start with an empty entry list automatically.
   const archiveCurrentEntries = useCallback(() => {
-    logStream.resetEntries();
-  }, [logStream.resetEntries]);
+    resetApprovals();
+  }, [resetApprovals]);
 
   const handleDropFiles = useCallback(
     (event: ReactDragEvent<HTMLElement>) => {
@@ -431,7 +423,7 @@ export const TaskSessionPanel = ({
           body: JSON.stringify({}),
         },
       );
-      logStream.resetDocument();
+      resetApprovals();
       setDiffViewerOpen(false);
       setIsMerged(true);
       // Set success state temporarily
@@ -451,7 +443,7 @@ export const TaskSessionPanel = ({
     addErrorMessage,
     isMerged,
     isMergingDiffs,
-    logStream.resetDocument,
+    resetApprovals,
     refetchBranchStatus,
     t,
     taskRunId,
@@ -671,7 +663,7 @@ export const TaskSessionPanel = ({
           <>
             {hasApprovals && (
               <ApprovalPanel
-                approvals={logStream.document.approvals}
+                approvals={streamApprovals}
                 t={t}
                 onApprovalUpdate={() => {
                   // Stream updates automatically refresh the board
