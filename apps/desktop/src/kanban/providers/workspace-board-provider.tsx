@@ -48,13 +48,15 @@ export function WorkspaceBoardProvider({
   children,
 }: WorkspaceBoardProviderProps) {
   const params = useParams({ strict: false }) as { projectId?: string };
-  const projectId = params.projectId ?? null;
+  const routeIdentifier = params.projectId ?? null;
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
 
-  // Resolve workspace path from project ID
+  // Resolve slug/id → UUID + workspace path
   useEffect(() => {
-    if (!projectId) {
+    if (!routeIdentifier) {
+      setProjectId(null);
       setWorkspacePath(null);
       setProjectError(null);
       return;
@@ -64,8 +66,9 @@ export function WorkspaceBoardProvider({
 
     const resolveProject = async () => {
       try {
-        const project = await taskApi.getProject(projectId);
+        const project = await taskApi.getProject(routeIdentifier);
         if (!cancelled) {
+          setProjectId(project.id);
           setWorkspacePath(project.gitRepoPath);
           setProjectError(null);
         }
@@ -87,7 +90,7 @@ export function WorkspaceBoardProvider({
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [routeIdentifier]);
 
   // Get board data from WebSocket hook
   const boardData = useWorkspaceBoard({

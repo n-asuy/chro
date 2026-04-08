@@ -9,7 +9,10 @@ import { useParams } from "@tanstack/react-router";
 import { taskApi, type ProjectResponse } from "@/kanban/api/task-api";
 
 interface ProjectContextValue {
+  /** Resolved UUID — use this for all API calls */
   projectId: string | null;
+  /** Short slug from URL — use this for navigation */
+  projectSlug: string | null;
   project: ProjectResponse | null;
   workspacePath: string | null;
   isLoading: boolean;
@@ -20,13 +23,14 @@ const ProjectContext = createContext<ProjectContextValue | null>(null);
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const params = useParams({ strict: false }) as { projectId?: string };
-  const projectId = params.projectId ?? null;
+  // Route param may be a slug or UUID (backward compat)
+  const routeIdentifier = params.projectId ?? null;
   const [project, setProject] = useState<ProjectResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!projectId) {
+    if (!routeIdentifier) {
       setProject(null);
       setIsLoading(false);
       setError(null);
@@ -38,7 +42,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     taskApi
-      .getProject(projectId)
+      .getProject(routeIdentifier)
       .then((proj) => {
         if (!cancelled) {
           setProject(proj);
@@ -58,10 +62,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [routeIdentifier]);
 
   const value: ProjectContextValue = {
-    projectId,
+    projectId: project?.id ?? null,
+    projectSlug: project?.slug ?? routeIdentifier,
     project,
     workspacePath: project?.gitRepoPath ?? null,
     isLoading,

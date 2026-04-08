@@ -6,6 +6,7 @@ use std::mem;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::slug::generate_slug;
 use crate::types::{ExecutionMode, RunStatus, TaskStatus};
 
 /// Task record (core entity)
@@ -16,10 +17,14 @@ use crate::types::{ExecutionMode, RunStatus, TaskStatus};
 #[ts(export, export_to = "task-record.ts")]
 pub struct TaskRecord {
     pub id: Uuid,
+    pub slug: Option<String>,
     pub project_id: Uuid,
     pub parent_task_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[ts(skip)]
+    pub prompt: Option<String>,
     pub status: TaskStatus,
     pub due_at: Option<DateTime<Utc>>,
     pub branch: Option<String>,
@@ -37,13 +42,27 @@ pub struct TaskRecord {
 impl TaskRecord {
     /// Create a new task
     pub fn new(project_id: Uuid, title: impl Into<String>, description: Option<String>) -> Self {
+        Self::new_with_prompt(project_id, title, description, None)
+    }
+
+    pub fn new_with_prompt(
+        project_id: Uuid,
+        title: impl Into<String>,
+        description: Option<String>,
+        prompt: Option<String>,
+    ) -> Self {
         let now = Utc::now();
+        let title = title.into();
+        let description = normalize_optional_text(description);
+        let prompt = normalize_prompt(prompt, &title, description.as_deref());
         Self {
             id: Uuid::new_v4(),
+            slug: Some(generate_slug()),
             project_id,
             parent_task_id: None,
-            title: title.into(),
+            title: title.clone(),
             description,
+            prompt,
             status: TaskStatus::Pending,
             due_at: None,
             branch: None,
@@ -79,14 +98,16 @@ impl TaskRecord {
     /// Persist the task record.
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO task_records (id, project_id, parent_task_id, title, description, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.id)
+        .bind(&self.slug)
         .bind(self.project_id)
         .bind(self.parent_task_id)
         .bind(&self.title)
         .bind(&self.description)
+        .bind(&self.prompt)
         .bind(self.status)
         .bind(self.due_at)
         .bind(&self.branch)
@@ -288,13 +309,15 @@ impl TaskRecord {
         pool: &Pool<Sqlite>,
         task_id: Uuid,
         title: String,
+        prompt: Option<String>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE task_records
-             SET title = ?, updated_at = datetime('now')
+             SET title = ?, prompt = COALESCE(?, prompt), updated_at = datetime('now')
              WHERE id = ?",
         )
         .bind(title)
+        .bind(prompt)
         .bind(task_id)
         .execute(pool)
         .await?;
@@ -329,14 +352,109 @@ impl TaskRecord {
     }
 
     pub fn to_prompt(&self) -> String {
-        if let Some(description) = self.description.as_ref() {
-            let trimmed = description.trim();
-            if !trimmed.is_empty() {
-                return format!("{}\n{}", self.title, trimmed);
+        if let Some(prompt) = self.prompt.as_deref().map(str::trim) {
+            if !prompt.is_empty() {
+                return prompt.to_string();
             }
         }
-        self.title.clone()
+
+        legacy_prompt_from_parts(&self.title, self.description.as_deref())
+            .unwrap_or_else(|| self.title.clone())
     }
+
+    pub fn legacy_prompt(&self) -> Option<String> {
+        legacy_prompt_from_parts(&self.title, self.description.as_deref())
+    }
+
+    pub fn prompt_matches_legacy(&self) -> bool {
+        let prompt = match self.prompt.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => value,
+            _ => return true,
+        };
+        match self.legacy_prompt() {
+            Some(legacy) => legacy == prompt,
+            None => false,
+        }
+    }
+}
+
+fn normalize_optional_text(text: Option<String>) -> Option<String> {
+    text.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn legacy_prompt_from_parts(title: &str, description: Option<&str>) -> Option<String> {
+    let trimmed_title = title.trim();
+
+    if let Some(trimmed_description) = description.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some((context_block, trailing)) = split_leading_context_block(trimmed_description) {
+            if trailing.is_empty() {
+                if is_generated_session_title(trimmed_title) {
+                    return Some(context_block.to_string());
+                }
+                if trimmed_title.is_empty() {
+                    return Some(context_block.to_string());
+                }
+                return Some(format!("{}\n{}", context_block, trimmed_title));
+            }
+
+            if trimmed_title.is_empty() {
+                return Some(format!("{}\n{}", context_block, trailing));
+            }
+            return Some(format!("{}\n{}\n{}", context_block, trimmed_title, trailing));
+        }
+
+        if trimmed_title.is_empty() {
+            return Some(trimmed_description.to_string());
+        }
+        return Some(format!("{}\n{}", trimmed_title, trimmed_description));
+    }
+
+    if trimmed_title.is_empty() {
+        None
+    } else {
+        Some(trimmed_title.to_string())
+    }
+}
+
+fn split_leading_context_block(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("<context>")?;
+    let end = rest.find("</context>")?;
+    let context_end = "<context>".len() + end + "</context>".len();
+    let (context_block, trailing) = content.split_at(context_end);
+    Some((context_block, trailing.trim_start()))
+}
+
+fn is_generated_session_title(title: &str) -> bool {
+    let rest = match title.strip_prefix("Session ") {
+        Some(value) => value,
+        None => return false,
+    };
+
+    let bytes = rest.as_bytes();
+    bytes.len() == 16
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b' '
+        && bytes[13] == b':'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13) || byte.is_ascii_digit())
+}
+
+fn normalize_prompt(
+    prompt: Option<String>,
+    title: &str,
+    description: Option<&str>,
+) -> Option<String> {
+    normalize_optional_text(prompt).or_else(|| legacy_prompt_from_parts(title, description))
 }
 
 /// Task run (execution history)
@@ -347,6 +465,7 @@ impl TaskRecord {
 #[ts(export, export_to = "task-run.ts")]
 pub struct TaskRun {
     pub id: Uuid,
+    pub slug: Option<String>,
     pub task_id: Uuid,
     pub execution_mode: ExecutionMode,
     pub status: RunStatus,
@@ -383,6 +502,7 @@ impl TaskRun {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            slug: Some(generate_slug()),
             task_id,
             execution_mode: ExecutionMode::Local,
             status: RunStatus::Pending,
@@ -433,16 +553,17 @@ impl TaskRun {
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO task_runs (
-                id, task_id, execution_mode, status, run_reason, executor_action, executor_action_type,
+                id, slug, task_id, execution_mode, status, run_reason, executor_action, executor_action_type,
                 exit_code, dropped, before_head_commit, after_head_commit, executor_job_id, s3_prefix,
                 logs_uri, summary_uri, diffs_prefix, logs_retrieval_failed, started_at, completed_at,
                 created_at, updated_at, branch_name, target_branch, container_ref, workspace_path,
                 executor_label, resume_session_id, worktree_deleted
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )",
         )
         .bind(self.id)
+        .bind(&self.slug)
         .bind(self.task_id)
         .bind(self.execution_mode)
         .bind(self.status)
@@ -731,6 +852,69 @@ mod tests {
         let parent_id = Uuid::new_v4();
         let task = TaskRecord::new_subtask(project_id, parent_id, "Subtask", None);
         assert_eq!(task.parent_task_id, Some(parent_id));
+    }
+
+    #[test]
+    fn test_to_prompt_uses_stored_prompt_when_present() {
+        let task = TaskRecord::new_with_prompt(
+            Uuid::new_v4(),
+            "fix the bug",
+            Some("summary".to_string()),
+            Some("<context>\n<file path=\"src/main.ts\" />\n</context>\nfix the bug".to_string()),
+        );
+        assert_eq!(
+            task.to_prompt(),
+            "<context>\n<file path=\"src/main.ts\" />\n</context>\nfix the bug"
+        );
+    }
+
+    #[test]
+    fn test_to_prompt_falls_back_to_legacy_prompt() {
+        let task = TaskRecord::new(Uuid::new_v4(), "fix the bug", Some("add tests".to_string()));
+        assert_eq!(task.to_prompt(), "fix the bug\nadd tests");
+    }
+
+    #[test]
+    fn test_to_prompt_reconstructs_legacy_context_prompt() {
+        let task = TaskRecord::new(
+            Uuid::new_v4(),
+            "fix the bug",
+            Some("<context>\n<file path=\"src/main.ts\" />\n</context>\nadd tests".to_string()),
+        );
+        assert_eq!(
+            task.to_prompt(),
+            "<context>\n<file path=\"src/main.ts\" />\n</context>\nfix the bug\nadd tests"
+        );
+    }
+
+    #[test]
+    fn test_to_prompt_reconstructs_context_only_prompt_from_generated_title() {
+        let task = TaskRecord::new(
+            Uuid::new_v4(),
+            "Session 2025-03-01 09:30",
+            Some("<context>\n<file path=\"src/main.ts\" />\n</context>".to_string()),
+        );
+        assert_eq!(
+            task.to_prompt(),
+            "<context>\n<file path=\"src/main.ts\" />\n</context>"
+        );
+    }
+
+    #[test]
+    fn test_prompt_matches_legacy_when_prompt_is_derived() {
+        let task = TaskRecord::new(Uuid::new_v4(), "fix the bug", Some("add tests".to_string()));
+        assert!(task.prompt_matches_legacy());
+    }
+
+    #[test]
+    fn test_prompt_matches_legacy_is_false_for_custom_prompt() {
+        let task = TaskRecord::new_with_prompt(
+            Uuid::new_v4(),
+            "fix the bug",
+            Some("add tests".to_string()),
+            Some("<context>\n<file path=\"src/main.ts\" />\n</context>\nfix the bug".to_string()),
+        );
+        assert!(!task.prompt_matches_legacy());
     }
 
     #[test]

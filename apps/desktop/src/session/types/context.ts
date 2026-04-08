@@ -105,6 +105,43 @@ export function parseContextFromContent(content: string): ParsedUserContent {
   return { contextEntries: entries, imageEntries, text };
 }
 
+function createGeneratedSessionTitle(now: Date = new Date()): string {
+  return `Session ${now.toISOString().slice(0, 16).replace("T", " ")}`;
+}
+
+export function inferTaskTitleFromContent(
+  content: string,
+  fallback: () => string = () => createGeneratedSessionTitle(),
+): string {
+  const firstLine = parseContextFromContent(content).text
+    .split(/\r?\n/)
+    .find((line) => line.trim().length > 0)
+    ?.trim();
+
+  if (!firstLine) {
+    return fallback();
+  }
+
+  return firstLine.slice(0, 80);
+}
+
+export function inferTaskDescriptionFromContent(content: string): string | null {
+  const textLines = parseContextFromContent(content).text.split(/\r?\n/);
+  const firstLineIndex = textLines.findIndex((line) => line.trim().length > 0);
+  if (firstLineIndex === -1) {
+    return null;
+  }
+
+  const remainingText =
+    firstLineIndex === -1
+      ? ""
+      : textLines
+          .slice(firstLineIndex + 1)
+          .join("\n")
+          .trim();
+  return remainingText || null;
+}
+
 const SESSION_PATH_RE =
   /^\.chro-context\/sessions\/([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$/;
 

@@ -17,6 +17,7 @@ type AfterConnectHook = dyn for<'a> Fn(
     + 'static;
 
 pub mod models;
+pub mod slug;
 pub mod types;
 
 /// Database service providing connection pool and utilities
@@ -221,7 +222,7 @@ mod tests {
 
         // Verify schema version
         let version = db.schema_version().await.unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[tokio::test]

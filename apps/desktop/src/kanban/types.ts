@@ -51,6 +51,7 @@ interface IssueComment {
 
 export interface BoardIssue {
   id: string;
+  slug?: string | null;
   sequenceId: number;
   key: string;
   title: string;

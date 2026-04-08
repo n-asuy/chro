@@ -7,7 +7,7 @@ import type { TaskStatus } from "./task-status";
  * Represents a task with its current state, references, and metadata.
  * This is the central entity in the Task-centric design.
  */
-export type TaskRecord = { id: string, project_id: string, parent_task_id: string | null, title: string, description: string | null, status: TaskStatus, due_at: string | null, branch: string | null, 
+export type TaskRecord = { id: string, slug: string | null, project_id: string, parent_task_id: string | null, title: string, description: string | null, status: TaskStatus, due_at: string | null, branch: string | null, 
 /**
  * Local execution only: worktree path for isolation
  */

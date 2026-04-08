@@ -3,6 +3,8 @@ import {
   extractSessionId,
   formatContextForPrompt,
   getContextEntries,
+  inferTaskDescriptionFromContent,
+  inferTaskTitleFromContent,
   parseContextFromContent,
   type ContextEntry,
   type Prompt,
@@ -335,5 +337,39 @@ describe("parseContextFromContent", () => {
     const result = parseContextFromContent(serialized);
     expect(result.contextEntries).toEqual(entries);
     expect(result.text).toBe(userText);
+  });
+});
+
+describe("inferTaskTitleFromContent", () => {
+  it("uses the first non-empty line after a leading context block", () => {
+    const content =
+      '<context>\n<file path="src/main.ts" />\n</context>\n\nfix the bug\nmore detail';
+    expect(inferTaskTitleFromContent(content)).toBe("fix the bug");
+  });
+
+  it("falls back when content only has context", () => {
+    const content = '<context>\n<file path="src/main.ts" />\n</context>';
+    expect(inferTaskTitleFromContent(content, () => "Session fallback")).toBe(
+      "Session fallback",
+    );
+  });
+});
+
+describe("inferTaskDescriptionFromContent", () => {
+  it("returns trailing text when no context exists", () => {
+    expect(inferTaskDescriptionFromContent("fix the bug\nadd tests")).toBe(
+      "add tests",
+    );
+  });
+
+  it("excludes leading context from the description", () => {
+    const content =
+      '<context>\n<file path="src/main.ts" />\n</context>\nfix the bug\nadd tests';
+    expect(inferTaskDescriptionFromContent(content)).toBe("add tests");
+  });
+
+  it("returns null for context-only prompts", () => {
+    const content = '<context>\n<file path="src/main.ts" />\n</context>';
+    expect(inferTaskDescriptionFromContent(content)).toBeNull();
   });
 });

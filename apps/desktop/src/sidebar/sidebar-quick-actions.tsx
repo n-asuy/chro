@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 
 import {
   AddTaskPanel,
+  type AddTaskPayload,
   type AddTaskSubmitOptions,
 } from "@/kanban/components/add-task-panel";
 import { useWorkspaceBoardContext } from "@/kanban/providers";
@@ -16,13 +17,11 @@ export const SidebarQuickActions = () => {
   const canAddTask = Boolean(defaultColumnId);
 
   const handleSubmit = useCallback(
-    (
-      payload: { title: string; summary?: string },
-      options?: AddTaskSubmitOptions,
-    ) => {
+    (payload: AddTaskPayload, options?: AddTaskSubmitOptions) => {
       if (!defaultColumnId) return;
       addIssueToColumn(defaultColumnId, payload.title, {
         summary: payload.summary,
+        prompt: payload.prompt,
         runImmediately: options?.runImmediately,
         useWorktree: options?.useWorktree,
         executorProfileId: options?.executorProfileId,

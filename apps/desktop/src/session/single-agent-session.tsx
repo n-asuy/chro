@@ -18,6 +18,7 @@ import {
   fetchExecutorProfile,
 } from "@/lib/executor-client";
 import { generateTaskTranscript } from "@/lib/project-client";
+import { isUuidIdentifier } from "@/lib/uuid";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
 import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
 import { Button } from "@chro/ui/button";
@@ -143,21 +144,28 @@ export function SingleAgentSessionView({
 }: SingleAgentSessionViewProps = {}) {
   const { open: openSettingsModal } = useSettingsModal();
   const { t } = useLanguage();
-  const { workspacePath: workspace, isLoading: isProjectLoading } =
-    useProjectContext();
+  const {
+    projectId: resolvedProjectId,
+    projectSlug,
+    workspacePath: workspace,
+    isLoading: isProjectLoading,
+  } = useProjectContext();
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
   const navigate = useNavigate();
 
-  // Get projectId, taskId, runId from route params
-  // Routes: /projects/[projectId]/session, /projects/[projectId]/session/[taskId], /projects/[projectId]/session/[taskId]/[runId]
+  // Route params — may contain slugs or UUIDs (backward compat)
   const params = useParams({ strict: false }) as {
     projectId?: string;
     taskId?: string;
     runId?: string;
   };
-  const routeProjectId = params.projectId ?? null;
-  const routeTaskId = params.taskId ?? null;
-  const routeRunId = params.runId ?? null;
+  // projectId resolved by context (UUID); slug used for navigation
+  const routeProjectSlug = projectSlug ?? params.projectId ?? null;
+  const routeProjectId =
+    resolvedProjectId ??
+    (isUuidIdentifier(params.projectId) ? params.projectId : null);
+  const routeTaskSlug = params.taskId ?? null;
+  const routeRunSlug = params.runId ?? null;
   const isSessionMountedRef = useRef(true);
   const latestRouteProjectIdRef = useRef<string | null>(routeProjectId);
 
@@ -253,27 +261,10 @@ export function SingleAgentSessionView({
   const { archiveSession, restoreSession, isArchived } = useArchivedSessions();
 
   // Session state
-  const activeTaskId = routeTaskId;
-  const routeTaskRunId = routeRunId;
   // Current attempt for conversation
   const [currentAttempt, setCurrentAttempt] = useState<TaskAttempt | null>(
     null,
   );
-  // Guard against stale attempt state from a previously opened task.
-  // During route switches, currentAttempt can briefly point to another task.
-  const taskRunId =
-    routeTaskRunId ??
-    (currentAttempt?.task_id === activeTaskId ? currentAttempt.id : null);
-
-  // User question state from store
-  const pendingQuestionsMap = useUserQuestionStore((s) => s.pendingQuestions);
-  const setPendingQuestions = useUserQuestionStore(
-    (s) => s.setPendingQuestions,
-  );
-  const setQuestionResult = useUserQuestionStore((s) => s.setResult);
-  const pendingQuestions = taskRunId
-    ? pendingQuestionsMap.get(taskRunId) ?? null
-    : null;
 
   // Ref to track the active taskRunId for cancellation
   // This is needed because URL params may not update immediately after sending
@@ -311,28 +302,32 @@ export function SingleAgentSessionView({
     );
   }, [executorLabels, sessionExecutorSelection, t]);
 
-  // Navigation helpers for URL-based state management
+  // Navigation helpers — accepts slugs (or UUIDs for backward compat)
   const navigateToSession = useCallback(
-    (taskId?: string | null, runId?: string | null) => {
-      if (!routeProjectId) return;
-      if (taskId && runId) {
+    (taskSlug?: string | null, runSlug?: string | null) => {
+      if (!routeProjectSlug) return;
+      if (taskSlug && runSlug) {
         navigate({
           to: "/projects/$projectId/session/$taskId/$runId",
-          params: { projectId: routeProjectId, taskId, runId },
+          params: {
+            projectId: routeProjectSlug,
+            taskId: taskSlug,
+            runId: runSlug,
+          },
         });
-      } else if (taskId) {
+      } else if (taskSlug) {
         navigate({
           to: "/projects/$projectId/session/$taskId/",
-          params: { projectId: routeProjectId, taskId },
+          params: { projectId: routeProjectSlug, taskId: taskSlug },
         });
       } else {
         navigate({
           to: "/projects/$projectId/session/",
-          params: { projectId: routeProjectId },
+          params: { projectId: routeProjectSlug },
         });
       }
     },
-    [routeProjectId, navigate],
+    [routeProjectSlug, navigate],
   );
 
   useEffect(() => {
@@ -375,7 +370,37 @@ export function SingleAgentSessionView({
   const isSessionsLoading = isTasksLoading;
   const sessionsError = tasksStreamError;
 
-  // Use streamedTasksById for O(1) lookup instead of find()
+  // Resolve task slug/UUID from route to UUID for API calls
+  const activeTaskId = useMemo(() => {
+    if (!routeTaskSlug) return null;
+    // Direct UUID match (backward compat or after navigation with UUID)
+    if (streamedTasksById[routeTaskSlug]) return routeTaskSlug;
+    // Slug lookup
+    const task = Object.values(streamedTasksById).find(
+      (t) => t.slug === routeTaskSlug,
+    );
+    return task?.id ?? null;
+  }, [routeTaskSlug, streamedTasksById]);
+
+  // Guard against stale attempt state from a previously opened task.
+  // During route switches, currentAttempt can briefly point to another task.
+  // taskRunId is always a resolved UUID (not a slug).
+  const taskRunId =
+    currentAttempt?.task_id === activeTaskId ? currentAttempt.id : null;
+
+  // User question state from store
+  const pendingQuestionsMap = useUserQuestionStore((s) => s.pendingQuestions);
+  const setPendingQuestions = useUserQuestionStore(
+    (s) => s.setPendingQuestions,
+  );
+  const setQuestionResult = useUserQuestionStore((s) => s.setResult);
+  const pendingQuestions = taskRunId
+    ? pendingQuestionsMap.get(taskRunId) ?? null
+    : null;
+
+  // Resolve run slug to UUID (deferred until runs are loaded)
+  const routeRunId = routeRunSlug;
+
   const activeTask = useMemo(
     () => (activeTaskId ? streamedTasksById[activeTaskId] ?? null : null),
     [streamedTasksById, activeTaskId],
@@ -524,9 +549,9 @@ export function SingleAgentSessionView({
 
   // Calculate new session URL
   const newSessionUrl = useMemo(() => {
-    if (!routeProjectId) return "/";
-    return `/projects/${routeProjectId}/session/`;
-  }, [routeProjectId]);
+    if (!routeProjectSlug) return "/";
+    return `/projects/${routeProjectSlug}/session/`;
+  }, [routeProjectSlug]);
 
   // Start new session handler
   const handleStartNewSession = useCallback(() => {
@@ -615,8 +640,9 @@ export function SingleAgentSessionView({
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-      // Route change first; run resolution is handled by route sync effect.
-      navigateToSession(task.id, selectedRunId ?? null);
+      // Navigate with slug for short URLs; fall back to id
+      const taskSlug = task.slug ?? task.id;
+      navigateToSession(taskSlug, selectedRunId ?? null);
     },
     [
       activeTaskId,
@@ -628,13 +654,13 @@ export function SingleAgentSessionView({
   );
 
   useEffect(() => {
-    if (!routeTaskId) {
+    if (!activeTaskId) {
       return;
     }
 
     if (
       !routeRunId &&
-      currentAttempt?.task_id === routeTaskId &&
+      currentAttempt?.task_id === activeTaskId &&
       activeTaskRunIdRef.current
     ) {
       setForceNewAttempt(false);
@@ -644,7 +670,7 @@ export function SingleAgentSessionView({
     if (
       routeRunId &&
       activeTaskRunIdRef.current === routeRunId &&
-      currentAttempt?.task_id === routeTaskId
+      currentAttempt?.task_id === activeTaskId
     ) {
       setForceNewAttempt(false);
       return;
@@ -656,7 +682,7 @@ export function SingleAgentSessionView({
     setForceNewAttempt(null);
     // Resolve run data for the current route. When runId is omitted,
     // select latest/active run into local state without changing URL.
-    void loadTaskRunData(routeTaskId, routeRunId ?? undefined, {
+    void loadTaskRunData(activeTaskId, routeRunId ?? undefined, {
       requestId,
       loadToken,
     })
@@ -679,7 +705,7 @@ export function SingleAgentSessionView({
         console.error("[session] Failed to load task runs", error);
         setForceNewAttempt(false);
       });
-  }, [routeTaskId, routeRunId, currentAttempt?.task_id, loadTaskRunData]);
+  }, [activeTaskId, routeRunId, currentAttempt?.task_id, loadTaskRunData]);
 
   const buildPromptPayload = useCallback((): PreparedPromptPayload | null => {
     const contextPrefix = formatContextForPrompt(editor.getContextEntries());
@@ -1015,7 +1041,7 @@ export function SingleAgentSessionView({
       editor.focus();
     }, 50);
     return () => clearTimeout(timeoutId);
-  }, [activeTaskId, routeTaskRunId, editor]);
+  }, [activeTaskId, routeRunSlug, editor]);
 
   // Note: activeTask, isTaskRunning, isSending, canSend are defined earlier for use in callbacks
   const activeTaskBranch = activeTask?.branch?.trim() || null;

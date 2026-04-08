@@ -6,6 +6,8 @@ use sqlx::{FromRow, Pool, Sqlite};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::slug::generate_slug;
+
 /// Project record
 ///
 /// Represents a project with its git repository and associated scripts.
@@ -13,6 +15,7 @@ use uuid::Uuid;
 #[ts(export, export_to = "project-record.ts")]
 pub struct ProjectRecord {
     pub id: Uuid,
+    pub slug: Option<String>,
     pub name: String,
     pub git_repo_path: String,
     pub setup_script: Option<String>,
@@ -29,6 +32,7 @@ impl ProjectRecord {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            slug: Some(generate_slug()),
             name: name.into(),
             git_repo_path: git_repo_path.into(),
             setup_script: None,
@@ -93,10 +97,11 @@ impl ProjectRecord {
 
         let project = ProjectRecord::new(resolved_name, git_repo_path.to_string());
         sqlx::query(
-            "INSERT INTO project_records (id, name, git_repo_path, setup_script, dev_script, cleanup_script, copy_files, created_at, updated_at)
-             VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
+            "INSERT INTO project_records (id, slug, name, git_repo_path, setup_script, dev_script, cleanup_script, copy_files, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
         )
         .bind(project.id)
+        .bind(&project.slug)
         .bind(&project.name)
         .bind(&project.git_repo_path)
         .bind(project.created_at)
@@ -105,6 +110,31 @@ impl ProjectRecord {
         .await?;
 
         Ok(project)
+    }
+
+    /// Fetch a project by slug.
+    pub async fn find_by_slug(
+        pool: &Pool<Sqlite>,
+        slug: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT * FROM project_records WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Fetch a project by either UUID string or slug.
+    /// Tries UUID parse first, falls back to slug lookup.
+    pub async fn get_by_identifier(
+        pool: &Pool<Sqlite>,
+        identifier: &str,
+    ) -> Result<Self, sqlx::Error> {
+        if let Ok(uuid) = Uuid::parse_str(identifier) {
+            return Self::get(pool, uuid).await;
+        }
+        Self::find_by_slug(pool, identifier)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
     }
 
     /// Derive a human-friendly name from a repository path.

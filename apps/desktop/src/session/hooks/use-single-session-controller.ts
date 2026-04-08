@@ -252,7 +252,7 @@ export function useSingleSessionController({
           updated_at: new Date().toISOString(),
         });
 
-        navigateToSession(response.task_id, null);
+        navigateToSession(response.task_slug ?? response.task_id, null);
         finishSendTimer({
           outcome: "ok",
           response_task_id: response.task_id,

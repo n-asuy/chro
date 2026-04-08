@@ -153,10 +153,17 @@ impl<'a, R: Runtime> TaskService<'a, R> {
     pub async fn create_task(
         &self,
         project_id: Uuid,
-        title: String,
+        title: Option<String>,
         description: Option<String>,
+        prompt: Option<String>,
     ) -> Result<TaskRecord, RuntimeError> {
-        let task = TaskRecord::new(project_id, title, description);
+        let prompt = normalize_optional_text(prompt);
+        let title = normalize_optional_text(title)
+            .or_else(|| prompt.as_deref().map(infer_task_title))
+            .ok_or(RuntimeError::BadRequest("title or prompt is required"))?;
+        let description = normalize_optional_text(description)
+            .or_else(|| prompt.as_deref().and_then(infer_task_description));
+        let task = TaskRecord::new_with_prompt(project_id, title, description, prompt);
         task.insert(self.pool()).await?;
         Ok(task)
     }
@@ -244,7 +251,15 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         task_id: Uuid,
         title: String,
     ) -> Result<TaskRecord, RuntimeError> {
-        TaskRecord::update_title(self.pool(), task_id, title).await?;
+        let existing = TaskRecord::get(self.pool(), task_id).await?;
+        let prompt = if existing.prompt_matches_legacy() {
+            let mut updated = existing.clone();
+            updated.title = title.clone();
+            updated.legacy_prompt()
+        } else {
+            None
+        };
+        TaskRecord::update_title(self.pool(), task_id, title, prompt).await?;
         let task = TaskRecord::get(self.pool(), task_id).await?;
         Ok(task)
     }
@@ -451,8 +466,11 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             run.insert(self.pool()).await?;
             (task, run, false)
         } else {
-            let title = infer_task_title(prompt.as_deref().unwrap_or_default());
-            let task = TaskRecord::new(project.id, title, None);
+            let prompt_text = provided_prompt.clone().unwrap_or_default();
+            let title = infer_task_title(&prompt_text);
+            let description = infer_task_description(&prompt_text);
+            let task =
+                TaskRecord::new_with_prompt(project.id, title, description, Some(prompt_text));
             task.insert(self.pool()).await?;
             let mut run = TaskRun::new_local(task.id, Some("codingagent".into()));
             run.executor_label = Some(executor_label.clone());
@@ -1327,18 +1345,83 @@ impl<'a> TaskLifecycle<'a> {
 }
 
 fn infer_task_title(prompt: &str) -> String {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
+    let text = extract_task_text(prompt);
+    if text.is_empty() {
         format!("Session {}", Utc::now().format("%Y-%m-%d %H:%M"))
     } else {
-        trimmed
-            .lines()
-            .next()
-            .unwrap_or(trimmed)
+        text.lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or(&text)
+            .trim()
             .chars()
             .take(80)
             .collect()
     }
+}
+
+fn infer_task_description(prompt: &str) -> Option<String> {
+    let text = extract_task_text(prompt);
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut seen_title = false;
+    let description = text
+        .lines()
+        .filter_map(|line| {
+            if !seen_title && !line.trim().is_empty() {
+                seen_title = true;
+                return None;
+            }
+            Some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if description.is_empty() {
+        None
+    } else {
+        Some(description)
+    }
+}
+
+fn extract_task_text(prompt: &str) -> String {
+    let remaining = strip_leading_context_block(prompt.trim());
+    remaining
+        .lines()
+        .filter(|line| !is_image_markdown_line(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn strip_leading_context_block(prompt: &str) -> &str {
+    let mut remaining = prompt;
+    while let Some(after_context) = remaining.strip_prefix("<context>").and_then(|rest| {
+        rest.find("</context>")
+            .map(|end| &rest[end + "</context>".len()..])
+    }) {
+        remaining = after_context.trim_start();
+    }
+    remaining
+}
+
+fn is_image_markdown_line(line: &str) -> bool {
+    line.starts_with("![") && line.contains("](") && line.ends_with(')')
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn short_id_from_uuid(id: &Uuid) -> String {
@@ -1465,6 +1548,34 @@ mod tests {
         let prompt = "<context>\n<file path=\".chro-context/sessions/abc.md\" />\n<file path=\"src/main.rs\" />\n</context>\nfix the bug";
         let paths = extract_context_file_paths(prompt, ".chro-context");
         assert_eq!(paths, vec![".chro-context/sessions/abc.md"]);
+    }
+
+    #[test]
+    fn infer_task_title_ignores_leading_context_block() {
+        let prompt =
+            "<context>\n<file path=\"src/main.rs\" />\n</context>\n\nfix the bug\nmore detail";
+        assert_eq!(infer_task_title(prompt), "fix the bug");
+    }
+
+    #[test]
+    fn infer_task_title_falls_back_when_prompt_only_has_context() {
+        let prompt = "<context>\n<file path=\"src/main.rs\" />\n</context>";
+        assert!(infer_task_title(prompt).starts_with("Session "));
+    }
+
+    #[test]
+    fn infer_task_title_ignores_leading_images() {
+        let prompt = "![img.png](.chro-context/img.png)\nfix the bug";
+        assert_eq!(infer_task_title(prompt), "fix the bug");
+    }
+
+    #[test]
+    fn infer_task_description_uses_remaining_text_after_title() {
+        let prompt = "<context>\n<file path=\"src/main.rs\" />\n</context>\nfix the bug\nadd tests";
+        assert_eq!(
+            infer_task_description(prompt),
+            Some("add tests".to_string())
+        );
     }
 
     #[test]

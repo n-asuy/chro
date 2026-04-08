@@ -11,7 +11,11 @@ import {
   searchProjectFiles,
 } from "@/lib/project-client";
 import type { ContextEntry } from "@/session/types/context";
-import { formatContextForPrompt } from "@/session/types/context";
+import {
+  formatContextForPrompt,
+  inferTaskDescriptionFromContent,
+  inferTaskTitleFromContent,
+} from "@/session/types/context";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,14 +54,17 @@ export type AddTaskSubmitOptions = {
   targetBranch?: string;
 };
 
+export interface AddTaskPayload {
+  title: string;
+  summary?: string;
+  prompt?: string;
+}
+
 interface AddTaskPanelProps {
   isOpen: boolean;
   projectId: string | null;
   onClose: () => void;
-  onSubmit: (
-    payload: { title: string; summary?: string },
-    options?: AddTaskSubmitOptions,
-  ) => void;
+  onSubmit: (payload: AddTaskPayload, options?: AddTaskSubmitOptions) => void;
   /** "popover" renders inline (sidebar), "modal" renders as centered portal */
   variant?: "popover" | "modal";
   /** Popover placement relative to the trigger. "right" = sidebar style, "top" = kanban footer, "bottom" = kanban header */
@@ -368,18 +375,26 @@ export const AddTaskPanel: React.FC<AddTaskPanelProps> = ({
     const { text, contextEntries } = parseEditorContent(editorRef.current);
     if (!text && contextEntries.length === 0) return null;
     const contextPrefix = formatContextForPrompt(contextEntries);
-    const title = contextPrefix ? `${contextPrefix}\n${text}` : text;
-    return title;
+    const prompt = contextPrefix ? `${contextPrefix}\n${text}` : text;
+    return {
+      title: inferTaskTitleFromContent(prompt),
+      summary: inferTaskDescriptionFromContent(prompt) ?? undefined,
+      prompt,
+    };
   }, []);
 
   const submitTask = useCallback(
     (options?: AddTaskSubmitOptions) => {
-      const title = getEditorPayload();
-      if (!title) return;
+      const payload = getEditorPayload();
+      if (!payload) return;
       const executorProfilePayload =
         sessionExecutorSelection ?? executorProfileId;
       onSubmit(
-        { title },
+        {
+          title: payload.title,
+          summary: payload.summary,
+          prompt: payload.prompt,
+        },
         {
           runImmediately: options?.runImmediately,
           useWorktree,

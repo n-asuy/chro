@@ -5,6 +5,7 @@ import type { TaskRecord } from "../state/task-store";
 
 export interface ProjectResponse {
   id: string;
+  slug?: string | null;
   name: string;
   gitRepoPath: string;
 }
@@ -16,6 +17,7 @@ interface EnsureProjectResponse {
 interface GetProjectResponse {
   project: {
     id: string;
+    slug?: string | null;
     name: string;
     git_repo_path: string;
   };
@@ -39,8 +41,9 @@ export const taskApi = {
 
   create: async (
     projectId: string,
-    title: string,
+    title: string | null,
     description: string | null,
+    prompt: string | null = null,
   ): Promise<TaskRecord> => {
     const response = await desktopFetch<CreateTaskResponse>("/rpc/tasks", {
       method: "POST",
@@ -49,6 +52,7 @@ export const taskApi = {
         project_id: projectId,
         title,
         description,
+        prompt,
       }),
     });
     return response.task;
@@ -88,7 +92,9 @@ export const taskApi = {
     });
   },
 
-  ensureProject: async (gitRepoPath: string): Promise<string> => {
+  ensureProject: async (
+    gitRepoPath: string,
+  ): Promise<{ id: string; slug: string }> => {
     const response = await desktopFetch<EnsureProjectResponse>(
       "/rpc/projects/ensure",
       {
@@ -97,15 +103,19 @@ export const taskApi = {
         body: JSON.stringify({ git_repo_path: gitRepoPath }),
       },
     );
-    return response.project.id;
+    return {
+      id: response.project.id,
+      slug: response.project.slug ?? response.project.id,
+    };
   },
 
   getProject: async (projectId: string): Promise<ProjectResponse> => {
     const response = await desktopFetch<GetProjectResponse>(
-      `/rpc/projects/${projectId}`,
+      `/rpc/projects/${encodeURIComponent(projectId)}`,
     );
     return {
       id: response.project.id,
+      slug: response.project.slug,
       name: response.project.name,
       gitRepoPath: response.project.git_repo_path,
     };

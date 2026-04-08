@@ -168,6 +168,7 @@ export interface UseWorkspaceBoardParams {
 
 export type AddIssueOptions = {
   summary?: string;
+  prompt?: string;
   runImmediately?: boolean;
   useWorktree?: boolean;
   executorProfileId?: ExecutorProfileId | null;
@@ -414,18 +415,26 @@ export function useWorkspaceBoard({
     setPeekIssueId(routeTaskId);
   }, [routeTaskId]);
 
+  // Use route-level slug for navigation URLs (not the resolved UUID)
+  const routeProjectSlug = params.projectId ?? projectId;
+
   const setPeekIssue = useCallback(
     (id?: string) => {
       setPeekIssueId(id);
-      // Update URL to reflect the selected task
-      if (!projectId) return;
+      // Update URL to reflect the selected task (use slug for short URL)
+      if (!routeProjectSlug) return;
       if (id) {
-        void navigate({ to: `/projects/${projectId}/tasks/${id}` });
+        // Find the task's slug for the URL
+        const task = tasks.find((t) => t.id === id);
+        const taskSlug = task?.slug ?? id;
+        void navigate({
+          to: `/projects/${routeProjectSlug}/tasks/${taskSlug}`,
+        });
       } else {
-        void navigate({ to: `/projects/${projectId}/tasks` });
+        void navigate({ to: `/projects/${routeProjectSlug}/tasks` });
       }
     },
-    [projectId, navigate],
+    [routeProjectSlug, tasks, navigate],
   );
 
   const toggleFilter = useCallback((key: BoardFilterKey, value: string) => {
@@ -495,6 +504,9 @@ export function useWorkspaceBoard({
       const summaryValue = options?.summary?.trim();
       const normalizedSummary =
         summaryValue && summaryValue.length > 0 ? summaryValue : undefined;
+      const promptValue = options?.prompt?.trim();
+      const normalizedPrompt =
+        promptValue && promptValue.length > 0 ? promptValue : null;
       const runImmediately = options?.runImmediately ?? true;
       const useWorktree = options?.useWorktree ?? true;
       const executorProfileId = options?.executorProfileId ?? undefined;
@@ -524,11 +536,13 @@ export function useWorkspaceBoard({
       }));
 
       try {
-        const resolvedProjectId = await taskApi.ensureProject(workspacePath);
+        const { id: resolvedProjectId } =
+          await taskApi.ensureProject(workspacePath);
         const savedTask = await taskApi.create(
           resolvedProjectId,
-          trimmedTitle,
+          normalizedPrompt ? null : trimmedTitle,
           normalizedSummary ?? null,
+          normalizedPrompt,
         );
 
         // Remove optimistic update (WebSocket will bring the real data)

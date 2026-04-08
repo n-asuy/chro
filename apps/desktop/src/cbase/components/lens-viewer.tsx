@@ -2,20 +2,35 @@
  * BaseViewer - main component for viewing a .cbase file
  * Parses the .cbase definition, indexes matching files, and renders the view.
  */
-
-import { type FC, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type FC,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { writeProjectFile } from "@/lib/project-client";
+import {
+  type FC,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useProjectId } from "../../files/context/project-context";
 import { useFilesStore } from "../../files/state/files-store";
+import { updateViewFilters } from "../definition-updates";
 import { executeView } from "../engine";
 import { indexWorkspaceFiles } from "../indexer";
 import { LensParseError, parseLens } from "../parser";
-import { looksLikeQueryLanguage } from "../query-language";
 import { mergeInferredProperties } from "../property-inference";
+import { looksLikeQueryLanguage } from "../query-language";
 import { serializeLens } from "../serializer";
 import type {
   LensDefinition,
-  LensFilterCondition,
+  LensFilter,
   LensRow,
   SortDirection,
 } from "../types";
@@ -46,7 +61,6 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
-  const [quickFilters, setQuickFilters] = useState<LensFilterCondition[]>([]);
   const isQueryLanguage = useRef(false);
   const skipNextParse = useRef(false);
 
@@ -61,7 +75,6 @@ export const BaseViewer: FC<BaseViewerProps> = ({
       const def = parseLens(content, { basePath });
       setDefinition(def);
       setParseError(null);
-      setQuickFilters([]);
       // Set default active view
       const defaultView = def.views.find((v) => v.default) ?? def.views[0];
       if (defaultView) {
@@ -123,24 +136,16 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     return mergeInferredProperties(definition.properties, rows);
   }, [definition, rows]);
 
-  const effectiveView = useMemo(() => {
-    if (!activeView) return null;
-    return {
-      ...activeView,
-      filters: [...(activeView.filters ?? []), ...quickFilters],
-    };
-  }, [activeView, quickFilters]);
-
   const viewResult = useMemo(() => {
-    if (!definition || !effectiveView) return null;
+    if (!definition || !activeView) return null;
     return executeView(
       rows,
-      effectiveView,
+      activeView,
       effectiveProperties,
       definition.filters,
       definition.sort,
     );
-  }, [rows, effectiveView, effectiveProperties, definition]);
+  }, [rows, activeView, effectiveProperties, definition]);
 
   const persistDefinition = useCallback(
     (updated: LensDefinition) => {
@@ -212,6 +217,24 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     [definition, activeViewId, effectiveProperties, persistDefinition],
   );
 
+  const handleColumnWidthsChange = useCallback(
+    (columnWidths: Record<string, number>) => {
+      if (!definition || !activeViewId) return;
+      const updated: LensDefinition = {
+        ...definition,
+        views: definition.views.map((v) => {
+          if (v.id !== activeViewId) return v;
+          return {
+            ...v,
+            table: { ...v.table, column_widths: columnWidths },
+          };
+        }),
+      };
+      persistDefinition(updated);
+    },
+    [definition, activeViewId, persistDefinition],
+  );
+
   const handleRowClick = useCallback(
     (filePath: string) => {
       if (onFileOpen) {
@@ -225,6 +248,21 @@ export const BaseViewer: FC<BaseViewerProps> = ({
       }
     },
     [onFileOpen, selectNode, openFile],
+  );
+
+  const handleViewFiltersChange = useCallback(
+    (filters: LensFilter[]) => {
+      if (!definition || !activeViewId) return;
+      persistDefinition(
+        updateViewFilters(
+          definition,
+          activeViewId,
+          filters,
+          effectiveProperties,
+        ),
+      );
+    },
+    [definition, activeViewId, effectiveProperties, persistDefinition],
   );
 
   if (parseError) {
@@ -245,7 +283,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   }
 
   return (
-    <div className="flex h-full w-full flex-1 flex-col bg-custom-background-90 font-workspace">
+    <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace">
       <div className="min-h-0 flex-1 overflow-hidden">
         {isIndexing && rows.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -265,14 +303,12 @@ export const BaseViewer: FC<BaseViewerProps> = ({
             view={activeView}
             properties={effectiveProperties}
             onRowClick={handleRowClick}
-            definedFilters={[
-              ...(definition.filters ?? []),
-              ...(activeView.filters ?? []),
-            ]}
-            quickFilters={quickFilters}
-            onQuickFiltersChange={setQuickFilters}
+            definedFilters={definition.filters ?? []}
+            viewFilters={activeView.filters ?? []}
+            onViewFiltersChange={handleViewFiltersChange}
             onColumnsChange={handleColumnsChange}
             onSortChange={handleSortChange}
+            onColumnWidthsChange={handleColumnWidthsChange}
           />
         ) : null}
       </div>

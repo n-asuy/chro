@@ -8,6 +8,7 @@ export * from "./context";
  */
 export type StoredTask = {
   id: string;
+  slug?: string | null;
   project_id: string;
   title: string;
   description?: string | null;

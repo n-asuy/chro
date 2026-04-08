@@ -30,8 +30,9 @@ struct TaskEnvelope {
 #[derive(Debug, Deserialize)]
 struct CreateTaskRequest {
     project_id: Uuid,
-    title: String,
+    title: Option<String>,
     description: Option<String>,
+    prompt: Option<String>,
 }
 
 async fn create_task(
@@ -42,9 +43,10 @@ async fn create_task(
         project_id,
         title,
         description,
+        prompt,
     } = payload;
     let task = TaskService::new(state.runtime())
-        .create_task(project_id, title, description)
+        .create_task(project_id, title, description, prompt)
         .await?;
     Ok(Json(TaskEnvelope { task }))
 }

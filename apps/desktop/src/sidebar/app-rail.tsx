@@ -3,10 +3,12 @@ import { useLanguage } from "@/i18n";
 import { taskApi } from "@/kanban/api/task-api";
 import {
   AddTaskPanel,
+  type AddTaskPayload,
   type AddTaskSubmitOptions,
 } from "@/kanban/components/add-task-panel";
 import { useOptionalWorkspaceBoardContext } from "@/kanban/providers";
 import { cn } from "@/lib/cn";
+import { isUuidIdentifier } from "@/lib/uuid";
 import {
   type RecentWorkspace,
   getRecentWorkspaces,
@@ -58,7 +60,9 @@ const getFolderName = (path: string): string => {
 
 export const AppRail = () => {
   const { t } = useLanguage();
-  const { projectId } = useParams({ strict: false }) as { projectId?: string };
+  const { projectId: routeProjectIdentifier } = useParams({
+    strict: false,
+  }) as { projectId?: string };
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { open: openSettingsModal, isOpen: isSettingsModalOpen } =
     useSettingsModal();
@@ -67,9 +71,15 @@ export const AppRail = () => {
   const appRailContext = useOptionalAppRail();
   const expanded = appRailContext?.expanded ?? true;
   const navigate = useNavigate();
+  const projectContext = useOptionalProjectContext();
+  const apiProjectId =
+    projectContext?.projectId ??
+    (isUuidIdentifier(routeProjectIdentifier) ? routeProjectIdentifier : null);
+  const navigationProjectId =
+    projectContext?.projectSlug ?? routeProjectIdentifier ?? null;
 
   const { tasks: projectTasks } = useProjectTasksStream({
-    projectId: projectId ?? null,
+    projectId: apiProjectId,
   });
   const runningTaskCount = useMemo(
     () => projectTasks.filter((t) => t.active_session_id).length,
@@ -77,7 +87,6 @@ export const AppRail = () => {
   );
 
   const boardContext = useOptionalWorkspaceBoardContext();
-  const projectContext = useOptionalProjectContext();
   const workspacePath =
     boardContext?.workspacePath ?? projectContext?.workspacePath ?? null;
 
@@ -99,14 +108,12 @@ export const AppRail = () => {
   }, [canAddTask]);
 
   const handleAddTaskSubmit = useCallback(
-    async (
-      payload: { title: string; summary?: string },
-      options?: AddTaskSubmitOptions,
-    ) => {
+    async (payload: AddTaskPayload, options?: AddTaskSubmitOptions) => {
       // When board context is available (tasks page), use optimistic UI path
       if (boardContext && defaultColumnId) {
         boardContext.addIssueToColumn(defaultColumnId, payload.title, {
           summary: payload.summary,
+          prompt: payload.prompt,
           runImmediately: options?.runImmediately,
           useWorktree: options?.useWorktree,
           executorProfileId: options?.executorProfileId,
@@ -118,11 +125,13 @@ export const AppRail = () => {
       // Otherwise, call API directly
       if (!workspacePath) return;
       try {
-        const resolvedProjectId = await taskApi.ensureProject(workspacePath);
+        const { id: resolvedProjectId } =
+          await taskApi.ensureProject(workspacePath);
         const savedTask = await taskApi.create(
           resolvedProjectId,
-          payload.title,
+          payload.prompt ? null : payload.title,
           payload.summary ?? null,
+          payload.prompt ?? null,
         );
         if (options?.runImmediately) {
           await taskApi.startClaudeExecution(workspacePath, savedTask.id, {
@@ -169,16 +178,20 @@ export const AppRail = () => {
       const requestId = ++workspaceSwitchRequestIdRef.current;
       setDropdownOpen(false);
       try {
-        const id = await taskApi.ensureProject(path);
+        const { id, slug } = await taskApi.ensureProject(path);
         if (requestId !== workspaceSwitchRequestIdRef.current) {
           return;
         }
-        if (id === projectId) {
+        if (
+          slug === routeProjectIdentifier ||
+          id === apiProjectId ||
+          slug === navigationProjectId
+        ) {
           return;
         }
         navigate({
           to: "/projects/$projectId/tasks",
-          params: { projectId: id },
+          params: { projectId: slug },
         });
       } catch (error) {
         if (requestId !== workspaceSwitchRequestIdRef.current) {
@@ -187,14 +200,14 @@ export const AppRail = () => {
         console.error("[app-rail] Failed to open recent project", error);
       }
     },
-    [navigate, projectId],
+    [apiProjectId, navigate, navigationProjectId, routeProjectIdentifier],
   );
 
   const workspaceLabel = workspacePath ? getFolderName(workspacePath) : "chro";
 
   const navItems = useMemo(() => {
-    if (!projectId) return [];
-    const projectBase = `/projects/${projectId}`;
+    if (!navigationProjectId) return [];
+    const projectBase = `/projects/${navigationProjectId}`;
     return [
       {
         id: "tasks",
@@ -219,7 +232,7 @@ export const AppRail = () => {
       const active = isPathActive(pathname ?? null, item.href);
       return { ...item, isActive: active };
     });
-  }, [pathname, projectId ?? null, t, runningTaskCount]);
+  }, [navigationProjectId, pathname, t, runningTaskCount]);
 
   const layout = expanded ? "stacked" : "compact";
   const width = expanded ? RAIL_WIDTH_EXPANDED : RAIL_WIDTH_COMPACT;
@@ -322,7 +335,7 @@ export const AppRail = () => {
             />
             <AddTaskPanel
               isOpen={isAddTaskOpen && canAddTask}
-              projectId={projectId ?? null}
+              projectId={apiProjectId}
               onClose={() => setIsAddTaskOpen(false)}
               onSubmit={handleAddTaskSubmit}
             />

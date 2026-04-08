@@ -24,7 +24,11 @@ export const selectTargetTaskRun = (
   }
 
   if (selectedRunId) {
-    return runs.find((run) => run.id === selectedRunId) ?? null;
+    return (
+      runs.find(
+        (run) => run.id === selectedRunId || run.slug === selectedRunId,
+      ) ?? null
+    );
   }
 
   const activeRun = runs.find((run) => run.status === "running");

@@ -20,7 +20,11 @@ import { useWorkspaceBoardContext } from "@/kanban/providers";
 import type { BoardColumn, BoardIssue } from "@/kanban/types";
 import { cn } from "@/lib/cn";
 
-import { AddTaskPanel, type AddTaskSubmitOptions } from "./add-task-panel";
+import {
+  AddTaskPanel,
+  type AddTaskPayload,
+  type AddTaskSubmitOptions,
+} from "./add-task-panel";
 import { KanbanColumnIcon } from "./column-icon";
 import { getColumnIconVariant } from "./column-icon-variants";
 import { KanbanIssueCard } from "./issue-card";
@@ -247,12 +251,10 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
     [displayedIssues, peekIssueId, setPeekIssue],
   );
 
-  const handleAddTask = (
-    payload: { title: string; summary?: string },
-    options?: AddTaskSubmitOptions,
-  ) => {
+  const handleAddTask = (payload: AddTaskPayload, options?: AddTaskSubmitOptions) => {
     addIssueToColumn(column.id, payload.title, {
       summary: payload.summary,
+      prompt: payload.prompt,
       runImmediately: options?.runImmediately,
       useWorktree: options?.useWorktree,
       executorProfileId: options?.executorProfileId,

@@ -17,6 +17,7 @@ export type TaskStatus =
  */
 export interface TaskRecord {
   id: string;
+  slug?: string | null;
   project_id: string;
   parent_task_id: string | null;
   title: string;
@@ -139,6 +140,7 @@ const taskToBoardIssue = (task: TaskRecord, sequenceId: number): BoardIssue => {
 
   return {
     id: task.id,
+    slug: task.slug,
     sequenceId,
     key: formatTaskKey(task.id, sequenceId),
     title: task.title,

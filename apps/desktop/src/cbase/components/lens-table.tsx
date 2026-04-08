@@ -22,8 +22,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@chro/ui/select";
-import { ArrowUpDown, ChevronDown, ChevronUp, Filter, Plus, X } from "lucide-react";
-import { type FC, useEffect, useMemo, useState } from "react";
+import {
+  ArrowUpDown,
+  ChevronDown,
+  ChevronUp,
+  Filter,
+  Plus,
+  X,
+} from "lucide-react";
+import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import {
   comparePropertyValues,
   formatPropertyValue,
@@ -45,11 +52,12 @@ interface BaseTableProps {
   view: LensView;
   properties: Record<string, LensProperty>;
   definedFilters?: LensFilter[];
-  quickFilters?: LensFilterCondition[];
-  onQuickFiltersChange?: (filters: LensFilterCondition[]) => void;
+  viewFilters?: LensFilter[];
+  onViewFiltersChange?: (filters: LensFilter[]) => void;
   onRowClick?: (filePath: string) => void;
   onColumnsChange?: (columnIds: string[]) => void;
   onSortChange?: (sortKey: string | null, direction: SortDirection) => void;
+  onColumnWidthsChange?: (columnWidths: Record<string, number>) => void;
 }
 
 type SortDirection = "asc" | "desc";
@@ -63,10 +71,12 @@ type ColumnOption = {
   propertyId: string;
   label: string;
   type: LensProperty["type"];
-  width?: number;
+  width: number | undefined;
 };
 
 const QUERY_ORDER_SORT_KEY = "__query_order__";
+const DEFAULT_COLUMN_WIDTH = 180;
+const MIN_COLUMN_WIDTH = 96;
 const FILTER_OPS_WITHOUT_VALUE: FilterOperator[] = ["is_empty", "is_not_empty"];
 const FILTER_OPERATOR_LABELS: Record<FilterOperator, string> = {
   "=": "is",
@@ -208,23 +218,53 @@ function formatFilterSummary(
   return `None of: ${formatFilterSummary(filter.not, properties)}`;
 }
 
+function createFilterEntries(filters: LensFilter[]) {
+  const seen = new Map<string, number>();
+  return filters.map((filter) => {
+    const serialized = JSON.stringify(filter);
+    const duplicateCount = seen.get(serialized) ?? 0;
+    seen.set(serialized, duplicateCount + 1);
+
+    return {
+      filter,
+      key:
+        duplicateCount === 0 ? serialized : `${serialized}:${duplicateCount}`,
+    };
+  });
+}
+
 export const BaseTable: FC<BaseTableProps> = ({
   rows,
   totalCount,
   view,
   properties,
   definedFilters = [],
-  quickFilters = [],
-  onQuickFiltersChange,
+  viewFilters = [],
+  onViewFiltersChange,
   onRowClick,
   onColumnsChange,
   onSortChange,
+  onColumnWidthsChange,
 }) => {
+  const toolbarButtonClassName =
+    "inline-flex items-center gap-1.5 rounded px-1.5 py-1 text-custom-text-200 transition-colors hover:bg-custom-background-90 hover:text-custom-text-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-custom-primary-100";
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [draft, setDraft] = useState<FilterDraft>(createDraft());
   const [sortPopoverOpen, setSortPopoverOpen] = useState(false);
   const [sortKey, setSortKey] = useState<string>(QUERY_ORDER_SORT_KEY);
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(
+    () => view.table?.column_widths ?? {},
+  );
+  const [activeResizeColumnId, setActiveResizeColumnId] = useState<
+    string | null
+  >(null);
+  const columnWidthsRef = useRef<Record<string, number>>(columnWidths);
+  const resizeStateRef = useRef<{
+    propertyId: string;
+    startWidth: number;
+    startX: number;
+  } | null>(null);
 
   const baseColumns = useMemo(
     () => resolveTableColumns(view, properties),
@@ -258,11 +298,18 @@ export const BaseTable: FC<BaseTableProps> = ({
       ),
     [allColumns],
   );
-  const [visibleColumnIds, setVisibleColumnIds] = useState<string[]>(baseColumnIds);
+  const [visibleColumnIds, setVisibleColumnIds] =
+    useState<string[]>(baseColumnIds);
 
   useEffect(() => {
     setVisibleColumnIds(baseColumnIds);
   }, [baseColumnIds, view.id]);
+
+  useEffect(() => {
+    const nextWidths = view.table?.column_widths ?? {};
+    columnWidthsRef.current = nextWidths;
+    setColumnWidths(nextWidths);
+  }, [view.id, view.table?.column_widths]);
 
   useEffect(() => {
     if (sortKey === QUERY_ORDER_SORT_KEY) return;
@@ -281,7 +328,9 @@ export const BaseTable: FC<BaseTableProps> = ({
           ? current.propertyId
           : firstPropertyId;
       const property = propertyId ? properties[propertyId] : undefined;
-      const operator = getAllowedFilterOperators(property).includes(current.operator)
+      const operator = getAllowedFilterOperators(property).includes(
+        current.operator,
+      )
         ? current.operator
         : defaultFilterOperator(property);
       const value =
@@ -310,19 +359,23 @@ export const BaseTable: FC<BaseTableProps> = ({
         .filter((column): column is ColumnOption => Boolean(column)),
     [visibleColumnIds, columnMap],
   );
+  const getColumnWidth = (column: ColumnOption) =>
+    columnWidths[column.propertyId] ?? column.width ?? DEFAULT_COLUMN_WIDTH;
   const tableMinWidth = useMemo(
     () =>
       visibleColumns.reduce(
-        (total, column) => total + (column.width ?? 180),
+        (total, column) => total + getColumnWidth(column),
         0,
       ),
-    [visibleColumns],
+    [columnWidths, visibleColumns],
   );
 
   const activeSortProperty =
     sortKey === QUERY_ORDER_SORT_KEY ? undefined : properties[sortKey];
   const sortDirectionLabels = getSortDirectionLabels(activeSortProperty);
-  const draftProperty = draft.propertyId ? properties[draft.propertyId] : undefined;
+  const draftProperty = draft.propertyId
+    ? properties[draft.propertyId]
+    : undefined;
   const allowedDraftOperators = getAllowedFilterOperators(draftProperty);
   const requiresDraftValue = !FILTER_OPS_WITHOUT_VALUE.includes(draft.operator);
 
@@ -358,18 +411,28 @@ export const BaseTable: FC<BaseTableProps> = ({
       definedFilters.reduce(
         (count, filter) => count + countFilterConditions(filter),
         0,
-      ) + quickFilters.length,
-    [definedFilters, quickFilters],
+      ) +
+      viewFilters.reduce(
+        (count, filter) => count + countFilterConditions(filter),
+        0,
+      ),
+    [definedFilters, viewFilters],
+  );
+  const definedFilterEntries = useMemo(
+    () => createFilterEntries(definedFilters),
+    [definedFilters],
   );
 
   const hiddenColumnOptions = useMemo(
     () =>
-      allColumns.filter((column) => !visibleColumnIds.includes(column.propertyId)),
+      allColumns.filter(
+        (column) => !visibleColumnIds.includes(column.propertyId),
+      ),
     [allColumns, visibleColumnIds],
   );
 
   const canAddFilter =
-    Boolean(onQuickFiltersChange) &&
+    Boolean(onViewFiltersChange) &&
     Boolean(draft.propertyId) &&
     (!requiresDraftValue ||
       (draftProperty?.type === "checkbox"
@@ -381,7 +444,7 @@ export const BaseTable: FC<BaseTableProps> = ({
   };
 
   const handleAddFilter = () => {
-    if (!onQuickFiltersChange || !draft.propertyId || !canAddFilter) return;
+    if (!onViewFiltersChange || !draft.propertyId || !canAddFilter) return;
 
     const nextFilter: LensFilterCondition = {
       property: draft.propertyId,
@@ -389,23 +452,25 @@ export const BaseTable: FC<BaseTableProps> = ({
     };
     if (requiresDraftValue) {
       nextFilter.value =
-        draftProperty?.type === "checkbox" ? draft.value === "true" : draft.value;
+        draftProperty?.type === "checkbox"
+          ? draft.value === "true"
+          : draft.value;
     }
 
-    onQuickFiltersChange([...quickFilters, nextFilter]);
+    onViewFiltersChange([...viewFilters, nextFilter]);
     updateDraft({ value: "" });
   };
 
-  const handleRemoveQuickFilter = (index: number) => {
-    if (!onQuickFiltersChange) return;
-    onQuickFiltersChange(
-      quickFilters.filter((_, currentIndex) => currentIndex !== index),
+  const handleRemoveViewFilter = (index: number) => {
+    if (!onViewFiltersChange) return;
+    onViewFiltersChange(
+      viewFilters.filter((_, currentIndex) => currentIndex !== index),
     );
   };
 
-  const handleClearQuickFilters = () => {
-    if (!onQuickFiltersChange) return;
-    onQuickFiltersChange([]);
+  const handleClearViewFilters = () => {
+    if (!onViewFiltersChange) return;
+    onViewFiltersChange([]);
   };
 
   const toggleDirection = () => {
@@ -463,6 +528,58 @@ export const BaseTable: FC<BaseTableProps> = ({
     });
   };
 
+  useEffect(() => {
+    if (!activeResizeColumnId) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState) return;
+
+      const nextWidth = Math.max(
+        MIN_COLUMN_WIDTH,
+        Math.round(resizeState.startWidth + event.clientX - resizeState.startX),
+      );
+
+      setColumnWidths((current) => {
+        if (current[resizeState.propertyId] === nextWidth) {
+          return current;
+        }
+
+        const next = {
+          ...current,
+          [resizeState.propertyId]: nextWidth,
+        };
+        columnWidthsRef.current = next;
+        return next;
+      });
+    };
+
+    const stopResizing = () => {
+      const resizeState = resizeStateRef.current;
+      resizeStateRef.current = null;
+      setActiveResizeColumnId(null);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+
+      if (!resizeState) return;
+      onColumnWidthsChange?.(columnWidthsRef.current);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResizing);
+    window.addEventListener("pointercancel", stopResizing);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResizing);
+      window.removeEventListener("pointercancel", stopResizing);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [activeResizeColumnId, onColumnWidthsChange]);
+
   const rowHeightStyle =
     view.table?.row_height != null
       ? { height: `${view.table.row_height}px` }
@@ -473,7 +590,7 @@ export const BaseTable: FC<BaseTableProps> = ({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-custom-background-90 font-workspace text-[13px] text-custom-text-100">
+    <div className="flex h-full min-h-0 flex-col bg-custom-background-100 font-workspace text-[13px] text-custom-text-100">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-custom-border-300 px-3 py-2">
         <div className="flex items-center gap-3">
           <span className="text-[14px] font-semibold text-custom-text-200">
@@ -484,10 +601,7 @@ export const BaseTable: FC<BaseTableProps> = ({
         <div className="flex flex-wrap items-center gap-2 text-[14px]">
           <Popover open={filterPopoverOpen} onOpenChange={setFilterPopoverOpen}>
             <PopoverTrigger asChild>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-md border border-custom-border-300 bg-custom-background-100 px-2.5 py-1.5 text-custom-text-200 hover:bg-custom-background-80"
-              >
+              <button type="button" className={toolbarButtonClassName}>
                 <Filter className="h-4 w-4" />
                 <span className="font-medium">Filter</span>
                 {totalActiveFilterCount > 0 ? (
@@ -505,42 +619,46 @@ export const BaseTable: FC<BaseTableProps> = ({
               <div className="border-b border-border px-3 py-2">
                 <p className="text-sm font-medium text-foreground">Filters</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Add session filters on top of the current base query.
+                  Add filters to the current view and save them to this .cbase
+                  file.
                 </p>
               </div>
 
               <div className="space-y-3 px-3 py-3">
                 <div className="space-y-2">
-                  {definedFilters.map((filter, index) => (
+                  {definedFilterEntries.map(({ filter, key }) => (
                     <div
-                      key={`defined:${index}`}
+                      key={`defined:${key}`}
                       className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
                     >
                       <span className="min-w-0 flex-1 text-foreground">
                         {formatFilterSummary(filter, properties)}
                       </span>
                       <Badge variant="outline" className="shrink-0 text-[10px]">
-                        File
+                        Global
                       </Badge>
                     </div>
                   ))}
 
-                  {quickFilters.map((filter, index) => (
+                  {viewFilters.map((filter, index) => (
                     <div
-                      key={`quick:${filter.property}:${filter.op}:${index}`}
+                      key={`view:${index}`}
                       className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
                     >
                       <span className="min-w-0 flex-1 text-foreground">
-                        {formatConditionSummary(filter, properties)}
+                        {formatFilterSummary(filter, properties)}
                       </span>
                       <div className="flex items-center gap-1">
-                        <Badge variant="outline" className="shrink-0 text-[10px]">
-                          Session
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 text-[10px]"
+                        >
+                          View
                         </Badge>
                         <button
                           type="button"
-                          onClick={() => handleRemoveQuickFilter(index)}
-                          disabled={!onQuickFiltersChange}
+                          onClick={() => handleRemoveViewFilter(index)}
+                          disabled={!onViewFiltersChange}
                           className="text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                           aria-label="Remove filter"
                         >
@@ -550,7 +668,7 @@ export const BaseTable: FC<BaseTableProps> = ({
                     </div>
                   ))}
 
-                  {definedFilters.length === 0 && quickFilters.length === 0 ? (
+                  {definedFilters.length === 0 && viewFilters.length === 0 ? (
                     <p className="py-2 text-xs text-muted-foreground">
                       No filters.
                     </p>
@@ -567,14 +685,17 @@ export const BaseTable: FC<BaseTableProps> = ({
                         value: "",
                       });
                     }}
-                    disabled={!onQuickFiltersChange || allColumns.length === 0}
+                    disabled={!onViewFiltersChange || allColumns.length === 0}
                   >
                     <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
                       <SelectValue placeholder="Property" />
                     </SelectTrigger>
                     <SelectContent>
                       {allColumns.map((column) => (
-                        <SelectItem key={column.propertyId} value={column.propertyId}>
+                        <SelectItem
+                          key={column.propertyId}
+                          value={column.propertyId}
+                        >
                           {column.label}
                         </SelectItem>
                       ))}
@@ -586,7 +707,7 @@ export const BaseTable: FC<BaseTableProps> = ({
                     onValueChange={(value) =>
                       updateDraft({ operator: value as FilterOperator })
                     }
-                    disabled={!onQuickFiltersChange || !draft.propertyId}
+                    disabled={!onViewFiltersChange || !draft.propertyId}
                   >
                     <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
                       <SelectValue placeholder="Operator" />
@@ -605,7 +726,7 @@ export const BaseTable: FC<BaseTableProps> = ({
                       <Select
                         value={draft.value}
                         onValueChange={(value) => updateDraft({ value })}
-                        disabled={!onQuickFiltersChange}
+                        disabled={!onViewFiltersChange}
                       >
                         <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
                           <SelectValue placeholder="Value" />
@@ -619,7 +740,7 @@ export const BaseTable: FC<BaseTableProps> = ({
                       <Select
                         value={draft.value}
                         onValueChange={(value) => updateDraft({ value })}
-                        disabled={!onQuickFiltersChange}
+                        disabled={!onViewFiltersChange}
                       >
                         <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
                           <SelectValue placeholder="Value" />
@@ -635,10 +756,12 @@ export const BaseTable: FC<BaseTableProps> = ({
                     ) : (
                       <Input
                         value={draft.value}
-                        onChange={(event) => updateDraft({ value: event.target.value })}
+                        onChange={(event) =>
+                          updateDraft({ value: event.target.value })
+                        }
                         placeholder="Value"
                         className="h-9 border-border bg-background text-sm"
-                        disabled={!onQuickFiltersChange}
+                        disabled={!onViewFiltersChange}
                       />
                     )
                   ) : (
@@ -653,19 +776,19 @@ export const BaseTable: FC<BaseTableProps> = ({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    onClick={handleClearQuickFilters}
-                    disabled={!onQuickFiltersChange || quickFilters.length === 0}
-                    className="h-8 px-2 text-xs text-muted-foreground"
+                    onClick={handleClearViewFilters}
+                    disabled={!onViewFiltersChange || viewFilters.length === 0}
+                    className="h-8 rounded px-1 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground"
                   >
-                    Clear session filters
+                    Clear view filters
                   </Button>
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     onClick={handleAddFilter}
                     disabled={!canAddFilter}
-                    className="h-8 gap-1 px-2"
+                    className="h-8 gap-1 rounded px-1 text-xs hover:bg-transparent"
                   >
                     <Plus className="h-3.5 w-3.5" />
                     Add filter
@@ -677,10 +800,7 @@ export const BaseTable: FC<BaseTableProps> = ({
 
           <Popover open={sortPopoverOpen} onOpenChange={setSortPopoverOpen}>
             <PopoverTrigger asChild>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-md border border-custom-border-300 bg-custom-background-100 px-2.5 py-1.5 text-custom-text-200 hover:bg-custom-background-80"
-              >
+              <button type="button" className={toolbarButtonClassName}>
                 <ArrowUpDown className="h-4 w-4" />
                 <span className="font-medium">Sort</span>
               </button>
@@ -718,7 +838,10 @@ export const BaseTable: FC<BaseTableProps> = ({
                         query order
                       </SelectItem>
                       {allColumns.map((column) => (
-                        <SelectItem key={column.propertyId} value={column.propertyId}>
+                        <SelectItem
+                          key={column.propertyId}
+                          value={column.propertyId}
+                        >
                           {column.label}
                         </SelectItem>
                       ))}
@@ -755,10 +878,7 @@ export const BaseTable: FC<BaseTableProps> = ({
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-md border border-custom-border-300 bg-custom-background-100 px-2.5 py-1.5 text-custom-text-200 hover:bg-custom-background-80"
-              >
+              <button type="button" className={toolbarButtonClassName}>
                 <span className="font-medium">Properties</span>
                 <ChevronDown className="h-4 w-4" />
               </button>
@@ -771,7 +891,8 @@ export const BaseTable: FC<BaseTableProps> = ({
               <DropdownMenuSeparator />
               {allColumns.map((column) => {
                 const checked = visibleColumnIds.includes(column.propertyId);
-                const isOnlyVisibleColumn = checked && visibleColumnIds.length === 1;
+                const isOnlyVisibleColumn =
+                  checked && visibleColumnIds.length === 1;
 
                 return (
                   <DropdownMenuCheckboxItem
@@ -807,40 +928,77 @@ export const BaseTable: FC<BaseTableProps> = ({
 
       <div className="show-scrollbar min-h-0 flex-1 overflow-auto">
         <table
-          className="w-full min-w-full table-fixed border-collapse bg-custom-background-90"
-          style={tableMinWidth > 0 ? { minWidth: `${tableMinWidth}px` } : undefined}
+          className="w-full min-w-full table-fixed border-collapse bg-custom-background-100"
+          style={
+            tableMinWidth > 0 ? { minWidth: `${tableMinWidth}px` } : undefined
+          }
         >
           <colgroup>
             {visibleColumns.map((column, index) => (
               <col
                 key={column.propertyId}
                 style={
-                  column.width != null && index !== visibleColumns.length - 1
-                    ? { width: `${column.width}px` }
+                  index !== visibleColumns.length - 1
+                    ? { width: `${getColumnWidth(column)}px` }
                     : {}
                 }
               />
             ))}
           </colgroup>
-          <thead className="sticky top-0 z-10 bg-custom-background-90">
+          <thead className="sticky top-0 z-10 bg-custom-background-100">
             <tr className="h-11 border-b border-custom-border-300 text-[13px] font-medium text-custom-text-300">
               {visibleColumns.map((column, index) => (
                 <th
                   key={column.propertyId}
                   className={
                     index === visibleColumns.length - 1
-                      ? "px-3 text-left"
-                      : "border-r border-custom-border-300 px-3 text-left"
+                      ? "relative px-3 text-left"
+                      : "relative border-r border-custom-border-300 px-3 text-left"
                   }
                 >
                   <button
                     type="button"
                     onClick={() => setColumnSort(column.propertyId)}
-                    className="inline-flex w-full items-center justify-between gap-2 text-left hover:text-custom-text-200"
+                    className={
+                      index === visibleColumns.length - 1
+                        ? "inline-flex w-full items-center justify-between gap-2 text-left hover:text-custom-text-200"
+                        : "inline-flex w-full items-center justify-between gap-2 pr-3 text-left hover:text-custom-text-200"
+                    }
                   >
                     <span>{column.label}</span>
                     {sortIndicator(column.propertyId)}
                   </button>
+                  {index !== visibleColumns.length - 1 ? (
+                    <button
+                      type="button"
+                      aria-label={`Resize ${column.label} column`}
+                      title={`Resize ${column.label} column`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        resizeStateRef.current = {
+                          propertyId: column.propertyId,
+                          startWidth: getColumnWidth(column),
+                          startX: event.clientX,
+                        };
+                        setActiveResizeColumnId(column.propertyId);
+                      }}
+                      className="absolute -right-1 top-0 z-10 h-full w-3 cursor-col-resize touch-none select-none border-0 bg-transparent p-0"
+                    >
+                      <span
+                        className={
+                          activeResizeColumnId === column.propertyId
+                            ? "absolute left-1/2 top-2 bottom-2 w-px -translate-x-1/2 bg-custom-text-200"
+                            : "absolute left-1/2 top-2 bottom-2 w-px -translate-x-1/2 bg-custom-border-300"
+                        }
+                      />
+                    </button>
+                  ) : null}
                 </th>
               ))}
             </tr>
@@ -898,4 +1056,3 @@ export const BaseTable: FC<BaseTableProps> = ({
     </div>
   );
 };
-

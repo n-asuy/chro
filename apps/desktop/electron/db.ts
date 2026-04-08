@@ -94,8 +94,9 @@ export interface SessionDatabase {
   getOrCreateProject(workspacePath: string): Promise<ProjectRecord>;
   createTask(
     projectId: string,
-    title: string,
+    title: string | null,
     description?: string | null,
+    prompt?: string | null,
   ): Promise<TaskRecord>;
   createTaskAttempt(
     taskId: string,
@@ -174,13 +175,15 @@ class HttpSessionDatabase implements SessionDatabase {
 
   async createTask(
     projectId: string,
-    title: string,
+    title: string | null,
     description: string | null = null,
+    prompt: string | null = null,
   ): Promise<TaskRecord> {
     const result = await this.post<{ task: TaskRecord }>("/rpc/tasks", {
       project_id: projectId,
       title,
       description,
+      prompt,
     });
     return result.task;
   }

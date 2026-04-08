@@ -77,9 +77,9 @@ async fn ensure_project(
 
 async fn get_project(
     State(state): State<AppState>,
-    Path(project_id): Path<Uuid>,
+    Path(identifier): Path<String>,
 ) -> Result<Json<ProjectEnvelope>, ApiError> {
-    let project = ProjectRecord::get(state.pool(), project_id).await?;
+    let project = ProjectRecord::get_by_identifier(state.pool(), &identifier).await?;
     Ok(Json(ProjectEnvelope { project }))
 }
 
@@ -169,6 +169,7 @@ async fn get_project_path(state: &AppState, project_id: Uuid) -> Result<PathBuf,
     let project = ProjectRecord::get(state.pool(), project_id).await?;
     Ok(PathBuf::from(&project.git_repo_path))
 }
+
 
 async fn list_project_entries(
     State(state): State<AppState>,

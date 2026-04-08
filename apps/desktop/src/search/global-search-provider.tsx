@@ -1,3 +1,4 @@
+import { useOptionalProjectContext } from "@/files/context/project-context";
 import {
   type FileSearchResult,
   MATCH_TYPE_LABELS,
@@ -5,6 +6,7 @@ import {
 } from "@/files/lib/file-search";
 import { useLanguage } from "@/i18n";
 import { searchProjectFiles } from "@/lib/project-client";
+import { isUuidIdentifier } from "@/lib/uuid";
 import { useProjectTasksStream } from "@/session/hooks/use-project-tasks-stream";
 import { Dialog, Transition } from "@headlessui/react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -119,9 +121,15 @@ function GlobalSearchModal({
 }) {
   const { t } = useLanguage();
   const navigate = useNavigate();
-  const { projectId } = useParams({ strict: false }) as {
+  const params = useParams({ strict: false }) as {
     projectId?: string;
   };
+  // Route param is slug for navigation; use project context UUID for API
+  const projectSlug = params.projectId;
+  const projectContext = useOptionalProjectContext();
+  const projectId =
+    projectContext?.projectId ??
+    (isUuidIdentifier(projectSlug) ? projectSlug : null);
 
   const [query, setQuery] = useState("");
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
@@ -136,7 +144,7 @@ function GlobalSearchModal({
 
   // Session data via WebSocket (only while modal is open)
   const { tasks } = useProjectTasksStream({
-    projectId: projectId ?? null,
+    projectId,
     enabled: isOpen && canSearch,
   });
 
@@ -229,17 +237,21 @@ function GlobalSearchModal({
   // Navigate to result
   const handleSelectResult = useCallback(
     (item: SearchResultItem) => {
-      if (!projectId) return;
+      const navProjectId = projectSlug ?? projectId;
+      if (!navProjectId) return;
 
       if (item.category === "session") {
         void navigate({
           to: "/projects/$projectId/session/$taskId",
-          params: { projectId, taskId: item.task.id },
+          params: {
+            projectId: navProjectId,
+            taskId: item.task.slug ?? item.task.id,
+          },
         });
       } else {
         void navigate({
           to: "/projects/$projectId/files",
-          params: { projectId },
+          params: { projectId: navProjectId },
           search: { path: item.file.normalizedPath },
         });
       }

@@ -4,10 +4,13 @@ export type StartClaudeResponse = {
   task_id: string;
   project_id: string;
   executor_session_id: string;
+  task_slug?: string | null;
+  task_run_slug?: string | null;
 };
 
 export type TaskRunRecord = {
   id: string;
+  slug?: string | null;
   task_id: string;
   execution_mode: string;
   status: string;

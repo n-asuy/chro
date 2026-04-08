@@ -80,8 +80,11 @@ function WorkspacePage() {
       setErrorMessage(null);
       try {
         setRecentWorkspaces(touchRecentWorkspace(path));
-        const projectId = await taskApi.ensureProject(path);
-        navigate({ to: "/projects/$projectId/session", params: { projectId } });
+        const { slug: projectSlug } = await taskApi.ensureProject(path);
+        navigate({
+          to: "/projects/$projectId/session",
+          params: { projectId: projectSlug },
+        });
       } catch (err) {
         console.error("[onboarding] Failed to ensure project", err);
         setErrorMessage("Failed to initialize project. Please try again.");

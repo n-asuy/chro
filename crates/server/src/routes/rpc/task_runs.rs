@@ -173,6 +173,8 @@ struct StartExecutionSessionResponse {
     task_id: Uuid,
     project_id: Uuid,
     executor_session_id: Uuid,
+    task_slug: Option<String>,
+    task_run_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -212,6 +214,8 @@ fn start_execution_response(
         task_id: result.task.id,
         project_id: result.project.id,
         executor_session_id: result.executor_session_id,
+        task_slug: result.task.slug.clone(),
+        task_run_slug: result.task_run.slug.clone(),
     }
 }
 

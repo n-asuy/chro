@@ -24,6 +24,9 @@ async-trait = "0.1"
 tracing = "0.1"
 log-types = { path = "../log-types" }
 
+nanoid = "0.4"
+rand = "0.8"
+
 [dependencies.dirs]
 version = "5.0"
 
