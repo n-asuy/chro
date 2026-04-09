@@ -1,225 +1,171 @@
 <p align="center">
-  <h1 align="center"><b>Chro</b></h1>
-  <p align="center">
-    Feed your knowledge, create in parallel.
-    <br />
-    An AI-powered, local-first desktop workspace for orchestrating Claude Code agents.
-    <br />
-    <br />
-    <a href="https://chro-ai.com"><strong>Website</strong></a> ·
-    <a href="#features"><strong>Features</strong></a> ·
-    <a href="#how-it-works"><strong>How It Works</strong></a> ·
-    <a href="#download"><strong>Download</strong></a> ·
-    <a href="#architecture"><strong>Architecture</strong></a> ·
-    <a href="#development"><strong>Development</strong></a> ·
-    <a href="./SECURITY.md"><strong>Security</strong></a>
-  </p>
+  <img src="banner.jpg" alt="Chro — Feed your knowledge, create in parallel" width="100%">
 </p>
 
-Chro helps you turn your notes, research, and project context into parallel AI execution.
-Launch multiple agents, each in its own isolated Git worktree, stream live logs and diffs, and
-merge only what you approve. Powered by your existing Claude Code subscription.
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="apps/desktop/assets/logo/logo_chro_invert_symbol.png">
+  <source media="(prefers-color-scheme: light)" srcset="apps/desktop/assets/logo/logo_chro_symbol.png">
+  <img alt="Chro" src="apps/desktop/assets/logo/logo_chro_symbol.png" width="50">
+</picture>
+
+# Chro
+
+**Your ideas run in parallel.**
+
+Local-first AI workspace for orchestrating coding agents.<br/>
+Launch parallel agents in isolated worktrees, stream live diffs, merge only what you approve.
+
+[![Check](https://github.com/n-asuy/chro/actions/workflows/check.yml/badge.svg)](https://github.com/n-asuy/chro/actions/workflows/check.yml)
+[![License](https://img.shields.io/badge/License-see_LICENSE.md-blue.svg)](LICENSE.md)
+
+[Website](https://chro-ai.com) · [Download](https://github.com/n-asuy/chro/releases/latest) · [Security](SECURITY.md)
+
+**English | [日本語](docs/i18n/README.ja.md) | [简体中文](docs/i18n/README.zh-CN.md) | [한국어](docs/i18n/README.ko.md) | [Español](docs/i18n/README.es.md) | [Français](docs/i18n/README.fr.md) | [Português](docs/i18n/README.pt-BR.md) | [Tiếng Việt](docs/i18n/README.vi.md) | [Deutsch](docs/i18n/README.de.md)**
+
+</div>
+
+## What is Chro?
+
+Chro turns your notes, research, and project context into parallel AI execution. Launch multiple coding agents from a single task screen — each runs in its own Git worktree, keeping your main branch untouched until you're ready.
+
+No context switching between terminals. No manual worktree juggling. Your agents stream live logs and diffs in a unified editor, and nothing reaches your main branch without your explicit approval. Works with your existing **Claude Code** or **Codex** subscription.
+
+<p align="center">
+  <img src="docs/assets/demo1.png" alt="Chro task board" width="49%">
+  <img src="docs/assets/demo2.png" alt="Chro file editor" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/demo3.png" alt="Chro session editor" width="49%">
+  <img src="docs/assets/demo4.png" alt="Chro agent execution" width="49%">
+</p>
 
 ## Features
 
-- **Local-first knowledge base** — your ideas, notes, and research stay as files you own.
-- **Parallel agent orchestration** — launch multiple agents from a single task screen, each in its own worktree sandbox.
-- **Worktree isolation** — every agent runs in a dedicated Git worktree, keeping your main branch untouched until you're ready.
-- **Unified knowledge editor** — review commits, logs, and assets in one place with inline diffs.
-- **Real-time timelines** — stream live logs, events, and diffs as agents work.
-- **Approval gates** — explicit approval required before agents apply sensitive commands or file operations.
-- **Kanban task board** — organize work with focus and peek modes.
-- **Built-in editor & Git workflow** — full diff and PR workflow without leaving the app.
+- **Parallel Agent Orchestration** — launch multiple agents from a single task screen. Each gets its own worktree sandbox and real-time timeline.
+- **Worktree Isolation** — every agent runs in a dedicated Git worktree, keeping your main branch safe until you merge.
+- **Local-First Knowledge** — your ideas, notes, and research stay as files you own. This context shapes how agents think and create.
+- **Unified Editor** — review every agent's commits, logs, and assets in one place with inline diffs.
+- **Approval Gates** — explicit approval required before agents apply sensitive commands or file operations.
+- **Kanban Task Board** — organize work visually with focus and peek modes.
+- **Built-in Git Workflow** — full diff and PR workflow without leaving the app.
 
-## How It Works
+## Getting Started
 
-1. **Feed the knowledge** — ideas, notes, and research live as local files. This context shapes how agents think, research, and create.
-2. **Run safely in worktrees** — each agent runs in its own Git worktree. They can research, write code, generate assets, and update files without touching your main branch.
-3. **Create in parallel** — launch multiple agents from a single task screen. Each gets its own worktree sandbox and timeline.
-4. **Curate in one editor** — flip through every agent's commits, logs, and assets in the unified editor. Diff changes inline and merge only the pieces you approve.
+### Desktop App
 
-## Download
-
-Chro is available for macOS and Windows. Free during beta.
+Download and install — free during beta. Works with your Claude Code / Codex subscription.
 
 | Platform | Link |
 |----------|------|
-| macOS (Apple Silicon) | [Download .dmg](https://github.com/n-asuy/chro-ai/releases/latest) |
-| macOS (Intel) | [Download .dmg](https://github.com/n-asuy/chro-ai/releases/latest) |
-| Windows | [Download .exe](https://github.com/n-asuy/chro-ai/releases/latest) |
+| macOS (Apple Silicon) | [Download .dmg](https://github.com/n-asuy/chro/releases/latest) |
+| macOS (Intel) | [Download .dmg](https://github.com/n-asuy/chro/releases/latest) |
+| Windows | [Download .exe](https://github.com/n-asuy/chro/releases/latest) |
 
-> Chro works with your existing **Claude Code** or **Codex** subscription. Sign in with your account and use your existing subscription.
+### CLI (Browser + Local Server)
 
-## Safety & Privacy
+Run Chro in your browser without the desktop app. Also provides task management commands.
 
-- **Local-first by design** — workspaces live on your machine.
-- **No training on your data** — content is not used to train AI models unless you explicitly consent.
-- **Isolated execution** — agents run in worktrees with explicit approvals before applying risky changes.
-- **You control merges** — nothing reaches your main workspace without your approval.
-- **Security reporting** — if you believe you've found a vulnerability, follow [SECURITY.md](./SECURITY.md) and contact us privately.
-- **Not affiliated with Anthropic** — Chro is an independent product that uses Claude Code via your subscription.
+```bash
+npx @chro-ai/cli                # Start Chro (browser + local server)
+```
+
+```bash
+npx @chro-ai/cli task list                              # List tasks
+npx @chro-ai/cli task create "Add unit tests for auth"  # Create a task
+npx @chro-ai/cli task run <id>                          # Run an agent on a task
+npx @chro-ai/cli task logs <id>                         # Stream execution logs
+npx @chro-ai/cli task merge <id>                        # Merge agent changes
+```
+
+See `npx @chro-ai/cli --help` for the full command reference.
+
+## Quickstart
+
+### 1. Open a project
+
+Launch Chro and open any Git repository as a workspace. Your local files become the knowledge context for agents.
+
+### 2. Create a task
+
+Use the Kanban board to create a task. Describe what you want — a feature, a bug fix, a refactor. Attach notes or files for additional context.
+
+### 3. Launch agents
+
+Assign one or more agents to the task. Each agent spins up in its own Git worktree and starts working immediately. Watch progress in real time via the timeline.
+
+### 4. Review and merge
+
+Flip through each agent's commits and diffs in the unified editor. Approve the pieces you want, discard the rest, and merge — all without leaving Chro.
 
 ## Architecture
 
-Chro is a monorepo with an Electron desktop shell, a React SPA frontend, and a Rust backend server.
-
 ```
-┌─────────────────────────────────────────────────┐
-│  Electron Shell (main process)                  │
-│  Window management, auth, system tray, IPC      │
-└────────────────────┬────────────────────────────┘
-                     │ IPC
-┌────────────────────▼────────────────────────────┐
-│  React SPA (renderer process)                   │
-│  TanStack Router · React Query · Zustand · Vite │
-│                                                 │
-│  Routes: /projects/:id/tasks, /files, /session  │
-│  UI: Kanban board, file explorer, session view  │
-└────────────────────┬────────────────────────────┘
-                     │ HTTP / WebSocket
-┌────────────────────▼────────────────────────────┐
-│  Rust Backend Server (Axum)                     │
-│  Task management, agent execution, git ops,     │
-│  file system, real-time streaming               │
-│                                                 │
-│  SQLite for persistence · Tokio async runtime   │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│  Local Workspace (Git Repository)               │
-│  Worktrees for sandboxed agent execution        │
-└─────────────────────────────────────────────────┘
+apps/
+  desktop/   → Electron + Vite + React + Markdown-first workspace UI
+  api/       → Cloudflare Workers (Rust → WASM, D1)
+  cli/       → CLI for browser mode + task management (Rust)
+packages/
+  ui/        → Shared UI components (Radix UI, Tailwind CSS)
+crates/      → Rust backend (17 crates)
+  server/    → Axum web server (JSON-RPC, WebSocket, worktrees, local DB)
+  db/        → SQLx + SQLite persistence layer
+  ...        → worktree, git, executors, events, etc.
+tooling/     → Build scripts, TS config, licenses
 ```
 
-### Repository Structure
-
 ```
-chro/
-├── apps/
-│   ├── desktop/          # Electron + React desktop app
-│   ├── api/              # Cloudflare Workers API (Rust → WASM, D1)
-│   └── cli/              # CLI launcher for dev services (Rust)
-├── crates/               # Rust backend libraries
-│   ├── server/           # Axum HTTP/WebSocket server
-│   ├── db/               # SQLite database layer (SQLx)
-│   ├── runtime/          # Agent execution runtime
-│   ├── local-runtime/    # Local execution adapter
-│   ├── executors/        # Agent executor implementations
-│   ├── worktree/         # Git worktree management
-│   ├── git/              # Git operations
-│   ├── filesystem/       # File I/O operations
-│   ├── napi-filesystem/  # N-API bindings for filesystem
-│   ├── events/           # Event system
-│   ├── approvals/        # Approval gate logic
-│   ├── analytics/        # Analytics
-│   ├── diff-stream/      # Real-time diff streaming
-│   ├── file-search-cache/# File search indexing
-│   ├── image/            # Image processing
-│   ├── config/           # Configuration management
-│   └── log-types/        # Log type definitions
-├── packages/
-│   └── ui/               # Shared UI components
-├── tooling/
-│   ├── scripts/          # Build & deployment scripts
-│   ├── typescript/       # Shared TS config
-│   └── licenses/         # License checking utilities
-└── docs/                 # Architecture and design documents
+┌──────────────────┐
+│  Electron Shell  │──────────┐
+│  (main process)  │   IPC    │
+└──────────────────┘          │
+                         ┌────▼─────────────┐
+┌──────────────────┐     │                  │
+│  CLI / Browser   │────>│    React SPA     │
+│  (npx @chro-ai)  │     │                  │
+└──────────────────┘     └────────┬─────────┘
+                                  │ JSON-RPC / WebSocket
+                         ┌────────▼─────────┐
+                         │  Rust Backend    │
+                         │   (Axum RPC)     │
+                         └───────┬────┬─────┘
+                                 │    │
+                  ┌──────────────▼────────┐  ┌▼───────────────┐
+                  │    Git Worktrees      │  │  SQLite / D1   │
+                  │   (agent sandboxes)   │  │ tasks, state,  │
+                  └───────────────────────┘  │  metadata      │
+                                             └────────────────┘
 ```
 
-### Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Desktop shell | Electron 38 |
-| Frontend | React 19, TanStack Router, Vite 7, Tailwind CSS 3, Zustand |
-| Editors | CodeMirror 6, Monaco Editor |
-| Backend | Rust, Axum 0.7, Tokio, SQLx (SQLite) |
-| Build | Bun, Turbo, Biome |
-| CLI | Rust (clap), launches dev services |
-| Packaging | electron-builder (macOS dmg, Windows nsis/zip, Linux AppImage) |
+| Layer | Stack |
+|-------|-------|
+| Desktop | Electron 38 |
+| Frontend | React 19, TanStack Router, Vite 7, Tailwind CSS, Zustand |
+| Content | Markdown-first files, frontmatter, CodeMirror 6 WYSIWYG, Monaco Editor |
+| Data | SQLite + SQLx locally, D1 in cloud |
+| Backend | Rust, Axum 0.7, Tokio, JSON-RPC, WebSocket |
+| Build | Bun, Turborepo, Biome |
 
 ## Development
 
-### Prerequisites
-
-| Tool | Purpose |
-|------|---------|
-| [Bun](https://bun.sh) ≥ 1.1 | Package manager and JS runtime |
-| [Rust](https://rustup.rs) | Backend server compilation |
-| [Git](https://git-scm.com) | Version control and worktree support |
-| Claude Code subscription | Agent execution |
-
-### Install
+**Prerequisites:** [Bun](https://bun.sh) v1.1+, [Rust](https://rustup.rs), [Git](https://git-scm.com)
 
 ```bash
-bun install
+bun install          # Install dependencies
+bun dev:desktop      # Start full desktop app (Rust + Vite + Electron)
+bun dev:cli          # Start CLI flow (browser UI + local server)
 ```
-
-### Run the Desktop App
 
 ```bash
-# Full desktop app (Rust server + Vite + Electron)
-bun dev:desktop
-
-# Or run from within apps/desktop/
-cd apps/desktop
-bun dev
+bun test             # Run tests
+bun lint             # Lint with Biome
+bun typecheck        # TypeScript type checking
 ```
 
-This concurrently starts:
-1. The Rust backend server on port `4310`
-2. Vite dev server on port `3400`
-3. Electron shell connecting to the Vite dev server
+## Safety & Privacy
 
-### Web-only Development
-
-```bash
-cd apps/desktop
-bun dev:web
-```
-
-Runs the Rust server and Vite without Electron, accessible at `http://localhost:3400`.
-
-### Build & Package
-
-```bash
-cd apps/desktop
-bun run build              # Vite build + Electron TypeScript compilation
-bun run package            # Package with electron-builder
-bun run package:release    # Build and publish release
-```
-
-### Tests & Lint
-
-```bash
-bun test                   # Run all tests
-bun lint                   # Lint with Biome
-bun typecheck              # TypeScript type checking
-bun format                 # Format with Biome
-```
-
-## Pricing
-
-| Plan | Price | Features |
-|------|-------|----------|
-| Free | $0 forever | Full source code access, self-hosted, community support |
-| Pro | $20/month | Unlimited macOS & Windows apps, built-in editor & git, full diff & PR workflow |
-
-Free during beta. Works with your Claude Code / Codex subscription.
-
-## FAQ
-
-**What is Chro?**
-A local-first app that orchestrates AI agents from your ideas, notes, and research. Each agent runs in its own Git worktree, keeping your main workspace safe while creating in parallel.
-
-**How is Chro different from Claude Code CLI?**
-Chro provides a native desktop UI with built-in editor, git management, and the ability to run multiple agents in parallel worktrees. It's designed to feel like a calm, integrated workspace rather than a command-line interface.
-
-**How is Chro different from Claude Desktop?**
-Claude Desktop is a general-purpose chat interface. Chro is purpose-built for knowledge work and development, with features like parallel agents, worktree isolation, built-in editor, and git workflows designed for shipping code.
-
-**Is my data sent to external servers?**
-Chro is local-first. Your knowledge, notes, and code stay on your machine. Only the prompts you send go through Anthropic's API using your own subscription.
+Chro is local-first by design. Your knowledge, notes, and code stay on your machine. Agents run in isolated worktrees with explicit approvals, and nothing reaches your main branch without your consent. Not affiliated with Anthropic. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License
 

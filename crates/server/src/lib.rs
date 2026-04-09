@@ -6,11 +6,12 @@ use runtime::{Runtime, RuntimeOptions};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use args::Args;
+use args::ServerArgs;
 use shutdown::shutdown_signal;
 
 mod app_state;
 pub mod args;
+pub mod cli;
 mod constants;
 mod cors;
 mod errors;
@@ -22,7 +23,6 @@ mod routes;
 mod shutdown;
 
 pub(crate) use app_state::AppState;
-pub use args::Args as ServerArgs;
 pub(crate) use constants::MAX_IMAGE_UPLOAD_BYTES;
 pub(crate) use errors::ApiError;
 pub(crate) use helpers::format_system_time;
@@ -50,7 +50,7 @@ fn raise_fd_limit() {
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(false)

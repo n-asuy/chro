@@ -1,6 +1,6 @@
 [package]
 name = "chro-server"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -39,6 +39,7 @@ analytics = { path = "../analytics" }
 rust-embed = "8"
 mime_guess = "2"
 open = "5"
+ureq = { version = "2", features = ["json"] }
 
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"

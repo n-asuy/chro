@@ -1,7 +1,14 @@
-use chro_server::{run, ServerArgs};
+use chro_server::args::{Cli, Commands};
 use clap::Parser;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run(ServerArgs::parse()).await
+    let cli = Cli::parse();
+
+    match cli.command {
+        None => chro_server::run(cli.server).await,
+        Some(Commands::Task { command }) => {
+            chro_server::cli::run_task(&command, cli.project.as_deref())
+        }
+    }
 }

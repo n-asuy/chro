@@ -1,59 +1,153 @@
 # Chro CLI
 
-`apps/cli` provides the `chro` launcher plus the npm wrapper that downloads a
-platform-specific Rust binary from R2.
+Run Chro in your browser without the desktop app, and manage tasks from the terminal.
 
-## What It Does
+The CLI downloads a platform-specific Rust binary (`chro-server`) from R2, starts it locally, and opens the web UI. Task subcommands talk to a running server over HTTP.
 
-- Starts `chro-server` and the Vite web surface directly
-- Does not delegate to `bun run dev:web`
-- Keeps the CLI surface to a single `chro` command
-- Downloads `chro.zip` from R2 during `postinstall` or on first run
+## Install
 
-## Local Development
+```bash
+npx @chro-ai/cli          # Run directly (downloads binary on first run)
+```
+
+Requires Node.js 18+.
+
+## Quick Start
+
+```bash
+# 1. Start Chro (launches local server + opens browser UI)
+npx @chro-ai/cli
+
+# 2. Create a task and run an agent
+npx @chro-ai/cli task create "Add auth middleware" --prompt "Implement JWT auth"
+
+# 3. Watch progress
+npx @chro-ai/cli task logs <run-id>
+
+# 4. Merge when satisfied
+npx @chro-ai/cli task merge <run-id>
+```
+
+## Commands
+
+### `chro`
+
+Start the local server and web UI. Equivalent to `chro dev`.
+
+### `chro dev [--perf]`
+
+Launch development services (Rust server + Vite). Pass `--perf` to enable performance recording to `log/performance/`.
+
+### `chro task list`
+
+List tasks for the current project (detected from CWD's git root).
+
+### `chro task create <title>`
+
+Create a new task and optionally start an agent run.
+
+| Flag | Description |
+|------|-------------|
+| `-d, --description` | Task description |
+| `--prompt` | Prompt for the agent |
+| `--no-run` | Create task only, skip agent execution |
+
+### `chro task status <id> [STATUS]`
+
+Show task run history, or update status to one of: `pending`, `in_progress`, `blocked`, `completed`, `failed`, `cancelled`.
+
+### `chro task run <id> [-p, --prompt]`
+
+Start a new agent execution on an existing task.
+
+### `chro task logs <id>`
+
+Show execution logs for a task run.
+
+### `chro task cancel <id>`
+
+Stop a running execution.
+
+### `chro task diff <id>`
+
+Show branch and commit range for a task run.
+
+### `chro task merge <id> [-m, --message]`
+
+Merge agent changes into the target branch.
+
+### Global Options
+
+| Flag | Description |
+|------|-------------|
+| `-w, --project <path>` | Git repository path (default: CWD's git root) |
+| `--help` | Show help |
+| `--version` | Show version |
+
+## How It Works
+
+```
+npx @chro-ai/cli
+       │
+       ▼
+  cli.js (Node)
+       │  downloads + caches chro-server binary from R2
+       │  verifies SHA-256 checksum
+       ▼
+  chro-server (Rust)
+       │  Axum web server on port 4310
+       │  SQLite database
+       │  manages Git worktrees for agent sandboxes
+       ▼
+  Browser UI (React SPA served by Vite or embedded)
+```
+
+Task commands connect to a running server by reading the port from `$TMPDIR/chro/chro.port`.
+
+## Development
+
+For contributors working on the CLI itself within the Chro repository.
+
+### Run from source
 
 ```bash
 cd apps/cli
-cargo run --
-cargo run -- --perf
+cargo run                  # Start server + Vite (dev mode)
+cargo run -- task list     # Run task subcommands
+cargo run -- --perf        # Enable perf recording
 ```
 
-The binary locates the repo root at runtime, so installed copies still need to
-be run from inside a Chro checkout unless `CHRO_REPO_ROOT` is set explicitly.
+The binary locates the repo root at runtime. Set `CHRO_REPO_ROOT` explicitly when running from outside the checkout.
 
-## Packaging
+### Test
+
+```bash
+cargo test --manifest-path apps/cli/Cargo.toml
+```
+
+### Local build
 
 ```bash
 cd apps/cli
 bash ./local-build.sh
 ```
 
-This builds the Rust binary, zips it into `npx-cli/dist/<platform>/chro.zip`,
-syncs the npm package version from `Cargo.toml`, and creates an npm tarball in
-`apps/cli/npx-cli/`.
+Builds the Rust binary, zips it into `npx-cli/dist/<platform>/chro-server.zip`, syncs the npm package version from `crates/server/Cargo.toml`, and produces an npm tarball.
 
-## Release
+### Release
 
 ```bash
 cd apps/cli
-R2_ENDPOINT=...
-R2_BUCKET=...
-R2_PUBLIC_URL=...
-bash ./release.sh
+R2_ENDPOINT=... R2_BUCKET=... R2_PUBLIC_URL=... bash ./release.sh
 ```
 
-`release.sh` uploads `chro.zip` to R2, stores the resolved public base URL in
-the npm package metadata, and then runs `npm publish`.
+Uploads `chro-server.zip` to R2, stores the resolved public URL in npm metadata, and publishes with `npm publish`. Optional env vars: `R2_PREFIX`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
 
-Optional:
+## Environment Variables
 
-- `R2_PREFIX` to upload under a bucket subpath
-- `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` if AWS credentials are not
-  already exported
-
-## Notes
-
-- `bun` must be installed
-- workspace dependencies must already be installed with `bun install`
-- this command is intended for local development inside the repository
-- if either `chro-server` or Vite exits, `chro` stops the other process too
+| Variable | Description |
+|----------|-------------|
+| `CHRO_REPO_ROOT` | Override repo root detection |
+| `CHRO_SERVER_READY_TIMEOUT_SECS` | Server startup timeout (default: 120) |
+| `CHRO_LOCAL` | Set to `1` to use locally built binaries in `npx-cli/dist/` |
+| `CHRO_DEBUG` | Enable debug output in the npm wrapper |

@@ -14,7 +14,7 @@ import {
   fetchAuthStatus,
   fetchExecutorInstallStatus,
   triggerAuthLogin,
-  updateExecutorProfile,
+
 } from "@/lib/executor-client";
 import type { AppTheme } from "@/lib/preferences-client";
 import { setUiValue } from "@/lib/ui-state-client";
@@ -401,10 +401,6 @@ export function SettingsPanel({
               CODEX: result.codex,
             });
             setAuthTriggering(null);
-            // Ensure the executor is persisted so the app doesn't
-            // fall back to the onboarding screen on next load.
-            setUiValue("chro:selected-executor", executor);
-            void updateExecutorProfile({ executor, variant: null });
           }
         } catch {
           /* keep polling */
@@ -1125,7 +1121,10 @@ export function SettingsPanel({
                   return (
                     <DropdownMenuItem
                       key={option}
-                      onClick={() => void handleExecutorSelect(option)}
+                      onClick={() => {
+                        setUiValue("chro:selected-executor", option);
+                        void handleExecutorSelect(option);
+                      }}
                       className="font-workspace cursor-pointer rounded px-2 py-1.5 text-[13px] text-foreground"
                     >
                       <div className="flex w-full items-center justify-between">

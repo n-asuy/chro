@@ -93,6 +93,7 @@ fn run_dev(perf: bool) {
 
     let mut server = spawn_server(&desktop_dir, &server_manifest, &repo_root, perf);
     wait_for_server_ready(&mut server, SERVER_PORT);
+    println!("\n  Local:   http://127.0.0.1:{}\n", SERVER_PORT);
     let mut vite = spawn_vite(&desktop_dir, perf);
 
     let exit_code = wait_for_children(&mut server, &mut vite);

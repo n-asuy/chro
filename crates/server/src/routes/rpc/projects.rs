@@ -165,11 +165,13 @@ impl From<WorkspaceFile> for ProjectFileResponse {
     }
 }
 
-async fn resolve_project_path(state: &AppState, identifier: &str) -> Result<(Uuid, PathBuf), ApiError> {
+async fn resolve_project_path(
+    state: &AppState,
+    identifier: &str,
+) -> Result<(Uuid, PathBuf), ApiError> {
     let project = ProjectRecord::get_by_identifier(state.pool(), identifier).await?;
     Ok((project.id, PathBuf::from(&project.git_repo_path)))
 }
-
 
 async fn list_project_entries(
     State(state): State<AppState>,

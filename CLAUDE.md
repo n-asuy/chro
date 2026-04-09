@@ -8,10 +8,10 @@ AI-powered productivity desktop application.
 apps/
   desktop/    → Electron + Vite + React 19 + TanStack Router (main product)
   api/        → Cloudflare Workers (Rust → WASM, D1 database)
-  cli/        → CLI launcher for dev services (Rust)
+  cli/        → CLI for browser mode + task management (Rust)
 
 packages/
-  ui/         → Shared components (Radix UI + Tailwind CSS)
+  ui/         → Shared UI components (Radix UI + Tailwind CSS)
 
 crates/       → Rust backend (17 crates)
   server/     → Axum web server (local, SQLite, JSON-RPC/WebSocket)
@@ -24,6 +24,8 @@ tooling/
   scripts/    → Build & deployment scripts
   typescript/ → Shared TS config
   licenses/   → License checking utilities
+
+docs/         → Design documents, i18n READMEs, infra docs
 ```
 
 ## Tech Stack
@@ -33,7 +35,7 @@ tooling/
 | Frontend | React 19, TypeScript 5.5, Vite 7.3 |
 | Routing | TanStack Router (desktop) |
 | State | Zustand 4.5, TanStack Query 5 |
-| Styling | Tailwind CSS 3.4, Radix UI |
+| Styling | Tailwind CSS 4 (ui) / 3.4 (desktop), Radix UI |
 | Editor | CodeMirror 6, Monaco Editor |
 | Backend (local) | Rust, Axum 0.7, Tokio, SQLx + SQLite |
 | Backend (cloud) | Rust → WASM, Cloudflare Workers, D1 |
@@ -47,17 +49,17 @@ tooling/
 
 ```bash
 # Development
-bun dev:web          # Marketing web app (@chro/web)
-bun dev:web:perf     # Desktop frontend + Rust with perf recording to log/performance/
 bun dev:desktop      # Full desktop (Vite + Electron + Rust server)
+bun dev:cli          # CLI flow (browser UI + local server)
+bun dev:web:perf     # Desktop frontend + Rust with perf recording to log/performance/
 bun run --filter=@chro/desktop dev:web  # Desktop frontend only (Vite, port 3400)
 bun dev:api          # Cloudflare Workers API (port 5286)
 
 # Build & Test
 bun run build        # Build all
-bun run test         # Run tests (Vitest)
+bun run test         # Run workspace tests
 bun run typecheck    # TypeScript check
-bun run lint         # Biome lint
+bun run lint         # Turbo lint + Sherif
 bun run format       # Biome format
 
 # Rust server (standalone)
