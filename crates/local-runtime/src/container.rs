@@ -360,6 +360,7 @@ impl LocalContainerService {
         params: ExecutionStartParams,
         events_tx: broadcast::Sender<ExecutionEvent>,
         mut cancel_rx: oneshot::Receiver<()>,
+        msg_store: Arc<MsgStore>,
     ) -> Result<(), ContainerError> {
         let run_id = params.task_run_id;
         let process_started_at = std::time::Instant::now();
@@ -434,12 +435,6 @@ impl LocalContainerService {
         }
 
         let executor_session_id = params.executor_session_id;
-
-        let msg_store = Arc::new(MsgStore::new());
-        {
-            let mut map = self.msg_stores.write().await;
-            map.insert(run_id, msg_store.clone());
-        }
 
         // Background task: persist MsgStore entries to JSONL file asynchronously.
         // This task also captures external_session_id inline when it appears in
@@ -957,9 +952,19 @@ impl ContainerService for LocalContainerService {
         };
 
         let run_id = params.task_run_id;
+
+        // Create the MsgStore before spawning so it is guaranteed to exist
+        // when the API response reaches the frontend (which may immediately
+        // open a log-stream WebSocket for this run).
+        let msg_store = Arc::new(MsgStore::new());
+        {
+            let mut map = self.msg_stores.write().await;
+            map.insert(run_id, msg_store.clone());
+        }
+
         let handle = tokio::spawn(async move {
             if let Err(err) = service
-                .run_execution_process(params, events_tx.clone(), cancel_rx)
+                .run_execution_process(params, events_tx.clone(), cancel_rx, msg_store)
                 .await
             {
                 error!(error = %err, "execution failed");

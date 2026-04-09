@@ -491,12 +491,13 @@ export function useConversationHistory({
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
 
-  // Find the running TaskRun (if any)
-  const activeRun = useMemo(
+  // Find the running TaskRun — prefer the API response (pendingSubmission.runId)
+  // which is available immediately, over WS-derived status which races.
+  const wsActiveRun = useMemo(
     () => runs.find((r) => r.status === "running"),
     [runs],
   );
-  const activeRunId = activeRun?.id ?? null;
+  const activeRunId = pendingSubmission?.runId ?? wsActiveRun?.id ?? null;
 
   const latestRunId = useMemo(() => {
     if (runs.length === 0) return null;
@@ -575,7 +576,7 @@ export function useConversationHistory({
     const loadHistoric = async () => {
       const sortedRuns = sortRunsByCreatedAtAscending(runs);
       const historicRuns = sortedRuns
-        .filter((r) => r.status !== "running" && !loadedRunIdsRef.current.has(r.id))
+        .filter((r) => r.status !== "running" && r.id !== activeRunId && !loadedRunIdsRef.current.has(r.id))
         .reverse();
 
       if (historicRuns.length === 0) {
@@ -639,7 +640,7 @@ export function useConversationHistory({
   // No cancelled flag. The stream is autonomous and survives effect re-runs.
   // Dedup via activeStreamRef prevents duplicate streams.
   // Depends on activeRunId (primitive), not runs (object reference).
-  const activeRunCreatedAt = activeRun?.created_at ?? null;
+  const activeRunCreatedAt = pendingSubmission?.createdAt ?? wsActiveRun?.created_at ?? null;
 
   useEffect(() => {
     if (!enabled || !taskId) return;
@@ -699,9 +700,33 @@ export function useConversationHistory({
 
       activeStreamRef.current = { runId, close: controller.close };
     } else if (!activeRunId && activeStreamRef.current) {
+      // activeRunId went null while streaming (e.g. pendingSubmission cleared
+      // before log stream sent 'finished'). Finalize gracefully: close the
+      // stream, mark the run as loaded, and reload finalized entries so we
+      // don't lose the tail.
+      const closingRunId = activeStreamRef.current.runId;
+      const closingCreatedAt = taskRunEntriesRef.current.get(closingRunId)?.createdAt
+        ?? new Date().toISOString();
       activeStreamRef.current.close();
       activeStreamRef.current = null;
       setIsStreaming(false);
+      loadedRunIdsRef.current.add(closingRunId);
+
+      void loadHistoricTaskRunEntries(closingRunId, (entries) => {
+        taskRunEntriesRef.current.set(closingRunId, {
+          taskRunId: closingRunId, createdAt: closingCreatedAt, entries, finished: true,
+        });
+        updateEntriesVersion();
+      })
+        .catch((err) => {
+          console.error(`[useConversationHistory] Failed to reload early-closed TaskRun ${closingRunId}:`, err);
+          const state = taskRunEntriesRef.current.get(closingRunId);
+          if (state) state.finished = true;
+        })
+        .finally(() => {
+          callbacksRef.current?.onFinished?.();
+          updateEntriesVersion();
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, taskId, activeRunId]);

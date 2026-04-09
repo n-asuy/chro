@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.1.18
+## 0.1.22
 
-- Added `.cbase` serializer to persist table view state (column visibility, sort order) back to `.cbase` files on disk
-- Added `onColumnsChange` and `onSortChange` callbacks to cbase table, enabling auto-save of user-driven view changes
-- Added `resolveDefaultColumns()` with sensible defaults (`file.path`, `file.name`, `file.mtime`) instead of showing all properties
-- Added session empty state component with branded Chro logo placeholder for empty sessions
-- Added i18n key for session input placeholder, replacing hardcoded English text
-- Changed cbase viewer to skip persistence for query-language-based definitions
+- Unified versioning across Desktop and CLI into a single product version
+- Added CHANGELOG gate to release process: releases require a changelog entry before tagging
+- Release notes are now automatically extracted from CHANGELOG.md and used as Git tag annotations and GitHub Release body
+- Changed CLI release workflow from manual dispatch to tag-triggered, firing alongside Desktop on the same `v*` tag
+- Added timestamp-tag filter to prevent legacy CLI tags from triggering Desktop builds

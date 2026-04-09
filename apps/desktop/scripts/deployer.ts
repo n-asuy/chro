@@ -59,6 +59,14 @@ const rustServerCrateDir = path.join(repoRoot, "crates", "server");
 const rustServerReleaseDir = path.join(rustServerCrateDir, "target", "release");
 const rustServerBinaryBaseName = "chro-server";
 const rustServerManifestPath = path.join(rustServerCrateDir, "Cargo.toml");
+const npxCliPackageJsonPath = path.join(
+  repoRoot,
+  "apps",
+  "cli",
+  "npx-cli",
+  "package.json",
+);
+const changelogPath = path.join(repoRoot, "CHANGELOG.md");
 
 type RustBuildContext = {
   label: string;
@@ -216,12 +224,77 @@ function ensureGhRepoConfigured(command: Command) {
   );
 }
 
+function extractChangelogEntry(version: string): string {
+  const changelog = readFileSync(changelogPath, "utf8");
+  const heading = `## ${version}`;
+  const headingIndex = changelog.indexOf(heading);
+  if (headingIndex === -1) {
+    throw new Error(
+      `CHANGELOG.md has no entry for version ${version}. Add a "${heading}" section before releasing.`,
+    );
+  }
+  const afterHeading = changelog.slice(headingIndex + heading.length);
+  const nextSection = afterHeading.indexOf("\n## ");
+  const sectionBody = (
+    nextSection === -1 ? afterHeading : afterHeading.slice(0, nextSection)
+  ).trim();
+  if (!sectionBody.includes("- ")) {
+    throw new Error(
+      `CHANGELOG.md entry for ${version} has no content. Add at least one "- " item.`,
+    );
+  }
+  return sectionBody;
+}
+
+function updateCargoTomlVersion(newVersion: string) {
+  const content = readFileSync(rustServerManifestPath, "utf8");
+  const updated = content.replace(
+    /^version\s*=\s*"[^"]*"/m,
+    `version = "${newVersion}"`,
+  );
+  writeFileSync(rustServerManifestPath, updated, "utf8");
+}
+
+function updateNpxCliVersion(newVersion: string) {
+  const pkg = JSON.parse(
+    readFileSync(npxCliPackageJsonPath, "utf8"),
+  ) as Record<string, unknown>;
+  pkg.version = newVersion;
+  writeFileSync(
+    npxCliPackageJsonPath,
+    `${JSON.stringify(pkg, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function updateCargoLock() {
+  runCommand("cargo", ["check", "--manifest-path", rustServerManifestPath], {
+    cwd: repoRoot,
+  });
+}
+
+function commitUnifiedVersionBump(newVersion: string) {
+  const paths = [
+    relativeToRepo(
+      path.join(repoRoot, "apps", "desktop", "package.json"),
+    ),
+    relativeToRepo(rustServerManifestPath),
+    relativeToRepo(npxCliPackageJsonPath),
+    relativeToRepo(
+      path.join(rustServerCrateDir, "Cargo.lock"),
+    ),
+  ];
+  runCommand("git", ["add", ...paths], { cwd: repoRoot });
+  runCommand("git", ["commit", "-m", `release ${newVersion}`], {
+    cwd: repoRoot,
+  });
+}
+
 function tagRelease(
   configs: ProjectConfig[],
   packageInfos: PackageInfo[],
   requestedVersion: string | null,
   tagOverride: string | null,
-  releaseMessage: string | null,
 ) {
   const baseVersion = packageInfos[0].version;
   const targetVersion = requestedVersion
@@ -229,39 +302,34 @@ function tagRelease(
     : incrementPatchVersion(baseVersion);
 
   assertSemver(targetVersion);
+  const releaseNotes = extractChangelogEntry(targetVersion);
   ensureCleanWorkingTree();
 
-  const configsWithVersionChange: ProjectConfig[] = [];
-
+  console.log(`Bumping version ${baseVersion} → ${targetVersion}…`);
   configs.forEach((config, index) => {
-    const currentVersion = packageInfos[index].version;
-    if (currentVersion !== targetVersion) {
-      console.log(
-        `Updating package version ${currentVersion} → ${targetVersion} for ${config.name}…`,
-      );
-      updatePackageVersion(config, targetVersion);
-      configsWithVersionChange.push(config);
-      packageInfos[index] = {
-        ...packageInfos[index],
-        version: targetVersion,
-      };
-    }
+    updatePackageVersion(config, targetVersion);
+    packageInfos[index] = { ...packageInfos[index], version: targetVersion };
   });
+  updateCargoTomlVersion(targetVersion);
+  updateNpxCliVersion(targetVersion);
 
-  if (configsWithVersionChange.length > 0) {
-    console.log("Committing package version bump…");
-    commitVersionBump(configsWithVersionChange, targetVersion);
-    console.log("Pushing current branch to origin…");
-    pushCurrentBranch();
-  }
+  console.log("Updating Cargo.lock…");
+  updateCargoLock();
+
+  console.log("Committing version bump…");
+  commitUnifiedVersionBump(targetVersion);
+  console.log("Pushing current branch to origin…");
+  pushCurrentBranch();
 
   const tagName = normaliseTag(tagOverride ?? targetVersion);
   console.log(`Creating git tag ${tagName}…`);
-  createGitTag(tagName, releaseMessage);
+  createGitTag(tagName, releaseNotes);
   console.log(`Pushing tag ${tagName} to origin…`);
   pushGitTag(tagName);
 
-  console.log(`Done. CI will create the release for ${tagName}.`);
+  console.log(
+    `Done. CI will create the Desktop and CLI releases for ${tagName}.`,
+  );
 }
 
 function readPackageInfo(config: ProjectConfig): PackageInfo {
@@ -707,19 +775,6 @@ function pushGitTag(tagName: string) {
   runCommand("git", ["push", "origin", tagName], { cwd: repoRoot });
 }
 
-function commitVersionBump(configs: ProjectConfig[], newVersion: string) {
-  if (configs.length === 0) {
-    return;
-  }
-
-  const paths = configs.map((config) => config.packageJsonRelativePath);
-  runCommand("git", ["add", ...paths], { cwd: repoRoot });
-
-  const scopes = configs.map((config) => config.commitScope).join(" ");
-  runCommand("git", ["commit", "-m", `release ${scopes} ${newVersion}`], {
-    cwd: repoRoot,
-  });
-}
 
 function pushCurrentBranch() {
   runCommand("git", ["push", "origin", "HEAD"], { cwd: repoRoot });
@@ -1048,14 +1103,14 @@ function main(options: Options) {
 
   // Handle tag command (local mode: bump version, commit, tag, push - CI handles release)
   if (options.command === "tag") {
-    tagRelease(configs, packageInfos, options.version, options.tag, options.message);
+    tagRelease(configs, packageInfos, options.version, options.tag);
     return;
   }
 
   // Handle upload command (CI mode: upload artifacts to existing release)
   if (options.command === "upload") {
     const version = packageInfos[0].version;
-    const tagName = options.tag ?? `desktop-v${version}`;
+    const tagName = options.tag ?? `v${version}`;
     console.log(`Uploading artifacts for ${tagName} (version ${version})…`);
     uploadToExistingRelease(configs, tagName, version);
     console.log("Done.");
@@ -1063,41 +1118,33 @@ function main(options: Options) {
   }
 
   let targetVersion: string | null = null;
+  let releaseNotes: string | null = null;
   const configsWithVersionChange: ProjectConfig[] = [];
 
   if (options.command === "release") {
+    const baseVersion = packageInfos[0].version;
     const requestedVersion = options.version
       ? normaliseVersionInput(options.version)
-      : (() => {
-          const baseVersion = packageInfos[0].version;
-          const hasMismatch = packageInfos.some(
-            (info) => info.version !== baseVersion,
-          );
-          if (hasMismatch) {
-            throw new Error(
-              "Projects have mismatched versions. Use --version to specify the desired release version for all projects.",
-            );
-          }
-          return incrementPatchVersion(baseVersion);
-        })();
+      : incrementPatchVersion(baseVersion);
 
     assertSemver(requestedVersion);
+    releaseNotes = extractChangelogEntry(requestedVersion);
     ensureCleanWorkingTree();
 
+    console.log(`Bumping version ${baseVersion} → ${requestedVersion}…`);
     configs.forEach((config, index) => {
-      const currentVersion = packageInfos[index].version;
-      if (currentVersion !== requestedVersion) {
-        console.log(
-          `Updating package version ${currentVersion} → ${requestedVersion} for ${config.name}…`,
-        );
-        updatePackageVersion(config, requestedVersion);
-        configsWithVersionChange.push(config);
-        packageInfos[index] = {
-          ...packageInfos[index],
-          version: requestedVersion,
-        };
-      }
+      updatePackageVersion(config, requestedVersion);
+      configsWithVersionChange.push(config);
+      packageInfos[index] = {
+        ...packageInfos[index],
+        version: requestedVersion,
+      };
     });
+    updateCargoTomlVersion(requestedVersion);
+    updateNpxCliVersion(requestedVersion);
+
+    console.log("Updating Cargo.lock…");
+    updateCargoLock();
 
     targetVersion = requestedVersion;
   }
@@ -1117,15 +1164,15 @@ function main(options: Options) {
 
   if (options.command === "release" && targetVersion) {
     if (configsWithVersionChange.length > 0) {
-      console.log("Committing package version bump…");
-      commitVersionBump(configsWithVersionChange, targetVersion);
+      console.log("Committing version bump…");
+      commitUnifiedVersionBump(targetVersion);
       console.log("Pushing current branch to origin…");
       pushCurrentBranch();
     }
 
     const tagName = normaliseTag(options.tag ?? targetVersion);
     console.log(`Creating git tag ${tagName}…`);
-    createGitTag(tagName, null);
+    createGitTag(tagName, releaseNotes);
     console.log(`Pushing tag ${tagName} to origin…`);
     pushGitTag(tagName);
 
