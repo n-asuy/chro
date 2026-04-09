@@ -22,7 +22,7 @@ Launch parallel agents in isolated worktrees, stream live diffs, merge only what
 
 [Website](https://chro-ai.com) · [Download](https://github.com/n-asuy/chro/releases/latest) · [Security](SECURITY.md)
 
-**English | [日本語](docs/i18n/README.ja.md) | [简体中文](docs/i18n/README.zh-CN.md) | [한국어](docs/i18n/README.ko.md) | [Español](docs/i18n/README.es.md) | [Français](docs/i18n/README.fr.md) | [Português](docs/i18n/README.pt-BR.md) | [Tiếng Việt](docs/i18n/README.vi.md) | [Deutsch](docs/i18n/README.de.md)**
+**English | [日本語](.github/i18n/README.ja.md) | [简体中文](.github/i18n/README.zh-CN.md) | [한국어](.github/i18n/README.ko.md) | [Español](.github/i18n/README.es.md) | [Français](.github/i18n/README.fr.md) | [Português](.github/i18n/README.pt-BR.md) | [Tiếng Việt](.github/i18n/README.vi.md) | [Deutsch](.github/i18n/README.de.md)**
 
 </div>
 
@@ -33,12 +33,12 @@ Chro turns your notes, research, and project context into parallel AI execution.
 No context switching between terminals. No manual worktree juggling. Your agents stream live logs and diffs in a unified editor, and nothing reaches your main branch without your explicit approval. Works with your existing **Claude Code** or **Codex** subscription.
 
 <p align="center">
-  <img src="docs/assets/demo1.png" alt="Chro task board" width="49%">
-  <img src="docs/assets/demo2.png" alt="Chro file editor" width="49%">
+  <img src="assets/demo1.png" alt="Chro task board" width="49%">
+  <img src="assets/demo2.png" alt="Chro file editor" width="49%">
 </p>
 <p align="center">
-  <img src="docs/assets/demo3.png" alt="Chro session editor" width="49%">
-  <img src="docs/assets/demo4.png" alt="Chro agent execution" width="49%">
+  <img src="assets/demo3.png" alt="Chro session editor" width="49%">
+  <img src="assets/demo4.png" alt="Chro agent execution" width="49%">
 </p>
 
 ## Features

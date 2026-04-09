@@ -12,10 +12,11 @@ import {
 import { installTool } from "@/lib/executor-install";
 import { getUiValue, removeUiValue, setUiValue } from "@/lib/ui-state-client";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Check, ExternalLink, GitBranch, Loader2 } from "lucide-react";
+import { Check, GitBranch, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const EXECUTOR_STORAGE_KEY = "chro:selected-executor";
+const AUTH_ONBOARDING_SKIPPED_KEY = "chro:auth-onboarding-skipped";
 
 const DEFAULT_AUTH_STATUS: Record<BaseCodingAgent, AvailabilityInfo> = {
   CLAUDE_CODE: { type: "NOT_FOUND" },
@@ -129,14 +130,11 @@ function OpenAiIcon({ className }: { className?: string }) {
 function ProviderSelectionPage() {
   const { t } = useLanguage();
   const navigate = useNavigate();
-  const savedExecutor = getUiValue<string>(EXECUTOR_STORAGE_KEY);
-  const hasSavedExecutor =
-    savedExecutor === "CLAUDE_CODE" || savedExecutor === "CODEX";
 
   const [initialLoading, setInitialLoading] = useState(true);
   const [availabilityLoading, setAvailabilityLoading] = useState(true);
   const [selectedExecutor, setSelectedExecutor] =
-    useState<BaseCodingAgent | null>(hasSavedExecutor ? savedExecutor : null);
+    useState<BaseCodingAgent | null>(null);
   const [authStatus, setAuthStatus] =
     useState<Record<BaseCodingAgent, AvailabilityInfo>>(DEFAULT_AUTH_STATUS);
   const [installStatus, setInstallStatus] = useState<
@@ -145,11 +143,24 @@ function ProviderSelectionPage() {
   const [gitInstallStatus, setGitInstallStatus] = useState<ExecutorInstallInfo>(
     DEFAULT_GIT_INSTALL_STATUS,
   );
-  const [installingTool, setInstallingTool] =
-    useState<InstallableTool | null>(null);
+  const [installingTool, setInstallingTool] = useState<InstallableTool | null>(
+    null,
+  );
   const [signingInExecutor, setSigningInExecutor] =
     useState<BaseCodingAgent | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearAuthPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }, []);
 
   const loadAvailability = useCallback(async () => {
     setAvailabilityLoading(true);
@@ -200,7 +211,14 @@ function ProviderSelectionPage() {
         return;
       }
 
+      const savedExecutor = getUiValue<string>(EXECUTOR_STORAGE_KEY);
+      const hasSavedExecutor =
+        savedExecutor === "CLAUDE_CODE" || savedExecutor === "CODEX";
+      const skippedAuthOnboarding =
+        getUiValue<boolean>(AUTH_ONBOARDING_SKIPPED_KEY) === true;
+
       if (hasSavedExecutor) {
+        setSelectedExecutor(savedExecutor);
         const savedState = getAgentCardState({
           executor: savedExecutor,
           authStatus: availability.authStatus,
@@ -211,11 +229,17 @@ function ProviderSelectionPage() {
         });
 
         if (savedState === "signed_in") {
+          removeUiValue(AUTH_ONBOARDING_SKIPPED_KEY);
           navigate({ to: "/workspace" });
           return;
         }
 
         removeUiValue(EXECUTOR_STORAGE_KEY);
+      }
+
+      if (skippedAuthOnboarding) {
+        navigate({ to: "/workspace" });
+        return;
       }
 
       setInitialLoading(false);
@@ -232,12 +256,10 @@ function ProviderSelectionPage() {
 
     return () => {
       cancelled = true;
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-      }
+      clearAuthPolling();
       window.removeEventListener("focus", handleFocus);
     };
-  }, [hasSavedExecutor, loadAvailability, navigate, savedExecutor]);
+  }, [clearAuthPolling, loadAvailability, navigate]);
 
   const handleInstall = useCallback(
     async (tool: InstallableTool) => {
@@ -262,9 +284,7 @@ function ProviderSelectionPage() {
 
       try {
         await triggerAuthLogin(executor);
-        if (pollRef.current) {
-          clearInterval(pollRef.current);
-        }
+        clearAuthPolling();
         pollRef.current = setInterval(async () => {
           try {
             const status = await fetchAuthStatus();
@@ -277,10 +297,7 @@ function ProviderSelectionPage() {
             const info =
               executor === "CLAUDE_CODE" ? status.claude_code : status.codex;
             if (info.type === "LOGIN_DETECTED") {
-              if (pollRef.current) {
-                clearInterval(pollRef.current);
-              }
-              pollRef.current = null;
+              clearAuthPolling();
               setSigningInExecutor(null);
               setSelectedExecutor(executor);
             }
@@ -289,19 +306,17 @@ function ProviderSelectionPage() {
           }
         }, 2000);
 
-        setTimeout(() => {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-            setSigningInExecutor(null);
-          }
+        pollTimeoutRef.current = setTimeout(() => {
+          clearAuthPolling();
+          setSigningInExecutor(null);
         }, 300_000);
       } catch {
+        clearAuthPolling();
         setSigningInExecutor(null);
         void loadAvailability();
       }
     },
-    [loadAvailability],
+    [clearAuthPolling, loadAvailability],
   );
 
   const handleAgentPrimaryAction = useCallback(
@@ -385,12 +400,21 @@ function ProviderSelectionPage() {
         executor: selectedExecutor,
         variant: null,
       });
+      removeUiValue(AUTH_ONBOARDING_SKIPPED_KEY);
       setUiValue(EXECUTOR_STORAGE_KEY, selectedExecutor);
       navigate({ to: "/workspace" });
     } catch (error) {
       console.error("[onboarding] Failed to set executor", error);
     }
   }, [navigate, selectedExecutor]);
+
+  const handleSkipForNow = useCallback(() => {
+    clearAuthPolling();
+    setSigningInExecutor(null);
+    removeUiValue(EXECUTOR_STORAGE_KEY);
+    setUiValue(AUTH_ONBOARDING_SKIPPED_KEY, true);
+    navigate({ to: "/workspace" });
+  }, [clearAuthPolling, navigate]);
 
   if (initialLoading) {
     return (
@@ -454,9 +478,7 @@ function ProviderSelectionPage() {
                 state={codexCardState}
                 selected={selectedExecutor === "CODEX"}
                 onSelect={() => setSelectedExecutor("CODEX")}
-                onPrimaryAction={() =>
-                  void handleAgentPrimaryAction("CODEX")
-                }
+                onPrimaryAction={() => void handleAgentPrimaryAction("CODEX")}
               />
             </div>
           </div>
@@ -472,6 +494,14 @@ function ProviderSelectionPage() {
             onClick={handleContinue}
           >
             Continue
+          </button>
+
+          <button
+            type="button"
+            className="w-full py-3 text-sm font-light text-white/45 transition-colors hover:text-white/70"
+            onClick={handleSkipForNow}
+          >
+            Skip for now
           </button>
         </div>
       </div>

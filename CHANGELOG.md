@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.24
+
+- Added "Skip for now" option to onboarding provider selection, allowing users to enter the workspace without configuring an agent
+- Added auth polling cleanup with timeout to prevent leaked intervals on the onboarding screen
+- Fixed onboarding screen redirecting to workspace prematurely when a saved executor exists but auth has not been skipped
+- Fixed Rust code formatting in CLI module (`cargo fmt`)
+
 ## 0.1.23
 
 - Added CLI task management commands (`chro task list`, `create`, `run`, `logs`, `cancel`, `diff`, `merge`)
