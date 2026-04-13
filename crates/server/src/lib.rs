@@ -122,7 +122,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     let listen_url = format!("http://{}:{}", args.host, actual_port);
     info!(port = actual_port, "listening on {}", listen_url);
 
-    {
+    if !args.no_open {
         let url = listen_url.clone();
         tokio::spawn(async move {
             if let Err(e) = open::that(&url) {

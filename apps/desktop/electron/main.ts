@@ -267,6 +267,7 @@ const launchRuntime = async (
     SERVER_HOST,
     "--port",
     String(port),
+    "--no-open",
   ];
 
   const env: NodeJS.ProcessEnv = {

@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, env, sync::Arc};
 use anyhow::Context;
 use axum::{
     extract::{Request, State},
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -69,7 +69,11 @@ impl AllowedOrigins {
                 Method::DELETE,
                 Method::OPTIONS,
             ])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                HeaderName::from_static("x-perf-request-id"),
+            ])
     }
 
     pub(crate) fn values(&self) -> &[String] {

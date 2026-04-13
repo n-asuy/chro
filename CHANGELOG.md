@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.25
+
+- Fixed desktop app "Failed to fetch" error when executing tasks by adding `x-perf-request-id` to CORS allowed headers
+- Fixed desktop app unintentionally opening a browser window on startup by adding `--no-open` server flag
+
 ## 0.1.24
 
 - Added "Skip for now" option to onboarding provider selection, allowing users to enter the workspace without configuring an agent

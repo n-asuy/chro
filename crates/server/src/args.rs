@@ -27,6 +27,9 @@ pub struct ServerArgs {
     /// Enable per-request latency logging to log/performance/
     #[arg(long)]
     pub perf: bool,
+    /// Do not open a browser on startup
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Subcommand, Debug)]
