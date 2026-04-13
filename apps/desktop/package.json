@@ -1,6 +1,6 @@
 {
   "name": "@chro/desktop",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "private": true,
   "license": "Apache-2.0",
   "main": "dist-electron/main.js",

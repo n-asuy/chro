@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.27
+
+- Added target branch to `chro task status` output
+
 ## 0.1.26
 
 - Added `chro task rebase` command to rebase a task run branch onto a new base (defaults to the run's target branch)

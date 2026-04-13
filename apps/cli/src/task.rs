@@ -238,7 +238,11 @@ fn status(
                     .get("branch_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-");
-                println!("  {status:<12} {run_id:<20} branch:{branch}");
+                let target = run
+                    .get("target_branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                println!("  {status:<12} {run_id:<20} branch:{branch}  target:{target}");
             }
         }
     }
