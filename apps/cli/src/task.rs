@@ -68,6 +68,15 @@ pub enum TaskCommand {
         #[arg(short, long)]
         message: Option<String>,
     },
+
+    /// Rebase task run branch onto a new base
+    Rebase {
+        /// Task run ID or slug
+        id: String,
+        /// Branch to rebase onto (default: target branch of the run)
+        #[arg(short, long)]
+        onto: Option<String>,
+    },
 }
 
 pub fn run(
@@ -89,6 +98,7 @@ pub fn run(
         TaskCommand::Cancel { id } => cancel(client, id),
         TaskCommand::Diff { id } => diff(client, id),
         TaskCommand::Merge { id, message } => merge(client, id, message.as_deref()),
+        TaskCommand::Rebase { id, onto } => rebase(client, id, onto.as_deref()),
     }
 }
 
@@ -372,6 +382,33 @@ fn merge(
         .unwrap_or("?");
 
     println!("Merged into {target}  commit:{commit:.8}");
+    Ok(())
+}
+
+fn rebase(client: &ServerClient, id: &str, onto: Option<&str>) -> Result<(), client::ClientError> {
+    let new_base = match onto {
+        Some(branch) => branch.to_string(),
+        None => {
+            let resp = client.get(&format!("/rpc/task-runs/{id}/with-task"))?;
+            resp.get("task_run")
+                .and_then(|r| r.get("target_branch"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("main")
+                .to_string()
+        }
+    };
+
+    let body = serde_json::json!({ "new_base_branch": new_base });
+    let resp = client.post(&format!("/rpc/task-runs/{id}/rebase"), &body)?;
+
+    let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    if success {
+        println!("Rebased {id} onto {new_base}");
+    } else {
+        eprintln!("Rebase failed for {id}");
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 

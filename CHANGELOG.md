@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.26
+
+- Added `chro task rebase` command to rebase a task run branch onto a new base (defaults to the run's target branch)
+- Added Chro CLI skill for AI agent integration (`skills/chro/`)
+
 ## 0.1.25
 
 - Fixed desktop app "Failed to fetch" error when executing tasks by adding `x-perf-request-id` to CORS allowed headers
