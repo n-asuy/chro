@@ -415,6 +415,290 @@
       --color-border-400
     ); /* strong sidebar border- 2 */
   }
+
+  .pixel-cat-overlay {
+    pointer-events: none;
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    z-index: 45;
+    width: min(22rem, 45vw);
+    height: 11rem;
+    overflow: hidden;
+  }
+
+  .pixel-cat-track {
+    position: absolute;
+    inset: 0;
+  }
+
+  .pixel-cat-walker {
+    position: absolute;
+    right: 1rem;
+    bottom: 0.75rem;
+    animation: pixel-cat-roam 12s linear infinite;
+    transform-origin: center bottom;
+  }
+
+  .pixel-cat-bubble {
+    position: absolute;
+    right: 2.75rem;
+    bottom: 4.75rem;
+    width: 10rem;
+    padding: 0.5rem 0.65rem;
+    border: 2px solid rgb(var(--color-text-100));
+    border-radius: 0.65rem;
+    background: rgb(var(--color-background-100));
+    color: rgb(var(--color-text-100));
+    font-size: 0.6875rem;
+    line-height: 1.35;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.14);
+    opacity: 0;
+    transform: translateY(0.4rem);
+    transition:
+      opacity 220ms ease,
+      transform 220ms ease;
+  }
+
+  .pixel-cat-bubble::after {
+    content: "";
+    position: absolute;
+    right: 1rem;
+    bottom: -0.45rem;
+    width: 0.85rem;
+    height: 0.85rem;
+    border-right: 2px solid rgb(var(--color-text-100));
+    border-bottom: 2px solid rgb(var(--color-text-100));
+    background: rgb(var(--color-background-100));
+    transform: rotate(45deg);
+  }
+
+  .pixel-cat-bubble.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .pixel-cat {
+    position: relative;
+    width: 4rem;
+    height: 3.25rem;
+    animation: pixel-cat-bob 450ms steps(2, end) infinite;
+  }
+
+  .pixel-cat-body,
+  .pixel-cat-tail,
+  .pixel-cat-leg {
+    position: absolute;
+    width: 0.25rem;
+    height: 0.25rem;
+  }
+
+  .pixel-cat-body {
+    right: 0.75rem;
+    bottom: 0.95rem;
+    background: #2b2b2b;
+    box-shadow:
+      0.25rem 0 #2b2b2b,
+      0.5rem 0 #2b2b2b,
+      0.75rem 0 #2b2b2b,
+      1rem 0 #2b2b2b,
+      1.25rem 0 #2b2b2b,
+      1.5rem 0 #2b2b2b,
+      1.75rem 0 #2b2b2b,
+      2rem 0 #2b2b2b,
+      0 0.25rem #2b2b2b,
+      0.25rem 0.25rem #f0b35a,
+      0.5rem 0.25rem #f0b35a,
+      0.75rem 0.25rem #f0b35a,
+      1rem 0.25rem #f0b35a,
+      1.25rem 0.25rem #f0b35a,
+      1.5rem 0.25rem #f0b35a,
+      1.75rem 0.25rem #f0b35a,
+      2rem 0.25rem #2b2b2b,
+      -0.25rem 0.5rem #2b2b2b,
+      0 0.5rem #f0b35a,
+      0.25rem 0.5rem #f0b35a,
+      0.5rem 0.5rem #f0b35a,
+      0.75rem 0.5rem #f0b35a,
+      1rem 0.5rem #f7d9a1,
+      1.25rem 0.5rem #f0b35a,
+      1.5rem 0.5rem #f0b35a,
+      1.75rem 0.5rem #f0b35a,
+      2rem 0.5rem #f0b35a,
+      2.25rem 0.5rem #2b2b2b,
+      -0.25rem 0.75rem #2b2b2b,
+      0 0.75rem #f0b35a,
+      0.25rem 0.75rem #2b2b2b,
+      0.5rem 0.75rem #f0b35a,
+      0.75rem 0.75rem #f0b35a,
+      1rem 0.75rem #ffffff,
+      1.25rem 0.75rem #2b2b2b,
+      1.5rem 0.75rem #f0b35a,
+      1.75rem 0.75rem #f0b35a,
+      2rem 0.75rem #f0b35a,
+      2.25rem 0.75rem #2b2b2b,
+      -0.25rem 1rem #2b2b2b,
+      0 1rem #f0b35a,
+      0.25rem 1rem #f0b35a,
+      0.5rem 1rem #f0b35a,
+      0.75rem 1rem #f0b35a,
+      1rem 1rem #f0b35a,
+      1.25rem 1rem #f48c6c,
+      1.5rem 1rem #f0b35a,
+      1.75rem 1rem #f0b35a,
+      2rem 1rem #f0b35a,
+      2.25rem 1rem #2b2b2b,
+      0 1.25rem #2b2b2b,
+      0.25rem 1.25rem #f0b35a,
+      0.5rem 1.25rem #f0b35a,
+      0.75rem 1.25rem #f0b35a,
+      1rem 1.25rem #f0b35a,
+      1.25rem 1.25rem #f0b35a,
+      1.5rem 1.25rem #f0b35a,
+      1.75rem 1.25rem #f0b35a,
+      2rem 1.25rem #2b2b2b,
+      0.25rem 1.5rem #2b2b2b,
+      0.5rem 1.5rem #2b2b2b,
+      0.75rem 1.5rem #2b2b2b,
+      1rem 1.5rem #2b2b2b,
+      1.25rem 1.5rem #2b2b2b,
+      1.5rem 1.5rem #2b2b2b,
+      1.75rem 1.5rem #2b2b2b;
+  }
+
+  .pixel-cat-tail {
+    right: 3.15rem;
+    bottom: 1.85rem;
+    background: #2b2b2b;
+    transform-origin: right bottom;
+    animation: pixel-cat-tail-swish 650ms steps(2, end) infinite;
+    box-shadow:
+      -0.25rem 0 #2b2b2b,
+      -0.5rem 0.25rem #2b2b2b,
+      -0.75rem 0.5rem #2b2b2b,
+      -0.75rem 0.75rem #f0b35a,
+      -0.5rem 1rem #2b2b2b;
+  }
+
+  .pixel-cat-leg {
+    bottom: 0;
+    background: #2b2b2b;
+  }
+
+  .pixel-cat-leg-front {
+    right: 1.1rem;
+    animation: pixel-cat-step-front 450ms steps(2, end) infinite;
+    box-shadow:
+      0 0.25rem #f0b35a,
+      0 0.5rem #2b2b2b,
+      0.25rem 0.5rem #2b2b2b;
+  }
+
+  .pixel-cat-leg-back {
+    right: 2.1rem;
+    animation: pixel-cat-step-back 450ms steps(2, end) infinite;
+    box-shadow:
+      0 0.25rem #f0b35a,
+      0 0.5rem #2b2b2b,
+      0.25rem 0.5rem #2b2b2b;
+  }
+
+  @keyframes pixel-cat-roam {
+    0% {
+      transform: translateX(0) scaleX(-1);
+    }
+    45% {
+      transform: translateX(-11rem) scaleX(-1);
+    }
+    50% {
+      transform: translateX(-11rem) scaleX(1);
+    }
+    95% {
+      transform: translateX(0) scaleX(1);
+    }
+    100% {
+      transform: translateX(0) scaleX(-1);
+    }
+  }
+
+  @keyframes pixel-cat-bob {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-0.125rem);
+    }
+  }
+
+  @keyframes pixel-cat-tail-swish {
+    0%,
+    100% {
+      transform: rotate(12deg);
+    }
+    50% {
+      transform: rotate(-8deg);
+    }
+  }
+
+  @keyframes pixel-cat-step-front {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translate(-0.1rem, 0.18rem);
+    }
+  }
+
+  @keyframes pixel-cat-step-back {
+    0%,
+    100% {
+      transform: translate(-0.1rem, 0.18rem);
+    }
+    50% {
+      transform: translateY(0);
+    }
+  }
+
+  @media (max-width: 720px) {
+    .pixel-cat-overlay {
+      width: min(15rem, 52vw);
+      height: 8.5rem;
+    }
+
+    .pixel-cat-walker {
+      right: 0.5rem;
+      bottom: 0.5rem;
+      transform: scale(0.82);
+      transform-origin: right bottom;
+    }
+
+    .pixel-cat-bubble {
+      width: 7.5rem;
+      right: 2rem;
+      bottom: 4.35rem;
+      font-size: 0.6rem;
+    }
+
+    @keyframes pixel-cat-roam {
+      0% {
+        transform: translateX(0) scaleX(-1) scale(0.82);
+      }
+      45% {
+        transform: translateX(-7rem) scaleX(-1) scale(0.82);
+      }
+      50% {
+        transform: translateX(-7rem) scaleX(1) scale(0.82);
+      }
+      95% {
+        transform: translateX(0) scaleX(1) scale(0.82);
+      }
+      100% {
+        transform: translateX(0) scaleX(-1) scale(0.82);
+      }
+    }
+  }
 }
 
 * {
