@@ -4,15 +4,20 @@ import type {
   ContextEntry,
   FileAttachmentPart,
   Prompt,
+  SessionAttachmentPart,
+  SkillAttachmentPart,
+  SkillEntry,
   TextPart,
 } from "../types/context";
 import {
   DEFAULT_PROMPT,
-  extractSessionId,
   getContextEntries,
+  getSkillEntries,
+  shortSessionId,
 } from "../types/context";
 
 const ZERO_WIDTH_SPACE = "\u200B";
+const DEFAULT_PROMPT_SCOPE_ID = "default";
 
 /**
  * Recursively parse contenteditable DOM into ContentPart array.
@@ -72,6 +77,40 @@ export function parseFromDOM(root: HTMLElement): Prompt {
       return;
     }
 
+    if (el.dataset.type === "session" && el.dataset.taskId) {
+      flush();
+      const displayText = el.textContent ?? "";
+      const part: SessionAttachmentPart = {
+        type: "session",
+        content: displayText,
+        taskId: el.dataset.taskId,
+        start: offset,
+        end: offset + displayText.length,
+      };
+      if (el.dataset.branch) {
+        part.branch = el.dataset.branch;
+      }
+      parts.push(part);
+      offset += displayText.length;
+      return;
+    }
+
+    if (el.dataset.type === "skill" && el.dataset.skillId) {
+      flush();
+      const displayText = el.textContent ?? "";
+      const part: SkillAttachmentPart = {
+        type: "skill",
+        content: displayText,
+        id: el.dataset.skillId,
+        name: el.dataset.skillName ?? displayText.replace(/^#/, ""),
+        start: offset,
+        end: offset + displayText.length,
+      };
+      parts.push(part);
+      offset += displayText.length;
+      return;
+    }
+
     const isBlock =
       el.tagName === "DIV" || el.tagName === "P" || el.tagName === "BLOCKQUOTE";
 
@@ -118,6 +157,67 @@ function getTextFromPrompt(prompt: Prompt): string {
     .join("");
 }
 
+function createEmptyPrompt(): Prompt {
+  return DEFAULT_PROMPT.map((part) => ({ ...part }));
+}
+
+function promptDisplayContent(part: ContentPart): string {
+  switch (part.type) {
+    case "file":
+    case "session":
+      return (
+        part.content ||
+        `@${part.type === "file" ? part.path : shortSessionId(part.taskId)}`
+      );
+    case "skill":
+      return part.content || `#${part.name}`;
+    case "text":
+      return part.content;
+  }
+}
+
+function createAttachmentPill(
+  part: Exclude<ContentPart, TextPart>,
+): HTMLElement {
+  const pill = document.createElement("span");
+  pill.contentEditable = "false";
+  pill.textContent = promptDisplayContent(part);
+
+  switch (part.type) {
+    case "file":
+      pill.dataset.type = "file";
+      pill.dataset.path = part.path;
+      pill.dataset.isFile = String(part.isFile);
+      if (part.branch) pill.dataset.branch = part.branch;
+      break;
+    case "session":
+      pill.dataset.type = "session";
+      pill.dataset.taskId = part.taskId;
+      if (part.branch) pill.dataset.branch = part.branch;
+      break;
+    case "skill":
+      pill.dataset.type = "skill";
+      pill.dataset.skillId = part.id;
+      pill.dataset.skillName = part.name;
+      break;
+  }
+
+  return pill;
+}
+
+function renderPromptIntoDOM(editor: HTMLElement, prompt: Prompt) {
+  editor.replaceChildren();
+  for (const part of prompt) {
+    if (part.type === "text") {
+      if (part.content.length > 0) {
+        editor.append(document.createTextNode(part.content));
+      }
+      continue;
+    }
+    editor.append(createAttachmentPill(part));
+  }
+}
+
 function getCursorOffsetInEditor(editor: HTMLElement): number {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return -1;
@@ -161,58 +261,238 @@ function getSelectionInEditor(
   return { selection, range };
 }
 
+/**
+ * Drop an inline pill into the editor at the cursor, mirroring the contract
+ * used by file, session, and skill attachments.
+ */
+function insertPill(
+  scopeId: string,
+  editor: HTMLElement | null,
+  dataset: Record<string, string>,
+  displayName: string,
+  options: { trigger?: "at" | "skill"; prefix?: string } = {},
+) {
+  if (!editor) return;
+  editor.focus({ preventScroll: true });
+
+  let selectionState = getSelectionInEditor(editor);
+  if (!selectionState) {
+    if (!moveCaretToEnd(editor)) return;
+    selectionState = getSelectionInEditor(editor);
+  }
+  if (!selectionState) return;
+
+  const { selection: sel } = selectionState;
+
+  const range = sel.getRangeAt(0);
+  if (options.trigger === "skill") {
+    // Skills can be triggered by "/" (slash mention), "@" (context menu),
+    // or the "+" menu (no trigger). Delete whichever trigger is present.
+    if (!deleteSkillTriggerBeforeCursor(range)) {
+      deleteTriggerBeforeCursor(range, ["@"]);
+    }
+  } else {
+    deleteTriggerBeforeCursor(range, ["@"]);
+  }
+
+  const pill = document.createElement("span");
+  for (const [key, value] of Object.entries(dataset)) {
+    pill.dataset[key] = value;
+  }
+  pill.contentEditable = "false";
+  pill.textContent = `${options.prefix ?? "@"}${displayName}`;
+
+  const insertRange = sel.getRangeAt(0);
+  insertRange.collapse(false);
+  insertRange.insertNode(pill);
+
+  const space = document.createTextNode(" ");
+  pill.after(space);
+
+  const newRange = document.createRange();
+  newRange.setStartAfter(space);
+  newRange.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(newRange);
+
+  const store = usePromptEditorStore.getState();
+  store.setPopover(scopeId, null);
+  if (options.trigger === "skill") {
+    store.setSkillQuery(scopeId, "");
+  } else {
+    store.setAtQuery(scopeId, "");
+  }
+  const parsed = parseFromDOM(editor);
+  store.setPrompt(scopeId, parsed);
+}
+
 // --- Zustand store ---
 
-interface PromptEditorState {
+interface PromptEditorScopeState {
   prompt: Prompt;
   isEmpty: boolean;
   hasText: boolean;
-  popover: "at" | null;
+  popover: "at" | "skill" | null;
   atQuery: string;
+  skillQuery: string;
 }
 
 interface PromptEditorActions {
   /** Update prompt from parsed DOM result */
-  setPrompt: (prompt: Prompt) => void;
-  setPopover: (v: "at" | null) => void;
-  setAtQuery: (q: string) => void;
-  clear: () => void;
+  setPrompt: (scopeId: string, prompt: Prompt) => void;
+  setPopover: (scopeId: string, v: "at" | "skill" | null) => void;
+  setAtQuery: (scopeId: string, q: string) => void;
+  setSkillQuery: (scopeId: string, q: string) => void;
+  clear: (scopeId: string) => void;
 }
 
-type PromptEditorStore = PromptEditorState & PromptEditorActions;
+type PromptEditorStore = {
+  scopes: Record<string, PromptEditorScopeState>;
+} & PromptEditorActions;
 
-function computeDerived(prompt: Prompt) {
-  const rawText = getTextFromPrompt(prompt);
-  const trimmed = rawText.trim();
-  return {
-    isEmpty: trimmed.length === 0 && !prompt.some((p) => p.type === "file"),
-    hasText: trimmed.length > 0,
-  };
-}
-
-export const usePromptEditorStore = create<PromptEditorStore>((set) => ({
+const EMPTY_SCOPE_STATE: PromptEditorScopeState = {
   prompt: DEFAULT_PROMPT,
   isEmpty: true,
   hasText: false,
   popover: null,
   atQuery: "",
+  skillQuery: "",
+};
 
-  setPrompt: (prompt) =>
-    set({ prompt, ...computeDerived(prompt) }),
+function createEmptyScopeState(): PromptEditorScopeState {
+  return {
+    ...EMPTY_SCOPE_STATE,
+    prompt: createEmptyPrompt(),
+  };
+}
 
-  setPopover: (popover) => set({ popover }),
+export function getPromptEditorScopeState(
+  state: PromptEditorStore,
+  scopeId: string,
+): PromptEditorScopeState {
+  return state.scopes[scopeId] ?? EMPTY_SCOPE_STATE;
+}
 
-  setAtQuery: (atQuery) => set({ atQuery }),
+function updateScope(
+  current: Record<string, PromptEditorScopeState>,
+  scopeId: string,
+  patch: Partial<PromptEditorScopeState>,
+): Record<string, PromptEditorScopeState> {
+  const previous = current[scopeId] ?? createEmptyScopeState();
+  return {
+    ...current,
+    [scopeId]: {
+      ...previous,
+      ...patch,
+    },
+  };
+}
 
-  clear: () =>
-    set({
-      prompt: DEFAULT_PROMPT,
-      isEmpty: true,
-      hasText: false,
-      popover: null,
-      atQuery: "",
-    }),
+function computeDerived(prompt: Prompt) {
+  const rawText = getTextFromPrompt(prompt);
+  const trimmed = rawText.trim();
+  const hasAttachments = prompt.some((p) => p.type !== "text");
+  return {
+    isEmpty: trimmed.length === 0 && !hasAttachments,
+    hasText: trimmed.length > 0,
+  };
+}
+
+export const usePromptEditorStore = create<PromptEditorStore>((set) => ({
+  scopes: {},
+
+  setPrompt: (scopeId, prompt) =>
+    set((state) => ({
+      scopes: updateScope(state.scopes, scopeId, {
+        prompt,
+        ...computeDerived(prompt),
+      }),
+    })),
+
+  setPopover: (scopeId, popover) =>
+    set((state) => ({
+      scopes: updateScope(state.scopes, scopeId, { popover }),
+    })),
+
+  setAtQuery: (scopeId, atQuery) =>
+    set((state) => ({
+      scopes: updateScope(state.scopes, scopeId, { atQuery }),
+    })),
+
+  setSkillQuery: (scopeId, skillQuery) =>
+    set((state) => ({
+      scopes: updateScope(state.scopes, scopeId, { skillQuery }),
+    })),
+
+  clear: (scopeId) =>
+    set((state) => ({
+      scopes: {
+        ...state.scopes,
+        [scopeId]: createEmptyScopeState(),
+      },
+    })),
 }));
+
+function getSkillTriggerQuery(textBeforeCursor: string): string | null {
+  const lineStart = textBeforeCursor.lastIndexOf("\n") + 1;
+  const currentLine = textBeforeCursor.slice(lineStart);
+  if (!currentLine.startsWith("/")) {
+    return null;
+  }
+  const raw = currentLine.slice(1);
+  if (/\s/.test(raw)) {
+    return null;
+  }
+  return raw;
+}
+
+function deleteTriggerBeforeCursor(
+  range: Range,
+  triggerChars: string[],
+): boolean {
+  const textNode = range.startContainer;
+  if (textNode.nodeType !== Node.TEXT_NODE) {
+    return false;
+  }
+
+  const text = textNode.textContent ?? "";
+  const cursorOffset = range.startOffset;
+  const beforeCursor = text.substring(0, cursorOffset);
+  let triggerIdx = -1;
+  for (const trigger of triggerChars) {
+    triggerIdx = Math.max(triggerIdx, beforeCursor.lastIndexOf(trigger));
+  }
+  if (triggerIdx === -1) {
+    return false;
+  }
+
+  const deleteRange = document.createRange();
+  deleteRange.setStart(textNode, triggerIdx);
+  deleteRange.setEnd(textNode, cursorOffset);
+  deleteRange.deleteContents();
+  return true;
+}
+
+function deleteSkillTriggerBeforeCursor(range: Range): boolean {
+  const textNode = range.startContainer;
+  if (textNode.nodeType !== Node.TEXT_NODE) {
+    return false;
+  }
+
+  const text = textNode.textContent ?? "";
+  const cursorOffset = range.startOffset;
+  const beforeCursor = text.substring(0, cursorOffset);
+  const lineStart = beforeCursor.lastIndexOf("\n") + 1;
+  if (!beforeCursor.slice(lineStart).startsWith("/")) {
+    return false;
+  }
+
+  const deleteRange = document.createRange();
+  deleteRange.setStart(textNode, lineStart);
+  deleteRange.setEnd(textNode, cursorOffset);
+  deleteRange.deleteContents();
+  return true;
+}
 
 // --- Imperative actions (no re-render on the caller) ---
 
@@ -223,10 +503,12 @@ export const usePromptEditorStore = create<PromptEditorStore>((set) => ({
  * editorRef must be set by the PromptEditor component.
  */
 export interface PromptEditorHandle {
+  scopeId: string;
   editorRef: React.MutableRefObject<HTMLDivElement | null>;
   isComposingRef: React.MutableRefObject<boolean>;
   getText: () => string;
   getContextEntries: () => ContextEntry[];
+  getSkillEntries: () => SkillEntry[];
   isEmpty: () => boolean;
   /** Snapshot current content, clear DOM + store. Call restore() to undo. */
   clearWithSnapshot: () => void;
@@ -234,29 +516,40 @@ export interface PromptEditorHandle {
   restore: () => void;
   clear: () => void;
   focus: () => void;
+  activate: () => void;
+  syncDomFromStore: () => void;
   setCursorFromPoint: (x: number, y: number) => boolean;
   handleInput: () => void;
   handleCompositionStart: () => void;
   handleCompositionEnd: () => void;
-  addFilePart: (
-    path: string,
-    isFile: boolean,
-    branch?: string | null,
-  ) => void;
+  addFilePart: (path: string, isFile: boolean, branch?: string | null) => void;
+  addSessionPart: (taskId: string, branch?: string | null) => void;
+  addSkillPart: (id: string, name: string) => void;
 }
 
-let singletonHandle: PromptEditorHandle | null = null;
+const handlesByScope = new Map<string, PromptEditorHandle>();
+let activeScopeId: string | null = null;
+let activeProxyHandle: PromptEditorHandle | null = null;
+
+function getScopePrompt(scopeId: string): Prompt {
+  return getPromptEditorScopeState(usePromptEditorStore.getState(), scopeId)
+    .prompt;
+}
+
+function setActiveScope(scopeId: string) {
+  activeScopeId = scopeId;
+}
 
 /**
- * Returns the singleton prompt editor handle.
+ * Returns a prompt editor handle scoped to one tab/session surface.
  * The handle's methods read from the store imperatively (getState),
  * so calling them never triggers a re-render on the caller.
- *
- * Singleton ensures editorRef/isComposingRef are shared across all consumers.
  */
-export function getPromptEditorHandle(): PromptEditorHandle {
-  if (singletonHandle) return singletonHandle;
-
+export function getPromptEditorHandle(
+  scopeId = DEFAULT_PROMPT_SCOPE_ID,
+): PromptEditorHandle {
+  const existing = handlesByScope.get(scopeId);
+  if (existing) return existing;
   const editorRef: React.MutableRefObject<HTMLDivElement | null> = {
     current: null,
   };
@@ -265,63 +558,82 @@ export function getPromptEditorHandle(): PromptEditorHandle {
   let snapshotPrompt: Prompt | null = null;
 
   const handle: PromptEditorHandle = {
+    scopeId,
     editorRef,
     isComposingRef,
 
     getText: () => {
-      const { prompt } = usePromptEditorStore.getState();
-      return getTextFromPrompt(prompt);
+      return getTextFromPrompt(getScopePrompt(scopeId));
     },
 
     getContextEntries: () => {
-      const { prompt } = usePromptEditorStore.getState();
-      return getContextEntries(prompt);
+      return getContextEntries(getScopePrompt(scopeId));
+    },
+
+    getSkillEntries: () => {
+      return getSkillEntries(getScopePrompt(scopeId));
     },
 
     isEmpty: () => {
-      return usePromptEditorStore.getState().isEmpty;
+      return getPromptEditorScopeState(usePromptEditorStore.getState(), scopeId)
+        .isEmpty;
     },
 
     clearWithSnapshot: () => {
+      setActiveScope(scopeId);
       const el = editorRef.current;
       snapshotHtml = el ? el.innerHTML : null;
-      snapshotPrompt = usePromptEditorStore.getState().prompt;
+      snapshotPrompt = getScopePrompt(scopeId);
       if (el) {
         el.innerHTML = "";
       }
-      usePromptEditorStore.getState().clear();
+      usePromptEditorStore.getState().clear(scopeId);
     },
 
     restore: () => {
       if (snapshotPrompt === null) return;
+      setActiveScope(scopeId);
       const el = editorRef.current;
       if (el && snapshotHtml !== null) {
         el.innerHTML = snapshotHtml;
       }
-      usePromptEditorStore.getState().setPrompt(snapshotPrompt);
+      usePromptEditorStore.getState().setPrompt(scopeId, snapshotPrompt);
       snapshotHtml = null;
       snapshotPrompt = null;
     },
 
     clear: () => {
+      setActiveScope(scopeId);
       snapshotHtml = null;
       snapshotPrompt = null;
       const el = editorRef.current;
       if (el) {
         el.innerHTML = "";
       }
-      usePromptEditorStore.getState().clear();
+      usePromptEditorStore.getState().clear(scopeId);
     },
 
     focus: () => {
-      editorRef.current?.focus();
+      setActiveScope(scopeId);
+      editorRef.current?.focus({ preventScroll: true });
+    },
+
+    activate: () => {
+      setActiveScope(scopeId);
+    },
+
+    syncDomFromStore: () => {
+      const el = editorRef.current;
+      if (!el) return;
+      renderPromptIntoDOM(el, getScopePrompt(scopeId));
     },
 
     setCursorFromPoint: (x: number, y: number) => {
+      setActiveScope(scopeId);
       const el = editorRef.current;
       if (!el) return false;
 
-      el.focus();
+      el.focus({ preventScroll: true });
 
       const doc = el.ownerDocument as DocumentWithCaretPoint;
       let range: Range | null = null;
@@ -353,12 +665,13 @@ export function getPromptEditorHandle(): PromptEditorHandle {
     },
 
     handleInput: () => {
+      setActiveScope(scopeId);
       const el = editorRef.current;
       if (!el) return;
 
       const parsed = parseFromDOM(el);
       const store = usePromptEditorStore.getState();
-      store.setPrompt(parsed);
+      store.setPrompt(scopeId, parsed);
 
       // Detect @ trigger
       const cursorPos = getCursorOffsetInEditor(el);
@@ -366,15 +679,22 @@ export function getPromptEditorHandle(): PromptEditorHandle {
         const textBefore = getTextFromPrompt(parsed).substring(0, cursorPos);
         const atMatch = textBefore.match(/@(\S*)$/);
         if (atMatch) {
-          store.setAtQuery(atMatch[1]);
-          store.setPopover("at");
+          store.setAtQuery(scopeId, atMatch[1]);
+          store.setPopover(scopeId, "at");
         } else {
-          store.setPopover(null);
+          const skillQuery = getSkillTriggerQuery(textBefore);
+          if (skillQuery !== null) {
+            store.setSkillQuery(scopeId, skillQuery);
+            store.setPopover(scopeId, "skill");
+          } else {
+            store.setPopover(scopeId, null);
+          }
         }
       }
     },
 
     handleCompositionStart: () => {
+      setActiveScope(scopeId);
       isComposingRef.current = true;
     },
 
@@ -383,76 +703,97 @@ export function getPromptEditorHandle(): PromptEditorHandle {
     },
 
     addFilePart: (path: string, isFile: boolean, branch?: string | null) => {
-      const el = editorRef.current;
-      if (!el) return;
-
-      el.focus();
-
-      let selectionState = getSelectionInEditor(el);
-      if (!selectionState) {
-        if (!moveCaretToEnd(el)) return;
-        selectionState = getSelectionInEditor(el);
-      }
-      if (!selectionState) return;
-
-      const { selection: sel } = selectionState;
-
-      // Find and remove @query text before cursor
-      const range = sel.getRangeAt(0);
-      const textNode = range.startContainer;
-      if (textNode.nodeType === Node.TEXT_NODE) {
-        const text = textNode.textContent ?? "";
-        const cursorOffset = range.startOffset;
-        const beforeCursor = text.substring(0, cursorOffset);
-        const atIdx = beforeCursor.lastIndexOf("@");
-        if (atIdx !== -1) {
-          const deleteRange = document.createRange();
-          deleteRange.setStart(textNode, atIdx);
-          deleteRange.setEnd(textNode, cursorOffset);
-          deleteRange.deleteContents();
-        }
-      }
-
-      // Create pill element
-      const sessionId = extractSessionId(path);
-      const displayName = sessionId
-        ? sessionId
-        : path.split("/").pop() ?? path;
-      const pill = document.createElement("span");
-      pill.dataset.type = "file";
-      pill.dataset.path = path;
-      pill.dataset.isFile = String(isFile);
+      const displayName = path.split("/").pop() ?? path;
+      const dataset: Record<string, string> = {
+        type: "file",
+        path,
+        isFile: String(isFile),
+      };
       if (branch) {
-        pill.dataset.branch = branch;
+        dataset.branch = branch;
       }
-      pill.contentEditable = "false";
-      pill.textContent = `@${displayName}`;
+      insertPill(scopeId, editorRef.current, dataset, displayName);
+    },
 
-      // Insert pill at current cursor
-      const insertRange = sel.getRangeAt(0);
-      insertRange.collapse(false);
-      insertRange.insertNode(pill);
+    addSessionPart: (taskId: string, branch?: string | null) => {
+      const dataset: Record<string, string> = {
+        type: "session",
+        taskId,
+      };
+      if (branch) {
+        dataset.branch = branch;
+      }
+      insertPill(scopeId, editorRef.current, dataset, shortSessionId(taskId));
+    },
 
-      // Add space after pill
-      const space = document.createTextNode(" ");
-      pill.after(space);
-
-      // Move cursor after space
-      const newRange = document.createRange();
-      newRange.setStartAfter(space);
-      newRange.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(newRange);
-
-      // Close popover and reparse
-      const store = usePromptEditorStore.getState();
-      store.setPopover(null);
-      store.setAtQuery("");
-      const parsed = parseFromDOM(el);
-      store.setPrompt(parsed);
+    addSkillPart: (id: string, name: string) => {
+      insertPill(
+        scopeId,
+        editorRef.current,
+        {
+          type: "skill",
+          skillId: id,
+          skillName: name,
+        },
+        name,
+        { trigger: "skill", prefix: "#" },
+      );
     },
   };
 
-  singletonHandle = handle;
+  handlesByScope.set(scopeId, handle);
   return handle;
+}
+
+function activeHandle(): PromptEditorHandle {
+  if (activeScopeId) {
+    const handle = handlesByScope.get(activeScopeId);
+    if (handle) return handle;
+  }
+  return getPromptEditorHandle(DEFAULT_PROMPT_SCOPE_ID);
+}
+
+function createActiveRef<T>(
+  read: (handle: PromptEditorHandle) => React.MutableRefObject<T>,
+): React.MutableRefObject<T> {
+  const ref = {} as React.MutableRefObject<T>;
+  Object.defineProperty(ref, "current", {
+    get: () => read(activeHandle()).current,
+    set: (value: T) => {
+      read(activeHandle()).current = value;
+    },
+  });
+  return ref;
+}
+
+export function getActivePromptEditorHandle(): PromptEditorHandle {
+  if (activeProxyHandle) return activeProxyHandle;
+
+  const proxy: PromptEditorHandle = {
+    scopeId: "__active__",
+    editorRef: createActiveRef((handle) => handle.editorRef),
+    isComposingRef: createActiveRef((handle) => handle.isComposingRef),
+    getText: () => activeHandle().getText(),
+    getContextEntries: () => activeHandle().getContextEntries(),
+    getSkillEntries: () => activeHandle().getSkillEntries(),
+    isEmpty: () => activeHandle().isEmpty(),
+    clearWithSnapshot: () => activeHandle().clearWithSnapshot(),
+    restore: () => activeHandle().restore(),
+    clear: () => activeHandle().clear(),
+    focus: () => activeHandle().focus(),
+    activate: () => activeHandle().activate(),
+    syncDomFromStore: () => activeHandle().syncDomFromStore(),
+    setCursorFromPoint: (x, y) => activeHandle().setCursorFromPoint(x, y),
+    handleInput: () => activeHandle().handleInput(),
+    handleCompositionStart: () => activeHandle().handleCompositionStart(),
+    handleCompositionEnd: () => activeHandle().handleCompositionEnd(),
+    addFilePart: (path, isFile, branch) =>
+      activeHandle().addFilePart(path, isFile, branch),
+    addSessionPart: (taskId, branch) =>
+      activeHandle().addSessionPart(taskId, branch),
+    addSkillPart: (id, name) => activeHandle().addSkillPart(id, name),
+  };
+
+  activeProxyHandle = proxy;
+  return proxy;
 }

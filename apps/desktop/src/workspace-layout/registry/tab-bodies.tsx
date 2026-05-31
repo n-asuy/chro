@@ -1,0 +1,121 @@
+import { FilesEditor } from "@/files/components/editor/files-editor";
+import { useFileTreeStore } from "@/files/state/file-tree-store";
+import { useFilesStore } from "@/files/state/files-store";
+import { DiffViewerPanel } from "@/session/components/diff-viewer-panel";
+import { useDiffStream } from "@/session/hooks/use-diff-stream";
+import { SingleAgentSessionView } from "@/session/single-agent-session";
+import { SettingsPanel } from "@/settings/settings-panel";
+import { useEffect, useMemo } from "react";
+import { BrowserPane } from "../components/browser-pane";
+import { NativeBrowserPane } from "../components/native-browser-pane";
+import { TerminalPane } from "../components/terminal-pane";
+import { useLayoutStore } from "../state/layout-store";
+import type { PaneItemRenderProps } from "./registry";
+
+/**
+ * Per-kind tab body adapters. Each receives the resolved kind payload and
+ * renders the existing inner view, omitting any shell chrome
+ * (e.g. the header / dock) — those are owned by the outer LayoutShell.
+ *
+ * Most kinds reuse the existing component verbatim; the kind payload feeds
+ * through the TabKindContext provided by PaneContainer.
+ */
+
+export function SessionTabBody(_: PaneItemRenderProps) {
+  return <SingleAgentSessionView />;
+}
+
+export function FileTabBody({ isActiveLeaf, kind }: PaneItemRenderProps) {
+  if (kind.type !== "file") return null;
+  return (
+    <SingleFileEditor
+      path={kind.path}
+      taskRunId={kind.taskRunId}
+      isActiveLeaf={isActiveLeaf}
+    />
+  );
+}
+
+function SingleFileEditor({
+  isActiveLeaf,
+  path,
+  taskRunId,
+}: {
+  isActiveLeaf: boolean;
+  path: string;
+  taskRunId?: string;
+}) {
+  const selectNode = useFilesStore((s) => s.selectNode);
+  const expandToPath = useFileTreeStore((s) => s.expandToPath);
+
+  useEffect(() => {
+    if (!isActiveLeaf) return;
+    if (useFilesStore.getState().currentFilePath !== path) {
+      useFilesStore.setState({ currentFilePath: path });
+    }
+    // Skip project-tree reflection for task-run-scoped tabs: the file may not
+    // exist in the project tree at all.
+    if (taskRunId) return;
+    selectNode(path);
+    expandToPath(path);
+  }, [expandToPath, isActiveLeaf, path, selectNode, taskRunId]);
+
+  return (
+    <div className="h-full w-full">
+      <FilesEditor path={path} taskRunId={taskRunId} />
+    </div>
+  );
+}
+
+export function SettingsTabBody() {
+  return (
+    <div className="h-full overflow-y-auto">
+      <SettingsPanel />
+    </div>
+  );
+}
+
+export function TerminalTabBody({ tab }: PaneItemRenderProps) {
+  return <TerminalPane tabId={tab.id} />;
+}
+
+export function InBrowserTabBody({ tab, kind }: PaneItemRenderProps) {
+  const url = kind.type === "browser" ? kind.url : undefined;
+  return <NativeBrowserPane tabId={tab.id} initialUrl={url} />;
+}
+
+export function CdpBrowserTabBody({ tab, kind }: PaneItemRenderProps) {
+  const url = kind.type === "cdp-browser" ? kind.url : undefined;
+  return <BrowserPane tabId={tab.id} initialUrl={url} />;
+}
+
+export function DiffTabBody({ tab, kind }: PaneItemRenderProps) {
+  if (kind.type !== "diff") return null;
+  return <DiffTabContent runId={kind.runId} tabId={tab.id} />;
+}
+
+function DiffTabContent({
+  runId,
+  tabId,
+}: {
+  runId: string;
+  tabId: string;
+}) {
+  const closeTab = useLayoutStore((s) => s.closeTab);
+  const { diffs } = useDiffStream({ taskRunId: runId });
+
+  const diffEntries = useMemo(
+    () => Object.entries(diffs).map(([path, diff]) => ({ path, diff })),
+    [diffs],
+  );
+
+  return (
+    <div className="h-full w-full">
+      <DiffViewerPanel
+        onClose={() => closeTab(tabId)}
+        diffs={diffEntries}
+        taskRunId={runId}
+      />
+    </div>
+  );
+}

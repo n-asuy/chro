@@ -10,6 +10,7 @@ type SendTaskMessageOptions = {
   requestId?: string;
   executorProfileId?: ExecutorProfileId | null;
   imageIds?: string[] | null;
+  selectedSkillIds?: string[];
   useWorktree?: boolean;
   targetBranch?: string | null;
 };
@@ -33,6 +34,7 @@ export async function sendTaskMessage(
         mode: options.mode,
         executor_profile_id: options.executorProfileId ?? undefined,
         image_ids: options.imageIds ?? undefined,
+        selected_skill_ids: options.selectedSkillIds ?? [],
         use_worktree: options.useWorktree,
         target_branch: options.targetBranch ?? undefined,
       }),

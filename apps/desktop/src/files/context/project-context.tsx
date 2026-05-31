@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { useParams } from "@tanstack/react-router";
-import { taskApi, type ProjectResponse } from "@/kanban/api/task-api";
+import { taskApi, type ProjectResponse } from "@/tasks/task-api";
 
 interface ProjectContextValue {
   /** Resolved UUID — use this for all API calls */
@@ -93,8 +93,8 @@ export function useProjectId(): string | null {
 
 /**
  * Optional version of useProjectContext that returns null
- * if no ProjectProvider is present. Useful for components like
- * ElectronTitlebar that may render outside the provider.
+ * if no ProjectProvider is present. Useful for components that
+ * may render outside the provider.
  */
 export function useOptionalProjectContext(): ProjectContextValue | null {
   return useContext(ProjectContext);

@@ -37,6 +37,7 @@ approvals = { path = "../approvals" }
 file-search-cache = { path = "../file-search-cache" }
 diff-stream = { path = "../diff-stream" }
 executors = { path = "../executors" }
+skills = { path = "../skills" }
 
 [dev-dependencies]
 tempfile = "3"

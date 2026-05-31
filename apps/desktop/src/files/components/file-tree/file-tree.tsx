@@ -1,5 +1,8 @@
+import { FolderPickerDialog } from "@/components/dialogs/folder-picker-dialog";
 import { useLanguage } from "@/i18n";
 import { revealInFinder } from "@/lib/project-client";
+import { usePromptEditorHandle } from "@/session/hooks/use-prompt-editor";
+import { useRightDockStore } from "@/workspace-layout/state/right-dock-store";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -27,7 +30,9 @@ import {
   ExternalLink,
   FilePlus,
   FileText,
+  FolderInput,
   FolderPlus,
+  GitBranch,
   Minimize2,
   PanelLeftClose,
   PenLine,
@@ -53,6 +58,7 @@ import { TreeNode } from "./tree-node";
 
 const TREE_INDENT_BASE = 18;
 const TREE_INDENT_STEP = 16;
+const ROOT_INDENT_PX = 4;
 const ROW_HEIGHT = 28;
 const VIRTUALIZER_OVERSCAN = 8;
 
@@ -61,6 +67,7 @@ interface VisibleRow {
   depth: number;
   isExpanded: boolean;
   indentPx: number;
+  isWorkspaceRoot: boolean;
 }
 
 type FileTreeProps = {
@@ -70,15 +77,17 @@ type FileTreeProps = {
 export const FileTree = ({ onClose }: FileTreeProps) => {
   const { t } = useLanguage();
   const containerRef = useRef<HTMLDivElement>(null);
-  const scrollVisibilityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+  const scrollVisibilityTimeoutRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   const [showScrollBar, setShowScrollBar] = useState(false);
   const { projectId, workspacePath } = useProjectContext();
+  const setRightDockActivePanel = useRightDockStore((s) => s.setActivePanel);
 
   const {
     fileTree,
     rootPath,
+    roots,
     selectedPaths,
     selectNode,
     clearSelection,
@@ -91,12 +100,70 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     moveNode,
     importExternalFiles,
     editingPath,
+    addRoot,
+    removeRoot,
   } = useFilesStore();
 
-  // Internal DnD hook (tree-to-tree moves)
+  const deriveAdHocRootName = useCallback((absolutePath: string): string => {
+    const trimmed = absolutePath.replace(/[\\/]+$/, "");
+    const segments = trimmed.split(/[\\/]/).filter(Boolean);
+    return segments[segments.length - 1] ?? absolutePath;
+  }, []);
+
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+
+  const handleAddFolderToProject = useCallback(() => {
+    setFolderPickerOpen(true);
+  }, []);
+
+  const handleFolderPickerSelect = useCallback(
+    (picked: string | null) => {
+      if (!picked) return;
+      const name = deriveAdHocRootName(picked);
+      addRoot({
+        path: picked,
+        name,
+        displayName: name,
+        isPrimary: false,
+        children: [],
+      });
+    },
+    [addRoot, deriveAdHocRootName],
+  );
+
+  const handleRemoveFolderFromProject = useCallback(
+    (path: string) => {
+      removeRoot(path);
+    },
+    [removeRoot],
+  );
+
+  // Prompt editor handle (singleton, shared with the chat input).
+  // Methods are no-ops when the editor is not mounted.
+  const promptEditorHandle = usePromptEditorHandle();
+
+  const handleDropToPromptEditor = useCallback(
+    ({
+      node,
+      clientX,
+      clientY,
+    }: {
+      node: { path: string; name: string; isDir: boolean };
+      clientX: number;
+      clientY: number;
+    }) => {
+      if (!promptEditorHandle.editorRef.current) return;
+      promptEditorHandle.setCursorFromPoint(clientX, clientY);
+      promptEditorHandle.addFilePart(node.path, !node.isDir);
+    },
+    [promptEditorHandle],
+  );
+
+  // Internal DnD hook (tree-to-tree moves + drop to chat input)
   const { dragState, handlers: dndHandlers } = useFileTreeDnd({
     rootPath,
     onMove: moveNode,
+    onDropToPromptEditor: handleDropToPromptEditor,
   });
 
   // External drop hook (files from OS)
@@ -109,7 +176,11 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     useFileTreeStore();
 
   // Compute visible rows from the current expansion state.
-  // This is purely UI state computation - no API calls
+  // Each WorkspaceRoot contributes a synthetic header row labeled with its
+  // directory name (Zed-style worktree). The project's file nodes nest one
+  // level beneath their root and are only walked when the root is expanded.
+  // Root rows sit flush left; nested rows start at TREE_INDENT_BASE so the
+  // chevron column is aligned regardless of nesting depth.
   const visibleRows = useMemo(() => {
     const rows: VisibleRow[] = [];
 
@@ -117,20 +188,56 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
       for (const node of nodes) {
         const isDirectory = node.type === FileNodeType.Directory;
         const isExpanded = isDirectory && expandedPaths.has(node.path);
-        const indentPx = TREE_INDENT_BASE + depth * TREE_INDENT_STEP;
+        const indentPx =
+          TREE_INDENT_BASE + Math.max(0, depth - 1) * TREE_INDENT_STEP;
 
-        rows.push({ node, depth, isExpanded, indentPx });
+        rows.push({
+          node,
+          depth,
+          isExpanded,
+          indentPx,
+          isWorkspaceRoot: false,
+        });
 
-        // If directory is expanded and has children, walk them
         if (isDirectory && isExpanded && node.children?.length) {
           walk(node.children, depth + 1);
         }
       }
     };
 
-    walk(fileTree, 0);
+    if (roots.length === 0) {
+      walk(fileTree, 1);
+      return rows;
+    }
+
+    for (const root of roots) {
+      const isRootExpanded = expandedPaths.has(root.path);
+      const rootChildren = root.isPrimary ? fileTree : root.children ?? [];
+      const rootNode: FileNode = {
+        id: `workspace-root:${root.path}`,
+        name: root.name,
+        displayName: root.displayName,
+        path: root.path,
+        type: FileNodeType.Directory,
+        relativePath: "",
+        children: rootChildren,
+        hasChildren: rootChildren.length > 0,
+        isHydrated: true,
+      };
+      rows.push({
+        node: rootNode,
+        depth: 0,
+        isExpanded: isRootExpanded,
+        indentPx: ROOT_INDENT_PX,
+        isWorkspaceRoot: true,
+      });
+      if (isRootExpanded) {
+        walk(rootChildren, 1);
+      }
+    }
+
     return rows;
-  }, [fileTree, expandedPaths]);
+  }, [fileTree, roots, expandedPaths]);
 
   // Configure row virtualization for the current tree view.
   const rowVirtualizer = useVirtualizer({
@@ -179,7 +286,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   const handleRename = useCallback(
     (path: string, _name: string) => {
       const node = findNode(path);
-      startEditing(path, node?.displayName ?? _name);
+      startEditing(path, node?.name ?? _name);
     },
     [findNode, startEditing],
   );
@@ -342,8 +449,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         }
         case "ArrowUp": {
           e.preventDefault();
-          const prev =
-            currentIndex === -1 ? 0 : Math.max(0, currentIndex - 1);
+          const prev = currentIndex === -1 ? 0 : Math.max(0, currentIndex - 1);
           const prevRow = visibleRows[prev];
           if (prevRow) {
             selectNode(prevRow.node.path);
@@ -445,14 +551,14 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         return;
       }
 
-      containerRef.current?.focus();
+      containerRef.current?.focus({ preventScroll: true });
     },
     [containerRef],
   );
 
   const handleTreeClick = useCallback(
     (e: React.MouseEvent) => {
-      containerRef.current?.focus();
+      containerRef.current?.focus({ preventScroll: true });
 
       const target = e.target as HTMLElement | null;
       if (!target) return;
@@ -556,6 +662,21 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                 {t("newFolder")}
               </TooltipContent>
             </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
+                  aria-label={t("sourceControl")}
+                  onClick={() => setRightDockActivePanel("source-control")}
+                >
+                  <GitBranch className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="center">
+                {t("sourceControl")}
+              </TooltipContent>
+            </Tooltip>
           </TooltipProvider>
         </div>
         {onClose && (
@@ -611,7 +732,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                   const row = visibleRows[virtualItem.index];
                   if (!row) return null;
 
-                  const { node, isExpanded, indentPx } = row;
+                  const { node, isExpanded, indentPx, isWorkspaceRoot } = row;
                   const isSelected = selectedSet.has(node.path);
                   const isDirectory = node.type === FileNodeType.Directory;
                   const isDragOver =
@@ -620,6 +741,9 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                   const isDragging =
                     dragState.isDragging &&
                     dragState.draggedNode?.path === node.path;
+                  const matchedRoot = isWorkspaceRoot
+                    ? roots.find((r) => r.path === node.path)
+                    : null;
 
                   return (
                     <div
@@ -644,6 +768,12 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                         }
                         onCreateFolder={(parentPath) =>
                           quickCreate(FileNodeType.Directory, parentPath)
+                        }
+                        isWorkspaceRoot={isWorkspaceRoot}
+                        isPrimaryRoot={matchedRoot?.isPrimary ?? false}
+                        onAddFolderToProject={handleAddFolderToProject}
+                        onRemoveFolderFromProject={
+                          handleRemoveFolderFromProject
                         }
                       >
                         <TreeNode
@@ -720,6 +850,13 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             <span>{t("newFolder")}</span>
           </ContextMenuItem>
           <ContextMenuItem
+            onSelect={handleAddFolderToProject}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <FolderInput className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("addFolderToProject")}</span>
+          </ContextMenuItem>
+          <ContextMenuItem
             onSelect={handleRevealRootInFinder}
             disabled={!projectId}
             className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
@@ -729,6 +866,13 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
+      <FolderPickerDialog
+        open={folderPickerOpen}
+        onOpenChange={setFolderPickerOpen}
+        onSelect={handleFolderPickerSelect}
+        title={t("addFolderToProject")}
+        description={t("addFolderToProjectDescription")}
+      />
     </div>
   );
 };

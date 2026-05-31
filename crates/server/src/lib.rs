@@ -11,6 +11,7 @@ use shutdown::shutdown_signal;
 
 mod app_state;
 pub mod args;
+mod browser_session;
 pub mod cli;
 mod constants;
 mod cors;
@@ -19,6 +20,7 @@ mod helpers;
 pub(crate) mod identifiers;
 mod perf;
 mod port_file;
+mod pty;
 mod routes;
 mod shutdown;
 
@@ -87,6 +89,8 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .await
         .context("failed to cleanup executions")?;
     let state = AppState::new(runtime.clone());
+    let state_pty_handle = state.pty().clone();
+    let state_browser_handle = state.browser().clone();
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
     let actual_port = listener.local_addr()?.port();
 
@@ -131,8 +135,15 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         });
     }
 
+    let pty_for_shutdown = state_pty_handle.clone();
+    let browser_for_shutdown = state_browser_handle.clone();
+    let shutdown = async move {
+        shutdown_signal().await;
+        pty_for_shutdown.shutdown_all().await;
+        browser_for_shutdown.shutdown_all().await;
+    };
     axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
 
     Ok(())

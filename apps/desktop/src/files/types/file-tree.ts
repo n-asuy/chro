@@ -53,8 +53,8 @@ export const getDisplayName = (name: string, type: FileNodeType): string => {
 };
 
 /**
- * Get actual file name — appends extension if missing.
- * When no extension is provided, defaults to ".md" for backward compatibility.
+ * Get actual file name — appends the fallback extension only when the input has none.
+ * If the user provides any extension (e.g. "doc.txt"), it is honoured as-is.
  */
 export const getActualFileName = (
   displayName: string,
@@ -62,7 +62,8 @@ export const getActualFileName = (
   extension = "md",
 ): string => {
   if (type !== FileNodeType.File) return displayName;
-  if (displayName.endsWith(`.${extension}`)) return displayName;
+  const dotIndex = displayName.lastIndexOf(".");
+  if (dotIndex > 0) return displayName;
   return `${displayName}.${extension}`;
 };
 

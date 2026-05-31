@@ -12,6 +12,8 @@
     "dev:api": "turbo dev --filter=@chro/api",
     "dev:cli": "turbo dev --filter=@chro/cli",
     "dev:desktop": "turbo dev --filter=@chro/desktop",
+    "dev:mobile": "turbo dev --filter=@chro/mobile",
+    "setup:mobile": "bun run --filter=@chro/mobile setup",
     "test": "turbo test --parallel",
     "package:local:cli": "bun run --filter=@chro/cli package:local",
     "package:release:cli": "bun run --filter=@chro/cli package:release",
@@ -24,13 +26,16 @@
     "licenses:js": "bun tooling/scripts/check-js-licenses.mjs",
     "licenses:rust": "bun tooling/scripts/check-rust-licenses.mjs",
     "typecheck": "turbo typecheck",
-    "codemap:session": "node tooling/scripts/generate-session-codemap.mjs"
+    "codemap:session": "node tooling/scripts/generate-session-codemap.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "devDependencies": {
     "@biomejs/biome": "1.8.3",
     "@cloudflare/workers-types": "^4.20250618.0",
     "@daytonaio/sdk": "0.22.1",
     "@opentelemetry/winston-transport": "^0.14.0",
+    "@playwright/test": "1.59.1",
     "@t3-oss/env-nextjs": "^0.11.1",
     "@tailwindcss/container-queries": "^0.1.1",
     "@tailwindcss/typography": "^0.5.19",

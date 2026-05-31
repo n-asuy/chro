@@ -9,10 +9,10 @@ import {
 } from "@chro/ui/tooltip";
 import { Link } from "@tanstack/react-router";
 import { Archive, PanelLeftClose, Plus } from "lucide-react";
-import { ArchivePopover } from "./archive-popover";
-import { SessionList } from "./session-list";
 import type { ArchivedSession } from "../hooks";
 import type { StoredTask } from "../types";
+import { ArchivePopover } from "./archive-popover";
+import { SessionList } from "./session-list";
 
 type SessionSidebarContentProps = {
   newSessionUrl: string;
@@ -25,7 +25,7 @@ type SessionSidebarContentProps = {
   activeTaskId: string | null;
   onLoadTask: (task: StoredTask, selectedRunId?: string) => void;
   onArchiveTask: (task: StoredTask) => Promise<void>;
-  onCloseSidebar: () => void;
+  onCloseSidebar?: () => void;
   sidebarButtonClassName: string;
   t: TranslationFunction;
 };
@@ -98,24 +98,26 @@ export function SessionSidebarContent({
             </div>
           ) : null}
         </div>
-        <TooltipProvider delayDuration={120}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("closeSidebar")}
-                onClick={onCloseSidebar}
-                className={sidebarButtonClassName}
-              >
-                <PanelLeftClose className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" align="center">
-              {t("closeSidebar")}
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        {onCloseSidebar ? (
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("closeSidebar")}
+                  onClick={onCloseSidebar}
+                  className={sidebarButtonClassName}
+                >
+                  <PanelLeftClose className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="center">
+                {t("closeSidebar")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : null}
       </div>
       {sessionsError ? (
         <div className="px-3 py-4">

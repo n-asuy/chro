@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::Utc;
 use events::MsgStore;
 use futures::StreamExt;
 use json_patch::Patch;
@@ -16,6 +17,7 @@ use log_types::{
     ActionType, CommandExitStatus, CommandRunResult, ConversationPatch, EntryIndexProvider,
     FileChange, LogEntry, NormalizedEntry, NormalizedEntryError, NormalizedEntryType, TodoItem,
     ToolResult, ToolResultValueType, ToolStatus, create_unified_diff,
+    should_suppress_system_message,
 };
 use serde_json::Value;
 use tracing::warn;
@@ -158,7 +160,7 @@ impl ClaudeLogProcessor {
                             }
                         }
                         Err(_) => {
-                            if !trimmed.is_empty() {
+                            if !trimmed.is_empty() && !should_suppress_system_message(trimmed) {
                                 let entry = NormalizedEntry {
                                     timestamp: None,
                                     entry_type: NormalizedEntryType::SystemMessage,
@@ -177,11 +179,12 @@ impl ClaudeLogProcessor {
                 buffer = buffer.rsplit('\n').next().unwrap_or("").to_owned();
             }
 
-            if !buffer.trim().is_empty() {
+            let trailing = buffer.trim();
+            if !trailing.is_empty() && !should_suppress_system_message(trailing) {
                 let entry = NormalizedEntry {
                     timestamp: None,
                     entry_type: NormalizedEntryType::SystemMessage,
-                    content: buffer.trim().to_string(),
+                    content: trailing.to_string(),
                     metadata: None,
                 };
                 let patch_id = entry_index_provider.next();
@@ -249,7 +252,7 @@ impl ClaudeLogProcessor {
                                 }
                             }
                             Err(_) => {
-                                if !trimmed.is_empty() {
+                                if !trimmed.is_empty() && !should_suppress_system_message(trimmed) {
                                     let entry = NormalizedEntry {
                                         timestamp: None,
                                         entry_type: NormalizedEntryType::SystemMessage,
@@ -295,11 +298,12 @@ impl ClaudeLogProcessor {
             }
         }
 
-        if !buffer.trim().is_empty() {
+        let trailing = buffer.trim();
+        if !trailing.is_empty() && !should_suppress_system_message(trailing) {
             let entry = NormalizedEntry {
                 timestamp: None,
                 entry_type: NormalizedEntryType::SystemMessage,
-                content: buffer.trim().to_string(),
+                content: trailing.to_string(),
                 metadata: None,
             };
             let patch_id = entry_index_provider.next();
@@ -386,6 +390,20 @@ impl ClaudeLogProcessor {
                 })
             }
             ClaudeContentItem::ToolResult { .. } => None,
+            ClaudeContentItem::Unknown { data } => {
+                let block_type = data
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let _ = role;
+                let _ = worktree_path;
+                Some(NormalizedEntry {
+                    timestamp: None,
+                    entry_type: NormalizedEntryType::SystemMessage,
+                    content: format!("Unsupported Claude content block: {block_type}"),
+                    metadata: Some(serde_json::to_value(content_item).unwrap_or(Value::Null)),
+                })
+            }
         }
     }
 
@@ -625,11 +643,17 @@ impl ClaudeLogProcessor {
         let mut patches = Vec::new();
 
         match claude_json {
-            ClaudeJson::System {
-                subtype,
-                api_key_source,
-                ..
-            } => {
+            ClaudeJson::System { api_key_source, .. } => {
+                // System events (`init`, `status`, `thinking_tokens`, …) are
+                // Claude Code protocol/status signals, not user-facing
+                // conversation content. We never surface them as SystemMessage
+                // entries: doing so leaks every new subtype Claude Code adds
+                // into the UI as a bare "System: <subtype>" line.
+                //
+                // The sole exception is the billing warning. An
+                // ANTHROPIC_API_KEY on the init event means usage is billed
+                // pay-as-you-go instead of via the Claude subscription, which
+                // the user must see.
                 if let Some("ANTHROPIC_API_KEY") = api_key_source.as_deref() {
                     warn!("ANTHROPIC_API_KEY env variable detected");
                     let warning = NormalizedEntry {
@@ -642,34 +666,6 @@ impl ClaudeLogProcessor {
                     };
                     let idx = entry_index_provider.next();
                     patches.push(ConversationPatch::add_normalized_entry(idx, warning));
-                }
-
-                match subtype.as_deref() {
-                    Some("init") => {}
-                    Some(subtype) => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: format!("System: {subtype}"),
-                            metadata: Some(
-                                serde_json::to_value(claude_json).unwrap_or(Value::Null),
-                            ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
-                    }
-                    None => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: "System message".to_string(),
-                            metadata: Some(
-                                serde_json::to_value(claude_json).unwrap_or(Value::Null),
-                            ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
-                    }
                 }
             }
             ClaudeJson::Assistant { message, .. } => {
@@ -733,7 +729,9 @@ impl ClaudeLogProcessor {
                             };
                             patches.push(patch);
                         }
-                        ClaudeContentItem::Text { .. } | ClaudeContentItem::Thinking { .. } => {
+                        ClaudeContentItem::Text { .. }
+                        | ClaudeContentItem::Thinking { .. }
+                        | ClaudeContentItem::Unknown { .. } => {
                             if let Some(entry) = Self::content_item_to_normalized_entry(
                                 item,
                                 &message.role,
@@ -995,7 +993,12 @@ impl ClaudeLogProcessor {
                 }
                 ClaudeStreamEvent::Unknown => {}
             },
-            ClaudeJson::Result { is_error, .. } => {
+            ClaudeJson::Result {
+                is_error,
+                duration_ms,
+                num_turns,
+                ..
+            } => {
                 if is_error.unwrap_or(false) {
                     let entry = NormalizedEntry {
                         timestamp: None,
@@ -1005,6 +1008,20 @@ impl ClaudeLogProcessor {
                         content: serde_json::to_string(claude_json)
                             .unwrap_or_else(|_| "error".to_string()),
                         metadata: Some(serde_json::to_value(claude_json).unwrap_or(Value::Null)),
+                    };
+                    let idx = entry_index_provider.next();
+                    patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                } else {
+                    // End-of-turn footer: wall-clock time (stamped at normalize
+                    // time), elapsed duration, and turn count from the result.
+                    let entry = NormalizedEntry {
+                        timestamp: Some(Utc::now().to_rfc3339()),
+                        entry_type: NormalizedEntryType::ExecutionSummary {
+                            duration_ms: *duration_ms,
+                            num_turns: *num_turns,
+                        },
+                        content: String::new(),
+                        metadata: None,
                     };
                     let idx = entry_index_provider.next();
                     patches.push(ConversationPatch::add_normalized_entry(idx, entry));
@@ -1359,6 +1376,82 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_system_status_is_suppressed() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"status","session_id":"abc123"}"#)
+                .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        assert!(
+            patches.is_empty(),
+            "System: status should be suppressed, got {patches:?}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_system_unknown_subtype_is_suppressed() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"system","subtype":"permissions","session_id":"abc123"}"#,
+        )
+        .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        assert!(
+            patches.is_empty(),
+            "system subtypes carry no user-facing content, got {patches:?}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_system_thinking_tokens_is_suppressed() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"system","subtype":"thinking_tokens","session_id":"abc123"}"#,
+        )
+        .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        assert!(
+            patches.is_empty(),
+            "System: thinking_tokens must never reach the UI, got {patches:?}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_system_api_key_source_emits_billing_warning() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"abc123","apiKeySource":"ANTHROPIC_API_KEY"}"#,
+        )
+        .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        let entries = patches_to_entries(&patches);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ErrorMessage { .. }
+        ));
+        assert!(entries[0].content.contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn test_normalize_log_entries_suppresses_system_status_stderr() {
+        let logs = vec![LogEntry::Stdout("System: status\n".to_string())];
+        let out = ClaudeLogProcessor::normalize_log_entries(&logs, "/tmp");
+        let json_patches: Vec<_> = out
+            .iter()
+            .filter(|e| matches!(e, LogEntry::JsonPatch(_)))
+            .collect();
+        assert!(
+            json_patches.is_empty(),
+            "non-JSON 'System: status' stderr must not emit a SystemMessage patch"
+        );
+    }
+
+    #[test]
     fn test_normalize_assistant_text() {
         let mut processor = ClaudeLogProcessor::new();
         let provider = EntryIndexProvider::new();
@@ -1386,6 +1479,171 @@ mod tests {
         .unwrap();
         let patches = processor.normalize_entries(&json, "/tmp", &provider);
         assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_successful_result_emits_execution_summary() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4300,"num_turns":1,"session_id":"abc123"}"#,
+        )
+        .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        let entries = patches_to_entries(&patches);
+        assert_eq!(entries.len(), 1);
+        match &entries[0].entry_type {
+            NormalizedEntryType::ExecutionSummary {
+                duration_ms,
+                num_turns,
+            } => {
+                assert_eq!(*duration_ms, Some(4300));
+                assert_eq!(*num_turns, Some(1));
+            }
+            other => panic!("expected ExecutionSummary, got {other:?}"),
+        }
+        // Wall-clock time is stamped so the UI can render "10:42 AM".
+        assert!(entries[0].timestamp.is_some());
+    }
+
+    #[test]
+    fn test_normalize_realworld_result_line_emits_execution_summary() {
+        // A real Claude Code `result` line carries many extra fields
+        // (total_cost_usd, usage, result text, …). Extra fields must not
+        // knock the message into the `Unknown` variant, or the footer
+        // silently disappears.
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4317,"duration_api_ms":3987,"num_turns":1,"result":"Done.","session_id":"sess-1","total_cost_usd":0.0123,"usage":{"input_tokens":1500,"output_tokens":42,"cache_read_input_tokens":0},"permission_denials":[]}"#;
+        let json: ClaudeJson = serde_json::from_str(line).unwrap();
+        // Guard against a silent fallthrough to the untagged `Unknown` arm.
+        assert!(
+            matches!(json, ClaudeJson::Result { .. }),
+            "real-world result line must parse as ClaudeJson::Result, not Unknown"
+        );
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        let entries = patches_to_entries(&patches);
+        assert_eq!(entries.len(), 1);
+        match &entries[0].entry_type {
+            NormalizedEntryType::ExecutionSummary {
+                duration_ms,
+                num_turns,
+            } => {
+                assert_eq!(*duration_ms, Some(4317));
+                assert_eq!(*num_turns, Some(1));
+            }
+            other => panic!("expected ExecutionSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_errored_result_does_not_emit_execution_summary() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"error","is_error":true,"duration_ms":1200,"num_turns":2}"#,
+        )
+        .unwrap();
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        let entries = patches_to_entries(&patches);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ErrorMessage { .. }
+        ));
+    }
+
+    #[test]
+    fn test_execution_summary_wire_shape_matches_frontend_contract() {
+        // The frontend (`ServerWireEntry` in use-conversation-history.ts) expects
+        // each entry's `type` field to be an OBJECT: `{ type: "<discriminant>",
+        // ...extra }`. `createNormalizedDisplayEntry` then maps that object to
+        // `entry_type`, and the renderer reads `entry.entry_type.duration_ms`.
+        // This test pins the exact serialized wire shape so a serde-attribute
+        // change can't silently break rendering.
+        let entry = NormalizedEntry {
+            timestamp: Some("2026-05-31T01:42:00+00:00".to_string()),
+            entry_type: NormalizedEntryType::ExecutionSummary {
+                duration_ms: Some(4317),
+                num_turns: Some(1),
+            },
+            content: String::new(),
+            metadata: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+
+        // `entry_type` is renamed to "type" and is an internally-tagged object.
+        let type_obj = json
+            .get("type")
+            .expect("entry must serialize a `type` field");
+        assert!(
+            type_obj.is_object(),
+            "frontend ServerWireEntry expects `type` to be an object, got {type_obj}"
+        );
+        assert_eq!(
+            type_obj.get("type").and_then(|v| v.as_str()),
+            Some("execution_summary")
+        );
+        assert_eq!(
+            type_obj.get("duration_ms").and_then(|v| v.as_u64()),
+            Some(4317)
+        );
+        assert_eq!(
+            type_obj.get("num_turns").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(json.get("timestamp").and_then(|v| v.as_str()), Some("2026-05-31T01:42:00+00:00"));
+    }
+
+    #[test]
+    fn test_replay_stream_emits_execution_summary_after_assistant() {
+        // End-to-end through the historic-replay path a completed run uses
+        // (`normalize_log_entries`), with a realistic stdout stream: assistant
+        // text followed by the final `result` line. The footer must appear as
+        // the last normalized entry, after the assistant message.
+        let stdout = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"All done."}]},"session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4317,"num_turns":1,"result":"All done.","session_id":"s1","total_cost_usd":0.01}"#,
+            "\n",
+        );
+        let logs = vec![LogEntry::Stdout(stdout.to_string()), LogEntry::Finished];
+        let out = ClaudeLogProcessor::normalize_log_entries(&logs, "/tmp");
+
+        let entries: Vec<NormalizedEntry> = out
+            .iter()
+            .filter_map(|e| match e {
+                LogEntry::JsonPatch(value) => {
+                    serde_json::from_value::<Patch>(value.clone()).ok()
+                }
+                _ => None,
+            })
+            .filter_map(|p| extract_normalized_entry_from_patch(&p))
+            .map(|(_, entry)| entry)
+            .collect();
+
+        let last = entries.last().expect("expected at least one entry");
+        match &last.entry_type {
+            NormalizedEntryType::ExecutionSummary {
+                duration_ms,
+                num_turns,
+            } => {
+                assert_eq!(*duration_ms, Some(4317));
+                assert_eq!(*num_turns, Some(1));
+            }
+            other => panic!("expected trailing ExecutionSummary, got {other:?}"),
+        }
+        assert!(
+            last.timestamp.is_some(),
+            "execution summary must carry a wall-clock timestamp"
+        );
+        // The assistant message must precede the footer.
+        assert!(entries.iter().any(|e| matches!(
+            e.entry_type,
+            NormalizedEntryType::AssistantMessage
+        )));
     }
 
     #[test]

@@ -4,8 +4,13 @@
  * Uses the new /streams/tasks endpoint with JSON Patch protocol.
  * Receives initial snapshot + live updates for all tasks in a project.
  */
-import { useMemo, useCallback } from "react";
 import { getBackendBaseUrl } from "@/lib/backend-client";
+import { useCallback, useEffect, useMemo } from "react";
+import {
+  applyTaskTitleOverridesToTasksById,
+  useTaskTitleOverrides,
+  useTaskTitleOverridesStore,
+} from "../state/task-title-overrides-store";
 import type { StoredTask } from "../types";
 import { useJsonPatchWsStream } from "./use-json-patch-ws-stream";
 
@@ -25,6 +30,8 @@ interface UseProjectTasksStreamParams {
 type TasksState = {
   tasks: Record<string, StoredTask>;
 };
+
+const EMPTY_TASKS_BY_ID: Record<string, StoredTask> = {};
 
 /**
  * Stream tasks for a project via WebSocket.
@@ -51,9 +58,27 @@ export function useProjectTasksStream({
     initialData,
   );
 
-  const tasksById = useMemo(
-    (): Record<string, StoredTask> => data?.tasks ?? {},
+  const rawTasksById = useMemo(
+    (): Record<string, StoredTask> => data?.tasks ?? EMPTY_TASKS_BY_ID,
     [data?.tasks],
+  );
+  const titleOverrides = useTaskTitleOverrides(projectId);
+  const clearTaskTitleOverride = useTaskTitleOverridesStore(
+    (state) => state.clearTaskTitleOverride,
+  );
+
+  useEffect(() => {
+    for (const [taskId, title] of Object.entries(titleOverrides)) {
+      if (rawTasksById[taskId]?.title === title) {
+        clearTaskTitleOverride(taskId, title);
+      }
+    }
+  }, [clearTaskTitleOverride, rawTasksById, titleOverrides]);
+
+  const tasksById = useMemo(
+    (): Record<string, StoredTask> =>
+      applyTaskTitleOverridesToTasksById(rawTasksById, titleOverrides),
+    [rawTasksById, titleOverrides],
   );
 
   const tasks = useMemo((): StoredTask[] => {

@@ -1,43 +1,52 @@
-
 import {
+  getProjectAssetUrl,
+  getProjectBinaryFileUrl,
+  getTaskRunAssetUrl,
+  getTaskRunBinaryFileUrl,
+  getWorkspaceAssetUrl,
+  getWorkspaceBinaryFileUrl,
+  readProjectFile,
+  readTaskRunFile,
+  readWorkspaceFileAtPath,
+  searchProjectFiles,
+} from "@/lib/project-client";
+import type { DesktopWorkspaceFile } from "@/types/desktop";
+import { Button } from "@chro/ui/button";
+import { cn } from "@chro/ui/utils";
+import { Code, Eye, RefreshCw } from "lucide-react";
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
-  type KeyboardEvent,
 } from "react";
 import TextareaAutosize from "react-textarea-autosize";
-import { cn } from "@chro/ui/utils";
-import { useFilesStore } from "../../state/files-store";
-import { useFileTreeStore } from "../../state/file-tree-store";
-import type { FileNode } from "../../types/file-tree";
-import type { DesktopWorkspaceFile } from "@/types/desktop";
-import {
-  readProjectFile,
-  getProjectBinaryFileUrl,
-  searchProjectFiles,
-} from "@/lib/project-client";
+import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
+import { useAutoSave } from "../../hooks/use-auto-save";
+import {
+  type Frontmatter,
+  combineFrontmatterAndBody,
+  parseFrontmatter,
+} from "../../lib/frontmatter";
+import { useFileTreeStore } from "../../state/file-tree-store";
+import { useFilesStore, type WorkspaceRoot } from "../../state/files-store";
+import type { FileNode } from "../../types/file-tree";
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from "./codemirror";
 import { FormattingMenu } from "./codemirror/plugins/bubble-menu";
+import { EditorFindBar } from "./editor-find-bar";
 import type { EmbedPluginConfig } from "./codemirror/plugins/prose";
-import { ImageViewer } from "./image-viewer";
-import { VideoViewer } from "./video-viewer";
-import { PdfViewer } from "./pdf-viewer";
 import { ExcalidrawEditor } from "./excalidraw-editor";
-import { BaseViewer } from "../../../cbase/components/cbase-viewer";
-import { useAutoSave } from "../../hooks/use-auto-save";
 import {
   FrontmatterEditor,
   type FrontmatterViewMode,
 } from "./frontmatter-editor";
-import {
-  parseFrontmatter,
-  combineFrontmatterAndBody,
-  type Frontmatter,
-} from "../../lib/frontmatter";
+import { ImageViewer } from "./image-viewer";
+import { PdfViewer } from "./pdf-viewer";
+import { VideoViewer } from "./video-viewer";
 
 const IMAGE_EXTENSIONS = new Set([
   "png",
@@ -50,13 +59,7 @@ const IMAGE_EXTENSIONS = new Set([
   "avif",
 ]);
 
-const VIDEO_EXTENSIONS = new Set([
-  "mp4",
-  "webm",
-  "mov",
-  "avi",
-  "mkv",
-]);
+const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv"]);
 
 const PDF_EXTENSIONS = new Set(["pdf"]);
 
@@ -64,11 +67,15 @@ const EXCALIDRAW_EXTENSIONS = new Set(["excalidraw"]);
 
 const BASE_EXTENSIONS = new Set(["cbase"]);
 
+const HTML_EXTENSIONS = new Set(["html", "htm"]);
+
 /** Extensions rendered as prose (WYSIWYG markdown editor) */
 const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
 
 const isProseFile = (extension?: string | null): boolean => {
-  if (!extension) return true; // default to prose for extensionless files
+  // Prose view is a strict whitelist. Extensionless files (LICENSE, Makefile)
+  // and dotfiles (.env, .gitignore) fall through to the code editor.
+  if (!extension) return false;
   return PROSE_EXTENSIONS.has(extension.toLowerCase());
 };
 
@@ -97,6 +104,11 @@ const isBaseFile = (extension?: string | null): boolean => {
   return BASE_EXTENSIONS.has(extension.toLowerCase());
 };
 
+const isHtmlFile = (extension?: string | null): boolean => {
+  if (!extension) return false;
+  return HTML_EXTENSIONS.has(extension.toLowerCase());
+};
+
 const findNodeByPath = (
   nodes: FileNode[],
   target: string | null,
@@ -113,6 +125,42 @@ const findNodeByPath = (
     return null;
   };
   return walk(nodes);
+};
+
+const findWorkspaceRootForPath = (
+  roots: WorkspaceRoot[],
+  target: string | null,
+): WorkspaceRoot | null => {
+  if (!target) return null;
+  let best: WorkspaceRoot | null = null;
+  for (const root of roots) {
+    if (root.isPrimary) continue;
+    if (target === root.path || target.startsWith(`${root.path}/`)) {
+      if (!best || root.path.length > best.path.length) best = root;
+    }
+  }
+  return best;
+};
+
+const relativePathForFile = (
+  filePath: string | null,
+  node: FileNode | null,
+  workspaceRoot: WorkspaceRoot | null,
+): string | null => {
+  if (!filePath) return null;
+  if (node?.relativePath) return node.relativePath;
+  if (workspaceRoot) {
+    if (filePath === workspaceRoot.path) return "";
+    if (filePath.startsWith(`${workspaceRoot.path}/`)) {
+      return filePath.slice(workspaceRoot.path.length + 1);
+    }
+  }
+  // Virtual tree paths (e.g. "/docs/x.md") and host-absolute paths emitted by
+  // agents (e.g. "/Users/.../proj/docs/x.md") are both forwarded as-is. The
+  // server's path resolver (see crates/server/.../path_resolve.rs) strips any
+  // matching candidate root before reading from disk. Leaving the leading
+  // slash in place is what triggers that resolution.
+  return filePath;
 };
 
 const computeStats = (content: string) => {
@@ -133,28 +181,47 @@ const formatTimestamp = (value?: string | null): string => {
   });
 };
 
-export const FilesEditor = () => {
+type FilesEditorProps = {
+  path?: string;
+  /**
+   * If set, file content is read from this task run's worktree
+   * (container_ref / workspace_path) instead of the project main checkout.
+   * Editing/saving falls back to project paths and is disabled until a
+   * worktree write endpoint exists; for now treat task-run files as read-only.
+   */
+  taskRunId?: string;
+};
+
+export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   const projectId = useProjectId();
   const {
     currentFilePath,
     fileTree,
+    roots,
     renameDisplayName,
     openFile,
     selectNode,
     fileContentVersion,
   } = useFilesStore();
   const { expandToPath } = useFileTreeStore();
+  const editorFilePath = path ?? currentFilePath;
   const editorRef = useRef<CodeMirrorEditorHandle>(null);
+  const workspaceRoot = useMemo(
+    () => findWorkspaceRootForPath(roots, editorFilePath),
+    [roots, editorFilePath],
+  );
   const currentNode = useMemo(
-    () => findNodeByPath(fileTree, currentFilePath),
-    [fileTree, currentFilePath],
+    () =>
+      workspaceRoot
+        ? findNodeByPath(workspaceRoot.children ?? [], editorFilePath)
+        : findNodeByPath(fileTree, editorFilePath),
+    [fileTree, workspaceRoot, editorFilePath],
   );
 
   const fallbackFileName = useMemo(() => {
-    const path = currentFilePath ?? "";
-    const cleaned = path.replace(/^\/+/, "");
+    const cleaned = (editorFilePath ?? "").replace(/^\/+/, "");
     return cleaned.split("/").pop() ?? "";
-  }, [currentFilePath]);
+  }, [editorFilePath]);
 
   const fallbackDisplayName = useMemo(() => {
     if (!fallbackFileName) return "";
@@ -188,26 +255,61 @@ export const FilesEditor = () => {
   const [frontmatterViewMode, setFrontmatterViewMode] =
     useState<FrontmatterViewMode>("ui");
 
-  const relativePath = currentFilePath
-    ? currentFilePath.replace(/^\/+/, "")
-    : null;
+  // HTML viewer toggle: "preview" renders an iframe, "raw" shows source in CodeMirror
+  const [htmlViewMode, setHtmlViewMode] = useState<"preview" | "raw">(
+    "preview",
+  );
+  // Bumped manually to force the preview iframe to reload after a save / refresh
+  const [htmlPreviewKey, setHtmlPreviewKey] = useState(0);
+
+  // In-editor find bar (Cmd/Ctrl+F). Rendered above the title/frontmatter so
+  // it floats at the top of the file view like Obsidian's find panel.
+  const [isFindOpen, setIsFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const openFindBar = useCallback(() => setIsFindOpen(true), []);
+  const closeFindBar = useCallback(() => {
+    setIsFindOpen(false);
+    editorRef.current?.focus();
+  }, []);
+  // Close the find bar whenever the active file changes.
+  useEffect(() => {
+    setIsFindOpen(false);
+  }, [editorFilePath]);
+
+  const relativePath = useMemo(
+    () => relativePathForFile(editorFilePath, currentNode, workspaceRoot),
+    [editorFilePath, currentNode, workspaceRoot],
+  );
+  const workspaceRootPath = workspaceRoot?.path ?? null;
   const fileExtension = currentNode?.metadata?.extension ?? fallbackExtension;
   const isImage = isImageFile(fileExtension);
   const isVideo = isVideoFile(fileExtension);
   const isPdf = isPdfFile(fileExtension);
   const isExcalidraw = isExcalidrawFile(fileExtension);
   const isBase = isBaseFile(fileExtension);
+  const isHtml = isHtmlFile(fileExtension);
   const isProse = isProseFile(fileExtension);
   const headerPathLabel = currentNode
     ? relativePath ?? currentNode.path.replace(/^\/+/, "")
-    : "";
+    : taskRunId
+      ? relativePath ?? ""
+      : "";
 
   // Auto-save hook (Obsidian-style: silent, no status UI)
-  // Disabled for image/video/pdf/excalidraw files since they have their own save handling
+  // Disabled for image/video/pdf/excalidraw files since they have their own save handling.
+  // Also disabled when scoped to a task-run worktree — writing back is not yet
+  // wired through, and writing to the project main checkout would be wrong.
   const { saveNow, isDirty } = useAutoSave({
     relativePath,
     content,
-    enabled: !isImage && !isVideo && !isPdf && !isExcalidraw && !isBase,
+    enabled:
+      !isImage &&
+      !isVideo &&
+      !isPdf &&
+      !isExcalidraw &&
+      !isBase &&
+      !taskRunId &&
+      !workspaceRootPath,
     debounceMs: 2000,
   });
 
@@ -286,6 +388,21 @@ export const FilesEditor = () => {
         editorRef.current?.redo();
         return;
       }
+
+      // Handle find: Ctrl+F or Cmd+F. Intercept here too (in addition to the
+      // CodeMirror keymap) so the bar opens even when focus is in the title
+      // input or frontmatter, and so the browser's native find never fires.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "f" || e.key === "F")
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsFindOpen(true);
+        return;
+      }
     };
 
     // Use capture phase to intercept before other handlers
@@ -312,20 +429,30 @@ export const FilesEditor = () => {
       return;
     }
 
-    if (!currentFilePath || !projectId) {
+    if (!editorFilePath || !relativePath) {
+      setWorkspaceFile(null);
+      setWorkspaceError(null);
+      return;
+    }
+    if (!taskRunId && !workspaceRootPath && !projectId) {
       setWorkspaceFile(null);
       setWorkspaceError(null);
       return;
     }
     let active = true;
-    const isExternalReload = loadedFilePath === currentFilePath;
+    const isExternalReload = loadedFilePath === editorFilePath;
     if (!isExternalReload) {
       setWorkspaceLoading(true);
     }
     setWorkspaceError(null);
-    const fileRelativePath = currentFilePath.replace(/^\/+/, "");
 
-    readProjectFile(projectId, fileRelativePath)
+    const readPromise = taskRunId
+      ? readTaskRunFile(taskRunId, relativePath)
+      : workspaceRootPath
+        ? readWorkspaceFileAtPath(workspaceRootPath, relativePath)
+        : readProjectFile(projectId!, relativePath);
+
+    readPromise
       .then((file) => {
         if (!active) return;
         // Skip frontmatter parsing for non-prose files
@@ -334,7 +461,7 @@ export const FilesEditor = () => {
           setContent(file.content);
           setFrontmatter({});
           setEditorBody(file.content);
-          setLoadedFilePath(currentFilePath);
+          setLoadedFilePath(editorFilePath);
           return;
         }
         const parsed = parseFrontmatter(file.content);
@@ -342,11 +469,15 @@ export const FilesEditor = () => {
         setContent(file.content);
         setFrontmatter(parsed.frontmatter);
         setEditorBody(parsed.body);
-        setLoadedFilePath(currentFilePath);
+        setLoadedFilePath(editorFilePath);
       })
       .catch((error) => {
         if (!active) return;
         setWorkspaceFile(null);
+        setContent("");
+        setFrontmatter({});
+        setEditorBody("");
+        setLoadedFilePath(editorFilePath);
         const raw =
           error instanceof Error ? error.message : "Failed to load file";
         if (raw === "target is not a file") {
@@ -366,7 +497,20 @@ export const FilesEditor = () => {
     return () => {
       active = false;
     };
-  }, [currentFilePath, isImage, isVideo, isPdf, isExcalidraw, isBase, isProse, projectId, fileContentVersion]);
+  }, [
+    editorFilePath,
+    isImage,
+    isVideo,
+    isPdf,
+    isExcalidraw,
+    isBase,
+    isProse,
+    projectId,
+    relativePath,
+    taskRunId,
+    workspaceRootPath,
+    fileContentVersion,
+  ]);
 
   const stats = useMemo(() => computeStats(content), [content]);
 
@@ -474,6 +618,41 @@ export const FilesEditor = () => {
   /**
    * Embed configuration for the CodeMirror editor
    */
+  const getBinaryFileUrl = useCallback(
+    (targetRelativePath: string): string => {
+      const base = taskRunId
+        ? getTaskRunBinaryFileUrl(taskRunId, targetRelativePath)
+        : workspaceRootPath
+          ? getWorkspaceBinaryFileUrl(workspaceRootPath, targetRelativePath)
+          : projectId
+            ? getProjectBinaryFileUrl(projectId, targetRelativePath)
+            : "";
+      if (!base) return "";
+      return fileContentVersion ? `${base}&_v=${fileContentVersion}` : base;
+    },
+    [projectId, taskRunId, workspaceRootPath, fileContentVersion],
+  );
+
+  /**
+   * Path-based asset URL used by the HTML preview iframe so that relative
+   * `<link>` / `<script>` / `<img>` references inside the served HTML resolve
+   * naturally to sibling files via the same endpoint.
+   */
+  const getAssetUrl = useCallback(
+    (targetRelativePath: string): string => {
+      const base = taskRunId
+        ? getTaskRunAssetUrl(taskRunId, targetRelativePath)
+        : workspaceRootPath
+          ? getWorkspaceAssetUrl(workspaceRootPath, targetRelativePath)
+          : projectId
+            ? getProjectAssetUrl(projectId, targetRelativePath)
+            : "";
+      if (!base) return "";
+      return fileContentVersion ? `${base}?_v=${fileContentVersion}` : base;
+    },
+    [projectId, taskRunId, workspaceRootPath, fileContentVersion],
+  );
+
   const embedConfig: EmbedPluginConfig = useMemo(
     () => ({
       getImageUrl: (path: string) => {
@@ -502,17 +681,18 @@ export const FilesEditor = () => {
           }
         }
 
-        if (!projectId) return "";
-        const base = getProjectBinaryFileUrl(projectId, resolved.join("/"));
-        return fileContentVersion ? `${base}&_v=${fileContentVersion}` : base;
+        const joined = resolved.join("/");
+        return getBinaryFileUrl(joined);
       },
     }),
-    [relativePath, projectId, fileContentVersion],
+    [relativePath, getBinaryFileUrl],
   );
 
   // Early returns must come AFTER all hooks
-  if (!currentFilePath) {
-    return <div className="flex h-full w-full flex-1 bg-custom-background-100" />;
+  if (!editorFilePath) {
+    return (
+      <div className="flex h-full w-full flex-1 bg-custom-background-100" />
+    );
   }
 
   // Handle image files with ImageViewer
@@ -522,6 +702,7 @@ export const FilesEditor = () => {
         relativePath={relativePath}
         fileName={currentNode?.name ?? fallbackFileName}
         contentVersion={fileContentVersion}
+        sourceUrl={getBinaryFileUrl(relativePath)}
       />
     );
   }
@@ -533,6 +714,7 @@ export const FilesEditor = () => {
         relativePath={relativePath}
         fileName={currentNode?.name ?? fallbackFileName}
         contentVersion={fileContentVersion}
+        sourceUrl={getBinaryFileUrl(relativePath)}
       />
     );
   }
@@ -544,23 +726,25 @@ export const FilesEditor = () => {
         relativePath={relativePath}
         fileName={currentNode?.name ?? fallbackFileName}
         contentVersion={fileContentVersion}
+        sourceUrl={getBinaryFileUrl(relativePath)}
       />
     );
   }
 
   // Handle Excalidraw files with ExcalidrawEditor
-  if (isExcalidraw && relativePath && loadedFilePath === currentFilePath) {
+  if (isExcalidraw && relativePath && loadedFilePath === editorFilePath) {
     return (
       <ExcalidrawEditor
         relativePath={relativePath}
         fileName={currentNode?.name ?? fallbackFileName}
         initialContent={content}
+        workspaceRootPath={workspaceRootPath ?? undefined}
       />
     );
   }
 
   // Handle .cbase files with BaseViewer
-  if (isBase && loadedFilePath === currentFilePath) {
+  if (isBase && loadedFilePath === editorFilePath) {
     return (
       <BaseViewer
         content={content}
@@ -572,7 +756,7 @@ export const FilesEditor = () => {
 
   // Show loading state when content hasn't been loaded yet for the current file
   // This prevents showing stale content from the previous file
-  const isContentStale = loadedFilePath !== currentFilePath;
+  const isContentStale = loadedFilePath !== editorFilePath;
   if (isContentStale || workspaceLoading) {
     return (
       <div className="flex h-full w-full flex-1 items-center justify-center bg-custom-background-100 font-workspace text-sm text-muted-foreground">
@@ -674,6 +858,7 @@ export const FilesEditor = () => {
 
   // Code file layout: no title editing, no frontmatter, line numbers
   if (!isProse) {
+    const showHtmlPreview = isHtml && htmlViewMode === "preview";
     return (
       <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]">
         <div
@@ -685,19 +870,86 @@ export const FilesEditor = () => {
               {currentNode?.name ?? fallbackFileName}
             </span>
             <span className="text-muted-foreground">{headerPathLabel}</span>
+            {isHtml && (
+              <div className="ml-auto flex items-center gap-1">
+                {htmlViewMode === "preview" && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-6"
+                    onClick={async () => {
+                      if (isDirty) await saveNow();
+                      setHtmlPreviewKey((k) => k + 1);
+                    }}
+                    title="Refresh preview"
+                  >
+                    <RefreshCw className="size-3.5" />
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant={htmlViewMode === "preview" ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[11px]"
+                  onClick={async () => {
+                    // Switching to preview: flush any pending edits first so the
+                    // iframe loads the latest on-disk content.
+                    if (isDirty) await saveNow();
+                    setHtmlPreviewKey((k) => k + 1);
+                    setHtmlViewMode("preview");
+                  }}
+                  title="Preview rendered HTML"
+                >
+                  <Eye className="size-3.5" />
+                  Preview
+                </Button>
+                <Button
+                  type="button"
+                  variant={htmlViewMode === "raw" ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[11px]"
+                  onClick={() => setHtmlViewMode("raw")}
+                  title="View raw source"
+                >
+                  <Code className="size-3.5" />
+                  Raw
+                </Button>
+              </div>
+            )}
           </header>
           <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="show-scrollbar flex flex-1 flex-col overflow-y-auto">
-              <CodeMirrorEditor
-                ref={editorRef}
-                contentKey={loadedFilePath ?? ""}
-                initialContent={content}
-                onChange={(value) => setContent(value)}
-                className="min-h-0 h-full w-full flex-1"
-                mode="code"
-                fileExtension={fileExtension ?? undefined}
+            {showHtmlPreview && relativePath ? (
+              <iframe
+                key={`${loadedFilePath ?? ""}-${htmlPreviewKey}`}
+                title={currentNode?.name ?? fallbackFileName}
+                src={`${getAssetUrl(relativePath)}${getAssetUrl(relativePath).includes("?") ? "&" : "?"}_r=${htmlPreviewKey}`}
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                className="h-full w-full flex-1 border-0 bg-white"
               />
-            </div>
+            ) : (
+              <div className="show-scrollbar flex flex-1 flex-col overflow-y-auto">
+                <div className="chro-find-bar-mount px-3 pt-2">
+                  <EditorFindBar
+                    open={isFindOpen}
+                    query={findQuery}
+                    onQueryChange={setFindQuery}
+                    onClose={closeFindBar}
+                    editorRef={editorRef}
+                  />
+                </div>
+                <CodeMirrorEditor
+                  ref={editorRef}
+                  contentKey={loadedFilePath ?? ""}
+                  initialContent={content}
+                  onChange={(value) => setContent(value)}
+                  className="min-h-0 h-full w-full flex-1"
+                  mode="code"
+                  fileExtension={fileExtension ?? undefined}
+                  onFindRequest={openFindBar}
+                />
+              </div>
+            )}
           </div>
           <footer className="flex h-10 items-center gap-4 border-t border-border bg-muted px-5 text-[12px] text-muted-foreground">
             <span>Modified {formatTimestamp(workspaceFile?.modifiedAt)}</span>
@@ -716,8 +968,20 @@ export const FilesEditor = () => {
         className="flex flex-1 flex-col overflow-hidden bg-custom-background-100"
       >
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="show-scrollbar flex flex-1 flex-col overflow-y-auto px-10 py-8">
-            <div className="mx-auto flex w-full max-w-[800px] flex-1 flex-col box-border px-[50px]">
+          <div
+            className="show-scrollbar flex flex-1 flex-col overflow-y-auto py-8"
+            style={{ containerType: "inline-size" }}
+          >
+            <div className="mx-auto flex w-full max-w-[800px] flex-1 flex-col box-border px-[clamp(24px,6cqi,50px)]">
+              <div className="chro-find-bar-mount">
+                <EditorFindBar
+                  open={isFindOpen}
+                  query={findQuery}
+                  onQueryChange={setFindQuery}
+                  onClose={closeFindBar}
+                  editorRef={editorRef}
+                />
+              </div>
               <div className="flex flex-col gap-2">
                 <TextareaAutosize
                   minRows={1}
@@ -760,6 +1024,7 @@ export const FilesEditor = () => {
                   onInternalLinkClick={handleInternalLinkClick}
                   embedConfig={embedConfig}
                   onEmbedClick={handleEmbedClick}
+                  onFindRequest={openFindBar}
                 />
               </div>
             </div>

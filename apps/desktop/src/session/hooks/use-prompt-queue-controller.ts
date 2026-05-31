@@ -29,6 +29,7 @@ export type QueuedPromptItem = {
   id: string;
   prompt: string;
   imageIds: string[] | null;
+  selectedSkillIds: string[];
   createdAt: number;
 };
 
@@ -69,33 +70,39 @@ export function usePromptQueueController({
     [],
   );
 
-  const removeFromPromptQueue = useCallback((queueKey: string, itemId: string) => {
-    setQueuedPromptsByTask((prev) => {
-      const queue = prev[queueKey] ?? EMPTY_PROMPT_QUEUE;
-      if (!queue.some((item) => item.id === itemId)) {
-        return prev;
-      }
-      const next = { ...prev };
-      delete next[queueKey];
-      return next;
-    });
-  }, []);
+  const removeFromPromptQueue = useCallback(
+    (queueKey: string, itemId: string) => {
+      setQueuedPromptsByTask((prev) => {
+        const queue = prev[queueKey] ?? EMPTY_PROMPT_QUEUE;
+        if (!queue.some((item) => item.id === itemId)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[queueKey];
+        return next;
+      });
+    },
+    [],
+  );
 
-  const popPromptQueueItem = useCallback((queueKey: string, itemId: string) => {
-    let poppedItem: QueuedPromptItem | null = null;
-    setQueuedPromptsByTask((prev) => {
-      const queue = prev[queueKey] ?? EMPTY_PROMPT_QUEUE;
-      const target = queue.find((item) => item.id === itemId);
-      if (!target) {
-        return prev;
-      }
-      poppedItem = target;
-      const next = { ...prev };
-      delete next[queueKey];
-      return next;
-    });
-    return poppedItem;
-  }, []);
+  const popPromptQueueItem = useCallback(
+    (queueKey: string, itemId: string): QueuedPromptItem | null => {
+      let poppedItem: QueuedPromptItem | null = null;
+      setQueuedPromptsByTask((prev) => {
+        const queue = prev[queueKey] ?? EMPTY_PROMPT_QUEUE;
+        const target = queue.find((item) => item.id === itemId);
+        if (!target) {
+          return prev;
+        }
+        poppedItem = target;
+        const next = { ...prev };
+        delete next[queueKey];
+        return next;
+      });
+      return poppedItem;
+    },
+    [],
+  );
 
   const prependPromptQueueItem = useCallback(
     (queueKey: string, item: QueuedPromptItem) => {
@@ -201,7 +208,11 @@ export function usePromptQueueController({
     queueProcessingRef.current = true;
     try {
       const isSent = await submitPrompt(
-        { prompt: queuedItem.prompt, imageIds: queuedItem.imageIds },
+        {
+          prompt: queuedItem.prompt,
+          imageIds: queuedItem.imageIds,
+          selectedSkillIds: queuedItem.selectedSkillIds,
+        },
         { restoreOnError: false },
       );
       if (!isSent) {
@@ -291,7 +302,11 @@ export function usePromptQueueController({
         }
 
         const isSent = await submitPrompt(
-          { prompt: queuedItem.prompt, imageIds: queuedItem.imageIds },
+          {
+            prompt: queuedItem.prompt,
+            imageIds: queuedItem.imageIds,
+            selectedSkillIds: queuedItem.selectedSkillIds,
+          },
           { restoreOnError: false },
         );
         if (!isSent) {

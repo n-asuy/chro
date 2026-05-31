@@ -60,6 +60,9 @@ impl IntoResponse for ApiError {
                 RuntimeError::Unsupported(_) => {
                     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
                 }
+                RuntimeError::Skills(_) => {
+                    (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+                }
                 RuntimeError::Git(git_err) => {
                     use git::GitServiceError;
                     match git_err {

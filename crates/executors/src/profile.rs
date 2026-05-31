@@ -971,6 +971,28 @@ async fn detect_install_info(command: &'static str) -> ExecutorInstallInfo {
     }
 }
 
+/// Manifest-aware install detection. Walks the layered candidate list so the
+/// `installed` flag reflects every place a user might have installed the CLI
+/// (Homebrew, `~/.local/bin`, the official installer dir, etc.).
+async fn detect_install_info_for_manifest(
+    manifest: &'static crate::cli_manifest::CliManifest,
+) -> ExecutorInstallInfo {
+    let resolved = crate::cli_resolver::resolve_cli(manifest).await;
+    let resolved_path = resolved.as_ref().map(|r| r.path.clone());
+    let detected_version = match resolved_path.as_ref() {
+        Some(path) => detect_installed_version(path).await,
+        None => None,
+    };
+    let resolved_path = resolved_path.map(|p| p.to_string_lossy().into_owned());
+
+    ExecutorInstallInfo {
+        installed: resolved_path.is_some(),
+        command: manifest.command.to_string(),
+        resolved_path,
+        detected_version,
+    }
+}
+
 async fn detect_installed_version(resolved_path: &Path) -> Option<String> {
     let output = tokio::process::Command::new(resolved_path)
         .arg("--version")
@@ -1005,8 +1027,8 @@ fn extract_detected_version(stdout: &[u8], stderr: &[u8]) -> Option<String> {
 /// This checks whether the CLI command required by the renderer auth flow can
 /// actually be resolved from the current environment.
 pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
-    let claude_code = detect_install_info("claude").await;
-    let codex = detect_install_info("codex").await;
+    let claude_code = detect_install_info_for_manifest(&crate::cli_manifest::CLAUDE).await;
+    let codex = detect_install_info_for_manifest(&crate::cli_manifest::CODEX).await;
     let git = detect_install_info("git").await;
 
     ExecutorInstallStatusResult {
@@ -1183,16 +1205,19 @@ fn extract_auth_url(text: &str) -> Option<String> {
 pub async fn trigger_auth_login(
     executor: BaseCodingAgent,
 ) -> Result<AuthLoginResult, ExecutorError> {
-    let (program, args): (&str, Vec<&str>) = match executor {
-        BaseCodingAgent::ClaudeCode => ("claude", vec!["auth", "login"]),
-        BaseCodingAgent::Codex => ("codex", vec!["login"]),
+    let (manifest, args): (&'static crate::cli_manifest::CliManifest, Vec<&str>) = match executor {
+        BaseCodingAgent::ClaudeCode => (&crate::cli_manifest::CLAUDE, vec!["auth", "login"]),
+        BaseCodingAgent::Codex => (&crate::cli_manifest::CODEX, vec!["login"]),
     };
+    let program = manifest.command;
 
-    let executable = resolve_executable_path(program).await.ok_or_else(|| {
-        ExecutorError::ExecutableNotFound {
+    let executable = crate::cli_resolver::resolve_cli(manifest)
+        .await
+        .map(|r| r.path)
+        .ok_or_else(|| ExecutorError::ExecutableNotFound {
             program: program.to_string(),
-        }
-    })?;
+            install_hint: Some(manifest.install_hint.to_string()),
+        })?;
 
     let mut cmd = tokio::process::Command::new(&executable);
     cmd.args(args)

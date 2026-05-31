@@ -1,0 +1,14 @@
+[package]
+name = "chro-mobile-native"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "chro_mobile_native"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

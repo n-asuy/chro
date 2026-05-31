@@ -36,6 +36,13 @@ pub enum BaseAgentCapability {
     SetupHelper,
 }
 
+fn format_executable_not_found(program: &str, install_hint: Option<&str>) -> String {
+    match install_hint {
+        Some(hint) => format!("Executable `{program}` not found. {hint}"),
+        None => format!("Executable `{program}` not found in PATH"),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("Follow-up is not supported: {0}")]
@@ -54,8 +61,11 @@ pub enum ExecutorError {
     ExecutorApprovalError(#[from] crate::approvals::ExecutorApprovalError),
     #[error(transparent)]
     CommandBuild(#[from] CommandBuildError),
-    #[error("Executable `{program}` not found in PATH")]
-    ExecutableNotFound { program: String },
+    #[error("{}", format_executable_not_found(.program, .install_hint.as_deref()))]
+    ExecutableNotFound {
+        program: String,
+        install_hint: Option<String>,
+    },
     #[error("Setup helper not supported")]
     SetupHelperNotSupported,
     #[error("Auth required: {0}")]

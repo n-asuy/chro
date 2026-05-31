@@ -5,10 +5,9 @@
 //! as a chronological Markdown conversation — the same source data that Claude
 //! Code saves as JSONL in `~/.claude/projects/`.
 
-use std::{fmt::Write, fs, path::Path};
+use std::fmt::Write;
 
 use executors::{ClaudeContentItem, ClaudeJson};
-use image::{ensure_context_dir, WORKTREE_IMAGES_DIR as CONTEXT_DIR};
 use log_types::LogEntry;
 use runtime::RuntimeError;
 use serde_json::Value;
@@ -17,14 +16,13 @@ use uuid::Uuid;
 use crate::LocalRuntime;
 
 impl LocalRuntime {
-    /// Generate a transcript Markdown file for an entire task (all runs
-    /// combined in chronological order) and write it under `workspace_path`.
-    ///
-    /// Returns the relative path suitable for `addFilePart()`.
-    pub async fn generate_task_transcript(
+    /// Render the Markdown transcript for an entire task (all runs combined in
+    /// chronological order) and return the content. The runtime inlines this
+    /// content into the executor's prompt at start-of-execution time, so no
+    /// transcript file ever lands on disk.
+    pub async fn task_transcript_markdown(
         &self,
         task_id: Uuid,
-        workspace_path: &Path,
     ) -> Result<String, RuntimeError> {
         let runs = db::models::TaskRun::list_by_task_id(self.db.pool(), task_id).await?;
 
@@ -35,17 +33,7 @@ impl LocalRuntime {
             all_entries.extend(entries);
         }
 
-        let markdown = render_raw_transcript(&all_entries, &task_id.to_string());
-
-        let context_dir = ensure_context_dir(workspace_path)?;
-        let sessions_dir = context_dir.join("sessions");
-        fs::create_dir_all(&sessions_dir)?;
-
-        let filename = format!("{task_id}.md");
-        let file_path = sessions_dir.join(&filename);
-        fs::write(&file_path, &markdown)?;
-
-        Ok(format!("{CONTEXT_DIR}/sessions/{filename}"))
+        Ok(render_raw_transcript(&all_entries, &task_id.to_string()))
     }
 }
 
@@ -63,9 +51,6 @@ fn render_raw_transcript(entries: &[LogEntry], task_id: &str) -> String {
     writeln!(out, "- task_id: {task_id}").unwrap();
     writeln!(out, "- generated_at: {}", chrono::Utc::now().to_rfc3339()).unwrap();
 
-    // Buffer for incomplete stdout lines
-    let mut stdout_buf = String::new();
-
     for entry in entries {
         match entry {
             LogEntry::UserPrompt(prompt) => {
@@ -75,31 +60,22 @@ fn render_raw_transcript(entries: &[LogEntry], task_id: &str) -> String {
                 writeln!(out, "{prompt}").unwrap();
             }
             LogEntry::Stdout(chunk) => {
-                stdout_buf.push_str(chunk);
-
-                // Process complete lines
-                while let Some(newline_pos) = stdout_buf.find('\n') {
-                    let line = stdout_buf[..newline_pos].trim().to_string();
-                    stdout_buf = stdout_buf[newline_pos + 1..].to_string();
-
-                    if line.is_empty() {
+                // Each Stdout entry is one logical unit, written as a single
+                // complete JSON line by the Claude executor (no trailing \n)
+                // or as one-or-more newline-delimited JSON lines from other
+                // sources. Parse each non-empty line independently — buffering
+                // across entries would only conflate distinct messages.
+                for line in chunk.split('\n') {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
                         continue;
                     }
-
-                    if let Ok(claude_json) = serde_json::from_str::<ClaudeJson>(&line) {
+                    if let Ok(claude_json) = serde_json::from_str::<ClaudeJson>(trimmed) {
                         render_claude_json(&mut out, &claude_json, &mut has_content);
                     }
                 }
             }
             _ => {}
-        }
-    }
-
-    // Flush remaining buffer
-    let remaining = stdout_buf.trim().to_string();
-    if !remaining.is_empty() {
-        if let Ok(claude_json) = serde_json::from_str::<ClaudeJson>(&remaining) {
-            render_claude_json(&mut out, &claude_json, &mut has_content);
         }
     }
 
@@ -212,6 +188,18 @@ fn render_message_content(
                     writeln!(out, "{text}").unwrap();
                 }
             }
+            ClaudeContentItem::Unknown { data } => {
+                let block_type = data
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                write_separator(out, has_content);
+                writeln!(out, "### Unsupported content block: {block_type}").unwrap();
+                writeln!(out).unwrap();
+                if let Ok(rendered) = serde_json::to_string_pretty(data) {
+                    writeln!(out, "```json\n{rendered}\n```").unwrap();
+                }
+            }
         }
     }
 }
@@ -296,12 +284,37 @@ mod tests {
     fn assistant_text_message() {
         let entries = vec![LogEntry::Stdout(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will fix it."}]}}"#
-                .to_string()
-                + "\n",
+                .to_string(),
         )];
         let md = render_raw_transcript(&entries, "task-1");
         assert!(md.contains("### Assistant"));
         assert!(md.contains("I will fix it."));
+    }
+
+    /// Regression: the Claude executor writes each stream-json line as a
+    /// `LogEntry::Stdout` payload **without** a trailing newline. Multiple
+    /// consecutive entries must each render — previously they were concatenated
+    /// into a single buffer keyed by `\n`, which silently dropped every entry.
+    #[test]
+    fn multiple_stdout_entries_without_trailing_newline() {
+        let entries = vec![
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"First message"}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Second message"}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Third message"}]}}"#
+                    .to_string(),
+            ),
+        ];
+        let md = render_raw_transcript(&entries, "task-1");
+        assert!(md.contains("First message"), "first message missing:\n{md}");
+        assert!(md.contains("Second message"), "second message missing:\n{md}");
+        assert!(md.contains("Third message"), "third message missing:\n{md}");
     }
 
     #[test]

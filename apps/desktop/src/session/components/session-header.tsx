@@ -1,5 +1,4 @@
-
-import { useState, useRef, useEffect, useCallback } from "react";
+import type { TranslationFunction } from "@/i18n";
 import { Button } from "@chro/ui/button";
 import {
   Tooltip,
@@ -16,7 +15,7 @@ import {
   PanelLeft,
   Pencil,
 } from "lucide-react";
-import type { TranslationFunction } from "@/i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
@@ -166,12 +165,13 @@ export function SessionHeader({
                 className="w-full bg-transparent text-[12px] font-medium text-foreground outline-none border-b border-border focus:border-primary py-0.5"
               />
             ) : (
-              <div className="group flex items-center gap-1.5">
+              <div className="group flex min-w-0 items-start gap-1.5">
                 <button
                   type="button"
                   onClick={() => onTitleChange && setIsEditing(true)}
+                  title={taskTitle ?? undefined}
                   className={cn(
-                    "whitespace-pre-line text-[12px] leading-[1.35] text-left",
+                    "min-w-0 flex-1 whitespace-pre-line break-words text-[12px] leading-[1.35] text-left line-clamp-2",
                     onTitleChange &&
                       "hover:bg-muted/50 rounded px-1 -mx-1 py-0.5 cursor-text",
                   )}
@@ -226,7 +226,7 @@ export function SessionHeader({
                 variant="outline"
                 disabled={!canRebase}
                 onClick={onRebase}
-                className="inline-flex items-center gap-1.5 text-[12px]"
+                className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
               >
                 {isRebasing ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -260,7 +260,7 @@ export function SessionHeader({
                     size="sm"
                     variant="outline"
                     onClick={onOpenDiffViewer}
-                    className="inline-flex items-center gap-1.5 text-[12px]"
+                    className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
                   >
                     <FileDiff className="h-3.5 w-3.5" />
                     <span>{t("openDiffViewerLabel")}</span>
@@ -277,7 +277,7 @@ export function SessionHeader({
                     size="sm"
                     disabled={!canMergeDiffs}
                     onClick={onMergeDiffs}
-                    className="inline-flex items-center gap-1.5 text-[12px]"
+                    className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
                   >
                     {isMergingDiffs ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />

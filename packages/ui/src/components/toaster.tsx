@@ -25,17 +25,25 @@ export function Toaster({ viewportClassName, toastClassName }: ToasterProps) {
         <Toast
           key={id}
           {...props}
-          className={cn("max-w-md mx-auto", toastClassName, props.className)}
+          className={cn(
+            "mx-auto max-w-md items-start",
+            toastClassName,
+            props.className,
+          )}
         >
-          <div className="flex items-center gap-2 flex-1">
-            {title && <ToastTitle className="font-medium">{title}</ToastTitle>}
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5 pr-5">
+            {title && (
+              <ToastTitle className="min-w-0 break-words font-medium leading-snug">
+                {title}
+              </ToastTitle>
+            )}
             {description && (
-              <ToastDescription className="text-xs">
+              <ToastDescription className="min-w-0 break-words text-xs leading-snug">
                 {description}
               </ToastDescription>
             )}
           </div>
-          {action}
+          {action ? <div className="mr-5 shrink-0">{action}</div> : null}
           <ToastClose />
         </Toast>
       ))}

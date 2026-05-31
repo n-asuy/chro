@@ -1,7 +1,10 @@
-import { useCallback } from "react";
 import { cn } from "@chro/ui/utils";
+import { useCallback } from "react";
 import type { PromptEditorHandle } from "../../state/prompt-editor-store";
-import { usePromptEditorStore } from "../../state/prompt-editor-store";
+import {
+  getPromptEditorScopeState,
+  usePromptEditorStore,
+} from "../../state/prompt-editor-store";
 
 interface PromptEditorProps {
   handle: PromptEditorHandle;
@@ -34,7 +37,22 @@ export function PromptEditor({
   onPaste,
 }: PromptEditorProps) {
   // Subscribe only to popover (not the whole store)
-  const popover = usePromptEditorStore((s) => s.popover);
+  const popover = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, handle.scopeId).popover,
+  );
+  const isEmpty = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, handle.scopeId).isEmpty,
+  );
+
+  const setEditorNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      handle.editorRef.current = node;
+      if (node) {
+        handle.syncDomFromStore();
+      }
+    },
+    [handle],
+  );
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -43,7 +61,10 @@ export function PromptEditor({
 
       // 2. Popover open: delegate to parent
       // Read popover from store imperatively to avoid stale closure
-      const currentPopover = usePromptEditorStore.getState().popover;
+      const currentPopover = getPromptEditorScopeState(
+        usePromptEditorStore.getState(),
+        handle.scopeId,
+      ).popover;
       if (currentPopover && onPopoverKeyDown) {
         const handled = onPopoverKeyDown(e);
         if (handled) {
@@ -70,28 +91,43 @@ export function PromptEditor({
   );
 
   return (
-    <div
-      ref={handle.editorRef}
-      contentEditable={disabled ? false : "plaintext-only"}
-      role="textbox"
-      aria-multiline="true"
-      aria-placeholder={placeholder}
-      aria-disabled={disabled}
-      suppressContentEditableWarning
-      className={cn(
-        "max-h-48 min-h-[56px] w-full resize-none border-none bg-transparent p-0 text-sm leading-relaxed shadow-none outline-none",
-        "empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(aria-placeholder)]",
-        "[&_[data-type=file]]:inline-flex [&_[data-type=file]]:items-center [&_[data-type=file]]:rounded [&_[data-type=file]]:bg-blue-50 [&_[data-type=file]]:px-1 [&_[data-type=file]]:text-blue-600 [&_[data-type=file]]:dark:bg-blue-950 [&_[data-type=file]]:dark:text-blue-400",
-        "overflow-y-auto whitespace-pre-wrap break-words",
-        disabled && "cursor-not-allowed opacity-50",
+    <div className="relative">
+      {isEmpty && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute left-0 top-0 select-none text-sm leading-relaxed text-muted-foreground"
+        >
+          {placeholder}
+        </div>
       )}
-      onInput={handle.handleInput}
-      onKeyDown={handleKeyDown}
-      onCompositionStart={handle.handleCompositionStart}
-      onCompositionEnd={handle.handleCompositionEnd}
-      onDrop={onDrop}
-      onPaste={onPaste}
-      onDragOver={(e) => e.preventDefault()}
-    />
+      <div
+        ref={setEditorNode}
+        contentEditable={disabled ? false : "plaintext-only"}
+        role="textbox"
+        aria-multiline="true"
+        aria-placeholder={placeholder}
+        aria-disabled={disabled}
+        suppressContentEditableWarning
+        data-prompt-editor-drop="true"
+        className={cn(
+          "relative max-h-48 min-h-[56px] w-full resize-none border-none bg-transparent p-0 text-sm leading-relaxed shadow-none outline-none",
+          "[&_[data-type=file]]:inline-flex [&_[data-type=file]]:items-center [&_[data-type=file]]:rounded [&_[data-type=file]]:bg-blue-50 [&_[data-type=file]]:px-1 [&_[data-type=file]]:text-blue-600 [&_[data-type=file]]:dark:bg-blue-950 [&_[data-type=file]]:dark:text-blue-400",
+          "[&_[data-type=session]]:inline-flex [&_[data-type=session]]:items-center [&_[data-type=session]]:rounded [&_[data-type=session]]:bg-blue-50 [&_[data-type=session]]:px-1 [&_[data-type=session]]:text-blue-600 [&_[data-type=session]]:dark:bg-blue-950 [&_[data-type=session]]:dark:text-blue-400",
+          "[&_[data-type=skill]]:inline-flex [&_[data-type=skill]]:items-center [&_[data-type=skill]]:rounded [&_[data-type=skill]]:bg-emerald-50 [&_[data-type=skill]]:px-1 [&_[data-type=skill]]:text-emerald-700 [&_[data-type=skill]]:dark:bg-emerald-950 [&_[data-type=skill]]:dark:text-emerald-300",
+          "overflow-y-auto whitespace-pre-wrap break-words",
+          "transition-shadow",
+          "data-[prompt-editor-drop-active=true]:ring-2 data-[prompt-editor-drop-active=true]:ring-primary/60 data-[prompt-editor-drop-active=true]:ring-offset-2 data-[prompt-editor-drop-active=true]:ring-offset-background",
+          disabled && "cursor-not-allowed opacity-50",
+        )}
+        onInput={handle.handleInput}
+        onKeyDown={handleKeyDown}
+        onFocus={handle.activate}
+        onCompositionStart={handle.handleCompositionStart}
+        onCompositionEnd={handle.handleCompositionEnd}
+        onDrop={onDrop}
+        onPaste={onPaste}
+        onDragOver={(e) => e.preventDefault()}
+      />
+    </div>
   );
 }

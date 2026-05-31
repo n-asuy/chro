@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
 
+use crate::cli_manifest::CliManifest;
+use crate::cli_resolver::resolve_cli;
 use crate::executors::ExecutorError;
 use crate::shell::resolve_executable_path;
 
@@ -24,18 +26,53 @@ pub enum CommandBuildError {
 pub struct CommandParts {
     program: String,
     args: Vec<String>,
+    /// Manifest used to drive layered resolution. `None` when the caller
+    /// overrode the base command (`CmdOverrides::base_command_override`) — in
+    /// that case we trust the user's literal command and fall back to the
+    /// generic [`resolve_executable_path`] discovery sequence.
+    manifest: Option<&'static CliManifest>,
 }
 
 impl CommandParts {
     pub fn new(program: String, args: Vec<String>) -> Self {
-        Self { program, args }
+        Self {
+            program,
+            args,
+            manifest: None,
+        }
+    }
+
+    pub fn with_manifest(mut self, manifest: &'static CliManifest) -> Self {
+        self.manifest = Some(manifest);
+        self
     }
 
     pub async fn into_resolved(self) -> Result<(PathBuf, Vec<String>), ExecutorError> {
-        let CommandParts { program, args } = self;
-        let executable = resolve_executable_path(&program)
-            .await
-            .ok_or(ExecutorError::ExecutableNotFound { program })?;
+        let CommandParts {
+            program,
+            args,
+            manifest,
+        } = self;
+        let executable = match manifest {
+            Some(m) => match resolve_cli(m).await {
+                Some(resolved) => resolved.path,
+                None => {
+                    return Err(ExecutorError::ExecutableNotFound {
+                        program: m.command.to_string(),
+                        install_hint: Some(m.install_hint.to_string()),
+                    });
+                }
+            },
+            None => match resolve_executable_path(&program).await {
+                Some(found) => found,
+                None => {
+                    return Err(ExecutorError::ExecutableNotFound {
+                        program,
+                        install_hint: None,
+                    });
+                }
+            },
+        };
         Ok((executable, args))
     }
 }
@@ -75,10 +112,21 @@ impl CmdOverrides {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 pub struct CommandBuilder {
-    /// Base executable command (e.g., "npx -y @anthropic-ai/claude-code@latest")
+    /// Base executable command. When constructed via [`Self::for_manifest`],
+    /// this is the manifest's primary `command`. When constructed via
+    /// [`Self::new`] or after [`Self::override_base`], it can be an arbitrary
+    /// shell-splittable command string.
     pub base: String,
     /// Optional parameters to append to the base command
     pub params: Option<Vec<String>>,
+    /// Manifest reference, set when [`Self::for_manifest`] was used and not
+    /// yet overridden. Skipped in serialization since `&'static` references
+    /// can't round-trip through JSON / schema generation, and the manifest
+    /// is recovered from the executor type on the receiving side.
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    pub manifest: Option<&'static CliManifest>,
 }
 
 impl CommandBuilder {
@@ -86,6 +134,19 @@ impl CommandBuilder {
         Self {
             base: base.into(),
             params: None,
+            manifest: None,
+        }
+    }
+
+    /// Construct a builder bound to a CLI manifest. The manifest drives the
+    /// layered resolution in [`CommandParts::into_resolved`]; if the caller
+    /// later overrides the base command, the manifest is cleared so the
+    /// user's literal command wins.
+    pub fn for_manifest(manifest: &'static CliManifest) -> Self {
+        Self {
+            base: manifest.command.to_string(),
+            params: None,
+            manifest: Some(manifest),
         }
     }
 
@@ -100,6 +161,10 @@ impl CommandBuilder {
 
     pub fn override_base<S: Into<String>>(mut self, base: S) -> Self {
         self.base = base.into();
+        // Clear the manifest binding: once the user supplies a literal
+        // command, we cannot assume the binary lives at any candidate path
+        // the manifest declares.
+        self.manifest = None;
         self
     }
 
@@ -166,7 +231,11 @@ impl CommandBuilder {
         }
 
         let program = parts.remove(0);
-        Ok(CommandParts::new(program, parts))
+        let mut cp = CommandParts::new(program, parts);
+        if let Some(manifest) = self.manifest {
+            cp = cp.with_manifest(manifest);
+        }
+        Ok(cp)
     }
 }
 
@@ -234,6 +303,64 @@ mod tests {
             .expect("should build");
         assert_eq!(parts.program, "custom");
         assert_eq!(parts.args, vec!["--print", "--extra"]);
+    }
+
+    #[test]
+    fn for_manifest_carries_manifest_into_parts() {
+        let builder = CommandBuilder::for_manifest(&crate::cli_manifest::CODEX);
+        assert_eq!(builder.base, "codex");
+        let parts = builder.build_initial().expect("should build");
+        assert_eq!(parts.program, "codex");
+        assert!(parts.manifest.is_some());
+        assert_eq!(parts.manifest.unwrap().name, "codex");
+    }
+
+    #[test]
+    fn override_base_clears_manifest_binding() {
+        let builder = CommandBuilder::for_manifest(&crate::cli_manifest::CODEX);
+        let overrides = CmdOverrides {
+            base_command_override: Some("/opt/custom/codex".into()),
+            additional_params: None,
+            env: None,
+        };
+        let built = apply_overrides(builder, &overrides)
+            .expect("override applies")
+            .build_initial()
+            .expect("should build");
+        assert_eq!(built.program, "/opt/custom/codex");
+        // When the user overrides the base command, manifest-driven
+        // resolution is bypassed — falling back to the generic
+        // resolve_executable_path path that trusts the literal command.
+        assert!(
+            built.manifest.is_none(),
+            "manifest must be cleared after base override"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_found_with_manifest_includes_install_hint() {
+        // Build a manifest that points exclusively at a path that cannot exist
+        // and a non-existent env override; resolution must yield the install
+        // hint in the error payload.
+        let manifest = Box::leak(Box::new(crate::cli_manifest::CliManifest {
+            name: "ghost",
+            command: "ghost-cli",
+            env_override: Some("CHRO_TEST_GHOST_BIN_NEVER_SET"),
+            home_env: None,
+            default_home: None,
+            candidates: &[crate::cli_manifest::Candidate::Absolute(
+                "/definitely/does/not/exist/ghost-cli",
+            )],
+            install_hint: "ghost CLI is not real — this is a unit test.",
+        }));
+        let parts = CommandParts::new("ghost-cli".to_string(), Vec::new()).with_manifest(manifest);
+        let err = parts.into_resolved().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ghost-cli"),
+            "error must name the program: {msg}"
+        );
+        assert!(msg.contains("ghost CLI"), "error must carry hint: {msg}");
     }
 
     #[test]

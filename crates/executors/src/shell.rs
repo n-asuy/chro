@@ -36,7 +36,13 @@ pub struct ShellOutput {
 
 const PATH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Resolve an executable by name, refreshing the PATH from the user's login shell if needed.
+/// Resolve a generic executable by name.
+///
+/// Used for ad-hoc binaries that are not declared in a [`crate::cli_manifest::CliManifest`]
+/// (npm, curl, brew, etc.) and as the fallback path when a user overrides
+/// the CLI base command via `CmdOverrides::base_command_override`. CLI
+/// binaries that own a manifest should go through [`crate::cli_resolver::resolve_cli`]
+/// instead so they pick up candidate-list + login-shell PATH refresh.
 pub async fn resolve_executable_path(executable: &str) -> Option<PathBuf> {
     if executable.trim().is_empty() {
         return None;
@@ -47,61 +53,38 @@ pub async fn resolve_executable_path(executable: &str) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
 
-    if let Some(found) = which_async(executable).await {
+    if let Some(found) = which_executable(executable).await {
         return Some(found);
     }
 
-    if refresh_path().await {
-        if let Some(found) = which_async(executable).await {
-            return Some(found);
-        }
-    }
-
-    if let Some(found) = find_executable_in_known_locations(executable) {
+    if refresh_login_shell_path().await
+        && let Some(found) = which_executable(executable).await
+    {
         return Some(found);
     }
 
     None
 }
 
-fn find_executable_in_known_locations(executable: &str) -> Option<PathBuf> {
-    known_executable_locations(executable)
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
-fn known_executable_locations(executable: &str) -> Vec<PathBuf> {
-    match executable {
-        "claude" => dirs::home_dir()
-            .map(|home| claude_known_locations(&home))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
-
-#[cfg(not(windows))]
-fn claude_known_locations(home: &Path) -> Vec<PathBuf> {
-    vec![
-        home.join(".local").join("bin").join("claude"),
-        home.join(".claude").join("bin").join("claude"),
-    ]
-}
-
-#[cfg(windows)]
-fn claude_known_locations(home: &Path) -> Vec<PathBuf> {
-    vec![
-        home.join(".local").join("bin").join("claude.exe"),
-        home.join(".local").join("bin").join("claude.cmd"),
-        home.join(".claude").join("bin").join("claude.exe"),
-    ]
-}
-
-async fn which_async(executable: &str) -> Option<PathBuf> {
+/// Look up a binary by name via `which`, off the runtime so it doesn't block.
+///
+/// Public so the manifest-driven resolver in [`crate::cli_resolver`] can
+/// reuse the same primitive without re-implementing the spawn-blocking dance.
+pub async fn which_executable(executable: &str) -> Option<PathBuf> {
     let executable = executable.to_string();
     spawn_blocking(move || which::which(executable))
         .await
         .ok()
         .and_then(Result::ok)
+}
+
+/// Refresh `$PATH` from the user's login shell.
+///
+/// Public so the manifest-driven resolver can re-walk its candidate list
+/// after the GUI-launched process picks up the user's interactive PATH
+/// (Homebrew, NVM, etc.). Returns `true` when `$PATH` actually changed.
+pub async fn refresh_login_shell_path() -> bool {
+    refresh_path().await
 }
 
 async fn refresh_path() -> bool {
@@ -509,28 +492,3 @@ pub fn detect_shell() -> (&'static str, &'static str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(not(windows))]
-    #[test]
-    fn claude_known_locations_include_official_installer_path() {
-        let home = PathBuf::from("/tmp/chro-home");
-        let candidates = claude_known_locations(&home);
-
-        assert!(candidates.contains(&home.join(".local").join("bin").join("claude")));
-        assert!(candidates.contains(&home.join(".claude").join("bin").join("claude")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn claude_known_locations_include_official_installer_path() {
-        let home = PathBuf::from(r"C:\Users\chro");
-        let candidates = claude_known_locations(&home);
-
-        assert!(candidates.contains(&home.join(".local").join("bin").join("claude.exe")));
-        assert!(candidates.contains(&home.join(".local").join("bin").join("claude.cmd")));
-        assert!(candidates.contains(&home.join(".claude").join("bin").join("claude.exe")));
-    }
-}

@@ -5,12 +5,21 @@ import type { FileNode } from "../types/file-tree";
 import { FileNodeType } from "../types/file-tree";
 
 const DRAG_THRESHOLD_PX = 5;
+const PROMPT_EDITOR_DROP_SELECTOR = "[data-prompt-editor-drop]";
+const PROMPT_EDITOR_DROP_ACTIVE_ATTR = "data-prompt-editor-drop-active";
+
+interface DraggedNodeInfo {
+  path: string;
+  name: string;
+  isDir: boolean;
+}
 
 interface DragState {
   isDragging: boolean;
-  draggedNode: { path: string; name: string; isDir: boolean } | null;
+  draggedNode: DraggedNodeInfo | null;
   dropTargetPath: string | null;
   dropTargetIsDir: boolean;
+  isOverPromptEditor: boolean;
   mousePosition: { x: number; y: number };
 }
 
@@ -19,12 +28,21 @@ const initialDragState: DragState = {
   draggedNode: null,
   dropTargetPath: null,
   dropTargetIsDir: false,
+  isOverPromptEditor: false,
   mousePosition: { x: 0, y: 0 },
 };
+
+interface PromptEditorDropPayload {
+  node: DraggedNodeInfo;
+  clientX: number;
+  clientY: number;
+  target: HTMLElement;
+}
 
 interface UseFileTreeDndOptions {
   rootPath: string | null;
   onMove: (sourcePath: string, targetParentPath: string) => Promise<void>;
+  onDropToPromptEditor?: (payload: PromptEditorDropPayload) => void;
 }
 
 interface UseFileTreeDndReturn {
@@ -38,6 +56,7 @@ interface UseFileTreeDndReturn {
 export function useFileTreeDnd({
   rootPath,
   onMove,
+  onDropToPromptEditor,
 }: UseFileTreeDndOptions): UseFileTreeDndReturn {
   const [dragState, setDragState] = useState<DragState>(initialDragState);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
@@ -100,6 +119,26 @@ export function useFileTreeDnd({
     };
   }, [dragState.isDragging]);
 
+  // Toggle a hint attribute on the prompt editor while dragging over it
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const editors = document.querySelectorAll<HTMLElement>(
+      PROMPT_EDITOR_DROP_SELECTOR,
+    );
+    for (const el of Array.from(editors)) {
+      if (dragState.isOverPromptEditor) {
+        el.setAttribute(PROMPT_EDITOR_DROP_ACTIVE_ATTR, "true");
+      } else {
+        el.removeAttribute(PROMPT_EDITOR_DROP_ACTIVE_ATTR);
+      }
+    }
+    return () => {
+      for (const el of Array.from(editors)) {
+        el.removeAttribute(PROMPT_EDITOR_DROP_ACTIVE_ATTR);
+      }
+    };
+  }, [dragState.isOverPromptEditor]);
+
   // Global mouse events during drag
   useEffect(() => {
     if (!dragState.isDragging) return;
@@ -112,10 +151,20 @@ export function useFileTreeDnd({
 
       // Detect drop target using elementFromPoint
       const elementUnder = document.elementFromPoint(e.clientX, e.clientY);
+      const promptEditor = elementUnder?.closest(
+        PROMPT_EDITOR_DROP_SELECTOR,
+      ) as HTMLElement | null;
       const fileTreeItem = elementUnder?.closest("[data-file-path]");
       const fileTreeContainer = elementUnder?.closest("[data-file-tree-root]");
 
-      if (fileTreeItem) {
+      if (promptEditor) {
+        setDragState((prev: DragState) => ({
+          ...prev,
+          dropTargetPath: null,
+          dropTargetIsDir: false,
+          isOverPromptEditor: true,
+        }));
+      } else if (fileTreeItem) {
         const path = fileTreeItem.getAttribute("data-file-path");
         const isDir = fileTreeItem.getAttribute("data-is-dir") === "true";
 
@@ -129,12 +178,14 @@ export function useFileTreeDnd({
             ...prev,
             dropTargetPath: isDropIntoSelf ? null : path,
             dropTargetIsDir: isDropIntoSelf ? false : isDir,
+            isOverPromptEditor: false,
           }));
         } else {
           setDragState((prev: DragState) => ({
             ...prev,
             dropTargetPath: null,
             dropTargetIsDir: false,
+            isOverPromptEditor: false,
           }));
         }
       } else if (fileTreeContainer) {
@@ -143,17 +194,48 @@ export function useFileTreeDnd({
           ...prev,
           dropTargetPath: "__ROOT__",
           dropTargetIsDir: true,
+          isOverPromptEditor: false,
         }));
       } else {
         setDragState((prev: DragState) => ({
           ...prev,
           dropTargetPath: null,
           dropTargetIsDir: false,
+          isOverPromptEditor: false,
         }));
       }
     };
 
-    const handleMouseUp = async () => {
+    const handleMouseUp = async (e: MouseEvent) => {
+      if (
+        dragState.isOverPromptEditor &&
+        dragState.draggedNode &&
+        onDropToPromptEditor
+      ) {
+        const elementUnder = document.elementFromPoint(e.clientX, e.clientY);
+        const promptEditor = elementUnder?.closest(
+          PROMPT_EDITOR_DROP_SELECTOR,
+        ) as HTMLElement | null;
+        if (promptEditor) {
+          try {
+            onDropToPromptEditor({
+              node: dragState.draggedNode,
+              clientX: e.clientX,
+              clientY: e.clientY,
+              target: promptEditor,
+            });
+          } catch (error) {
+            console.error(
+              "[use-file-tree-dnd] onDropToPromptEditor failed:",
+              error,
+            );
+          }
+        }
+        setDragState(initialDragState);
+        mouseDownRef.current = null;
+        return;
+      }
+
       if (dragState.dropTargetPath && dragState.draggedNode) {
         const { path: sourcePath, name: sourceName } = dragState.draggedNode;
         let targetParentPath = dragState.dropTargetPath;
@@ -200,7 +282,7 @@ export function useFileTreeDnd({
       document.removeEventListener("mouseup", handleMouseUp);
       document.removeEventListener("mouseleave", handleMouseUp);
     };
-  }, [dragState, onMove, rootPath]);
+  }, [dragState, onMove, onDropToPromptEditor, rootPath]);
 
   // Track mouse down for drag initiation
   useEffect(() => {
@@ -219,11 +301,12 @@ export function useFileTreeDnd({
           isDragging: true,
           draggedNode: {
             path: node.path,
-            name: node.displayName || node.name,
+            name: node.name,
             isDir: node.type === FileNodeType.Directory,
           },
           dropTargetPath: null,
           dropTargetIsDir: false,
+          isOverPromptEditor: false,
           mousePosition: { x: e.clientX, y: e.clientY },
         });
       }

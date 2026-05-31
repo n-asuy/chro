@@ -44,11 +44,10 @@ apps/desktop/
 │   │   ├── index.tsx       # Home / onboarding
 │   │   └── projects/
 │   │       └── $projectId/
-│   │           ├── tasks/  # Kanban task board
 │   │           ├── files.tsx   # File explorer
 │   │           ├── session/    # Agent session view
 │   │           └── settings.tsx
-│   ├── kanban/             # Task board (state, API, components)
+│   ├── tasks/              # Task / project data layer (API, types)
 │   ├── files/              # File explorer (state, components)
 │   ├── session/            # Agent session (state, components)
 │   ├── sidebar/            # Sidebar navigation

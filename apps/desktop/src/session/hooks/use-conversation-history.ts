@@ -10,15 +10,21 @@ import { recordPerfEvent } from "@/perf/recorder";
  * run's log stream, eliminating the need for a separate WebSocket connection.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { flattenConversationEntries } from "../domain/conversation-history";
-import type { PendingSessionSubmission } from "../domain/session-task-state";
-import type { ApprovalRecord } from "../types/api";
+import {
+  type ConversationFlattenCache,
+  createConversationFlattenCache,
+} from "../domain/conversation-history";
+import {
+  type PendingSessionSubmission,
+  isPendingSubmissionForTaskScope,
+} from "../domain/session-task-state";
 import type {
   DisplayEntry,
   NormalizedEntry,
   TaskRunRecord,
   TaskSessionRecord,
 } from "../types";
+import type { ApprovalRecord } from "../types/api";
 import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 import { useTaskRunsStream } from "./use-task-runs-stream";
 import { useTaskSessionsStream } from "./use-task-sessions-stream";
@@ -39,6 +45,7 @@ export interface UseConversationHistoryResult {
 }
 
 interface UseConversationHistoryParams {
+  sessionScopeId?: string | null;
   taskId: string | null;
   enabled?: boolean;
   runs?: TaskRunRecord[];
@@ -252,6 +259,14 @@ function loadHistoricTaskRunEntries(
     );
     const ws = new WebSocket(endpoint);
     let entries: DisplayEntry[] = [];
+    let settled = false;
+
+    const resolveWithEntries = () => {
+      if (settled) return;
+      settled = true;
+      onEntries(entries);
+      resolve();
+    };
 
     ws.onmessage = (event) => {
       try {
@@ -262,9 +277,8 @@ function loadHistoricTaskRunEntries(
         }
 
         if (msg.finished) {
-          onEntries(entries);
+          resolveWithEntries();
           ws.close(1000, "finished");
-          resolve();
         }
       } catch (err) {
         console.error(
@@ -275,15 +289,16 @@ function loadHistoricTaskRunEntries(
     };
 
     ws.onerror = () => {
+      if (settled) return;
+      settled = true;
       reject(new Error(`Failed to load entries for TaskRun ${taskRunId}`));
     };
 
-    ws.onclose = (evt) => {
-      if (evt.code !== 1000) {
-        // Abnormal close - still resolve with what we have
-        onEntries(entries);
-        resolve();
-      }
+    ws.onclose = () => {
+      // Some persisted runs have no replayable log entries. The server closes
+      // those streams normally without a finished marker, so still unblock
+      // history loading with whatever was replayed.
+      resolveWithEntries();
     };
   });
 }
@@ -428,6 +443,7 @@ function streamRunningTaskRunEntries(
  * ```
  */
 export function useConversationHistory({
+  sessionScopeId = null,
   taskId,
   enabled = true,
   runs: providedRuns,
@@ -441,6 +457,9 @@ export function useConversationHistory({
 }: UseConversationHistoryParams): UseConversationHistoryResult {
   // State for entries from each TaskRun
   const taskRunEntriesRef = useRef<Map<string, TaskRunEntriesState>>(new Map());
+  const flattenCacheRef = useRef<ConversationFlattenCache>(
+    createConversationFlattenCache(),
+  );
   const [entriesVersion, setEntriesVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -454,7 +473,16 @@ export function useConversationHistory({
 
   const hasProvidedRuns = providedRuns !== undefined;
   const hasProvidedSessions = providedSessions !== undefined;
-  const taskScopeId = taskId ?? pendingSubmission?.tempTaskId ?? null;
+  const pendingSubmissionCandidate = pendingSubmission ?? null;
+  const scopedPendingSubmission = isPendingSubmissionForTaskScope(
+    pendingSubmissionCandidate,
+    taskId,
+    taskId,
+    sessionScopeId,
+  )
+    ? pendingSubmissionCandidate
+    : null;
+  const taskScopeId = taskId ?? scopedPendingSubmission?.tempTaskId ?? null;
 
   // Stream of TaskRuns for this Task
   const streamedRuns = useTaskRunsStream({
@@ -497,7 +525,10 @@ export function useConversationHistory({
     () => runs.find((r) => r.status === "running"),
     [runs],
   );
-  const activeRunId = pendingSubmission?.runId ?? wsActiveRun?.id ?? null;
+  const pendingActiveRunId = scopedPendingSubmission?.finishedAt
+    ? null
+    : scopedPendingSubmission?.runId;
+  const activeRunId = pendingActiveRunId ?? wsActiveRun?.id ?? null;
 
   const latestRunId = useMemo(() => {
     if (runs.length === 0) return null;
@@ -517,31 +548,28 @@ export function useConversationHistory({
     }, 0);
   }, []);
 
-  const applyApprovalPatches = useCallback(
-    (ops: JsonPatchOperation[]) => {
-      let changed = false;
-      const next = { ...approvalsRef.current };
-      for (const op of ops) {
-        const segments = op.path.split("/").filter(Boolean);
-        if (segments[0] !== "approvals" || segments.length < 2) continue;
-        const approvalId = segments[1];
-        if (op.op === "remove") {
-          if (approvalId in next) {
-            delete next[approvalId];
-            changed = true;
-          }
-        } else if (op.value !== undefined) {
-          next[approvalId] = op.value as unknown as ApprovalRecord;
+  const applyApprovalPatches = useCallback((ops: JsonPatchOperation[]) => {
+    let changed = false;
+    const next = { ...approvalsRef.current };
+    for (const op of ops) {
+      const segments = op.path.split("/").filter(Boolean);
+      if (segments[0] !== "approvals" || segments.length < 2) continue;
+      const approvalId = segments[1];
+      if (op.op === "remove") {
+        if (approvalId in next) {
+          delete next[approvalId];
           changed = true;
         }
+      } else if (op.value !== undefined) {
+        next[approvalId] = op.value as unknown as ApprovalRecord;
+        changed = true;
       }
-      if (changed) {
-        approvalsRef.current = next;
-        setApprovals(next);
-      }
-    },
-    [],
-  );
+    }
+    if (changed) {
+      approvalsRef.current = next;
+      setApprovals(next);
+    }
+  }, []);
 
   const resetApprovals = useCallback(() => {
     approvalsRef.current = {};
@@ -552,6 +580,7 @@ export function useConversationHistory({
   useEffect(() => {
     taskRunEntriesRef.current.clear();
     loadedRunIdsRef.current.clear();
+    flattenCacheRef.current.clear();
     if (activeStreamRef.current) {
       activeStreamRef.current.close();
       activeStreamRef.current = null;
@@ -561,7 +590,7 @@ export function useConversationHistory({
     setError(null);
     setEntriesVersion(0);
     resetApprovals();
-  }, [taskId, taskScopeId, resetApprovals]);
+  }, [taskId, taskScopeId, sessionScopeId, resetApprovals]);
 
   // Effect 1: Load historic (finished) TaskRuns.
   // Uses cancelled flag — safe because historic loads are short-lived async ops.
@@ -576,7 +605,12 @@ export function useConversationHistory({
     const loadHistoric = async () => {
       const sortedRuns = sortRunsByCreatedAtAscending(runs);
       const historicRuns = sortedRuns
-        .filter((r) => r.status !== "running" && r.id !== activeRunId && !loadedRunIdsRef.current.has(r.id))
+        .filter(
+          (r) =>
+            r.status !== "running" &&
+            r.id !== activeRunId &&
+            !loadedRunIdsRef.current.has(r.id),
+        )
         .reverse();
 
       if (historicRuns.length === 0) {
@@ -593,14 +627,20 @@ export function useConversationHistory({
           await loadHistoricTaskRunEntries(run.id, (entries) => {
             if (cancelled) return;
             taskRunEntriesRef.current.set(run.id, {
-              taskRunId: run.id, createdAt: run.created_at, entries, finished: true,
+              taskRunId: run.id,
+              createdAt: run.created_at,
+              entries,
+              finished: true,
             });
             loadedRunIdsRef.current.add(run.id);
             updateEntriesVersion();
           });
           loaded = countLoadedEntries(taskRunEntriesRef.current.values());
         } catch (err) {
-          console.error(`[useConversationHistory] Failed to load TaskRun ${run.id}:`, err);
+          console.error(
+            `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
+            err,
+          );
         }
       }
 
@@ -616,31 +656,43 @@ export function useConversationHistory({
           await loadHistoricTaskRunEntries(run.id, (entries) => {
             if (cancelled) return;
             taskRunEntriesRef.current.set(run.id, {
-              taskRunId: run.id, createdAt: run.created_at, entries, finished: true,
+              taskRunId: run.id,
+              createdAt: run.created_at,
+              entries,
+              finished: true,
             });
             loadedRunIdsRef.current.add(run.id);
             updateEntriesVersion();
           });
-          batchLoaded += Math.max(0, countLoadedEntries(taskRunEntriesRef.current.values()) - before);
+          batchLoaded += Math.max(
+            0,
+            countLoadedEntries(taskRunEntriesRef.current.values()) - before,
+          );
           if (batchLoaded >= REMAINING_HISTORY_BATCH_SIZE) {
             batchLoaded = 0;
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
         } catch (err) {
-          console.error(`[useConversationHistory] Failed to load TaskRun ${run.id}:`, err);
+          console.error(
+            `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
+            err,
+          );
         }
       }
     };
 
     loadHistoric();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [enabled, taskId, runs, runsLoading, updateEntriesVersion]);
 
   // Effect 2: Stream the running TaskRun — fire-and-forget.
   // No cancelled flag. The stream is autonomous and survives effect re-runs.
   // Dedup via activeStreamRef prevents duplicate streams.
   // Depends on activeRunId (primitive), not runs (object reference).
-  const activeRunCreatedAt = pendingSubmission?.createdAt ?? wsActiveRun?.created_at ?? null;
+  const activeRunCreatedAt =
+    scopedPendingSubmission?.createdAt ?? wsActiveRun?.created_at ?? null;
 
   useEffect(() => {
     if (!enabled || !taskId) return;
@@ -682,12 +734,18 @@ export function useConversationHistory({
 
           void loadHistoricTaskRunEntries(runId, (entries) => {
             taskRunEntriesRef.current.set(runId, {
-              taskRunId: runId, createdAt: createdAt, entries, finished: true,
+              taskRunId: runId,
+              createdAt: createdAt,
+              entries,
+              finished: true,
             });
             updateEntriesVersion();
           })
             .catch((err) => {
-              console.error(`[useConversationHistory] Failed to replay finished TaskRun ${runId}:`, err);
+              console.error(
+                `[useConversationHistory] Failed to replay finished TaskRun ${runId}:`,
+                err,
+              );
               const state = taskRunEntriesRef.current.get(runId);
               if (state) state.finished = true;
             })
@@ -705,8 +763,9 @@ export function useConversationHistory({
       // stream, mark the run as loaded, and reload finalized entries so we
       // don't lose the tail.
       const closingRunId = activeStreamRef.current.runId;
-      const closingCreatedAt = taskRunEntriesRef.current.get(closingRunId)?.createdAt
-        ?? new Date().toISOString();
+      const closingCreatedAt =
+        taskRunEntriesRef.current.get(closingRunId)?.createdAt ??
+        new Date().toISOString();
       activeStreamRef.current.close();
       activeStreamRef.current = null;
       setIsStreaming(false);
@@ -714,12 +773,18 @@ export function useConversationHistory({
 
       void loadHistoricTaskRunEntries(closingRunId, (entries) => {
         taskRunEntriesRef.current.set(closingRunId, {
-          taskRunId: closingRunId, createdAt: closingCreatedAt, entries, finished: true,
+          taskRunId: closingRunId,
+          createdAt: closingCreatedAt,
+          entries,
+          finished: true,
         });
         updateEntriesVersion();
       })
         .catch((err) => {
-          console.error(`[useConversationHistory] Failed to reload early-closed TaskRun ${closingRunId}:`, err);
+          console.error(
+            `[useConversationHistory] Failed to reload early-closed TaskRun ${closingRunId}:`,
+            err,
+          );
           const state = taskRunEntriesRef.current.get(closingRunId);
           if (state) state.finished = true;
         })
@@ -729,7 +794,7 @@ export function useConversationHistory({
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, taskId, activeRunId]);
+  }, [enabled, taskId, activeRunId, sessionScopeId]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -746,18 +811,19 @@ export function useConversationHistory({
     const allStates: TaskRunEntriesState[] = Array.from(
       taskRunEntriesRef.current.values(),
     );
-    const pendingRunId = pendingSubmission?.runId ?? pendingSubmission?.tempRunId;
+    const pendingRunId =
+      scopedPendingSubmission?.runId ?? scopedPendingSubmission?.tempRunId;
 
     if (
-      pendingSubmission &&
+      scopedPendingSubmission &&
       pendingRunId &&
       !allStates.some((state) => state.taskRunId === pendingRunId)
     ) {
       allStates.push({
         taskRunId: pendingRunId,
-        createdAt: pendingSubmission.createdAt,
+        createdAt: scopedPendingSubmission.createdAt,
         entries: [],
-        finished: false,
+        finished: Boolean(scopedPendingSubmission.finishedAt),
       });
     }
 
@@ -765,9 +831,9 @@ export function useConversationHistory({
       string,
       { prompt: string; sessionId?: string | null }
     >();
-    if (pendingSubmission && pendingRunId) {
+    if (scopedPendingSubmission && pendingRunId) {
       promptOverridesByRun.set(pendingRunId, {
-        prompt: pendingSubmission.prompt,
+        prompt: scopedPendingSubmission.prompt,
       });
     }
 
@@ -775,16 +841,23 @@ export function useConversationHistory({
     if (isStreaming && activeRunId) {
       loadingRunIds.add(activeRunId);
     }
-    if (pendingRunId) {
+    if (pendingRunId && !scopedPendingSubmission?.finishedAt) {
       loadingRunIds.add(pendingRunId);
     }
 
-    return flattenConversationEntries(allStates, sessions, {
+    return flattenCacheRef.current.flatten(allStates, sessions, {
       promptOverridesByRun,
       loadingRunIds,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeRunId, entriesVersion, isStreaming, pendingSubmission, sessions]);
+  }, [
+    activeRunId,
+    entriesVersion,
+    isStreaming,
+    scopedPendingSubmission,
+    sessionScopeId,
+    sessions,
+  ]);
 
   return {
     entries,

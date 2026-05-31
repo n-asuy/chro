@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chro</title>
     <link rel="icon" type="image/png" href="/logo_chro_symbol.png" />
+    <!-- desktop-shim runs before the main bundle so React code can read
+         window.desktop / window.__CHRO_RUNTIME__ synchronously. -->
+    <script type="module" src="/src/lib/desktop-shim.ts"></script>
   </head>
   <body>
     <div id="root"></div>

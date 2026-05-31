@@ -27,7 +27,9 @@ import {
   ExternalLink,
   FilePlus,
   FileText,
+  FolderInput,
   FolderPlus,
+  FolderX,
   PenLine,
   Pencil,
   Trash2,
@@ -46,6 +48,12 @@ interface TreeContextMenuProps {
   onDuplicate: (path: string) => void;
   onCreateFile: (parentPath: string, kind?: NewFileKind) => void;
   onCreateFolder: (parentPath: string) => void;
+  /** True for synthetic worktree-root rows; swaps the menu for root actions. */
+  isWorkspaceRoot?: boolean;
+  /** Whether this root is the project's primary workspace (cannot be removed). */
+  isPrimaryRoot?: boolean;
+  onAddFolderToProject?: () => void;
+  onRemoveFolderFromProject?: (path: string) => void;
 }
 
 export const TreeContextMenu = ({
@@ -57,6 +65,10 @@ export const TreeContextMenu = ({
   onDuplicate,
   onCreateFile,
   onCreateFolder,
+  isWorkspaceRoot = false,
+  isPrimaryRoot = false,
+  onAddFolderToProject,
+  onRemoveFolderFromProject,
 }: TreeContextMenuProps) => {
   const { t } = useLanguage();
   const projectId = useProjectId();
@@ -121,6 +133,79 @@ export const TreeContextMenu = ({
   const handleCreateFolder = () => {
     onCreateFolder(targetParentPath);
   };
+
+  if (isWorkspaceRoot) {
+    return (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="block">{children}</div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="z-20 w-56 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+          <ContextMenuSub>
+            <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
+              <FilePlus className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("newFile")}</span>
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="z-20 min-w-[140px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+              <ContextMenuItem
+                onSelect={() => handleCreateFile("md")}
+                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("newFileMarkdown")}</span>
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => handleCreateFile("excalidraw")}
+                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <PenLine className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("newFileExcalidraw")}</span>
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => handleCreateFile("cbase")}
+                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <Database className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("newFileBase")}</span>
+              </ContextMenuItem>
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          <ContextMenuItem
+            onSelect={handleCreateFolder}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("newFolder")}</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+          <ContextMenuItem
+            onSelect={() => onAddFolderToProject?.()}
+            disabled={!onAddFolderToProject}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+          >
+            <FolderInput className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("addFolderToProject")}</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => onRemoveFolderFromProject?.(node.path)}
+            disabled={!onRemoveFolderFromProject}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+          >
+            <FolderX className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("removeFolderFromProject")}</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+          <ContextMenuItem
+            onSelect={handleRevealInFinder}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("revealInFinder")}</span>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    );
+  }
 
   return (
     <>

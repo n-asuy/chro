@@ -4,7 +4,7 @@
   "private": true,
   "license": "Apache-2.0",
   "scripts": {
-    "dev": "bun run --filter=@chro/desktop build && cargo run --manifest-path ../../crates/server/Cargo.toml --bin chro-server --",
+    "dev": "bun run --filter=@chro/desktop build && cargo run --manifest-path ../../crates/server/Cargo.toml --bin chro-server -- --port 4320",
     "build": "bun run --filter=@chro/desktop build && cargo build --release --manifest-path ../../crates/server/Cargo.toml",
     "package:local": "bash ./local-build.sh",
     "package:release": "bash ./release.sh",

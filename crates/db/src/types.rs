@@ -54,7 +54,6 @@ impl<'r> Decode<'r, Sqlite> for ExecutionMode {
 pub enum TaskStatus {
     Pending,
     InProgress,
-    Blocked,
     Completed,
     Failed,
     Cancelled,
@@ -74,7 +73,6 @@ impl<'q> Encode<'q, Sqlite> for TaskStatus {
         let s = match self {
             TaskStatus::Pending => "pending",
             TaskStatus::InProgress => "in_progress",
-            TaskStatus::Blocked => "blocked",
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Cancelled => "cancelled",
@@ -90,7 +88,6 @@ impl<'r> Decode<'r, Sqlite> for TaskStatus {
         match s {
             "pending" => Ok(TaskStatus::Pending),
             "in_progress" => Ok(TaskStatus::InProgress),
-            "blocked" => Ok(TaskStatus::Blocked),
             "completed" => Ok(TaskStatus::Completed),
             "failed" => Ok(TaskStatus::Failed),
             "cancelled" => Ok(TaskStatus::Cancelled),

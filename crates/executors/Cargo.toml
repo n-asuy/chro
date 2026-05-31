@@ -7,8 +7,8 @@ license = "Apache-2.0"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", rev = "82464689ce0ba8a3b2065e73a8aa0cfdf2ad0625" }
-codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", rev = "82464689ce0ba8a3b2065e73a8aa0cfdf2ad0625" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", rev = "637f7dd6d737f3961e6bf32fbb3861c4953269c5" }
+codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", rev = "637f7dd6d737f3961e6bf32fbb3861c4953269c5" }
 command-group = { version = "5", features = ["with-tokio"] }
 convert_case = "0.6"
 derivative = "2.2"

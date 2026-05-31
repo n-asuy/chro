@@ -72,11 +72,35 @@ const findNodeInTree = (
   return null;
 };
 
+/**
+ * A workspace root displayed at the top of the file tree. Modeled after
+ * Zed's worktree concept: each root contributes a header row labeled with
+ * its directory name, and the project's file nodes nest beneath it. The
+ * structure is an array so multiple roots can be rendered side-by-side.
+ *
+ * Primary root: the project's bound workspace. Its children come from the
+ * shared `fileTree` (loaded from the backend). Non-primary roots are added
+ * via UI ("Add Folder to Project") and own their `children` directly.
+ */
+export interface WorkspaceRoot {
+  /** Unique identifier used as the synthetic node path (also expansion key). */
+  path: string;
+  /** Raw directory name (e.g. "zed"). */
+  name: string;
+  /** Human-readable label rendered in the tree (project name or basename). */
+  displayName: string;
+  /** True for the project's bound workspace; false for ad-hoc folders. */
+  isPrimary: boolean;
+  /** Children of a non-primary root. Ignored for primary (uses fileTree). */
+  children?: FileNode[];
+}
+
 interface FilesState {
   // Project context
   projectId: string | null;
 
   // Tree state
+  roots: WorkspaceRoot[];
   rootPath: string | null;
   selectedPaths: string[];
 
@@ -95,7 +119,11 @@ interface FilesState {
 
   // Navigate callback registered by useFileUrlSync when the files route is active.
   // openFile/closeFile call this to update the URL in addition to the store.
-  _onFilePathChange: ((path: string | null) => void) | null;
+  // The optional `taskRunId` lets callers route file reads through a specific
+  // task run's worktree (e.g. when opening a file from a session view).
+  _onFilePathChange:
+    | ((path: string | null, taskRunId?: string) => void)
+    | null;
 }
 
 interface FilesActions {
@@ -103,7 +131,11 @@ interface FilesActions {
   setProjectId: (projectId: string | null) => void;
 
   // Root management
-  setRootPath: (path: string) => void;
+  setRoots: (roots: WorkspaceRoot[]) => void;
+  addRoot: (root: WorkspaceRoot) => void;
+  removeRoot: (path: string) => void;
+  /** Replace the children of a non-primary root (no-op for primary). */
+  setRootChildren: (rootPath: string, children: FileNode[]) => void;
 
   // Selection
   selectNode: (path: string, multiSelect?: boolean) => void;
@@ -135,7 +167,7 @@ interface FilesActions {
   addNodeToTree: (parentPath: string, node: FileNode) => void;
 
   // Current file
-  openFile: (path: string) => void;
+  openFile: (path: string, taskRunId?: string) => void;
   closeFile: () => void;
 
   // Inline editing
@@ -147,6 +179,14 @@ interface FilesActions {
   // Wikilink navigation (Obsidian-style)
   navigateToWikilink: (linkPath: string, subpath?: string) => void;
 
+  // Open an arbitrary file path (e.g. agent-emitted code path) in a tab.
+  //
+  // Strips the trailing `:line[:col]` suffix and passes the rest through to
+  // the server, which normalizes against the resource scope (task-run worktree
+  // when `taskRunId` is set, otherwise the project root). Accepts absolute
+  // paths under either root — see `path_resolve` in the server crate.
+  openFilePath: (rawPath: string, taskRunId?: string) => void;
+
   // External file modification notification.
   notifyFileModified: (path: string) => void;
 }
@@ -156,6 +196,7 @@ type FilesStore = FilesState & FilesActions;
 export const useFilesStore = create<FilesStore>()((set, get) => ({
   // Initial state
   projectId: null,
+  roots: [],
   rootPath: null,
   selectedPaths: [],
   fileTree: [],
@@ -169,7 +210,33 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   setProjectId: (projectId) => set({ projectId }),
 
   // Root management
-  setRootPath: (path) => set({ rootPath: path }),
+  setRoots: (roots) =>
+    set({
+      roots,
+      rootPath: (roots.find((r) => r.isPrimary) ?? roots[0])?.path ?? null,
+    }),
+
+  addRoot: (root) =>
+    set((state) => {
+      if (state.roots.some((r) => r.path === root.path)) return state;
+      return { roots: [...state.roots, root] };
+    }),
+
+  removeRoot: (path) =>
+    set((state) => {
+      const next = state.roots.filter((r) => r.path !== path);
+      return {
+        roots: next,
+        rootPath: (next.find((r) => r.isPrimary) ?? next[0])?.path ?? null,
+      };
+    }),
+
+  setRootChildren: (rootPath, children) =>
+    set((state) => ({
+      roots: state.roots.map((r) =>
+        r.path === rootPath && !r.isPrimary ? { ...r, children } : r,
+      ),
+    })),
 
   // Selection
   selectNode: (path, multiSelect = false) =>
@@ -203,7 +270,14 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
           return node;
         });
       };
-      return { fileTree: updateNodeRecursive(state.fileTree) };
+      return {
+        fileTree: updateNodeRecursive(state.fileTree),
+        roots: state.roots.map((r) =>
+          r.isPrimary || !r.children
+            ? r
+            : { ...r, children: updateNodeRecursive(r.children) },
+        ),
+      };
     }),
 
   updateNodes: (updates) =>
@@ -265,7 +339,7 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     const newPath = `/${relativePath}`;
 
     // Set editing state BEFORE creating file to prevent SSE handler from adding duplicate
-    get().startEditing(newPath, displayName);
+    get().startEditing(newPath, actualName);
 
     try {
       await writeProjectFile(state.projectId, relativePath, initialContent);
@@ -745,12 +819,13 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     }),
 
   // Current file
-  openFile: (path) => {
+  openFile: (path, taskRunId) => {
     if (!path) return;
     const prev = get().currentFilePath;
-    if (prev === path) return;
-    set({ currentFilePath: path });
-    get()._onFilePathChange?.(path);
+    if (prev !== path) {
+      set({ currentFilePath: path });
+    }
+    get()._onFilePathChange?.(path, taskRunId);
   },
   closeFile: () => {
     if (get().currentFilePath === null) return;
@@ -900,6 +975,56 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
           );
         });
     }
+  },
+
+  openFilePath: (rawPath: string, taskRunId?: string) => {
+    if (!rawPath) return;
+    const state = get();
+    const { fileTree, selectNode, openFile } = state;
+    const { expandPath } = useFileTreeStore.getState();
+
+    const stripped = rawPath.trim().replace(/:\d+(?::\d+)?$/, "");
+    if (!stripped) return;
+
+    // When opening through a task run, the file lives in that run's worktree
+    // and is read by the server (which normalizes any prefix — project root or
+    // worktree absolute — against the run's roots; see `path_resolve` in the
+    // server crate). The path is therefore passed through unchanged.
+    if (taskRunId) {
+      openFile(stripped, taskRunId);
+      return;
+    }
+
+    // For project-scoped opens the client maintains a virtual file tree keyed
+    // by a leading slash; try to land on a node so the tree can highlight /
+    // expand the right ancestors. The server will normalize the eventual
+    // request, so a missing node is not fatal — just a UX nicety.
+    const normalized = stripped.startsWith("/") ? stripped : `/${stripped}`;
+    let targetNode = findNodeByPath(fileTree, normalized);
+
+    if (!targetNode) {
+      const fileName = stripped.split("/").pop() ?? stripped;
+      if (fileName) {
+        targetNode = findNodeInTree(
+          fileTree,
+          (node) => node.type === FileNodeType.File && node.name === fileName,
+        );
+      }
+    }
+
+    const resolvedPath = targetNode?.path ?? normalized;
+
+    if (targetNode) {
+      const parts = targetNode.path.split("/").filter(Boolean);
+      let currentPath = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        currentPath += `/${parts[i]}`;
+        expandPath(currentPath);
+      }
+      selectNode(targetNode.path);
+    }
+
+    openFile(resolvedPath);
   },
 
   notifyFileModified: (path) => {

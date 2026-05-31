@@ -1,15 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  extractSessionId,
+  type ContextEntry,
+  type FileAttachmentPart,
+  type FileContextEntry,
+  type Prompt,
+  type SessionAttachmentPart,
+  type SessionContextEntry,
+  type SkillEntry,
+  type TextPart,
   formatContextForPrompt,
+  formatSkillContextForPrompt,
   getContextEntries,
   inferTaskDescriptionFromContent,
   inferTaskTitleFromContent,
   parseContextFromContent,
-  type ContextEntry,
-  type Prompt,
-  type TextPart,
-  type FileAttachmentPart,
+  shortSessionId,
 } from "../types/context";
 
 const text = (content: string, start = 0): TextPart => ({
@@ -28,41 +33,45 @@ const file = (path: string, isFile = true, start = 0): FileAttachmentPart => ({
   end: start + path.split("/").pop()!.length + 1,
 });
 
-const entry = (path: string, isFile = true, branch?: string): ContextEntry => {
-  const e: ContextEntry = { path, isFile };
+const sessionPart = (
+  taskId: string,
+  branch?: string,
+  start = 0,
+): SessionAttachmentPart => {
+  const part: SessionAttachmentPart = {
+    type: "session",
+    content: `@${shortSessionId(taskId)}`,
+    taskId,
+    start,
+    end: start + shortSessionId(taskId).length + 1,
+  };
+  if (branch) part.branch = branch;
+  return part;
+};
+
+const fileEntry = (
+  path: string,
+  isFile = true,
+  branch?: string,
+): FileContextEntry => {
+  const e: FileContextEntry = { kind: "file", path, isFile };
   if (branch) e.branch = branch;
   return e;
 };
 
-describe("extractSessionId", () => {
-  it("extracts short ID from a valid session transcript path", () => {
-    expect(
-      extractSessionId(
-        ".chro-context/sessions/bd7a332a-897c-4f4c-9f4b-b477c9bcf808.md",
-      ),
-    ).toBe("bd7a332a");
-  });
+const sessionEntry = (taskId: string, branch?: string): SessionContextEntry => {
+  const e: SessionContextEntry = { kind: "session", taskId };
+  if (branch) e.branch = branch;
+  return e;
+};
 
-  it("returns null for a regular file path", () => {
-    expect(extractSessionId("src/main.ts")).toBeNull();
-  });
+const TASK_ID = "bd7a332a-897c-4f4c-9f4b-b477c9bcf808";
 
-  it("returns null for a path with .chro-context but not sessions", () => {
-    expect(extractSessionId(".chro-context/images/abc.png")).toBeNull();
-  });
+const skillEntry = (id: string, name: string): SkillEntry => ({ id, name });
 
-  it("returns null for a malformed UUID", () => {
-    expect(
-      extractSessionId(".chro-context/sessions/not-a-uuid.md"),
-    ).toBeNull();
-  });
-
-  it("returns null for missing .md extension", () => {
-    expect(
-      extractSessionId(
-        ".chro-context/sessions/bd7a332a-897c-4f4c-9f4b-b477c9bcf808",
-      ),
-    ).toBeNull();
+describe("shortSessionId", () => {
+  it("returns the first eight characters of a UUID", () => {
+    expect(shortSessionId(TASK_ID)).toBe("bd7a332a");
   });
 });
 
@@ -72,101 +81,123 @@ describe("formatContextForPrompt", () => {
   });
 
   it("wraps a single file in context tags", () => {
-    expect(formatContextForPrompt([entry("src/main.ts")])).toBe(
+    expect(formatContextForPrompt([fileEntry("src/main.ts")])).toBe(
       '<context>\n<file path="src/main.ts" />\n</context>',
     );
   });
 
-  it("wraps multiple files in context tags", () => {
-    const result = formatContextForPrompt([entry("a.ts"), entry("b.ts")]);
-    expect(result).toBe(
-      '<context>\n<file path="a.ts" />\n<file path="b.ts" />\n</context>',
-    );
-  });
-
   it("uses <directory> tag for non-file entries", () => {
-    const result = formatContextForPrompt([entry("src/lib", false)]);
-    expect(result).toBe(
+    expect(formatContextForPrompt([fileEntry("src/lib", false)])).toBe(
       '<context>\n<directory path="src/lib" />\n</context>',
     );
   });
 
-  it("mixes file and directory tags", () => {
-    const result = formatContextForPrompt([
-      entry("src/main.ts", true),
-      entry("src/lib", false),
-    ]);
-    expect(result).toBe(
-      '<context>\n<file path="src/main.ts" />\n<directory path="src/lib" />\n</context>',
-    );
-  });
-
-  it("escapes double quotes in paths", () => {
-    const result = formatContextForPrompt([entry('path/"with"quotes.ts')]);
-    expect(result).toContain('path/&quot;with&quot;quotes.ts');
-  });
-
-  it("escapes &, <, > in paths", () => {
-    const result = formatContextForPrompt([entry("a&b<c>d.ts")]);
+  it("escapes XML special characters in paths", () => {
+    const result = formatContextForPrompt([fileEntry("a&b<c>d.ts")]);
     expect(result).toContain("a&amp;b&lt;c&gt;d.ts");
   });
 
-  it("includes branch attribute when present", () => {
-    const result = formatContextForPrompt([
-      entry(".chro-context/sessions/abc.md", true, "feature/auth"),
-    ]);
-    expect(result).toBe(
-      '<context>\n<file path=".chro-context/sessions/abc.md" branch="feature/auth" />\n</context>',
+  it("includes branch attribute on file entries when present", () => {
+    expect(
+      formatContextForPrompt([fileEntry("src/main.ts", true, "feature/auth")]),
+    ).toBe(
+      '<context>\n<file path="src/main.ts" branch="feature/auth" />\n</context>',
     );
   });
 
-  it("omits branch attribute when not set", () => {
-    const result = formatContextForPrompt([entry("src/main.ts")]);
-    expect(result).not.toContain("branch");
+  it("renders a session entry with the CLI hint inside <past_session>", () => {
+    const result = formatContextForPrompt([sessionEntry(TASK_ID)]);
+    expect(result).toBe(
+      [
+        "<context>",
+        `<past_session task_id="${TASK_ID}">`,
+        `Run \`chro task logs ${TASK_ID}\` to view the full transcript of this previous chro session.`,
+        "</past_session>",
+        "</context>",
+      ].join("\n"),
+    );
   });
 
-  it("escapes special characters in branch name", () => {
+  it("includes branch on a session entry", () => {
+    const result = formatContextForPrompt([sessionEntry(TASK_ID, "feature/x")]);
+    expect(result).toContain(
+      `<past_session task_id="${TASK_ID}" branch="feature/x">`,
+    );
+  });
+
+  it("renders mixed file and session entries", () => {
     const result = formatContextForPrompt([
-      entry("a.md", true, 'feat/"quotes"'),
+      fileEntry("src/main.ts"),
+      sessionEntry(TASK_ID),
     ]);
-    expect(result).toContain('branch="feat/&quot;quotes&quot;"');
+    expect(result).toContain('<file path="src/main.ts" />');
+    expect(result).toContain(`<past_session task_id="${TASK_ID}">`);
+  });
+});
+
+describe("formatSkillContextForPrompt", () => {
+  it("returns empty string for empty array", () => {
+    expect(formatSkillContextForPrompt([])).toBe("");
+  });
+
+  it("wraps skill entries in display-only skill context tags", () => {
+    expect(
+      formatSkillContextForPrompt([
+        skillEntry("workspace:.agents/skills:release", "release"),
+      ]),
+    ).toBe(
+      '<skills_context>\n<skill id="workspace:.agents/skills:release" name="release" />\n</skills_context>',
+    );
+  });
+
+  it("escapes XML special characters in skill attributes", () => {
+    const result = formatSkillContextForPrompt([
+      skillEntry('user:skills:a&b"c', 'docs & "notes"'),
+    ]);
+    expect(result).toContain('id="user:skills:a&amp;b&quot;c"');
+    expect(result).toContain('name="docs &amp; &quot;notes&quot;"');
   });
 });
 
 describe("getContextEntries", () => {
-  it("returns empty array when no file parts", () => {
-    const prompt: Prompt = [text("hello")];
-    expect(getContextEntries(prompt)).toEqual([]);
+  it("returns empty array when no attachment parts", () => {
+    expect(getContextEntries([text("hello")])).toEqual([]);
   });
 
-  it("returns entry from a single file part", () => {
-    const prompt: Prompt = [file("a.ts")];
-    expect(getContextEntries(prompt)).toEqual([{ path: "a.ts", isFile: true }]);
+  it("collects file parts as file entries", () => {
+    expect(getContextEntries([file("a.ts")])).toEqual([fileEntry("a.ts")]);
   });
 
-  it("returns entry for directory part", () => {
-    const prompt: Prompt = [file("src/lib", false)];
-    expect(getContextEntries(prompt)).toEqual([{ path: "src/lib", isFile: false }]);
+  it("collects directory parts as file entries with isFile=false", () => {
+    expect(getContextEntries([file("src/lib", false)])).toEqual([
+      fileEntry("src/lib", false),
+    ]);
   });
 
-  it("deduplicates paths", () => {
-    const prompt: Prompt = [
-      file("a.ts"),
-      text(" "),
-      file("a.ts"),
-    ];
-    expect(getContextEntries(prompt)).toEqual([{ path: "a.ts", isFile: true }]);
+  it("collects session parts as session entries", () => {
+    expect(getContextEntries([sessionPart(TASK_ID)])).toEqual([
+      sessionEntry(TASK_ID),
+    ]);
   });
 
-  it("preserves insertion order after dedup", () => {
+  it("preserves branch on session entries", () => {
+    expect(getContextEntries([sessionPart(TASK_ID, "feature/x")])).toEqual([
+      sessionEntry(TASK_ID, "feature/x"),
+    ]);
+  });
+
+  it("dedupes by path / taskId while preserving order", () => {
     const prompt: Prompt = [
       file("b.ts"),
+      sessionPart(TASK_ID),
       file("a.ts"),
+      sessionPart(TASK_ID),
       file("b.ts"),
     ];
     expect(getContextEntries(prompt)).toEqual([
-      { path: "b.ts", isFile: true },
-      { path: "a.ts", isFile: true },
+      fileEntry("b.ts"),
+      sessionEntry(TASK_ID),
+      fileEntry("a.ts"),
     ]);
   });
 
@@ -175,9 +206,8 @@ describe("getContextEntries", () => {
       ...file("session.md"),
       branch: "feature/xyz",
     };
-    const prompt: Prompt = [part];
-    expect(getContextEntries(prompt)).toEqual([
-      { path: "session.md", isFile: true, branch: "feature/xyz" },
+    expect(getContextEntries([part])).toEqual([
+      fileEntry("session.md", true, "feature/xyz"),
     ]);
   });
 });
@@ -187,84 +217,144 @@ describe("parseContextFromContent", () => {
     const result = parseContextFromContent("hello world");
     expect(result).toEqual({
       contextEntries: [],
+      skillEntries: [],
       imageEntries: [],
       text: "hello world",
     });
   });
 
   it("parses a single file entry", () => {
-    const content = '<context>\n<file path="src/main.ts" />\n</context>\nfix the bug';
+    const content =
+      '<context>\n<file path="src/main.ts" />\n</context>\nfix the bug';
     const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([{ path: "src/main.ts", isFile: true }]);
+    expect(result.contextEntries).toEqual([fileEntry("src/main.ts")]);
     expect(result.text).toBe("fix the bug");
   });
 
-  it("parses multiple file entries", () => {
-    const content = '<context>\n<file path="a.ts" />\n<file path="b.ts" />\n</context>\ndo something';
-    const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([
-      { path: "a.ts", isFile: true },
-      { path: "b.ts", isFile: true },
-    ]);
-    expect(result.text).toBe("do something");
-  });
-
   it("parses directory entries with isFile=false", () => {
-    const content = '<context>\n<directory path="src/lib" />\n</context>\ncheck this';
+    const content =
+      '<context>\n<directory path="src/lib" />\n</context>\ncheck this';
     const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([{ path: "src/lib", isFile: false }]);
-    expect(result.text).toBe("check this");
+    expect(result.contextEntries).toEqual([fileEntry("src/lib", false)]);
   });
 
-  it("parses mixed file and directory entries", () => {
-    const content = '<context>\n<file path="src/main.ts" />\n<directory path="src/lib" />\n</context>\nmixed';
+  it("parses a past_session entry", () => {
+    const content = [
+      "<context>",
+      `<past_session task_id="${TASK_ID}">`,
+      `Run \`chro task logs ${TASK_ID}\` to view the full transcript of this previous chro session.`,
+      "</past_session>",
+      "</context>",
+      "continue please",
+    ].join("\n");
     const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([
-      { path: "src/main.ts", isFile: true },
-      { path: "src/lib", isFile: false },
-    ]);
-    expect(result.text).toBe("mixed");
+    expect(result.contextEntries).toEqual([sessionEntry(TASK_ID)]);
+    expect(result.text).toBe("continue please");
+  });
+
+  it("parses a past_session entry with branch", () => {
+    const content = [
+      "<context>",
+      `<past_session task_id="${TASK_ID}" branch="feature/x">`,
+      "...",
+      "</past_session>",
+      "</context>",
+      "go",
+    ].join("\n");
+    const result = parseContextFromContent(content);
+    expect(result.contextEntries).toEqual([sessionEntry(TASK_ID, "feature/x")]);
   });
 
   it("unescapes XML-encoded characters in paths", () => {
-    const content = '<context>\n<file path="a&amp;b&lt;c&gt;d&quot;e.ts" />\n</context>\ntest';
+    const content =
+      '<context>\n<file path="a&amp;b&lt;c&gt;d&quot;e.ts" />\n</context>\ntest';
     const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([{ path: 'a&b<c>d"e.ts', isFile: true }]);
-    expect(result.text).toBe("test");
-  });
-
-  it("returns empty text when no content after context block", () => {
-    const content = '<context>\n<file path="a.ts" />\n</context>';
-    const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([{ path: "a.ts", isFile: true }]);
-    expect(result.text).toBe("");
+    expect(result.contextEntries).toEqual([fileEntry('a&b<c>d"e.ts')]);
   });
 
   it("does not parse context block that appears mid-content", () => {
     const content = 'some text\n<context>\n<file path="a.ts" />\n</context>';
     const result = parseContextFromContent(content);
     expect(result.contextEntries).toEqual([]);
+    expect(result.skillEntries).toEqual([]);
     expect(result.text).toBe(content);
   });
 
-  it("roundtrips with formatContextForPrompt", () => {
+  it("parses a leading skills_context block", () => {
+    const content = [
+      "<skills_context>",
+      '<skill id="workspace:.agents/skills:release" name="release" />',
+      "</skills_context>",
+      "ship it",
+    ].join("\n");
+    const result = parseContextFromContent(content);
+    expect(result.skillEntries).toEqual([
+      skillEntry("workspace:.agents/skills:release", "release"),
+    ]);
+    expect(result.text).toBe("ship it");
+  });
+
+  it("unescapes XML-encoded characters in skill entries", () => {
+    const content =
+      '<skills_context>\n<skill id="user:skills:a&amp;b&quot;c" name="docs &amp; &quot;notes&quot;" />\n</skills_context>\nreview';
+    const result = parseContextFromContent(content);
+    expect(result.skillEntries).toEqual([
+      skillEntry('user:skills:a&b"c', 'docs & "notes"'),
+    ]);
+    expect(result.text).toBe("review");
+  });
+
+  it("parses context, skills, images, and text together", () => {
+    const content = [
+      '<context>\n<file path="src/main.ts" />\n</context>',
+      '<skills_context>\n<skill id="workspace:.agents/skills:release" name="release" />\n</skills_context>',
+      "![img.png](.chro-context/img.png)",
+      "fix this",
+    ].join("\n");
+    const result = parseContextFromContent(content);
+    expect(result.contextEntries).toEqual([fileEntry("src/main.ts")]);
+    expect(result.skillEntries).toEqual([
+      skillEntry("workspace:.agents/skills:release", "release"),
+    ]);
+    expect(result.imageEntries).toEqual([
+      { name: "img.png", path: ".chro-context/img.png" },
+    ]);
+    expect(result.text).toBe("fix this");
+  });
+
+  it("roundtrips file entries with formatContextForPrompt", () => {
     const entries: ContextEntry[] = [
-      { path: "src/main.ts", isFile: true },
-      { path: "docs", isFile: false },
+      fileEntry("src/main.ts"),
+      fileEntry("docs", false),
     ];
     const userText = "fix everything";
-    const serialized = formatContextForPrompt(entries) + "\n" + userText;
+    const serialized = `${formatContextForPrompt(entries)}\n${userText}`;
     const result = parseContextFromContent(serialized);
     expect(result.contextEntries).toEqual(entries);
     expect(result.text).toBe(userText);
   });
 
-  it("roundtrips paths with special characters", () => {
-    const entries: ContextEntry[] = [{ path: 'path/"with"quotes & <angles>.ts', isFile: true }];
-    const userText = "handle this";
-    const serialized = formatContextForPrompt(entries) + "\n" + userText;
+  it("roundtrips session entries with formatContextForPrompt", () => {
+    const entries: ContextEntry[] = [
+      sessionEntry(TASK_ID, "feature/new-ui"),
+      fileEntry("src/main.ts"),
+    ];
+    const userText = "compare with the old session";
+    const serialized = `${formatContextForPrompt(entries)}\n${userText}`;
     const result = parseContextFromContent(serialized);
     expect(result.contextEntries).toEqual(entries);
+    expect(result.text).toBe(userText);
+  });
+
+  it("roundtrips skill entries with formatSkillContextForPrompt", () => {
+    const entries = [
+      skillEntry("workspace:.agents/skills:release", "release"),
+      skillEntry("user:.codex/skills:docs", "docs"),
+    ];
+    const userText = "use these";
+    const serialized = `${formatSkillContextForPrompt(entries)}\n${userText}`;
+    const result = parseContextFromContent(serialized);
+    expect(result.skillEntries).toEqual(entries);
     expect(result.text).toBe(userText);
   });
 
@@ -275,68 +365,17 @@ describe("parseContextFromContent", () => {
       { name: "screenshot.png", path: ".chro-context/abc.png" },
     ]);
     expect(result.text).toBe("hello");
-    expect(result.contextEntries).toEqual([]);
-  });
-
-  it("extracts multiple images", () => {
-    const content =
-      "![a.png](path/a.png)\n![b.jpg](path/b.jpg)\ncheck these";
-    const result = parseContextFromContent(content);
-    expect(result.imageEntries).toEqual([
-      { name: "a.png", path: "path/a.png" },
-      { name: "b.jpg", path: "path/b.jpg" },
-    ]);
-    expect(result.text).toBe("check these");
   });
 
   it("extracts images alongside context entries", () => {
     const content =
       '<context>\n<file path="src/main.ts" />\n</context>\n![img.png](.chro-context/img.png)\nfix this';
     const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([
-      { path: "src/main.ts", isFile: true },
-    ]);
+    expect(result.contextEntries).toEqual([fileEntry("src/main.ts")]);
     expect(result.imageEntries).toEqual([
       { name: "img.png", path: ".chro-context/img.png" },
     ]);
     expect(result.text).toBe("fix this");
-  });
-
-  it("returns empty imageEntries when no images", () => {
-    const result = parseContextFromContent("no images here");
-    expect(result.imageEntries).toEqual([]);
-  });
-
-  it("parses branch attribute from file tag", () => {
-    const content =
-      '<context>\n<file path="session.md" branch="feature/auth" />\n</context>\nfix it';
-    const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([
-      { path: "session.md", isFile: true, branch: "feature/auth" },
-    ]);
-    expect(result.text).toBe("fix it");
-  });
-
-  it("parses entries with and without branch", () => {
-    const content =
-      '<context>\n<file path="session.md" branch="main" />\n<file path="src/app.ts" />\n</context>\ndo it';
-    const result = parseContextFromContent(content);
-    expect(result.contextEntries).toEqual([
-      { path: "session.md", isFile: true, branch: "main" },
-      { path: "src/app.ts", isFile: true },
-    ]);
-  });
-
-  it("roundtrips entries with branch", () => {
-    const entries: ContextEntry[] = [
-      { path: "session.md", isFile: true, branch: "feature/new-ui" },
-      { path: "src/main.ts", isFile: true },
-    ];
-    const userText = "check branch context";
-    const serialized = formatContextForPrompt(entries) + "\n" + userText;
-    const result = parseContextFromContent(serialized);
-    expect(result.contextEntries).toEqual(entries);
-    expect(result.text).toBe(userText);
   });
 });
 
@@ -352,6 +391,12 @@ describe("inferTaskTitleFromContent", () => {
     expect(inferTaskTitleFromContent(content, () => "Session fallback")).toBe(
       "Session fallback",
     );
+  });
+
+  it("ignores leading skill context", () => {
+    const content =
+      '<skills_context>\n<skill id="workspace:.agents/skills:release" name="release" />\n</skills_context>\nfix the release flow';
+    expect(inferTaskTitleFromContent(content)).toBe("fix the release flow");
   });
 });
 
@@ -370,6 +415,12 @@ describe("inferTaskDescriptionFromContent", () => {
 
   it("returns null for context-only prompts", () => {
     const content = '<context>\n<file path="src/main.ts" />\n</context>';
+    expect(inferTaskDescriptionFromContent(content)).toBeNull();
+  });
+
+  it("returns null for skill-context-only prompts", () => {
+    const content =
+      '<skills_context>\n<skill id="workspace:.agents/skills:release" name="release" />\n</skills_context>';
     expect(inferTaskDescriptionFromContent(content)).toBeNull();
   });
 });

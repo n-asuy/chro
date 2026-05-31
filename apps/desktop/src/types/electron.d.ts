@@ -45,11 +45,23 @@ declare global {
     message: string;
   };
 
+  type OpenProjectWindowResult = {
+    action: "current" | "focused" | "opened";
+    // Tauri-era windows are identified by string label rather than the
+    // numeric BrowserWindow id the Electron build used. Callers should treat
+    // this as opaque.
+    windowLabel: string;
+  };
+
   interface Window {
     desktop?: {
       getVersion?: () => Promise<string>;
       selectWorkspace?: () => Promise<string | null>;
-      openWorkspaceLauncher?: () => Promise<void>;
+      openProjectWindow?: (payload: {
+        workspacePath: string;
+        routePath: string;
+        reuseCurrentWindow?: boolean;
+      }) => Promise<OpenProjectWindowResult>;
       showFileContextMenu?: (payload: {
         path: string;
         name: string;
@@ -60,6 +72,7 @@ declare global {
         body?: string;
       }) => Promise<void>;
       openExternalUrl?: (url: string) => Promise<void>;
+      openPath?: (path: string, app?: string) => Promise<void>;
       installExecutor?: (
         executor: DesktopExecutor,
       ) => Promise<ExecutorInstallResult>;

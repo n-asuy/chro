@@ -8,34 +8,6 @@ use std::{
 
 use crate::{FilesystemError, FilesystemService};
 
-const VISIBLE_FILE_EXTENSIONS: &[&str] = &[
-    "md",
-    "base",
-    "cbase",
-    "canvas",
-    "excalidraw",
-    "avif",
-    "bmp",
-    "gif",
-    "jpeg",
-    "jpg",
-    "png",
-    "svg",
-    "webp",
-    "flac",
-    "m4a",
-    "mp3",
-    "ogg",
-    "wav",
-    "webm",
-    "3gp",
-    "mkv",
-    "mov",
-    "mp4",
-    "ogv",
-    "pdf",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceEntryType {
     File,
@@ -186,11 +158,15 @@ impl FilesystemService {
             let file_type = entry.file_type()?;
             let name_os = entry.file_name();
             let name = name_os.to_string_lossy().to_string();
-            if file_type.is_dir() {
+            let entry_path = entry.path();
+            let is_dir = file_type.is_dir() || (file_type.is_symlink() && entry_path.is_dir());
+            let is_file = file_type.is_file() || (file_type.is_symlink() && entry_path.is_file());
+
+            if is_dir {
                 if !include_hidden && is_hidden(&name) {
                     continue;
                 }
-                let absolute_child = entry.path();
+                let absolute_child = entry_path;
                 let rel = join_relative_string(&base_relative, &name);
                 let metadata = match detail {
                     WorkspaceEntryDetail::Basic => None,
@@ -234,13 +210,7 @@ impl FilesystemService {
                     created: metadata.and_then(|m| m.created().ok()),
                     children,
                 });
-            } else if file_type.is_file() {
-                if !include_hidden && is_hidden(&name) {
-                    continue;
-                }
-                if !is_visible_file(&name) {
-                    continue;
-                }
+            } else if is_file {
                 let rel = join_relative_string(&base_relative, &name);
                 let metadata = match detail {
                     WorkspaceEntryDetail::Basic => None,
@@ -321,6 +291,48 @@ impl FilesystemService {
 
         Ok(WorkspaceBinaryFile {
             relative_path: relative_path_string(&normalized_relative),
+            data,
+            size: metadata.len(),
+            mime_type,
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    /// Read a text file located at an arbitrary absolute path, outside any
+    /// workspace root.
+    ///
+    /// Used to serve files an agent referenced by absolute path (e.g. output
+    /// written to `/tmp`). Callers are responsible for having established that
+    /// the path is genuinely external (see `resolve_workspace_path`); no
+    /// workspace containment is enforced here.
+    pub fn read_absolute_file(&self, path: &Path) -> Result<WorkspaceFile, FilesystemError> {
+        if !path.is_file() {
+            return Err(FilesystemError::NotFile);
+        }
+        let metadata = fs::metadata(path)?;
+        let content = fs::read_to_string(path)?;
+        Ok(WorkspaceFile {
+            relative_path: path.to_string_lossy().to_string(),
+            content,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    /// Read a binary file located at an arbitrary absolute path, outside any
+    /// workspace root. The binary counterpart to [`read_absolute_file`].
+    pub fn read_absolute_binary_file(
+        &self,
+        path: &Path,
+    ) -> Result<WorkspaceBinaryFile, FilesystemError> {
+        if !path.is_file() {
+            return Err(FilesystemError::NotFile);
+        }
+        let metadata = fs::metadata(path)?;
+        let data = fs::read(path)?;
+        let mime_type = infer_mime_type(path);
+        Ok(WorkspaceBinaryFile {
+            relative_path: path.to_string_lossy().to_string(),
             data,
             size: metadata.len(),
             mime_type,
@@ -680,19 +692,18 @@ fn directory_has_visible_entries(
         let file_type = entry.file_type()?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if file_type.is_dir() {
+        let entry_path = entry.path();
+        let is_dir = file_type.is_dir() || (file_type.is_symlink() && entry_path.is_dir());
+        let is_file = file_type.is_file() || (file_type.is_symlink() && entry_path.is_file());
+
+        if is_dir {
             if !include_hidden && is_hidden(&name_str) {
                 continue;
             }
             return Ok(true);
         }
-        if file_type.is_file() {
-            if !include_hidden && is_hidden(&name_str) {
-                continue;
-            }
-            if is_visible_file(&name_str) {
-                return Ok(true);
-            }
+        if is_file {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -700,13 +711,6 @@ fn directory_has_visible_entries(
 
 fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
-}
-
-fn is_visible_file(name: &str) -> bool {
-    match extract_extension(OsStr::new(name)) {
-        Some(ext) => VISIBLE_FILE_EXTENSIONS.contains(&ext.as_str()),
-        None => false,
-    }
 }
 
 fn extract_extension(name: &OsStr) -> Option<String> {
@@ -727,6 +731,23 @@ fn infer_mime_type(path: &Path) -> String {
         .unwrap_or_default();
 
     match ext.as_str() {
+        // Web documents and scripts (needed for in-app HTML preview to render)
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" | "cjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "map" => "application/json; charset=utf-8",
+        "wasm" => "application/wasm",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" | "md" | "markdown" => "text/plain; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        // Web fonts
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        // Images
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -734,17 +755,21 @@ fn infer_mime_type(path: &Path) -> String {
         "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
         "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        // Audio
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         "ogg" => "audio/ogg",
         "flac" => "audio/flac",
         "m4a" => "audio/mp4",
+        // Video
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "mkv" => "video/x-matroska",
         "ogv" => "video/ogg",
         "3gp" => "video/3gpp",
+        // Other
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
     }
@@ -770,7 +795,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn lists_only_visible_entries() {
+    fn lists_files_and_non_hidden_directories() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         fs::create_dir_all(workspace.join(".git")).unwrap();
@@ -784,12 +809,14 @@ mod tests {
         let entries = service
             .list_workspace_entries(workspace, None, false)
             .unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].name, "notes");
         assert_eq!(entries[0].entry_type, WorkspaceEntryType::Directory);
         assert_eq!(entries[0].has_children, Some(true));
-        assert_eq!(entries[1].name, "diagram.svg");
+        assert_eq!(entries[1].name, ".env");
         assert_eq!(entries[1].entry_type, WorkspaceEntryType::File);
+        assert_eq!(entries[2].name, "diagram.svg");
+        assert_eq!(entries[2].entry_type, WorkspaceEntryType::File);
     }
 
     #[test]
@@ -807,6 +834,93 @@ mod tests {
         assert_eq!(entries[0].name, ".secrets");
         assert_eq!(entries[0].entry_type, WorkspaceEntryType::Directory);
         assert_eq!(entries[0].has_children, Some(true));
+    }
+
+    #[test]
+    fn lists_files_without_extension_filter() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join(".secrets")).unwrap();
+        fs::File::create(workspace.join("src/component.tsx")).unwrap();
+        fs::File::create(workspace.join("Cargo.toml")).unwrap();
+        fs::File::create(workspace.join("Dockerfile")).unwrap();
+        fs::File::create(workspace.join("script")).unwrap();
+        fs::File::create(workspace.join(".env")).unwrap();
+        fs::File::create(workspace.join(".gitignore")).unwrap();
+
+        let service = FilesystemService::new();
+        let entries = service
+            .list_workspace_entries(workspace, None, false)
+            .unwrap();
+
+        assert!(entries.iter().any(|entry| entry.name == "Cargo.toml"));
+        assert!(entries.iter().any(|entry| entry.name == "Dockerfile"));
+        assert!(entries.iter().any(|entry| entry.name == "script"));
+        assert!(entries.iter().any(|entry| entry.name == ".env"));
+        assert!(entries.iter().any(|entry| entry.name == ".gitignore"));
+        assert!(entries.iter().all(|entry| entry.name != ".secrets"));
+
+        let src_entries = service
+            .list_workspace_entries(workspace, Some("src"), false)
+            .unwrap();
+        let component = src_entries
+            .iter()
+            .find(|entry| entry.name == "component.tsx")
+            .unwrap();
+        assert_eq!(component.entry_type, WorkspaceEntryType::File);
+        assert_eq!(component.extension.as_deref(), Some("tsx"));
+    }
+
+    #[test]
+    fn lists_symlinked_files_and_directories() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join("actual-dir")).unwrap();
+        fs::File::create(workspace.join("actual-dir/nested.ts")).unwrap();
+        fs::File::create(workspace.join("actual-file.ts")).unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                workspace.join("actual-file.ts"),
+                workspace.join("linked-file.ts"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(workspace.join("actual-dir"), workspace.join("linked-dir"))
+                .unwrap();
+        }
+
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(
+                workspace.join("actual-file.ts"),
+                workspace.join("linked-file.ts"),
+            )
+            .unwrap();
+            std::os::windows::fs::symlink_dir(
+                workspace.join("actual-dir"),
+                workspace.join("linked-dir"),
+            )
+            .unwrap();
+        }
+
+        let service = FilesystemService::new();
+        let entries = service
+            .list_workspace_entries(workspace, None, false)
+            .unwrap();
+
+        let linked_file = entries
+            .iter()
+            .find(|entry| entry.name == "linked-file.ts")
+            .unwrap();
+        assert_eq!(linked_file.entry_type, WorkspaceEntryType::File);
+
+        let linked_dir = entries
+            .iter()
+            .find(|entry| entry.name == "linked-dir")
+            .unwrap();
+        assert_eq!(linked_dir.entry_type, WorkspaceEntryType::Directory);
     }
 
     #[test]
@@ -854,6 +968,51 @@ mod tests {
         assert_eq!(file.relative_path, "docs/readme.md");
         assert!(file.content.contains("Chro"));
         assert!(file.size > 0);
+    }
+
+    #[test]
+    fn reads_absolute_file_outside_any_workspace() {
+        // A file that lives outside the workspace root entirely — the case of an
+        // agent writing to a scratch directory and printing its absolute path.
+        let outside = tempdir().unwrap();
+        let file_path = outside.path().join("phone4.txt");
+        let mut file = fs::File::create(&file_path).unwrap();
+        writeln!(file, "crop data").unwrap();
+
+        let service = FilesystemService::new();
+        let read = service.read_absolute_file(&file_path).unwrap();
+        assert_eq!(read.relative_path, file_path.to_string_lossy());
+        assert!(read.content.contains("crop data"));
+        assert!(read.size > 0);
+    }
+
+    #[test]
+    fn reads_absolute_binary_file_with_inferred_mime() {
+        let outside = tempdir().unwrap();
+        let file_path = outside.path().join("phone4.png");
+        fs::write(&file_path, [0x89, b'P', b'N', b'G']).unwrap();
+
+        let service = FilesystemService::new();
+        let read = service.read_absolute_binary_file(&file_path).unwrap();
+        assert_eq!(read.relative_path, file_path.to_string_lossy());
+        assert_eq!(read.mime_type, "image/png");
+        assert_eq!(read.data, [0x89, b'P', b'N', b'G']);
+        assert_eq!(read.size, 4);
+    }
+
+    #[test]
+    fn absolute_read_rejects_directories_and_missing_paths() {
+        let outside = tempdir().unwrap();
+        let service = FilesystemService::new();
+
+        let dir_err = service.read_absolute_file(outside.path()).err().unwrap();
+        assert!(matches!(dir_err, FilesystemError::NotFile));
+
+        let missing_err = service
+            .read_absolute_binary_file(&outside.path().join("nope.png"))
+            .err()
+            .unwrap();
+        assert!(matches!(missing_err, FilesystemError::NotFile));
     }
 
     #[test]

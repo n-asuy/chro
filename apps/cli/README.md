@@ -22,10 +22,10 @@ npx @chro-ai/cli
 npx @chro-ai/cli task create "Add auth middleware" --prompt "Implement JWT auth"
 
 # 3. Watch progress
-npx @chro-ai/cli task logs <run-id>
+npx @chro-ai/cli task logs <task-id>
 
 # 4. Merge when satisfied
-npx @chro-ai/cli task merge <run-id>
+npx @chro-ai/cli task merge <task-id>
 ```
 
 ## Commands
@@ -37,6 +37,8 @@ Start the local server and web UI. Equivalent to `chro dev`.
 ### `chro dev [--perf]`
 
 Launch development services (Rust server + Vite). Pass `--perf` to enable performance recording to `log/performance/`.
+
+All `chro task` subcommands take a **task** identifier (UUID or slug). A task may have multiple runs (initial execution + follow-ups); operations target the latest run by default. Use `--run N` (1-indexed, chronological) to target a specific run.
 
 ### `chro task list`
 
@@ -52,29 +54,33 @@ Create a new task and optionally start an agent run.
 | `--prompt` | Prompt for the agent |
 | `--no-run` | Create task only, skip agent execution |
 
-### `chro task status <id> [STATUS]`
+### `chro task status <task> [STATUS]`
 
-Show task run history, or update status to one of: `pending`, `in_progress`, `blocked`, `completed`, `failed`, `cancelled`.
+Show the task's run history, or update task status to one of: `pending`, `in_progress`, `blocked`, `completed`, `failed`, `cancelled`.
 
-### `chro task run <id> [-p, --prompt]`
+### `chro task run <task> [-p, --prompt]`
 
 Start a new agent execution on an existing task.
 
-### `chro task logs <id>`
+### `chro task logs <task>`
 
-Show execution logs for a task run.
+Print the markdown transcript for the task (all runs combined, chronological order). Agents fetch this when a `<past_session>` tag references the task.
 
-### `chro task cancel <id>`
+### `chro task cancel <task> [-r, --run N]`
 
 Stop a running execution.
 
-### `chro task diff <id>`
+### `chro task diff <task> [-r, --run N]`
 
-Show branch and commit range for a task run.
+Show branch and commit range for a run.
 
-### `chro task merge <id> [-m, --message]`
+### `chro task merge <task> [-m, --message] [-r, --run N]`
 
-Merge agent changes into the target branch.
+Merge run changes into the target branch.
+
+### `chro task rebase <task> [-o, --onto <branch>] [-r, --run N]`
+
+Rebase the run's branch onto a new base.
 
 ### Global Options
 

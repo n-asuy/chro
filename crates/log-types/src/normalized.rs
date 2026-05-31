@@ -91,6 +91,15 @@ pub enum NormalizedEntryType {
         execution_processes: usize,
         needs_setup: bool,
     },
+    /// End-of-turn execution summary (wall-clock time on `timestamp`,
+    /// elapsed duration, and number of agent turns). Rendered as a small
+    /// footer beneath the assistant's final message.
+    ExecutionSummary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        num_turns: Option<u32>,
+    },
 }
 
 /// A normalized entry representing a single piece of agent conversation.
@@ -103,6 +112,33 @@ pub struct NormalizedEntry {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+}
+
+/// Content patterns whose `SystemMessage` entries must never reach the UI.
+///
+/// These are agent-CLI protocol events (e.g. Claude Code's
+/// `{"type":"system","subtype":"status"}`) that normalize into
+/// `SystemMessage` but carry no user-facing value. Suppression happens at
+/// the normalizer boundary so the entries never enter the patch stream,
+/// the conversation store, or the render path.
+pub const SUPPRESSED_SYSTEM_CONTENT_PATTERNS: &[&str] = &["System: status"];
+
+/// Returns true when a would-be `SystemMessage` content matches a known
+/// suppression pattern and the entry must not be emitted.
+///
+/// Matching is whitespace-trimmed and requires either an exact match or a
+/// word-boundary prefix (pattern followed by whitespace). This avoids
+/// accidentally swallowing content like "System: statusbar".
+pub fn should_suppress_system_message(content: &str) -> bool {
+    let trimmed = content.trim();
+    SUPPRESSED_SYSTEM_CONTENT_PATTERNS.iter().any(|pattern| {
+        if trimmed == *pattern {
+            return true;
+        }
+        trimmed
+            .strip_prefix(*pattern)
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace()))
+    })
 }
 
 /// Status of a tool execution.
@@ -200,4 +236,37 @@ pub enum FileChange {
         /// Whether line numbers in the hunks are reliable.
         has_line_numbers: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppresses_exact_system_status() {
+        assert!(should_suppress_system_message("System: status"));
+    }
+
+    #[test]
+    fn suppresses_trimmed_system_status() {
+        assert!(should_suppress_system_message("  System: status\n"));
+    }
+
+    #[test]
+    fn suppresses_system_status_with_trailing_detail() {
+        assert!(should_suppress_system_message("System: status running"));
+    }
+
+    #[test]
+    fn does_not_suppress_unrelated_system_messages() {
+        assert!(!should_suppress_system_message("Run with Opus 4.7"));
+        assert!(!should_suppress_system_message("System: init"));
+        assert!(!should_suppress_system_message("System message"));
+        assert!(!should_suppress_system_message(""));
+    }
+
+    #[test]
+    fn does_not_suppress_word_boundary_false_positive() {
+        assert!(!should_suppress_system_message("System: statusbar"));
+    }
 }

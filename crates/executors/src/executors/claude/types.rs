@@ -156,6 +156,12 @@ pub struct ClaudeMessage {
 }
 
 /// Content items within a Claude message.
+///
+/// The `Unknown` fallback keeps the parent message parseable when Claude
+/// introduces a new content block type (e.g. `server_tool_use` for the
+/// computer-use plugins). Without it, a single unrecognized item would
+/// fail deserialization of the whole assistant message and the run would
+/// silently drop the chunk.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ClaudeContentItem {
@@ -174,6 +180,11 @@ pub enum ClaudeContentItem {
         tool_use_id: String,
         content: Value,
         is_error: Option<bool>,
+    },
+    #[serde(untagged)]
+    Unknown {
+        #[serde(flatten)]
+        data: HashMap<String, Value>,
     },
 }
 
@@ -486,6 +497,26 @@ mod tests {
             }
         } else {
             panic!("Expected Assistant variant");
+        }
+    }
+
+    #[test]
+    fn parse_unknown_content_block_type() {
+        let json = r#"{"type":"server_tool_use","id":"st_1","name":"web_search","input":{"q":"x"}}"#;
+        let parsed: ClaudeContentItem = serde_json::from_str(json).unwrap();
+        assert!(matches!(parsed, ClaudeContentItem::Unknown { .. }));
+    }
+
+    #[test]
+    fn parse_assistant_message_with_unknown_content_block_does_not_fail() {
+        let json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"server_tool_use","name":"computer","input":{"action":"screenshot"}}]}}"#;
+        let parsed: ClaudeJson = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClaudeJson::Assistant { message, .. } => {
+                assert_eq!(message.content.len(), 1);
+                assert!(matches!(message.content[0], ClaudeContentItem::Unknown { .. }));
+            }
+            _ => panic!("expected Assistant variant"),
         }
     }
 

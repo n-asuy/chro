@@ -84,6 +84,37 @@ export const listProjectEntries = async (
   return entries.map(toDesktopEntry);
 };
 
+type ListWorkspaceEntriesOptions = {
+  relativePath?: string;
+  recursive?: boolean;
+  detail?: "basic" | "full";
+};
+
+/**
+ * List entries at any absolute filesystem path. Used by ad-hoc workspace
+ * roots (folders added to the project via "Add Folder to Project") so each
+ * extra root can be browsed independently of the bound project.
+ */
+export const listWorkspaceEntriesAtPath = async (
+  absolutePath: string,
+  options?: ListWorkspaceEntriesOptions,
+): Promise<DesktopWorkspaceEntry[]> => {
+  const params = new URLSearchParams({ abs_path: absolutePath });
+  if (options?.relativePath) {
+    params.set("relative_path", options.relativePath);
+  }
+  if (options?.recursive) {
+    params.set("recursive", "true");
+  }
+  if (options?.detail) {
+    params.set("detail", options.detail);
+  }
+  const { entries } = await desktopFetch<ProjectEntriesEnvelope>(
+    `/rpc/filesystem/workspace-entries?${params.toString()}`,
+  );
+  return entries.map(toDesktopEntry);
+};
+
 export const readProjectFile = async (
   projectId: string,
   relativePath: string,
@@ -91,6 +122,40 @@ export const readProjectFile = async (
   const params = new URLSearchParams({ relative_path: relativePath });
   const { file } = await desktopFetch<ProjectFileEnvelope>(
     `/rpc/projects/${projectId}/file?${params.toString()}`,
+  );
+  return toDesktopFile(file);
+};
+
+/**
+ * Read a text file from an arbitrary absolute workspace root. Used by
+ * additional file-tree roots added through "Add Folder to Project".
+ */
+export const readWorkspaceFileAtPath = async (
+  absolutePath: string,
+  relativePath: string,
+): Promise<DesktopWorkspaceFile> => {
+  const params = new URLSearchParams({
+    abs_path: absolutePath,
+    relative_path: relativePath,
+  });
+  const { file } = await desktopFetch<ProjectFileEnvelope>(
+    `/rpc/filesystem/workspace-file?${params.toString()}`,
+  );
+  return toDesktopFile(file);
+};
+
+/**
+ * Read a text file from a task run's worktree (container_ref or workspace_path).
+ * Used when opening files clicked from a session view so the user sees the
+ * worktree's version of the file rather than the project main checkout.
+ */
+export const readTaskRunFile = async (
+  taskRunId: string,
+  relativePath: string,
+): Promise<DesktopWorkspaceFile> => {
+  const params = new URLSearchParams({ relative_path: relativePath });
+  const { file } = await desktopFetch<ProjectFileEnvelope>(
+    `/rpc/task-runs/${taskRunId}/file?${params.toString()}`,
   );
   return toDesktopFile(file);
 };
@@ -200,11 +265,7 @@ export const copyProjectEntry = async (
   return toDesktopEntry(entry);
 };
 
-type ProjectFileEventType =
-  | "created"
-  | "modified"
-  | "deleted"
-  | "renamed";
+type ProjectFileEventType = "created" | "modified" | "deleted" | "renamed";
 
 export type ProjectFileEvent = {
   event_type: ProjectFileEventType;
@@ -273,6 +334,83 @@ export const getTaskRunBinaryFileUrl = (
   const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
   const params = new URLSearchParams({ relative_path: relativePath });
   return `${baseUrl}/rpc/task-runs/${taskRunId}/binary-file?${params.toString()}`;
+};
+
+/**
+ * Get the URL for a binary file under an arbitrary absolute workspace root.
+ */
+export const getWorkspaceBinaryFileUrl = (
+  absolutePath: string,
+  relativePath: string,
+): string => {
+  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
+  const params = new URLSearchParams({
+    abs_path: absolutePath,
+    relative_path: relativePath,
+  });
+  return `${baseUrl}/rpc/filesystem/workspace-binary-file?${params.toString()}`;
+};
+
+/**
+ * Encode a workspace-relative path into URL path segments.
+ * Each segment is percent-encoded but the slashes are preserved so that the
+ * resulting URL keeps a real directory hierarchy — this is what lets relative
+ * URLs inside an iframe (e.g. `<link href="style.css">`) resolve naturally.
+ */
+const encodeRelativePathSegments = (relativePath: string): string =>
+  relativePath
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .map(encodeURIComponent)
+    .join("/");
+
+/**
+ * base64url-encode a UTF-8 string. Used to embed an absolute workspace root
+ * path as a single URL path segment for the workspace asset endpoint.
+ */
+const base64UrlEncode = (input: string): string => {
+  const utf8 = unescape(encodeURIComponent(input));
+  return btoa(utf8)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+};
+
+/**
+ * Get a path-based asset URL for a project file. Unlike `getProjectBinaryFileUrl`
+ * (which uses a query parameter), this puts the relative path directly into the
+ * URL so that relative resources referenced from served HTML (CSS, JS, images)
+ * resolve via the same endpoint.
+ */
+export const getProjectAssetUrl = (
+  projectId: string,
+  relativePath: string,
+): string => {
+  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
+  return `${baseUrl}/rpc/projects/${projectId}/asset/${encodeRelativePathSegments(relativePath)}`;
+};
+
+/**
+ * Get a path-based asset URL for a file inside a task run worktree.
+ */
+export const getTaskRunAssetUrl = (
+  taskRunId: string,
+  relativePath: string,
+): string => {
+  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
+  return `${baseUrl}/rpc/task-runs/${taskRunId}/asset/${encodeRelativePathSegments(relativePath)}`;
+};
+
+/**
+ * Get a path-based asset URL for a file inside an arbitrary workspace root.
+ */
+export const getWorkspaceAssetUrl = (
+  absolutePath: string,
+  relativePath: string,
+): string => {
+  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
+  const encodedRoot = base64UrlEncode(absolutePath);
+  return `${baseUrl}/rpc/filesystem/workspace-asset/${encodedRoot}/${encodeRelativePathSegments(relativePath)}`;
 };
 
 type UploadBinaryFileResponse = {
@@ -365,27 +503,3 @@ export const revealInFinder = async (
   );
 };
 
-// --- Task transcript ---
-
-type GenerateTranscriptResponse = {
-  file_path: string;
-};
-
-export const generateTaskTranscript = async (
-  taskId: string,
-  workspacePath: string,
-  containerRef?: string | null,
-): Promise<string> => {
-  const { file_path } = await desktopFetch<GenerateTranscriptResponse>(
-    `/rpc/tasks/${taskId}/transcript`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspace_path: workspacePath,
-        container_ref: containerRef ?? undefined,
-      }),
-    },
-  );
-  return file_path;
-};

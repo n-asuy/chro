@@ -66,12 +66,14 @@ interface ParsedExternalLink {
 
 type TableInlineSegment =
   | { type: "text"; value: string }
+  | { type: "bold"; value: string }
   | { type: "internal-link"; link: ParsedInternalLink }
   | { type: "external-link"; link: ParsedExternalLink };
 
 const WIKILINK_PATTERN = /\[\[([\s\S]*?)\]\]/g;
 const TABLE_MARKDOWN_LINK_PATTERN =
   /\[([^\]]*)\]\(([^)\s]+)\)|<((?:https?:\/\/)[^>\s]+)>/g;
+const TABLE_BOLD_PATTERN = /\*\*([^*\n]+?)\*\*/g;
 
 const normalizeTableExternalUrl = (value: string): string | null => {
   const trimmed = value.trim();
@@ -89,6 +91,44 @@ const normalizeTableExternalUrl = (value: string): string | null => {
   }
 
   return normalized;
+};
+
+interface CaretPositionResult {
+  offsetNode: Node;
+  offset: number;
+}
+
+const caretRangeFromPoint = (
+  x: number,
+  y: number,
+  container: HTMLElement,
+): Range | null => {
+  if (typeof document === "undefined") return null;
+
+  let range: Range | null = null;
+
+  const standardFn = (
+    document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => CaretPositionResult | null;
+    }
+  ).caretPositionFromPoint;
+  if (typeof standardFn === "function") {
+    const pos = standardFn.call(document, x, y);
+    if (pos) {
+      range = document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+      range.collapse(true);
+    }
+  } else if (typeof document.caretRangeFromPoint === "function") {
+    range = document.caretRangeFromPoint(x, y);
+    if (range) {
+      range.collapse(true);
+    }
+  }
+
+  if (!range) return null;
+  if (!container.contains(range.startContainer)) return null;
+  return range;
 };
 
 const openExternalUrl = (url: string) => {
@@ -279,7 +319,42 @@ function parseCellInlineSegments(rawCell: string): TableInlineSegment[] {
     parsedSegments.push({ type: "text", value: unescapeTableCellPipes(source) });
   }
 
-  return parsedSegments;
+  const withBold: TableInlineSegment[] = [];
+  for (const segment of parsedSegments) {
+    if (segment.type !== "text" || !segment.value.includes("**")) {
+      withBold.push(segment);
+      continue;
+    }
+
+    const text = segment.value;
+    let boldLastIndex = 0;
+    TABLE_BOLD_PATTERN.lastIndex = 0;
+
+    let boldMatch: RegExpExecArray | null;
+    let matched = false;
+    while ((boldMatch = TABLE_BOLD_PATTERN.exec(text)) !== null) {
+      matched = true;
+      if (boldMatch.index > boldLastIndex) {
+        withBold.push({
+          type: "text",
+          value: text.slice(boldLastIndex, boldMatch.index),
+        });
+      }
+      withBold.push({ type: "bold", value: boldMatch[1] });
+      boldLastIndex = boldMatch.index + boldMatch[0].length;
+    }
+
+    if (!matched) {
+      withBold.push(segment);
+      continue;
+    }
+
+    if (boldLastIndex < text.length) {
+      withBold.push({ type: "text", value: text.slice(boldLastIndex) });
+    }
+  }
+
+  return withBold;
 }
 
 function findTables(state: EditorState): TableInfo[] {
@@ -622,6 +697,13 @@ class EditableTableWidget extends WidgetType {
         continue;
       }
 
+      if (segment.type === "bold") {
+        const boldEl = document.createElement("strong");
+        boldEl.textContent = segment.value;
+        el.appendChild(boldEl);
+        continue;
+      }
+
       if (segment.type === "external-link") {
         const linkEl = document.createElement("span");
         linkEl.className = "cm-table-external-link";
@@ -692,7 +774,10 @@ class EditableTableWidget extends WidgetType {
     el.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.startEditingCell(rowIdx, colIdx);
+      this.startEditingCell(rowIdx, colIdx, {
+        x: e.clientX,
+        y: e.clientY,
+      });
     });
 
     el.addEventListener("contextmenu", (e) => {
@@ -807,7 +892,11 @@ class EditableTableWidget extends WidgetType {
 
   // ── Cell editing ───────────────────────────────────────────────
 
-  private startEditingCell(rowIdx: number, colIdx: number) {
+  private startEditingCell(
+    rowIdx: number,
+    colIdx: number,
+    caretAt?: { x: number; y: number },
+  ) {
     // Commit any previously active cell first
     if (this.activeCellEl) {
       this.commitActiveCell();
@@ -832,12 +921,22 @@ class EditableTableWidget extends WidgetType {
     el.classList.add("cm-table-cell-active");
     el.focus();
 
-    // Select all text in the cell
-    const range = document.createRange();
-    range.selectNodeContents(el);
     const sel = window.getSelection();
     sel?.removeAllRanges();
-    sel?.addRange(range);
+
+    const caretRange = caretAt
+      ? caretRangeFromPoint(caretAt.x, caretAt.y, el)
+      : null;
+    if (caretRange) {
+      sel?.addRange(caretRange);
+    } else {
+      // Keyboard navigation (Tab/Enter) or unsupported caret API:
+      // place cursor at the end so typing appends.
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel?.addRange(range);
+    }
 
     // Keyboard handlers on the cell
     el.addEventListener("keydown", this.handleCellKeydown);

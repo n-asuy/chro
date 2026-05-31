@@ -116,6 +116,27 @@ impl<'a, R: Runtime> ProjectFileService<'a, R> {
             .await
     }
 
+    /// Read a text file at an arbitrary absolute path outside the workspace.
+    ///
+    /// Used by read endpoints to serve files an agent referenced by absolute
+    /// path (e.g. `/tmp/...`). The caller resolves containment beforehand.
+    pub async fn read_file_absolute(&self, path: PathBuf) -> Result<WorkspaceFile, RuntimeError> {
+        let fs_service = self.runtime.filesystem().clone();
+        self.run_blocking(move || fs_service.read_absolute_file(&path))
+            .await
+    }
+
+    /// Read a binary file at an arbitrary absolute path outside the workspace.
+    /// The binary counterpart to [`read_file_absolute`].
+    pub async fn read_binary_file_absolute(
+        &self,
+        path: PathBuf,
+    ) -> Result<WorkspaceBinaryFile, RuntimeError> {
+        let fs_service = self.runtime.filesystem().clone();
+        self.run_blocking(move || fs_service.read_absolute_binary_file(&path))
+            .await
+    }
+
     pub async fn write_file(
         &self,
         relative_path: &str,

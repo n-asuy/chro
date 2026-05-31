@@ -1,5 +1,8 @@
-
-import { useCallback, useEffect, useState } from "react";
+import {
+  type DirectoryEntry,
+  type DirectoryListResponse,
+  filesystemApi,
+} from "@/lib/filesystem-client";
 import { Button } from "@chro/ui/button";
 import {
   Dialog,
@@ -17,11 +20,27 @@ import {
   Home,
   Loader2,
 } from "lucide-react";
-import {
-  filesystemApi,
-  type DirectoryEntry,
-  type DirectoryListResponse,
-} from "@/lib/filesystem-client";
+import { useCallback, useEffect, useState } from "react";
+
+function EntryRowContent({ entry }: { entry: DirectoryEntry }) {
+  return (
+    <>
+      {entry.is_directory ? (
+        <Folder className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+      ) : (
+        <File className="h-4 w-4 flex-shrink-0 text-muted-foreground/60" />
+      )}
+      <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+        {entry.name}
+      </span>
+      {entry.is_git_repo && (
+        <span className="flex-shrink-0 rounded bg-accent px-1.5 py-0.5 text-xs text-muted-foreground">
+          Git
+        </span>
+      )}
+    </>
+  );
+}
 
 interface FolderPickerDialogProps {
   open: boolean;
@@ -104,22 +123,20 @@ export function FolderPickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[600px] w-full h-[600px] flex flex-col overflow-hidden bg-[#181818] border-white/10 text-white">
+      <DialogContent className="flex h-[600px] w-full max-w-[600px] flex-col overflow-hidden border-custom-border-200 bg-custom-background-100 text-foreground">
         <DialogHeader>
-          <DialogTitle className="text-white">{title}</DialogTitle>
-          <DialogDescription className="text-white/60">
-            {description}
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 flex flex-col space-y-4 overflow-hidden">
+        <div className="flex flex-1 flex-col space-y-4 overflow-hidden">
           {/* Navigation */}
-          <div className="flex items-center space-x-2 min-w-0">
+          <div className="flex min-w-0 items-center space-x-2">
             <Button
               onClick={handleHomeDirectory}
               variant="outline"
               size="sm"
-              className="flex-shrink-0 border-white/10 text-white hover:bg-white/5"
+              className="flex-shrink-0"
               title="Home directory"
             >
               <Home className="h-4 w-4" />
@@ -129,82 +146,70 @@ export function FolderPickerDialog({
               variant="outline"
               size="sm"
               disabled={!currentPath || currentPath === "/"}
-              className="flex-shrink-0 border-white/10 text-white hover:bg-white/5 disabled:opacity-50"
+              className="flex-shrink-0"
               title="Parent directory"
             >
               <ChevronUp className="h-4 w-4" />
             </Button>
-            <div className="text-sm text-white/60 flex-1 truncate min-w-0">
+            <div className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
               {currentPath || "Home"}
             </div>
             {currentIsGitRepo && (
-              <span className="text-xs text-white/40 flex-shrink-0">Git</span>
+              <span className="flex-shrink-0 rounded bg-accent px-1.5 py-0.5 text-xs text-muted-foreground">
+                Git
+              </span>
             )}
           </div>
 
           {/* Directory listing */}
-          <div className="flex-1 border border-white/10 rounded-md overflow-auto bg-white/5">
+          <div className="flex-1 overflow-auto rounded-md border border-custom-border-200 bg-custom-background-90">
             {loading ? (
-              <div className="p-4 text-center text-white/50 flex items-center justify-center gap-2">
+              <div className="flex items-center justify-center gap-2 p-4 text-center text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Loading...
               </div>
             ) : error ? (
-              <div className="m-4 p-3 bg-red-500/10 border border-red-500/20 rounded text-red-400 flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <div className="m-4 flex items-start gap-2 rounded border border-destructive/30 bg-destructive/10 p-3 text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
                 <span className="text-sm">{error}</span>
               </div>
             ) : entries.length === 0 ? (
-              <div className="p-4 text-center text-white/50">
+              <div className="p-4 text-center text-muted-foreground">
                 Empty directory
               </div>
             ) : (
               <div className="p-2">
-                {entries.map((entry, index) => (
-                  <div
-                    key={`${entry.path}-${index}`}
-                    className={`flex items-center space-x-2 p-2 rounded cursor-pointer hover:bg-white/10 ${
-                      !entry.is_directory ? "opacity-50 cursor-not-allowed" : ""
-                    }`}
-                    onClick={() =>
-                      entry.is_directory && handleFolderClick(entry)
-                    }
-                    title={entry.path}
-                  >
-                    {entry.is_directory ? (
-                      <Folder className="h-4 w-4 text-white/70 flex-shrink-0" />
-                    ) : (
-                      <File className="h-4 w-4 text-white/40 flex-shrink-0" />
-                    )}
-                    <span className="text-sm flex-1 truncate min-w-0 text-white/90">
-                      {entry.name}
-                    </span>
-                    {entry.is_git_repo && (
-                      <span className="text-xs text-white/40 flex-shrink-0">
-                        Git
-                      </span>
-                    )}
-                  </div>
-                ))}
+                {entries.map((entry, index) =>
+                  entry.is_directory ? (
+                    <button
+                      type="button"
+                      key={`${entry.path}-${index}`}
+                      className="flex w-full cursor-pointer items-center space-x-2 rounded p-2 text-left hover:bg-accent"
+                      onClick={() => handleFolderClick(entry)}
+                      title={entry.path}
+                    >
+                      <EntryRowContent entry={entry} />
+                    </button>
+                  ) : (
+                    <div
+                      key={`${entry.path}-${index}`}
+                      className="flex cursor-not-allowed items-center space-x-2 rounded p-2 opacity-50"
+                      title={entry.path}
+                    >
+                      <EntryRowContent entry={entry} />
+                    </div>
+                  ),
+                )}
               </div>
             )}
           </div>
         </div>
 
         <DialogFooter className="flex gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={handleCancel}
-            className="border-white/10 text-white hover:bg-white/5"
-          >
+          <Button type="button" variant="outline" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button
-            onClick={handleSelectCurrent}
-            disabled={!currentPath}
-            className="bg-white text-black hover:bg-white/90 disabled:opacity-50"
-          >
+          <Button onClick={handleSelectCurrent} disabled={!currentPath}>
             Select
           </Button>
         </DialogFooter>

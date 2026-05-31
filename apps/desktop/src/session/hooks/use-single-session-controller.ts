@@ -16,6 +16,7 @@ type SetState<T> = (value: T | ((prev: T) => T)) => void;
 export type PreparedPromptPayload = {
   prompt: string;
   imageIds: string[] | null;
+  selectedSkillIds: string[];
 };
 
 type UseSingleSessionControllerArgs = {
@@ -88,11 +89,13 @@ export function useSingleSessionController({
         task_message_mode: hasTaskContext ? taskMessageMode : "create",
         prompt_chars: payload.prompt.length,
         image_count: payload.imageIds?.length ?? 0,
+        skill_count: payload.selectedSkillIds.length,
         use_worktree: useWorktree,
       });
 
       try {
-        const executorProfilePayload = sessionExecutorSelection ?? executorProfileId;
+        const executorProfilePayload =
+          sessionExecutorSelection ?? executorProfileId;
 
         const response = activeTaskId
           ? await sendTaskMessage(activeTaskId, {
@@ -101,6 +104,7 @@ export function useSingleSessionController({
               requestId,
               executorProfileId: executorProfilePayload,
               imageIds: payload.imageIds,
+              selectedSkillIds: payload.selectedSkillIds,
               useWorktree,
               targetBranch: baseBranch,
             })
@@ -118,6 +122,7 @@ export function useSingleSessionController({
                 use_worktree: useWorktree,
                 executor_profile_id: executorProfilePayload ?? undefined,
                 image_ids: payload.imageIds ?? undefined,
+                selected_skill_ids: payload.selectedSkillIds,
                 target_branch: baseBranch ?? undefined,
               }),
             });
@@ -212,13 +217,7 @@ export function useSingleSessionController({
     } finally {
       setIsStopping(false);
     }
-  }, [
-    isSending,
-    isStopping,
-    activeTaskRunIdRef,
-    taskRunId,
-    setIsStopping,
-  ]);
+  }, [isSending, isStopping, activeTaskRunIdRef, taskRunId, setIsStopping]);
 
   return {
     submitPrompt,

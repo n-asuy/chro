@@ -1,4 +1,4 @@
-
+import { type TranslationFunction, useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import {
   CheckSquare,
@@ -11,6 +11,7 @@ import {
   Globe,
   Hammer,
   ImageIcon,
+  MessageCircle,
   MessageSquare,
   Search,
   Terminal,
@@ -18,29 +19,29 @@ import {
 import type {
   KeyboardEvent,
   MouseEvent,
-  ReactNode,
   MutableRefObject,
+  ReactNode,
 } from "react";
-import { memo, useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Markdown } from "./components/markdown";
-import { BrailleSpinner } from "./components/braille-spinner";
-import { TextShimmer } from "./components/text-shimmer";
-import RawLogText from "./components/raw-log-text";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentAskUserQuestionTool } from "./components/agent-ask-user-question-tool";
-import { useLanguage, type TranslationFunction } from "@/i18n";
+import { BrailleSpinner } from "./components/braille-spinner";
+import { Markdown } from "./components/markdown";
+import RawLogText from "./components/raw-log-text";
+import { TextShimmer } from "./components/text-shimmer";
+import { useImageMetadata } from "./hooks/use-image-metadata";
 import type {
   CommandRunResult,
+  DisplayEntry,
   FileChange,
   NormalizedEntry,
   ToolStatus,
-  DisplayEntry,
 } from "./types";
 import {
-  extractSessionId,
-  parseContextFromContent,
   type ImageEntry,
+  parseContextFromContent,
+  shortSessionId,
 } from "./types/context";
-import { useImageMetadata } from "./hooks/use-image-metadata";
+import { SESSION_SELECT_TEXT_ATTR } from "./utils/session-select-all";
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -78,12 +79,7 @@ const ExpandableUserMessage = ({
   return (
     <div
       data-user-message-id={dataUserMessageId}
-      className="sticky -top-5 z-10 bg-background pt-5"
-      style={{
-        marginLeft: "calc(-50vw + 50%)",
-        marginRight: "calc(-50vw + 50%)",
-        width: "100vw",
-      }}
+      className="sticky -top-5 z-10 w-full bg-background pt-5"
     >
       <div className="mx-auto w-full max-w-2xl">
         <div
@@ -175,13 +171,15 @@ const renderStructuredValue = (value: unknown): ReactNode => {
         }
       }
       return (
-        <pre className="whitespace-pre-wrap break-words rounded border border-border/40 bg-background/60 px-2 py-1 font-mono text-[11px] text-foreground">
+        <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded border border-border/40 bg-background/60 px-2 py-1 font-mono text-[11px] text-foreground">
           {value}
         </pre>
       );
     }
     return (
-      <span className="font-mono text-[11px] text-foreground">{value}</span>
+      <span className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono text-[11px] text-foreground">
+        {value}
+      </span>
     );
   }
   if (typeof value === "number" || typeof value === "boolean") {
@@ -220,14 +218,14 @@ const renderStructuredValue = (value: unknown): ReactNode => {
             <span className="min-w-[88px] shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
               {key}
             </span>
-            <div className="flex-1">{renderStructuredValue(val)}</div>
+            <div className="min-w-0 flex-1">{renderStructuredValue(val)}</div>
           </div>
         ))}
       </div>
     );
   }
   return (
-    <pre className="whitespace-pre-wrap break-words rounded border border-border/40 bg-background/60 px-2 py-1 font-mono text-[11px] text-foreground">
+    <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded border border-border/40 bg-background/60 px-2 py-1 font-mono text-[11px] text-foreground">
       {JSON.stringify(value, null, 2)}
     </pre>
   );
@@ -249,8 +247,9 @@ const MessageCard = ({
   onToggle,
 }: MessageCardProps) => {
   const systemTheme =
-    "w-full rounded border border-border/50 px-3 py-2 text-muted-foreground";
-  const errorTheme = "w-full text-sm leading-relaxed text-destructive";
+    "flex min-w-0 w-full items-center gap-1.5 text-muted-foreground";
+  const errorTheme =
+    "flex min-w-0 w-full items-start gap-1.5 text-sm leading-relaxed text-destructive";
 
   return (
     <div
@@ -258,19 +257,19 @@ const MessageCard = ({
       onClick={onToggle}
       role={onToggle ? "button" : undefined}
     >
-      <div className="flex items-center gap-1.5">
-        <div className="min-w-0 flex-1">{children}</div>
-        {onToggle && (
-          <ExpandChevron
-            expanded={!!expanded}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggle();
-            }}
-            variant={variant}
-          />
-        )}
+      <div className="min-w-0 flex-1 overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+        {children}
       </div>
+      {onToggle && (
+        <ExpandChevron
+          expanded={!!expanded}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle();
+          }}
+          variant={variant}
+        />
+      )}
     </div>
   );
 };
@@ -285,9 +284,11 @@ const ExpandChevron = ({ expanded, onClick, variant }: ExpandChevronProps) => (
   <ChevronDown
     onClick={onClick}
     className={cn(
-      "h-4 w-4 cursor-pointer",
+      "h-4 w-4 shrink-0 cursor-pointer",
       expanded ? "" : "-rotate-90",
-      variant === "system" ? "text-muted-foreground" : "text-red-500 dark:text-red-400",
+      variant === "system"
+        ? "text-muted-foreground"
+        : "text-red-500 dark:text-red-400",
     )}
   />
 );
@@ -341,66 +342,268 @@ const CollapsibleEntry = ({
 
 type ThinkingBlockProps = {
   content: string;
-  isStreaming: boolean;
 };
 
-const ThinkingBlock = ({ content, isStreaming }: ThinkingBlockProps) => {
-  const [isExpanded, setIsExpanded] = useState(isStreaming);
-  const wasStreamingRef = useRef(isStreaming);
-  const { t } = useLanguage();
+const ThinkingBlock = ({ content }: ThinkingBlockProps) => {
+  return (
+    <div className="flex items-start gap-2 text-sm text-muted-foreground">
+      <MessageCircle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <Markdown tone="muted">{content}</Markdown>
+      </div>
+    </div>
+  );
+};
 
-  // Auto-collapse when streaming ends
-  useEffect(() => {
-    if (wasStreamingRef.current && !isStreaming) {
-      setIsExpanded(false);
+type NormalizedDisplayEntry = Extract<
+  DisplayEntry,
+  { type: "NORMALIZED_ENTRY" }
+>;
+
+type AggregatedThinkingGroup = {
+  type: "AGGREGATED_THINKING_GROUP";
+  entries: NormalizedDisplayEntry[];
+  key: string;
+};
+
+type ConversationDisplayEntry = DisplayEntry | AggregatedThinkingGroup;
+
+const isUserMessageEntry = (
+  entry: ConversationDisplayEntry,
+): entry is NormalizedDisplayEntry =>
+  entry.type === "NORMALIZED_ENTRY" &&
+  entry.content.entry_type.type === "user_message";
+
+const isThinkingEntry = (
+  entry: ConversationDisplayEntry,
+): entry is NormalizedDisplayEntry =>
+  entry.type === "NORMALIZED_ENTRY" &&
+  entry.content.entry_type.type === "thinking";
+
+const isEmptyThinkingEntry = (entry: ConversationDisplayEntry) =>
+  isThinkingEntry(entry) && entry.content.content.trim().length === 0;
+
+const isLoadingDisplayEntry = (
+  entry: DisplayEntry | ConversationDisplayEntry,
+): boolean =>
+  entry.type === "NORMALIZED_ENTRY" &&
+  entry.content.entry_type.type === "loading";
+
+const aggregateThinkingInPreviousTurns = (
+  entries: DisplayEntry[],
+): ConversationDisplayEntry[] => {
+  if (entries.length === 0) return [];
+
+  const userMessageIndices: number[] = [];
+  entries.forEach((entry, index) => {
+    if (isUserMessageEntry(entry)) {
+      userMessageIndices.push(index);
     }
-    wasStreamingRef.current = isStreaming;
-  }, [isStreaming]);
+  });
 
-  const previewMarkdown = (() => {
-    if (!content) return "";
-    const firstLine = content.split("\n")[0] ?? "";
-    return firstLine.replace(/\s+/g, " ").trim();
-  })();
+  if (userMessageIndices.length <= 1) {
+    return entries;
+  }
 
-  const label = isStreaming ? t("thinkingLabel") : t("thoughtLabel");
+  const lastUserMessageIndex =
+    userMessageIndices[userMessageIndices.length - 1] ?? -1;
+  const result: ConversationDisplayEntry[] = [];
+  let currentThinkingGroup: NormalizedDisplayEntry[] = [];
+
+  const flushThinkingGroup = () => {
+    if (currentThinkingGroup.length === 0) return;
+    const firstEntry = currentThinkingGroup[0];
+    result.push({
+      type: "AGGREGATED_THINKING_GROUP",
+      entries: [...currentThinkingGroup],
+      key: `agg-thinking:${firstEntry.key}`,
+    });
+    currentThinkingGroup = [];
+  };
+
+  entries.forEach((entry, index) => {
+    if (isEmptyThinkingEntry(entry)) {
+      return;
+    }
+
+    const isInPreviousTurn = index < lastUserMessageIndex;
+
+    if (isUserMessageEntry(entry)) {
+      flushThinkingGroup();
+      result.push(entry);
+      return;
+    }
+
+    if (isInPreviousTurn && isThinkingEntry(entry)) {
+      currentThinkingGroup.push(entry);
+      return;
+    }
+
+    flushThinkingGroup();
+    result.push(entry);
+  });
+
+  flushThinkingGroup();
+  return result;
+};
+
+/**
+ * Incremental wrapper around `aggregateThinkingInPreviousTurns`.
+ *
+ * During a streaming turn no new user messages appear (a follow-up creates a
+ * new TaskRun → arrives as a new entry, which is the moment we recompute).
+ * That means the "last user message index" is stable, and any newly-appended
+ * entries are in the current turn — they pass through with empty-thinking
+ * filtering, no re-aggregation of earlier turns.
+ *
+ * Streaming typically appends entries before a trailing loading sentinel.
+ * The cache strips that sentinel when comparing prefixes so a single
+ * "insert before loading" patch still hits the fast path.
+ */
+type ThinkingAggregator = (
+  entries: DisplayEntry[],
+) => ConversationDisplayEntry[];
+
+function createThinkingAggregator(): ThinkingAggregator {
+  let cachedInput: DisplayEntry[] | null = null;
+  let cachedOutput: ConversationDisplayEntry[] | null = null;
+  let cachedUserMessageCount = 0;
+  let cachedInputBodyLength = 0;
+
+  const bodyEndOf = (entries: DisplayEntry[]): number => {
+    let end = entries.length;
+    while (end > 0 && isLoadingDisplayEntry(entries[end - 1])) end--;
+    return end;
+  };
+
+  const outputBodyEndOf = (output: ConversationDisplayEntry[]): number => {
+    let end = output.length;
+    while (end > 0 && isLoadingDisplayEntry(output[end - 1])) end--;
+    return end;
+  };
+
+  return (entries: DisplayEntry[]): ConversationDisplayEntry[] => {
+    if (cachedInput === entries && cachedOutput !== null) {
+      return cachedOutput;
+    }
+
+    const newBodyEnd = bodyEndOf(entries);
+
+    if (
+      cachedInput !== null &&
+      cachedOutput !== null &&
+      cachedUserMessageCount >= 2 &&
+      newBodyEnd >= cachedInputBodyLength
+    ) {
+      let prefixEqual = true;
+      for (let i = 0; i < cachedInputBodyLength; i++) {
+        if (entries[i] !== cachedInput[i]) {
+          prefixEqual = false;
+          break;
+        }
+      }
+
+      if (prefixEqual) {
+        let tailUserMessages = 0;
+        for (let i = cachedInputBodyLength; i < newBodyEnd; i++) {
+          if (isUserMessageEntry(entries[i])) {
+            tailUserMessages++;
+            break;
+          }
+        }
+
+        if (tailUserMessages === 0) {
+          const cachedBodyOutputEnd = outputBodyEndOf(cachedOutput);
+          const next: ConversationDisplayEntry[] = cachedOutput.slice(
+            0,
+            cachedBodyOutputEnd,
+          );
+          for (let i = cachedInputBodyLength; i < newBodyEnd; i++) {
+            const entry = entries[i];
+            if (isEmptyThinkingEntry(entry)) continue;
+            next.push(entry);
+          }
+          for (let i = newBodyEnd; i < entries.length; i++) {
+            next.push(entries[i]);
+          }
+          cachedInput = entries;
+          cachedOutput = next;
+          cachedInputBodyLength = newBodyEnd;
+          return next;
+        }
+      }
+    }
+
+    const output = aggregateThinkingInPreviousTurns(entries);
+    let count = 0;
+    for (const entry of entries) {
+      if (isUserMessageEntry(entry)) count++;
+    }
+    cachedInput = entries;
+    cachedOutput = output;
+    cachedUserMessageCount = count;
+    cachedInputBodyLength = newBodyEnd;
+    return output;
+  };
+}
+
+const CollapsedThinkingGroup = ({
+  group,
+}: {
+  group: AggregatedThinkingGroup;
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const { t } = useLanguage();
+  const entries = group.entries.filter(
+    (entry) => entry.content.content.trim().length > 0,
+  );
+
+  if (entries.length === 0) {
+    return null;
+  }
 
   return (
-    <div className="w-full">
-      <button
-        type="button"
-        onClick={() => setIsExpanded((prev) => !prev)}
-        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted/50 transition-colors"
-      >
-        <span className="font-medium">{label}</span>
-        {!isExpanded && previewMarkdown && (
-          <div
-            className={cn(
-              "min-w-0 flex-1 text-xs opacity-70",
-              "[&>div]:space-y-0 [&>div]:truncate [&>div>hr]:my-0",
-              "[&>div>p]:m-0 [&>div>p]:truncate [&>div>p]:whitespace-nowrap",
-            )}
-          >
-            <Markdown tone="muted">{previewMarkdown}</Markdown>
-          </div>
-        )}
-        <ChevronRight
-          className={cn(
-            "h-4 w-4 shrink-0 transition-transform duration-200",
-            isExpanded && "rotate-90"
-          )}
-        />
-      </button>
+    <div className="flex flex-col px-4 py-3 text-sm text-muted-foreground">
       <div
-        className={cn(
-          "overflow-hidden transition-all duration-200 ease-in-out",
-          isExpanded ? "max-h-96 opacity-100" : "max-h-0 opacity-0"
-        )}
+        className="group flex cursor-pointer items-center gap-2"
+        onClick={() => setExpanded((prev) => !prev)}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        role="button"
+        aria-expanded={expanded}
+        tabIndex={0}
+        onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setExpanded((prev) => !prev);
+          }
+        }}
       >
-        <div className="px-2 py-2 text-sm text-muted-foreground/80">
-          <Markdown tone="muted">{content}</Markdown>
-        </div>
+        <span className="shrink-0">
+          {isHovered ? (
+            <ChevronRight
+              className={cn(
+                "h-4 w-4 transition-transform duration-150",
+                expanded && "rotate-90",
+              )}
+            />
+          ) : (
+            <MessageCircle className="h-4 w-4" />
+          )}
+        </span>
+        <span className="truncate">{t("thinkingLabel")}</span>
       </div>
+
+      {expanded && (
+        <div className="ml-6 flex flex-col gap-3 pt-2">
+          {entries.map((entry) => (
+            <div key={entry.key} className="pl-2 text-sm text-muted-foreground">
+              <Markdown tone="muted">{entry.content.content}</Markdown>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -455,9 +658,7 @@ const PlanPresentationCard = ({
 
   return (
     <div className="inline-block w-full">
-      <div
-        className={cn("w-full overflow-hidden rounded border", tone.border)}
-      >
+      <div className={cn("w-full overflow-hidden rounded border", tone.border)}>
         <button
           type="button"
           onClick={() => setExpanded((prev) => !prev)}
@@ -615,10 +816,10 @@ const toolIcon = (entry: NormalizedEntry): ReactNode => {
 };
 
 const getEntryWrapperClasses = (entry: NormalizedEntry) => {
-  const base = "flex flex-col gap-3 px-4 py-3";
+  const base = "flex min-w-0 max-w-full flex-col gap-3 px-4 py-1";
   switch (entry.entry_type.type) {
     case "user_message":
-      return `${base} bg-custom-sidebar-background-80`;
+      return `${base} rounded-md bg-custom-sidebar-background-80`;
     case "assistant_message":
       return `${base}`;
     case "system_message": {
@@ -632,9 +833,12 @@ const getEntryWrapperClasses = (entry: NormalizedEntry) => {
     case "error_message":
       return `${base} rounded border border-destructive/40 bg-destructive/10 text-destructive`;
     case "thinking":
-      return `${base} bg-muted/20 rounded text-muted-foreground`;
+      return `${base} text-muted-foreground`;
     case "tool_use":
-      return `${base} rounded border border-border/50`;
+      return `${base}`;
+    case "execution_summary":
+      // Compact, like the model-info row: the footer carries its own padding.
+      return "px-4 pb-1";
     default:
       return `${base}`;
   }
@@ -682,9 +886,13 @@ const toolStatusTone = (status: ToolStatus): string => {
 
 type ToolCallEntryContentProps = {
   entry: ToolUseEntry;
+  onFilePathClick?: (path: string) => void;
 };
 
-const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
+const ToolCallEntryContent = ({
+  entry,
+  onFilePathClick,
+}: ToolCallEntryContentProps) => {
   const { action_type: action, status, tool_name } = entry.entry_type;
   const { t } = useLanguage();
 
@@ -877,7 +1085,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
         sections.push(
           renderSection(
             t("commandLabel"),
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono text-xs text-foreground">
               {commandText}
             </pre>,
           ),
@@ -889,7 +1097,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
           sections.push(
             renderSection(
               t("outputLabel"),
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-mono text-xs text-foreground">
                 {commandOutput}
               </pre>,
             ),
@@ -934,7 +1142,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
       }
 
       return (
-        <div className="overflow-hidden rounded-lg border border-border/50">
+        <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-border/50">
           {sections.map((section, index) => (
             <div key={`command-section-${index}`}>{section}</div>
           ))}
@@ -1022,23 +1230,71 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
     return null;
   })();
 
+  const filePathTarget =
+    (action.action === "file_read" || action.action === "file_edit") &&
+    typeof action.path === "string" &&
+    action.path.length > 0
+      ? action.path
+      : null;
+  const handleFilePathClick = (event: React.SyntheticEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (filePathTarget && onFilePathClick) {
+      onFilePathClick(filePathTarget);
+    }
+  };
+  const isClickablePathSummary =
+    Boolean(filePathTarget) &&
+    Boolean(onFilePathClick) &&
+    summaryText === filePathTarget;
+
+  const handleHeaderKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (
+    event,
+  ) => {
+    if (!canExpand) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
+  };
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <button
-        type="button"
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <div
         onClick={canExpand ? toggle : undefined}
-        disabled={!canExpand}
+        onKeyDown={handleHeaderKeyDown}
+        role={canExpand ? "button" : undefined}
+        tabIndex={canExpand ? 0 : undefined}
+        aria-expanded={canExpand ? expanded : undefined}
         className={cn(
-          "flex items-center gap-2 text-left text-[12px] text-muted-foreground",
+          "flex min-w-0 items-center gap-2 text-left text-[12px] text-muted-foreground",
           canExpand && "hover:text-foreground cursor-pointer",
           !canExpand && "cursor-default",
         )}
       >
         <span className="shrink-0">{toolIcon(entry)}</span>
-        <span className="font-medium">{label}</span>
-        {summaryText && (
-          <span className="font-mono text-[11px] truncate">{summaryText}</span>
-        )}
+        <span className="min-w-0 shrink font-medium">{label}</span>
+        {summaryText &&
+          (isClickablePathSummary ? (
+            <span
+              role="link"
+              tabIndex={0}
+              onClick={handleFilePathClick}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  handleFilePathClick(event);
+                }
+              }}
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-blue-600 hover:underline underline-offset-2 cursor-pointer"
+              title={summaryText}
+            >
+              {summaryText}
+            </span>
+          ) : (
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+              {summaryText}
+            </span>
+          ))}
         {canExpand && (
           <ChevronDown
             className={cn(
@@ -1047,7 +1303,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
             )}
           />
         )}
-      </button>
+      </div>
       {action.action !== "command_run" &&
         !showInlineSummary &&
         inlineSummary && (
@@ -1063,7 +1319,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
         </p>
       )}
       {status.status === "denied" && status.reason && (
-        <p className="text-[11px] text-destructive">
+        <p className="whitespace-pre-wrap break-words text-[11px] text-destructive">
           {t("deniedReasonLabel")}: {status.reason}
         </p>
       )}
@@ -1074,13 +1330,19 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
 
 type ToolCallEntryProps = {
   entry: NormalizedEntry;
+  onFilePathClick?: (path: string) => void;
 };
 
-const ToolCallEntry = ({ entry }: ToolCallEntryProps) => {
+const ToolCallEntry = ({ entry, onFilePathClick }: ToolCallEntryProps) => {
   if (entry.entry_type.type !== "tool_use") {
     return null;
   }
-  return <ToolCallEntryContent entry={entry as ToolUseEntry} />;
+  return (
+    <ToolCallEntryContent
+      entry={entry as ToolUseEntry}
+      onFilePathClick={onFilePathClick}
+    />
+  );
 };
 
 const ImagePill = ({ name, path }: ImageEntry) => {
@@ -1106,33 +1368,54 @@ const ImagePill = ({ name, path }: ImageEntry) => {
 };
 
 const UserMessageContent = ({ content }: { content: string }) => {
-  const { contextEntries, imageEntries, text } =
+  const { contextEntries, skillEntries, imageEntries, text } =
     parseContextFromContent(content);
 
-  const hasPills = contextEntries.length > 0 || imageEntries.length > 0;
+  const hasPills =
+    contextEntries.length > 0 ||
+    skillEntries.length > 0 ||
+    imageEntries.length > 0;
 
   return (
     <div className="space-y-2">
       {hasPills && (
         <div className="flex flex-wrap gap-1.5">
           {contextEntries.map((entry) => {
-            const sessionId = extractSessionId(entry.path);
-            const displayName = sessionId
-              ? sessionId
-              : entry.path.split("/").pop() || entry.path;
-            const Icon = sessionId
-              ? MessageSquare
-              : entry.isFile
-                ? FileText
-                : Folder;
+            if (entry.kind === "session") {
+              const display = shortSessionId(entry.taskId);
+              return (
+                <span
+                  key={`session-${entry.taskId}`}
+                  className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
+                  title={`Session ${entry.taskId}`}
+                >
+                  <MessageSquare className="h-3 w-3 shrink-0" />
+                  {display}
+                </span>
+              );
+            }
+            const displayName = entry.path.split("/").pop() || entry.path;
+            const Icon = entry.isFile ? FileText : Folder;
             return (
               <span
-                key={entry.path}
+                key={`file-${entry.path}`}
                 className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
-                title={sessionId ? `Session ${sessionId}` : entry.path}
+                title={entry.path}
               >
                 <Icon className="h-3 w-3 shrink-0" />
                 {displayName}
+              </span>
+            );
+          })}
+          {skillEntries.map((skill) => {
+            const displayName = skill.name || skill.id;
+            return (
+              <span
+                key={`skill-${skill.id}`}
+                className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                title={skill.id}
+              >
+                <Hammer className="h-3 w-3 shrink-0" />#{displayName}
               </span>
             );
           })}
@@ -1142,10 +1425,70 @@ const UserMessageContent = ({ content }: { content: string }) => {
         </div>
       )}
       {text && (
-        <p className="whitespace-pre-wrap break-words text-sm font-medium leading-relaxed text-foreground">
+        <p
+          className="whitespace-pre-wrap break-words text-sm font-medium leading-relaxed text-foreground"
+          {...{ [SESSION_SELECT_TEXT_ATTR]: "true" }}
+        >
           {text}
         </p>
       )}
+    </div>
+  );
+};
+
+// Format an elapsed duration for compact status labels:
+// sub-second as `ms`, under a minute as `Ns`, otherwise `Nm Ns`.
+const formatDuration = (ms: number): string => {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return `${minutes}m ${remainingSeconds}s`;
+};
+
+// Format an ISO timestamp as a short wall-clock time (e.g. "10:42 AM").
+// Returns null when the timestamp is missing or unparseable.
+const formatClockTime = (timestamp?: string | null): string | null => {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+};
+
+// End-of-turn footer: "10:42 AM · 4.3s · 1 turn", mid-dot separated.
+// Each segment is optional; the footer renders nothing if all are absent.
+const ExecutionSummaryFooter = ({
+  timestamp,
+  durationMs,
+  numTurns,
+}: {
+  timestamp?: string | null;
+  durationMs?: number | null;
+  numTurns?: number | null;
+}) => {
+  const segments: string[] = [];
+
+  const clock = formatClockTime(timestamp);
+  if (clock) segments.push(clock);
+
+  if (typeof durationMs === "number" && durationMs > 0) {
+    segments.push(formatDuration(durationMs));
+  }
+
+  if (typeof numTurns === "number" && numTurns > 0) {
+    segments.push(`${numTurns} ${numTurns === 1 ? "turn" : "turns"}`);
+  }
+
+  if (segments.length === 0) return null;
+
+  return (
+    <div className="flex items-center text-[11px] text-muted-foreground/60">
+      <span className="font-mono">{segments.join(" · ")}</span>
     </div>
   );
 };
@@ -1154,14 +1497,21 @@ const renderEntryBody = (
   entry: NormalizedEntry,
   translate: ReturnType<typeof useLanguage>["t"],
   onWikilinkClick?: (path: string, subpath?: string) => void,
-  isStreaming?: boolean,
+  onFilePathClick?: (path: string) => void,
 ) => {
   switch (entry.entry_type.type) {
     case "user_message":
       return <UserMessageContent content={entry.content} />;
     case "assistant_message":
       return (
-        <Markdown onWikilinkClick={onWikilinkClick}>{entry.content}</Markdown>
+        <div {...{ [SESSION_SELECT_TEXT_ATTR]: "true" }}>
+          <Markdown
+            onWikilinkClick={onWikilinkClick}
+            onFilePathClick={onFilePathClick}
+          >
+            {entry.content}
+          </Markdown>
+        </div>
       );
     case "system_message": {
       // Model info message (e.g., "Run with gpt-5.2-codex reasoning effort: high")
@@ -1196,9 +1546,7 @@ const renderEntryBody = (
         <CollapsibleEntry content={entry.content} markdown variant="system" />
       );
     case "thinking":
-      return (
-        <ThinkingBlock content={entry.content} isStreaming={isStreaming ?? false} />
-      );
+      return <ThinkingBlock content={entry.content} />;
     case "tool_use":
       return <ToolCallEntry entry={entry} />;
     case "loading":
@@ -1210,6 +1558,14 @@ const renderEntryBody = (
             </TextShimmer>
           </BrailleSpinner>
         </div>
+      );
+    case "execution_summary":
+      return (
+        <ExecutionSummaryFooter
+          timestamp={entry.timestamp}
+          durationMs={entry.entry_type.duration_ms}
+          numTurns={entry.entry_type.num_turns}
+        />
       );
     default:
       return (
@@ -1224,358 +1580,473 @@ type ConversationEntriesProps = {
   entries: DisplayEntry[];
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
   onWikilinkClick?: (path: string, subpath?: string) => void;
+  onFilePathClick?: (path: string) => void;
   scrollContainerRef?: MutableRefObject<HTMLDivElement | null>;
+  onScrollAnchorWillAdjust?: () => void;
+  onScrollAnchorAdjusted?: () => void;
+  /**
+   * When active (find-in-conversation open with a query), bypass tail
+   * virtualization and mount every entry so off-screen matches are searchable.
+   */
+  searchActive?: boolean;
 };
 
 const INITIAL_RENDER_COUNT = 120;
 const LOAD_MORE_COUNT = 120;
 const LOAD_MORE_THRESHOLD = 72;
 
-export const ConversationEntries = memo(({
-  entries,
-  endRef,
-  onWikilinkClick,
-  scrollContainerRef,
-}: ConversationEntriesProps) => {
-  const { t } = useLanguage();
-  const internalScrollRef = useRef<HTMLDivElement>(null);
-  const prevEntriesLengthRef = useRef(entries.length);
-  const prevVisibleEntriesLengthRef = useRef(entries.length);
-  const prevFirstEntryKeyRef = useRef<string | null>(entries[0]?.key ?? null);
-  const scrollAdjustRef = useRef<{
-    prevScrollHeight: number;
-    prevScrollTop: number;
-  } | null>(null);
-  const [visibleCount, setVisibleCount] = useState(() =>
-    Math.min(entries.length, INITIAL_RENDER_COUNT),
-  );
-
-  const getScrollElement = useCallback(
-    () => scrollContainerRef?.current ?? internalScrollRef.current,
-    [scrollContainerRef],
-  );
-
-  useEffect(() => {
-    const firstKey = entries[0]?.key ?? null;
-    const prevLength = prevVisibleEntriesLengthRef.current;
-    const prevFirstKey = prevFirstEntryKeyRef.current;
-    const hasReset =
-      (prevFirstKey && firstKey && prevFirstKey !== firstKey) ||
-      entries.length < prevLength;
-
-    if (hasReset) {
-      setVisibleCount(Math.min(entries.length, INITIAL_RENDER_COUNT));
-    } else if (entries.length > prevLength) {
-      const delta = entries.length - prevLength;
-      const isBulkLoad = delta > LOAD_MORE_COUNT;
-      setVisibleCount((prev) => {
-        // Streaming: small increments while user is already seeing all → follow tail
-        if (prev >= prevLength && !isBulkLoad) {
-          return entries.length;
-        }
-        // Bulk load (historic run): cap to avoid rendering thousands of DOM nodes
-        return Math.min(entries.length, Math.max(prev, INITIAL_RENDER_COUNT));
-      });
-    } else if (entries.length === 0) {
-      setVisibleCount(0);
+export const ConversationEntries = memo(
+  ({
+    entries,
+    endRef,
+    onWikilinkClick,
+    onFilePathClick,
+    scrollContainerRef,
+    onScrollAnchorWillAdjust,
+    onScrollAnchorAdjusted,
+    searchActive,
+  }: ConversationEntriesProps) => {
+    const { t } = useLanguage();
+    const aggregatorRef = useRef<ThinkingAggregator | null>(null);
+    if (aggregatorRef.current === null) {
+      aggregatorRef.current = createThinkingAggregator();
     }
+    const conversationEntries = useMemo(
+      () => aggregatorRef.current!(entries),
+      [entries],
+    );
 
-    prevVisibleEntriesLengthRef.current = entries.length;
-    prevFirstEntryKeyRef.current = firstKey;
-  }, [entries]);
+    // Stabilize callback identities so the per-group memo can hit even when
+    // callers pass freshly-created closures on every render (e.g. inline
+    // arrow functions capturing local state).
+    const onWikilinkClickRef = useRef(onWikilinkClick);
+    onWikilinkClickRef.current = onWikilinkClick;
+    const hasWikilinkClick = onWikilinkClick !== undefined;
+    const stableOnWikilinkClick = useMemo(
+      () =>
+        hasWikilinkClick
+          ? (path: string, subpath?: string) =>
+              onWikilinkClickRef.current?.(path, subpath)
+          : undefined,
+      [hasWikilinkClick],
+    );
 
-  useEffect(() => {
-    const scrollElement = getScrollElement();
-    if (!scrollElement) return;
+    const onFilePathClickRef = useRef(onFilePathClick);
+    onFilePathClickRef.current = onFilePathClick;
+    const hasFilePathClick = onFilePathClick !== undefined;
+    const stableOnFilePathClick = useMemo(
+      () =>
+        hasFilePathClick
+          ? (path: string) => onFilePathClickRef.current?.(path)
+          : undefined,
+      [hasFilePathClick],
+    );
+    const internalScrollRef = useRef<HTMLDivElement>(null);
+    const prevVisibleEntriesLengthRef = useRef(conversationEntries.length);
+    const prevFirstEntryKeyRef = useRef<string | null>(
+      conversationEntries[0]?.key ?? null,
+    );
+    const scrollAdjustRef = useRef<{
+      prevScrollHeight: number;
+      prevScrollTop: number;
+    } | null>(null);
+    const [visibleCount, setVisibleCount] = useState(() =>
+      Math.min(conversationEntries.length, INITIAL_RENDER_COUNT),
+    );
 
-    const handleScroll = () => {
-      if (scrollElement.scrollTop > LOAD_MORE_THRESHOLD) return;
-      if (visibleCount >= entries.length) return;
+    const getScrollElement = useCallback(
+      () => scrollContainerRef?.current ?? internalScrollRef.current,
+      [scrollContainerRef],
+    );
 
-      scrollAdjustRef.current = {
-        prevScrollHeight: scrollElement.scrollHeight,
-        prevScrollTop: scrollElement.scrollTop,
+    // While searching, mount the whole conversation so matches in older,
+    // virtualized-out entries are reachable. Anchor the viewport so prepending
+    // older entries above the fold doesn't visibly shift the content (the
+    // existing scroll-adjust effect consumes scrollAdjustRef on visibleCount
+    // changes).
+    useEffect(() => {
+      if (!searchActive) return;
+      if (visibleCount >= conversationEntries.length) return;
+      const scrollElement = getScrollElement();
+      if (scrollElement) {
+        onScrollAnchorWillAdjust?.();
+        scrollAdjustRef.current = {
+          prevScrollHeight: scrollElement.scrollHeight,
+          prevScrollTop: scrollElement.scrollTop,
+        };
+      }
+      setVisibleCount(conversationEntries.length);
+    }, [
+      searchActive,
+      conversationEntries.length,
+      getScrollElement,
+      onScrollAnchorWillAdjust,
+      visibleCount,
+    ]);
+
+    useEffect(() => {
+      const firstKey = conversationEntries[0]?.key ?? null;
+      const prevLength = prevVisibleEntriesLengthRef.current;
+      const prevFirstKey = prevFirstEntryKeyRef.current;
+      const hasReset =
+        (prevFirstKey && firstKey && prevFirstKey !== firstKey) ||
+        conversationEntries.length < prevLength;
+
+      if (hasReset) {
+        setVisibleCount(
+          Math.min(conversationEntries.length, INITIAL_RENDER_COUNT),
+        );
+      } else if (conversationEntries.length > prevLength) {
+        const delta = conversationEntries.length - prevLength;
+        const isBulkLoad = delta > LOAD_MORE_COUNT;
+        setVisibleCount((prev) => {
+          // Streaming: small increments while user is already seeing all → follow tail
+          if (prev >= prevLength && !isBulkLoad) {
+            return conversationEntries.length;
+          }
+          // Bulk load (historic run): cap to avoid rendering thousands of DOM nodes
+          return Math.min(
+            conversationEntries.length,
+            Math.max(prev, INITIAL_RENDER_COUNT),
+          );
+        });
+      } else if (conversationEntries.length === 0) {
+        setVisibleCount(0);
+      }
+
+      prevVisibleEntriesLengthRef.current = conversationEntries.length;
+      prevFirstEntryKeyRef.current = firstKey;
+    }, [conversationEntries]);
+
+    useEffect(() => {
+      const scrollElement = getScrollElement();
+      if (!scrollElement) return;
+
+      const handleScroll = () => {
+        if (scrollElement.scrollTop > LOAD_MORE_THRESHOLD) return;
+        if (visibleCount >= conversationEntries.length) return;
+
+        onScrollAnchorWillAdjust?.();
+        scrollAdjustRef.current = {
+          prevScrollHeight: scrollElement.scrollHeight,
+          prevScrollTop: scrollElement.scrollTop,
+        };
+        setVisibleCount((prev) =>
+          Math.min(conversationEntries.length, prev + LOAD_MORE_COUNT),
+        );
       };
-      setVisibleCount((prev) =>
-        Math.min(entries.length, prev + LOAD_MORE_COUNT),
-      );
-    };
 
-    scrollElement.addEventListener("scroll", handleScroll);
-    return () => {
-      scrollElement.removeEventListener("scroll", handleScroll);
-    };
-  }, [entries.length, getScrollElement, visibleCount]);
+      scrollElement.addEventListener("scroll", handleScroll);
+      return () => {
+        scrollElement.removeEventListener("scroll", handleScroll);
+      };
+    }, [
+      conversationEntries.length,
+      getScrollElement,
+      onScrollAnchorWillAdjust,
+      visibleCount,
+    ]);
 
-  useEffect(() => {
-    const pendingAdjust = scrollAdjustRef.current;
-    if (!pendingAdjust) return;
-    const scrollElement = getScrollElement();
-    if (!scrollElement) return;
+    useEffect(() => {
+      const pendingAdjust = scrollAdjustRef.current;
+      if (!pendingAdjust) return;
+      const scrollElement = getScrollElement();
+      if (!scrollElement) return;
 
-    const adjustScroll = () => {
-      const nextScrollHeight = scrollElement.scrollHeight;
-      const delta = nextScrollHeight - pendingAdjust.prevScrollHeight;
-      scrollElement.scrollTop = pendingAdjust.prevScrollTop + delta;
-      scrollAdjustRef.current = null;
-    };
-
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(adjustScroll);
-    } else if (typeof queueMicrotask === "function") {
-      queueMicrotask(adjustScroll);
-    } else {
-      setTimeout(adjustScroll, 0);
-    }
-  }, [getScrollElement, visibleCount]);
-
-  // Auto-scroll to bottom when new entries are added
-  useEffect(() => {
-    if (entries.length > prevEntriesLengthRef.current) {
-      const scrollToLatest = () => {
-        if (endRef?.current) {
-          endRef.current.scrollIntoView({ block: "end" });
-          return;
-        }
-        const scrollContainer =
-          scrollContainerRef?.current ?? internalScrollRef.current;
-        if (scrollContainer) {
-          scrollContainer.scrollTo({
-            top: scrollContainer.scrollHeight,
-            behavior: "auto",
-          });
-        }
+      const adjustScroll = () => {
+        const nextScrollHeight = scrollElement.scrollHeight;
+        const delta = nextScrollHeight - pendingAdjust.prevScrollHeight;
+        scrollElement.scrollTop = pendingAdjust.prevScrollTop + delta;
+        scrollAdjustRef.current = null;
+        onScrollAnchorAdjusted?.();
       };
 
       if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(scrollToLatest);
+        requestAnimationFrame(adjustScroll);
       } else if (typeof queueMicrotask === "function") {
-        queueMicrotask(scrollToLatest);
+        queueMicrotask(adjustScroll);
       } else {
-        setTimeout(scrollToLatest, 0);
+        setTimeout(adjustScroll, 0);
       }
+    }, [getScrollElement, onScrollAnchorAdjusted, visibleCount]);
+
+    const startIndex = Math.max(conversationEntries.length - visibleCount, 0);
+    const visibleEntries = conversationEntries.slice(startIndex);
+
+    // If no external scroll container, use internal wrapper
+    if (!scrollContainerRef) {
+      return (
+        <div
+          ref={internalScrollRef}
+          className={cn(
+            "flex w-full max-w-2xl flex-col mx-auto overflow-y-auto",
+          )}
+          style={{ height: "100%", contain: "strict" }}
+        >
+          <EntryList
+            entries={visibleEntries}
+            t={t}
+            onWikilinkClick={stableOnWikilinkClick}
+            onFilePathClick={stableOnFilePathClick}
+            endRef={endRef}
+          />
+        </div>
+      );
     }
-    prevEntriesLengthRef.current = entries.length;
-  }, [entries.length, endRef, scrollContainerRef]);
 
-  const startIndex = Math.max(entries.length - visibleCount, 0);
-  const visibleEntries = entries.slice(startIndex);
-
-  // If no external scroll container, use internal wrapper
-  if (!scrollContainerRef) {
     return (
-      <div
-        ref={internalScrollRef}
-        className={cn("flex w-full max-w-2xl flex-col mx-auto overflow-y-auto")}
-        style={{ height: "100%", contain: "strict" }}
-      >
-        <EntryList
-          entries={visibleEntries}
-          t={t}
-          onWikilinkClick={onWikilinkClick}
-          endRef={endRef}
-        />
-      </div>
+      <EntryList
+        entries={visibleEntries}
+        t={t}
+        onWikilinkClick={stableOnWikilinkClick}
+        onFilePathClick={stableOnFilePathClick}
+        endRef={endRef}
+      />
     );
-  }
-
-  return (
-    <EntryList
-      entries={visibleEntries}
-      t={t}
-      onWikilinkClick={onWikilinkClick}
-      endRef={endRef}
-    />
-  );
-});
+  },
+);
 
 interface EntryListProps {
-  entries: DisplayEntry[];
+  entries: ConversationDisplayEntry[];
   t: TranslationFunction;
   onWikilinkClick?: (path: string, subpath?: string) => void;
+  onFilePathClick?: (path: string) => void;
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
 }
 
 // Group entries by user message: each group starts with a user_message and includes
 // all subsequent entries until the next user_message
 type EntryGroup = {
-  userEntry: DisplayEntry | null;
-  followingEntries: DisplayEntry[];
+  userEntry: ConversationDisplayEntry | null;
+  followingEntries: ConversationDisplayEntry[];
   key: string;
 };
 
-const groupEntriesByUserMessage = (entries: DisplayEntry[]): EntryGroup[] => {
-  const groups: EntryGroup[] = [];
-  let currentGroup: EntryGroup | null = null;
+/**
+ * Grouping cache: reuses an `EntryGroup` object across renders when its
+ * `userEntry` reference and `followingEntries` contents are unchanged.
+ * This lets the memoized `<Group>` component skip rendering for every
+ * conversation turn except the one currently streaming.
+ */
+type GroupingCache = (entries: ConversationDisplayEntry[]) => EntryGroup[];
 
-  for (const entry of entries) {
-    const isUserMessage =
-      entry.type === "NORMALIZED_ENTRY" &&
-      entry.content.entry_type.type === "user_message";
+function createGroupingCache(): GroupingCache {
+  type CacheEntry = {
+    group: EntryGroup;
+    followingSnapshot: ConversationDisplayEntry[];
+  };
+  const cache = new Map<string, CacheEntry>();
 
-    if (isUserMessage) {
-      // Start a new group with this user message
-      if (currentGroup) {
-        groups.push(currentGroup);
+  const reuseOrCommit = (candidate: EntryGroup): EntryGroup => {
+    const cached = cache.get(candidate.key);
+    if (
+      cached &&
+      cached.group.userEntry === candidate.userEntry &&
+      cached.followingSnapshot.length === candidate.followingEntries.length
+    ) {
+      let same = true;
+      for (let i = 0; i < cached.followingSnapshot.length; i++) {
+        if (cached.followingSnapshot[i] !== candidate.followingEntries[i]) {
+          same = false;
+          break;
+        }
       }
-      currentGroup = {
-        userEntry: entry,
-        followingEntries: [],
-        key: entry.key,
-      };
-    } else {
-      // Add to current group's following entries, or create orphan group
-      if (currentGroup) {
-        currentGroup.followingEntries.push(entry);
-      } else {
-        // Entries before the first user message (system messages, etc.)
-        groups.push({
-          userEntry: null,
-          followingEntries: [entry],
-          key: entry.key,
-        });
-      }
+      if (same) return cached.group;
     }
-  }
-
-  // Push the last group
-  if (currentGroup) {
-    groups.push(currentGroup);
-  }
-
-  return groups;
-};
-
-const isThinkingEntry = (entry: DisplayEntry): boolean =>
-  entry.type === "NORMALIZED_ENTRY" &&
-  entry.content.entry_type.type === "thinking";
-
-const isLoadingEntry = (entry: DisplayEntry): boolean =>
-  entry.type === "NORMALIZED_ENTRY" &&
-  entry.content.entry_type.type === "loading";
-
-const EntryList = memo(({ entries, t, onWikilinkClick, endRef }: EntryListProps) => {
-  const groups = useMemo(() => groupEntriesByUserMessage(entries), [entries]);
-
-  // Check if there's a loading entry at the end (indicates streaming)
-  const hasLoadingAtEnd =
-    entries.length > 0 && isLoadingEntry(entries[entries.length - 1]!);
-
-  // Find the last thinking entry index
-  const lastThinkingIndex = useMemo(
-    () => entries.reduce((acc, entry, idx) => (isThinkingEntry(entry) ? idx : acc), -1),
-    [entries],
-  );
-
-  // A thinking entry is streaming if it's the last thinking entry
-  // and there's a loading entry after it (or it's being actively updated)
-  const isThinkingStreaming = (entryKey: string): boolean => {
-    if (lastThinkingIndex < 0) return false;
-    const lastThinking = entries[lastThinkingIndex];
-    return lastThinking?.key === entryKey && hasLoadingAtEnd;
+    cache.set(candidate.key, {
+      group: candidate,
+      followingSnapshot: [...candidate.followingEntries],
+    });
+    return candidate;
   };
 
-  return (
-    <div className={cn("flex w-full max-w-2xl mx-auto flex-col")}>
-      {groups.map((group) => (
-        <div key={group.key} className="relative">
-          {/* User message - sticky with blur expansion */}
-          {group.userEntry && (
-            <ExpandableUserMessage dataUserMessageId={group.key}>
-              <EntryRenderer
-                displayEntry={group.userEntry}
-                t={t}
-                onWikilinkClick={onWikilinkClick}
-              />
-            </ExpandableUserMessage>
-          )}
+  return (entries: ConversationDisplayEntry[]): EntryGroup[] => {
+    const groups: EntryGroup[] = [];
+    let currentGroup: EntryGroup | null = null;
 
-          {/* Following entries (assistant messages, tool calls, etc.) */}
-          {group.followingEntries.map((displayEntry) => {
-            if (!displayEntry) return null;
-            const isStreaming =
-              isThinkingEntry(displayEntry) &&
-              isThinkingStreaming(displayEntry.key);
-            return (
-              <div key={displayEntry.key}>
-                <div className="pb-2">
-                  <EntryRenderer
-                    displayEntry={displayEntry}
-                    t={t}
-                    onWikilinkClick={onWikilinkClick}
-                    isStreaming={isStreaming}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ))}
-      <div
-        ref={(node) => {
-          if (endRef) {
-            endRef.current = node;
-          }
-        }}
-        className="h-px"
-      />
-    </div>
-  );
-});
+    for (const entry of entries) {
+      const isUserMessage =
+        entry.type === "NORMALIZED_ENTRY" &&
+        entry.content.entry_type.type === "user_message";
 
-interface EntryRendererProps {
-  displayEntry: DisplayEntry;
-  t: TranslationFunction;
-  onWikilinkClick?: (path: string, subpath?: string) => void;
-  isStreaming?: boolean;
+      if (isUserMessage) {
+        if (currentGroup) groups.push(reuseOrCommit(currentGroup));
+        currentGroup = {
+          userEntry: entry,
+          followingEntries: [],
+          key: entry.key,
+        };
+      } else if (currentGroup) {
+        currentGroup.followingEntries.push(entry);
+      } else {
+        groups.push(
+          reuseOrCommit({
+            userEntry: null,
+            followingEntries: [entry],
+            key: entry.key,
+          }),
+        );
+      }
+    }
+
+    if (currentGroup) groups.push(reuseOrCommit(currentGroup));
+
+    const liveKeys = new Set<string>();
+    for (const g of groups) liveKeys.add(g.key);
+    for (const k of [...cache.keys()]) {
+      if (!liveKeys.has(k)) cache.delete(k);
+    }
+
+    return groups;
+  };
 }
 
-const EntryRenderer = memo(({
-  displayEntry,
-  t,
-  onWikilinkClick,
-  isStreaming,
-}: EntryRendererProps) => {
-  if (displayEntry.type === "STDOUT") {
-    return (
-      <RawLogText
-        content={displayEntry.content}
-        channel="stdout"
-        className="text-sm px-4 py-1"
-      />
-    );
-  }
-  if (displayEntry.type === "STDERR") {
-    return (
-      <RawLogText
-        content={displayEntry.content}
-        channel="stderr"
-        className="text-sm px-4 py-1"
-      />
-    );
-  }
+interface GroupProps {
+  group: EntryGroup;
+  t: TranslationFunction;
+  onWikilinkClick?: (path: string, subpath?: string) => void;
+  onFilePathClick?: (path: string) => void;
+}
 
-  // Handle NORMALIZED_ENTRY type
-  const entry = displayEntry.content;
-
-  // Guard against malformed entries
-  if (!entry || !entry.entry_type) {
-    console.warn("[ConversationEntries] Skipping malformed entry:", entry);
-    return null;
-  }
-  const isTool = entry.entry_type.type === "tool_use";
-
-  return (
-    <div className={getEntryWrapperClasses(entry)}>
-      {isTool ? (
-        <ToolCallEntry entry={entry} />
-      ) : (
-        <div className="flex items-start gap-3">
-          <div className="flex-1 space-y-2">
-            {renderEntryBody(entry, t, onWikilinkClick, isStreaming)}
+const Group = memo(
+  ({ group, t, onWikilinkClick, onFilePathClick }: GroupProps) => (
+    <div className="relative">
+      {group.userEntry && (
+        <ExpandableUserMessage dataUserMessageId={group.key}>
+          <EntryRenderer
+            displayEntry={group.userEntry}
+            t={t}
+            onWikilinkClick={onWikilinkClick}
+            onFilePathClick={onFilePathClick}
+          />
+        </ExpandableUserMessage>
+      )}
+      {group.followingEntries.map((displayEntry) =>
+        displayEntry ? (
+          <div key={displayEntry.key} className="mx-auto w-full max-w-2xl">
+            <div className="pb-2">
+              <EntryRenderer
+                displayEntry={displayEntry}
+                t={t}
+                onWikilinkClick={onWikilinkClick}
+                onFilePathClick={onFilePathClick}
+              />
+            </div>
           </div>
-        </div>
+        ) : null,
       )}
     </div>
-  );
-});
+  ),
+  (prev, next) =>
+    prev.group === next.group &&
+    prev.t === next.t &&
+    prev.onWikilinkClick === next.onWikilinkClick &&
+    prev.onFilePathClick === next.onFilePathClick,
+);
+
+const EntryList = memo(
+  ({
+    entries,
+    t,
+    onWikilinkClick,
+    onFilePathClick,
+    endRef,
+  }: EntryListProps) => {
+    const groupingCacheRef = useRef<GroupingCache | null>(null);
+    if (groupingCacheRef.current === null) {
+      groupingCacheRef.current = createGroupingCache();
+    }
+    const groups = useMemo(() => groupingCacheRef.current!(entries), [entries]);
+
+    return (
+      <div className={cn("flex w-full flex-col")}>
+        {groups.map((group) => (
+          <Group
+            key={group.key}
+            group={group}
+            t={t}
+            onWikilinkClick={onWikilinkClick}
+            onFilePathClick={onFilePathClick}
+          />
+        ))}
+        <div
+          ref={(node) => {
+            if (endRef) {
+              endRef.current = node;
+            }
+          }}
+          className="h-px"
+        />
+      </div>
+    );
+  },
+);
+
+interface EntryRendererProps {
+  displayEntry: ConversationDisplayEntry;
+  t: TranslationFunction;
+  onWikilinkClick?: (path: string, subpath?: string) => void;
+  onFilePathClick?: (path: string) => void;
+}
+
+const EntryRenderer = memo(
+  ({
+    displayEntry,
+    t,
+    onWikilinkClick,
+    onFilePathClick,
+  }: EntryRendererProps) => {
+    if (displayEntry.type === "AGGREGATED_THINKING_GROUP") {
+      return <CollapsedThinkingGroup group={displayEntry} />;
+    }
+
+    if (displayEntry.type === "STDOUT") {
+      return (
+        <RawLogText
+          content={displayEntry.content}
+          channel="stdout"
+          className="text-sm px-4 py-1"
+        />
+      );
+    }
+    if (displayEntry.type === "STDERR") {
+      return (
+        <RawLogText
+          content={displayEntry.content}
+          channel="stderr"
+          className="text-sm px-4 py-1"
+        />
+      );
+    }
+
+    // Handle NORMALIZED_ENTRY type
+    const entry = displayEntry.content;
+
+    // Guard against malformed entries
+    if (!entry || !entry.entry_type) {
+      console.warn("[ConversationEntries] Skipping malformed entry:", entry);
+      return null;
+    }
+    if (
+      entry.entry_type.type === "thinking" &&
+      entry.content.trim().length === 0
+    ) {
+      return null;
+    }
+    const isTool = entry.entry_type.type === "tool_use";
+
+    return (
+      <div className={getEntryWrapperClasses(entry)}>
+        {isTool ? (
+          <ToolCallEntry entry={entry} onFilePathClick={onFilePathClick} />
+        ) : (
+          <div className="flex items-start gap-3">
+            <div className="flex-1 space-y-2">
+              {renderEntryBody(entry, t, onWikilinkClick, onFilePathClick)}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  },
+);

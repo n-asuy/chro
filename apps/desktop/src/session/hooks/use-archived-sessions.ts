@@ -1,9 +1,9 @@
 
 import { useCallback } from "react";
-import { taskApi } from "@/kanban/api/task-api";
+import { taskApi } from "@/tasks/task-api";
 import type { StoredTask } from "../types";
 
-// Backend uses "cancelled" for archived tasks (matches kanban column definition)
+// Backend uses "cancelled" for archived tasks
 const ARCHIVED_STATUS = "cancelled";
 
 export interface ArchivedSession {
@@ -24,7 +24,7 @@ export function useArchivedSessions(): UseArchivedSessionsResult {
   }, []);
 
   const restoreSession = useCallback(async (taskId: string) => {
-    // Restore to "pending" status (initial state in kanban "Planning" column)
+    // Restore to "pending" status (initial task state)
     await taskApi.updateStatus(taskId, "pending");
   }, []);
 

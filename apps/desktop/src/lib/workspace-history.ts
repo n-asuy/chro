@@ -3,6 +3,15 @@ import { getUiValue, setUiValue } from "./ui-state-client";
 export type RecentWorkspace = {
   path: string;
   lastOpenedAt: number;
+  projectId?: string;
+  projectSlug?: string | null;
+  projectName?: string;
+};
+
+export type RecentWorkspaceMeta = {
+  projectId?: string;
+  projectSlug?: string | null;
+  projectName?: string;
 };
 
 const STORAGE_KEY = "chro.recentWorkspaces";
@@ -39,24 +48,33 @@ export const getRecentWorkspaces = (): RecentWorkspace[] => {
   return readFromStorage();
 };
 
-export const touchRecentWorkspace = (path: string): RecentWorkspace[] => {
+export const touchRecentWorkspace = (
+  path: string,
+  meta: RecentWorkspaceMeta = {},
+): RecentWorkspace[] => {
   const trimmed = path.trim();
   if (!trimmed) {
     return getRecentWorkspaces();
   }
 
   const normalized = normalizePathForCompare(trimmed);
-  const existing = readFromStorage().filter(
+  const previous = readFromStorage();
+  const prior = previous.find(
+    (entry) => normalizePathForCompare(entry.path) === normalized,
+  );
+  const remaining = previous.filter(
     (entry) => normalizePathForCompare(entry.path) !== normalized,
   );
   const next: RecentWorkspace[] = [
     {
       path: trimmed,
       lastOpenedAt: Date.now(),
+      projectId: meta.projectId ?? prior?.projectId,
+      projectSlug: meta.projectSlug ?? prior?.projectSlug,
+      projectName: meta.projectName ?? prior?.projectName,
     },
-    ...existing,
+    ...remaining,
   ].slice(0, MAX_RECENT_WORKSPACES);
 
   return persist(next);
 };
-

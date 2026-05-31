@@ -251,10 +251,25 @@ pub enum CLIMessage {
     Other,
 }
 
+/// A control request from the Claude CLI.
+///
+/// The CLI may send subtypes that this host does not yet recognize
+/// (computer-use plugins, future SDK additions, etc.). Falling back to
+/// `Unknown` keeps the JSON parseable so the host can still emit a
+/// `ControlResponseType::Error` and unblock the CLI rather than hanging
+/// forever waiting for a response we never send.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ControlRequestType {
+    Known(KnownControlRequest),
+    Unknown(Value),
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
-pub enum ControlRequestType {
+pub enum KnownControlRequest {
     CanUseTool {
         tool_name: String,
         input: Value,
@@ -373,8 +388,33 @@ impl ClaudeProtocolPeer {
         request_id: String,
         request: ControlRequestType,
     ) -> Result<(), ContainerError> {
-        match request {
-            ControlRequestType::CanUseTool {
+        let known = match request {
+            ControlRequestType::Known(known) => known,
+            ControlRequestType::Unknown(value) => {
+                let subtype = value
+                    .get("subtype")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(missing)")
+                    .to_string();
+                tracing::warn!(
+                    subtype = %subtype,
+                    request = %value,
+                    "received control_request with unsupported subtype; \
+                    responding with error to keep the CLI from hanging",
+                );
+                return self
+                    .send_response(ControlResponseType::Error {
+                        request_id,
+                        error: Some(format!(
+                            "Unsupported control_request subtype: {subtype}"
+                        )),
+                    })
+                    .await;
+            }
+        };
+
+        match known {
+            KnownControlRequest::CanUseTool {
                 tool_name,
                 input,
                 permission_suggestions: _,
@@ -418,7 +458,7 @@ impl ClaudeProtocolPeer {
                 })
                 .await
             }
-            ControlRequestType::HookCallback { .. } => {
+            KnownControlRequest::HookCallback { .. } => {
                 let payload = self.client.on_hook_callback().await;
                 self.send_response(ControlResponseType::Success {
                     request_id,
@@ -470,6 +510,45 @@ impl ControlResponseMessage {
         Self {
             message_type: "control_response",
             response,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_known_control_request_can_use_tool() {
+        let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#;
+        let msg: CLIMessage = serde_json::from_str(line).unwrap();
+        match msg {
+            CLIMessage::ControlRequest { request, .. } => {
+                assert!(matches!(
+                    request,
+                    ControlRequestType::Known(KnownControlRequest::CanUseTool { .. })
+                ));
+            }
+            _ => panic!("expected ControlRequest"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_control_request_subtype_falls_back_to_unknown() {
+        let line = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"set_model","model":"claude-opus"}}"#;
+        let msg: CLIMessage = serde_json::from_str(line).unwrap();
+        match msg {
+            CLIMessage::ControlRequest { request, .. } => {
+                let value = match request {
+                    ControlRequestType::Unknown(v) => v,
+                    other => panic!("expected Unknown, got {other:?}"),
+                };
+                assert_eq!(
+                    value.get("subtype").and_then(|v| v.as_str()),
+                    Some("set_model")
+                );
+            }
+            _ => panic!("expected ControlRequest"),
         }
     }
 }

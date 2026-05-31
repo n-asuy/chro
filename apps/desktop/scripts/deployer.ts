@@ -15,7 +15,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+// Tauri replacement for the old electron-builder-driven deployer. The high
+// level shape (parseArgs / package / release / tag / upload) is preserved so
+// CI calling conventions stay the same. The interior switches to running
+// `tauri build` and staging chro-server as a Tauri sidecar.
 
 type Command = "package" | "release" | "upload" | "tag";
 
@@ -52,11 +56,29 @@ interface ReleaseArtifact {
   path: string;
 }
 
+interface TauriBuildContext {
+  /** human-readable label e.g. "macOS arm64" */
+  label: string;
+  /** rustup target triple, e.g. "aarch64-apple-darwin" */
+  triple: string;
+  /** bundle types passed to `tauri build --bundles` */
+  bundles: string[];
+  /** suffix appended to the staged chro-server binary name */
+  binaryName: string;
+  /** glob patterns matching artifacts in src-tauri/target/<triple>/release/bundle/ */
+  artifactGlobs: RegExp[];
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(__filename), "..", "..", "..");
 
+const desktopProjectDir = path.join(repoRoot, "apps", "desktop");
+const srcTauriDir = path.join(desktopProjectDir, "src-tauri");
+const tauriBinariesDir = path.join(srcTauriDir, "binaries");
+const tauriConfPath = path.join(srcTauriDir, "tauri.conf.json");
+const tauriCargoTomlPath = path.join(srcTauriDir, "Cargo.toml");
+
 const rustServerCrateDir = path.join(repoRoot, "crates", "server");
-const rustServerReleaseDir = path.join(rustServerCrateDir, "target", "release");
 const rustServerBinaryBaseName = "chro-server";
 const rustServerManifestPath = path.join(rustServerCrateDir, "Cargo.toml");
 const npxCliPackageJsonPath = path.join(
@@ -67,12 +89,6 @@ const npxCliPackageJsonPath = path.join(
   "package.json",
 );
 const changelogPath = path.join(repoRoot, "CHANGELOG.md");
-
-type RustBuildContext = {
-  label: string;
-  triple?: string;
-  binaryName: string;
-};
 
 const ensuredRustTargets = new Set<string>();
 
@@ -211,14 +227,12 @@ function ensureGhRepoConfigured(command: Command) {
   if (command !== "release" && command !== "upload") {
     return;
   }
-
   const ghRepo = process.env.GH_REPO?.trim();
   if (!ghRepo) {
     throw new Error(
       "GH_REPO environment variable must be set (e.g. export GH_REPO=owner/repo) before running the release/upload command.",
     );
   }
-
   console.log(
     `Using GitHub repository ${ghRepo} (GH_REPO) for release artifacts.`,
   );
@@ -246,13 +260,22 @@ function extractChangelogEntry(version: string): string {
   return sectionBody;
 }
 
-function updateCargoTomlVersion(newVersion: string) {
-  const content = readFileSync(rustServerManifestPath, "utf8");
+function updateCargoTomlVersion(manifestPath: string, newVersion: string) {
+  const content = readFileSync(manifestPath, "utf8");
   const updated = content.replace(
     /^version\s*=\s*"[^"]*"/m,
     `version = "${newVersion}"`,
   );
-  writeFileSync(rustServerManifestPath, updated, "utf8");
+  writeFileSync(manifestPath, updated, "utf8");
+}
+
+function updateTauriConfVersion(newVersion: string) {
+  const conf = JSON.parse(readFileSync(tauriConfPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  conf.version = newVersion;
+  writeFileSync(tauriConfPath, `${JSON.stringify(conf, null, 2)}\n`, "utf8");
 }
 
 function updateNpxCliVersion(newVersion: string) {
@@ -275,61 +298,17 @@ function updateCargoLock() {
 
 function commitUnifiedVersionBump(newVersion: string) {
   const paths = [
-    relativeToRepo(
-      path.join(repoRoot, "apps", "desktop", "package.json"),
-    ),
+    relativeToRepo(path.join(desktopProjectDir, "package.json")),
+    relativeToRepo(tauriConfPath),
+    relativeToRepo(tauriCargoTomlPath),
     relativeToRepo(rustServerManifestPath),
     relativeToRepo(npxCliPackageJsonPath),
-    relativeToRepo(
-      path.join(rustServerCrateDir, "Cargo.lock"),
-    ),
+    relativeToRepo(path.join(rustServerCrateDir, "Cargo.lock")),
   ];
   runCommand("git", ["add", ...paths], { cwd: repoRoot });
   runCommand("git", ["commit", "-m", `release ${newVersion}`], {
     cwd: repoRoot,
   });
-}
-
-function tagRelease(
-  configs: ProjectConfig[],
-  packageInfos: PackageInfo[],
-  requestedVersion: string | null,
-  tagOverride: string | null,
-) {
-  const baseVersion = packageInfos[0].version;
-  const targetVersion = requestedVersion
-    ? normaliseVersionInput(requestedVersion)
-    : incrementPatchVersion(baseVersion);
-
-  assertSemver(targetVersion);
-  const releaseNotes = extractChangelogEntry(targetVersion);
-  ensureCleanWorkingTree();
-
-  console.log(`Bumping version ${baseVersion} → ${targetVersion}…`);
-  configs.forEach((config, index) => {
-    updatePackageVersion(config, targetVersion);
-    packageInfos[index] = { ...packageInfos[index], version: targetVersion };
-  });
-  updateCargoTomlVersion(targetVersion);
-  updateNpxCliVersion(targetVersion);
-
-  console.log("Updating Cargo.lock…");
-  updateCargoLock();
-
-  console.log("Committing version bump…");
-  commitUnifiedVersionBump(targetVersion);
-  console.log("Pushing current branch to origin…");
-  pushCurrentBranch();
-
-  const tagName = normaliseTag(tagOverride ?? targetVersion);
-  console.log(`Creating git tag ${tagName}…`);
-  createGitTag(tagName, releaseNotes);
-  console.log(`Pushing tag ${tagName} to origin…`);
-  pushGitTag(tagName);
-
-  console.log(
-    `Done. CI will create the Desktop and CLI releases for ${tagName}.`,
-  );
 }
 
 function readPackageInfo(config: ProjectConfig): PackageInfo {
@@ -342,19 +321,8 @@ function readPackageInfo(config: ProjectConfig): PackageInfo {
       `Unable to read version from ${config.packageJsonRelativePath}`,
     );
   }
-
   const name = typeof pkg.name === "string" ? pkg.name : config.name;
-  let productName = config.fallbackProductName;
-
-  const build = pkg.build;
-  if (build && typeof build === "object") {
-    const candidate = (build as Record<string, unknown>).productName;
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      productName = candidate;
-    }
-  }
-
-  return { name, version, productName };
+  return { name, version, productName: config.fallbackProductName };
 }
 
 function normaliseVersionInput(raw: string): string {
@@ -370,8 +338,7 @@ function assertSemver(version: string) {
 function incrementPatchVersion(current: string): string {
   assertSemver(current);
   const [major, minor, patch] = current.split(".");
-  const nextPatch = Number(patch) + 1;
-  return `${major}.${minor}.${nextPatch}`;
+  return `${major}.${minor}.${Number(patch) + 1}`;
 }
 
 function updatePackageVersion(config: ProjectConfig, newVersion: string) {
@@ -420,15 +387,12 @@ function runCommand(
   if (result.error) {
     throw result.error;
   }
-
   if (result.status !== 0) {
     throw new Error(
       `Command failed with exit code ${result.status}: ${command} ${formattedArgs.join(" ")}`,
     );
   }
-
-  const stdout = capture && result.stdout ? result.stdout.toString() : "";
-  return { stdout };
+  return { stdout: capture && result.stdout ? result.stdout.toString() : "" };
 }
 
 function ensureCleanWorkingTree() {
@@ -447,10 +411,6 @@ function ensureCleanWorkingTree() {
   }
 }
 
-interface PackagingOptions {
-  skipSigning: boolean;
-}
-
 function ensureRustTarget(target: string) {
   if (ensuredRustTargets.has(target)) {
     return;
@@ -459,308 +419,392 @@ function ensureRustTarget(target: string) {
   ensuredRustTargets.add(target);
 }
 
-function detectRustBuildContext(runArgs: string[]): RustBuildContext | null {
-  if (runArgs.includes("--mac")) {
-    if (runArgs.includes("--arm64")) {
-      return {
-        label: "macOS arm64",
-        triple: "aarch64-apple-darwin",
-        binaryName: rustServerBinaryBaseName,
-      };
+function detectBuildContexts(runArgs: string[]): TauriBuildContext[] {
+  const wantMac = runArgs.includes("--mac");
+  const wantWin = runArgs.includes("--win");
+  const wantLinux = runArgs.includes("--linux");
+  const wantArm = runArgs.includes("--arm64");
+  const wantX64 = runArgs.includes("--x64");
+
+  if (wantMac) {
+    const archs: Array<{ triple: string; label: string }> = [];
+    if (wantArm || (!wantArm && !wantX64)) {
+      archs.push({ triple: "aarch64-apple-darwin", label: "macOS arm64" });
     }
-    if (runArgs.includes("--x64")) {
-      return {
-        label: "macOS x64",
-        triple: "x86_64-apple-darwin",
-        binaryName: rustServerBinaryBaseName,
-      };
+    if (wantX64 || (!wantArm && !wantX64)) {
+      archs.push({ triple: "x86_64-apple-darwin", label: "macOS x64" });
     }
-    return {
-      label: "macOS",
+    return archs.map(({ triple, label }) => ({
+      label,
+      triple,
+      bundles: ["app", "dmg", "updater"],
       binaryName: rustServerBinaryBaseName,
-    };
+      artifactGlobs: [
+        /\.dmg$/i,
+        /\.app\.tar\.gz$/i,
+        /\.app\.tar\.gz\.sig$/i,
+        /latest\.json$/i,
+      ],
+    }));
   }
 
-  if (runArgs.includes("--win")) {
+  if (wantWin) {
     if (process.platform !== "win32") {
       throw new Error(
         "Windows builds require a Windows environment. Use GitHub Actions or a Windows machine.",
       );
     }
-    return {
-      label: "Windows x64",
-      binaryName: `${rustServerBinaryBaseName}.exe`,
-    };
+    return [
+      {
+        label: "Windows x64",
+        triple: "x86_64-pc-windows-msvc",
+        bundles: ["nsis", "updater"],
+        binaryName: `${rustServerBinaryBaseName}.exe`,
+        artifactGlobs: [/\.exe$/i, /\.zip$/i, /\.zip\.sig$/i, /latest\.json$/i],
+      },
+    ];
   }
 
-  if (runArgs.includes("--linux")) {
-    return {
+  if (wantLinux) {
+    return [
+      {
+        label: "Linux x64",
+        triple: "x86_64-unknown-linux-gnu",
+        bundles: ["appimage", "deb", "updater"],
+        binaryName: rustServerBinaryBaseName,
+        artifactGlobs: [
+          /\.AppImage$/i,
+          /\.AppImage\.tar\.gz$/i,
+          /\.AppImage\.tar\.gz\.sig$/i,
+          /\.deb$/i,
+          /latest\.json$/i,
+        ],
+      },
+    ];
+  }
+
+  // No platform flag: pick a sensible default for the current host.
+  if (process.platform === "darwin") {
+    return [
+      {
+        label: "macOS arm64",
+        triple: "aarch64-apple-darwin",
+        bundles: ["app", "dmg", "updater"],
+        binaryName: rustServerBinaryBaseName,
+        artifactGlobs: [
+          /\.dmg$/i,
+          /\.app\.tar\.gz$/i,
+          /\.app\.tar\.gz\.sig$/i,
+          /latest\.json$/i,
+        ],
+      },
+      {
+        label: "macOS x64",
+        triple: "x86_64-apple-darwin",
+        bundles: ["app", "dmg", "updater"],
+        binaryName: rustServerBinaryBaseName,
+        artifactGlobs: [
+          /\.dmg$/i,
+          /\.app\.tar\.gz$/i,
+          /\.app\.tar\.gz\.sig$/i,
+          /latest\.json$/i,
+        ],
+      },
+    ];
+  }
+  if (process.platform === "win32") {
+    return [
+      {
+        label: "Windows x64",
+        triple: "x86_64-pc-windows-msvc",
+        bundles: ["nsis", "updater"],
+        binaryName: `${rustServerBinaryBaseName}.exe`,
+        artifactGlobs: [/\.exe$/i, /\.zip$/i, /\.zip\.sig$/i, /latest\.json$/i],
+      },
+    ];
+  }
+  return [
+    {
       label: "Linux x64",
-      triple:
-        process.platform === "linux" ? undefined : "x86_64-unknown-linux-gnu",
+      triple: "x86_64-unknown-linux-gnu",
+      bundles: ["appimage", "deb", "updater"],
       binaryName: rustServerBinaryBaseName,
-    };
-  }
-
-  return null;
+      artifactGlobs: [
+        /\.AppImage$/i,
+        /\.deb$/i,
+        /\.AppImage\.tar\.gz$/i,
+        /\.AppImage\.tar\.gz\.sig$/i,
+        /latest\.json$/i,
+      ],
+    },
+  ];
 }
 
-function stageRustBinary(context: RustBuildContext) {
-  const sourceDir = context.triple
-    ? path.join(rustServerCrateDir, "target", context.triple, "release")
-    : rustServerReleaseDir;
-  const sourcePath = path.join(sourceDir, context.binaryName);
+function buildAndStageRustBinary(context: TauriBuildContext) {
+  ensureRustTarget(context.triple);
+  console.log(`Building Rust server (${context.label})…`);
+  runCommand(
+    "cargo",
+    [
+      "build",
+      "--release",
+      "--manifest-path",
+      rustServerManifestPath,
+      "--bin",
+      rustServerBinaryBaseName,
+      "--target",
+      context.triple,
+    ],
+    { cwd: repoRoot },
+  );
+
+  const sourcePath = path.join(
+    rustServerCrateDir,
+    "target",
+    context.triple,
+    "release",
+    context.binaryName,
+  );
   if (!existsSync(sourcePath)) {
     throw new Error(
-      `Expected Rust binary at ${relativeToRepo(sourcePath)}, but it was not found. Ensure cargo build completed successfully.`,
+      `Expected Rust binary at ${relativeToRepo(sourcePath)}, but it was not found.`,
     );
   }
+  mkdirSync(tauriBinariesDir, { recursive: true });
 
-  mkdirSync(rustServerReleaseDir, { recursive: true });
-  const destinationPath = path.join(rustServerReleaseDir, context.binaryName);
-
-  // Skip copy if source and destination are the same (native build without cross-compilation)
-  if (path.resolve(sourcePath) === path.resolve(destinationPath)) {
-    console.log(
-      `Rust binary already at ${relativeToRepo(destinationPath)}, skipping copy.`,
-    );
-    return;
-  }
-
+  // Tauri sidecar naming convention: `<base>-<triple>[.exe]`.
+  const stagedName = `${rustServerBinaryBaseName}-${context.triple}${
+    context.binaryName.endsWith(".exe") ? ".exe" : ""
+  }`;
+  const destinationPath = path.join(tauriBinariesDir, stagedName);
   if (existsSync(destinationPath)) {
     rmSync(destinationPath, { force: true });
   }
   copyFileSync(sourcePath, destinationPath);
 }
 
-function buildRustBinaryForContext(context: RustBuildContext) {
-  const cargoArgs = [
-    "build",
-    "--release",
-    "--manifest-path",
-    rustServerManifestPath,
-    "--bin",
-    rustServerBinaryBaseName,
-  ];
-  if (context.triple) {
-    ensureRustTarget(context.triple);
-    cargoArgs.push("--target", context.triple);
+function tauriBuildEnv(skipSigning: boolean): NodeJS.ProcessEnv | undefined {
+  if (!skipSigning) {
+    return undefined;
   }
+  // `--skip-sign` only disables Apple code signing/notarization. Updater
+  // artifact signing is independent: with `createUpdaterArtifacts` + a configured
+  // `pubkey`, Tauri still requires `TAURI_SIGNING_PRIVATE_KEY`, so we must NOT
+  // clear it here — doing so breaks both local nosign builds and the CI Windows
+  // job (Apple-unsigned, but still signs its updater bundle via the secret key).
+  return {
+    APPLE_CERTIFICATE: undefined,
+    APPLE_CERTIFICATE_PASSWORD: undefined,
+    APPLE_SIGNING_IDENTITY: undefined,
+    APPLE_ID: undefined,
+    APPLE_PASSWORD: undefined,
+    APPLE_APP_SPECIFIC_PASSWORD: undefined,
+    APPLE_TEAM_ID: undefined,
+  };
+}
 
-  console.log(`Building Rust server (${context.label})…`);
-  runCommand("cargo", cargoArgs, { cwd: repoRoot });
-  stageRustBinary(context);
+function runTauriBuild(context: TauriBuildContext, skipSigning: boolean) {
+  // The updater bundle (.app.tar.gz / .zip) is signed with TAURI_SIGNING_PRIVATE_KEY.
+  // --skip-sign clears that key, so producing the updater artifact would fail with
+  // "public key found, but no private key". Local unsigned builds don't need the
+  // updater feed, so drop it and keep just the installable bundles.
+  const bundles = skipSigning
+    ? context.bundles.filter((bundle) => bundle !== "updater")
+    : context.bundles;
+  const tauriArgs = [
+    "tauri",
+    "build",
+    "--target",
+    context.triple,
+    "--bundles",
+    bundles.join(","),
+  ];
+  runCommand("bunx", tauriArgs, {
+    cwd: desktopProjectDir,
+    env: tauriBuildEnv(skipSigning),
+  });
+}
+
+function collectBundleArtifacts(context: TauriBuildContext): string[] {
+  // Tauri 2 writes outputs to <crate>/target/<triple>/release/bundle/<format>/.
+  const bundleRoot = path.join(
+    srcTauriDir,
+    "target",
+    context.triple,
+    "release",
+    "bundle",
+  );
+  if (!existsSync(bundleRoot)) {
+    return [];
+  }
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        const matches = context.artifactGlobs.some((g) => g.test(entry.name));
+        if (matches) {
+          out.push(full);
+        }
+      }
+    }
+  };
+  walk(bundleRoot);
+  return out;
 }
 
 function packageDesktop(
-  projectDir: string,
   builderArgs: string[],
   version: string,
-  options: PackagingOptions,
+  options: { skipSigning: boolean },
 ) {
-  runCommand("bun", ["run", "build"], { cwd: projectDir });
+  // Build the renderer once; Tauri's beforeBuildCommand also calls this but
+  // running it here keeps `bun run build` reproducible across hosts.
+  runCommand("bun", ["run", "build:vite"], { cwd: desktopProjectDir });
 
-  const defaultRuns: string[][] =
-    process.platform === "darwin"
-      ? [
-          ["--mac", "--arm64"],
-          ["--mac", "--x64"],
-        ]
-      : process.platform === "win32"
-        ? [["--win", "--x64"]]
-        : [["--linux", "--x64"]];
-
-  // Expand --mac without architecture to both arm64 and x64
-  const expandMacArgs = (args: string[]): string[][] => {
-    const hasMac = args.includes("--mac");
-    const hasArch = args.includes("--arm64") || args.includes("--x64");
-    if (hasMac && !hasArch && process.platform === "darwin") {
-      const otherArgs = args.filter((arg) => arg !== "--mac");
-      return [
-        ["--mac", "--arm64", ...otherArgs],
-        ["--mac", "--x64", ...otherArgs],
-      ];
-    }
-    return [args];
-  };
-
-  const builderRuns =
-    builderArgs.length > 0 ? expandMacArgs(builderArgs) : defaultRuns;
-
-  const builderEnv: NodeJS.ProcessEnv | undefined = options.skipSigning
-    ? {
-        NODE_ENV: process.env.NODE_ENV ?? "production",
-        CSC_IDENTITY_AUTO_DISCOVERY: "false",
-        CSC_LINK: undefined,
-        CSC_KEY_PASSWORD: undefined,
-        CSC_NAME: undefined,
-        APPLE_ID: undefined,
-        APPLE_APP_SPECIFIC_PASSWORD: undefined,
-        APPLE_ID_PASSWORD: undefined,
-        APPLE_TEAM_ID: undefined,
-        APPLE_API_KEY: undefined,
-        APPLE_API_KEY_ID: undefined,
-        APPLE_API_ISSUER: undefined,
-      }
-    : undefined;
-
-  const distDir = path.join(projectDir, "dist");
-  const stashRoot =
-    builderRuns.length > 1
-      ? path.join(projectDir, ".deployer-staged-artifacts")
-      : null;
-  const stashedDirs: string[] = [];
-
-  if (stashRoot) {
-    if (existsSync(stashRoot)) {
-      rmSync(stashRoot, { recursive: true, force: true });
-    }
-    mkdirSync(stashRoot, { recursive: true });
-  }
-
-  try {
-    builderRuns.forEach((runArgs, index) => {
-      const rustContext = detectRustBuildContext(runArgs);
-      if (rustContext) {
-        buildRustBinaryForContext(rustContext);
-      }
-      runCommand(
-        "bun",
-        ["x", "electron-builder", ...runArgs, "--publish", "never"],
-        {
-          cwd: projectDir,
-          env: builderEnv,
-        },
-      );
-
-      if (!stashRoot || index === builderRuns.length - 1) {
-        return;
-      }
-
-      const runStashDir = path.join(stashRoot, `run-${index}`);
-      stashBuilderOutput(distDir, runStashDir);
-      stashedDirs.push(runStashDir);
-    });
-  } finally {
-    if (stashRoot) {
-      restoreStashedOutputs(distDir, stashedDirs);
-      rmSync(stashRoot, { recursive: true, force: true });
-    }
-  }
-
-  moveArtifactsToRelease(projectDir, version);
-}
-
-function packageDesktopEditor(
-  projectDir: string,
-  builderArgs: string[],
-  version: string,
-  _options: PackagingOptions,
-) {
-  runCommand("bun", ["run", "sync-version"], {
-    cwd: projectDir,
-    env: { APP_VERSION: version },
-  });
-  runCommand("bun", ["run", "prepack-app"], { cwd: projectDir });
-  const effectiveArgs = builderArgs.length > 0 ? builderArgs : ["--mac"];
-  runCommand("bun", ["x", "electron-builder", ...effectiveArgs], {
-    cwd: projectDir,
-  });
-}
-
-function stashBuilderOutput(sourceDir: string, targetDir: string) {
-  if (!existsSync(sourceDir)) {
-    return;
-  }
-  const entries = readdirSync(sourceDir, { withFileTypes: true });
-  if (entries.length === 0) {
-    return;
-  }
-  mkdirSync(targetDir, { recursive: true });
-  entries.forEach((entry) => {
-    const sourcePath = path.join(sourceDir, entry.name);
-    const targetPath = path.join(targetDir, entry.name);
-    renameSync(sourcePath, targetPath);
-  });
-}
-
-function restoreStashedOutputs(distDir: string, stashedDirs: string[]) {
-  if (!stashedDirs.length) {
-    return;
-  }
-  if (!existsSync(distDir)) {
-    mkdirSync(distDir, { recursive: true });
-  }
-  stashedDirs.forEach((stashDir) => {
-    if (!existsSync(stashDir)) {
-      return;
-    }
-    const entries = readdirSync(stashDir, { withFileTypes: true });
-    entries.forEach((entry) => {
-      const sourcePath = path.join(stashDir, entry.name);
-      const targetPath = path.join(distDir, entry.name);
-      if (existsSync(targetPath)) {
-        if (entry.name === "latest-mac.yml") {
-          mergeLatestMacYmlFromFilePaths(targetPath, sourcePath);
-          rmSync(sourcePath, { recursive: true, force: true });
-          return;
-        }
-        console.warn(
-          `Skipping restoration of ${entry.name} because ${relativeToRepo(targetPath)} already exists.`,
-        );
-        return;
-      }
-      renameSync(sourcePath, targetPath);
-    });
-    rmSync(stashDir, { recursive: true, force: true });
-  });
-}
-
-function moveArtifactsToRelease(projectDir: string, version: string) {
-  const distDir = path.join(projectDir, "dist");
-  if (!existsSync(distDir)) {
-    console.warn(`No dist directory found at ${relativeToRepo(distDir)}.`);
-    return;
-  }
-  const entries = readdirSync(distDir, { withFileTypes: true });
-  if (entries.length === 0) {
-    console.warn(`No artifacts produced in ${relativeToRepo(distDir)}.`);
-    return;
-  }
-
-  const releaseDir = path.join(projectDir, "release", version);
+  const contexts = detectBuildContexts(builderArgs);
+  const releaseDir = path.join(desktopProjectDir, "release", version);
   if (existsSync(releaseDir)) {
     rmSync(releaseDir, { recursive: true, force: true });
   }
   mkdirSync(releaseDir, { recursive: true });
 
-  entries.forEach((entry) => {
-    const sourcePath = path.join(distDir, entry.name);
-    const targetPath = path.join(releaseDir, entry.name);
-    if (existsSync(targetPath)) {
-      rmSync(targetPath, { recursive: true, force: true });
-    }
-    renameSync(sourcePath, targetPath);
-  });
+  // For multi-arch macOS we want to consolidate the per-arch latest.json into
+  // a single feed manifest so the updater plugin gets one URL it can hit.
+  const latestJsonByPlatform = new Map<
+    string,
+    Record<string, unknown>
+  >();
 
-  rmSync(distDir, { recursive: true, force: true });
+  for (const ctx of contexts) {
+    buildAndStageRustBinary(ctx);
+    runTauriBuild(ctx, options.skipSigning);
+
+    const artifacts = collectBundleArtifacts(ctx);
+    if (artifacts.length === 0) {
+      console.warn(`No artifacts produced for ${ctx.label}.`);
+      continue;
+    }
+    for (const artifact of artifacts) {
+      const base = path.basename(artifact);
+      const target = path.join(releaseDir, prefixed(ctx, base));
+      copyOrMoveArtifact(artifact, target);
+
+      if (base === "latest.json") {
+        const json = JSON.parse(readFileSync(target, "utf8")) as Record<
+          string,
+          unknown
+        >;
+        const platform = osPlatformKey(ctx.triple);
+        const existing = latestJsonByPlatform.get(platform);
+        latestJsonByPlatform.set(
+          platform,
+          mergeLatestJson(existing, json, ctx.triple),
+        );
+        // Remove the per-arch file; we'll write the merged one below.
+        unlinkSync(target);
+      }
+    }
+  }
+
+  for (const [platform, manifest] of latestJsonByPlatform) {
+    const filename = `latest-${platform}.json`;
+    writeFileSync(
+      path.join(releaseDir, filename),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+  }
+}
+
+function copyOrMoveArtifact(source: string, target: string) {
+  if (existsSync(target)) {
+    rmSync(target, { force: true });
+  }
+  copyFileSync(source, target);
+}
+
+function prefixed(ctx: TauriBuildContext, base: string): string {
+  // Disambiguate same-name artifacts (e.g. latest.json) per arch by prefixing
+  // the triple. Final cross-arch merging happens after collection.
+  if (base === "latest.json") {
+    return `${ctx.triple}.${base}`;
+  }
+  return base;
+}
+
+function osPlatformKey(triple: string): string {
+  if (triple.includes("apple-darwin")) return "darwin";
+  if (triple.includes("windows")) return "windows";
+  if (triple.includes("linux")) return "linux";
+  return triple;
+}
+
+interface LatestJsonPlatform {
+  signature?: string;
+  url?: string;
+  with_elevated_task?: boolean;
+}
+
+interface LatestJson {
+  version?: string;
+  notes?: string;
+  pub_date?: string;
+  platforms?: Record<string, LatestJsonPlatform>;
+  // Tauri's manifest sometimes has only `signature` + `url` at the root for
+  // single-platform builds, but the canonical form is `platforms`.
+}
+
+function mergeLatestJson(
+  existing: Record<string, unknown> | undefined,
+  incoming: Record<string, unknown>,
+  triple: string,
+): Record<string, unknown> {
+  const base = (existing ?? incoming) as LatestJson;
+  const next = incoming as LatestJson;
+  const platforms: Record<string, LatestJsonPlatform> = {
+    ...(base.platforms ?? {}),
+    ...(next.platforms ?? {}),
+  };
+  const archKey = tauriArchKey(triple);
+  if (archKey && next.platforms?.[Object.keys(next.platforms)[0]]) {
+    // If the incoming json only declared one platform, re-key it under the
+    // arch-specific name expected by the updater plugin endpoints.
+    const firstKey = Object.keys(next.platforms)[0];
+    platforms[archKey] = next.platforms[firstKey];
+  }
+  const merged: LatestJson = {
+    version: next.version ?? base.version,
+    notes: next.notes ?? base.notes,
+    pub_date: pickLatest(base.pub_date, next.pub_date),
+    platforms,
+  };
+  return merged as unknown as Record<string, unknown>;
+}
+
+function tauriArchKey(triple: string): string | null {
+  if (triple === "aarch64-apple-darwin") return "darwin-aarch64";
+  if (triple === "x86_64-apple-darwin") return "darwin-x86_64";
+  if (triple === "x86_64-pc-windows-msvc") return "windows-x86_64";
+  if (triple === "x86_64-unknown-linux-gnu") return "linux-x86_64";
+  return null;
+}
+
+function pickLatest(a?: string, b?: string): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return new Date(a) > new Date(b) ? a : b;
 }
 
 function packageProject(
-  config: ProjectConfig,
+  _config: ProjectConfig,
   builderArgs: string[],
   version: string,
-  options: PackagingOptions,
+  options: { skipSigning: boolean },
 ) {
-  switch (config.name) {
-    case "desktop":
-      packageDesktop(config.projectDir, builderArgs, version, options);
-      return;
-    default: {
-      const neverProject: never = config.name;
-      throw new Error(`Unsupported project: ${neverProject}`);
-    }
-  }
+  packageDesktop(builderArgs, version, options);
 }
 
 function createGitTag(tagName: string, message: string | null) {
@@ -775,27 +819,19 @@ function pushGitTag(tagName: string) {
   runCommand("git", ["push", "origin", tagName], { cwd: repoRoot });
 }
 
-
 function pushCurrentBranch() {
   runCommand("git", ["push", "origin", "HEAD"], { cwd: repoRoot });
 }
 
-function resolveReleaseDir(config: ProjectConfig, version: string): string {
-  switch (config.name) {
-    case "desktop":
-      return path.join(config.projectDir, "release", version);
-    default: {
-      const neverProject: never = config.name;
-      throw new Error(`Unsupported project: ${neverProject}`);
-    }
-  }
+function resolveReleaseDir(version: string): string {
+  return path.join(desktopProjectDir, "release", version);
 }
 
 function collectReleaseArtifacts(
   config: ProjectConfig,
   version: string,
 ): ReleaseArtifact[] {
-  const releaseDir = resolveReleaseDir(config, version);
+  const releaseDir = resolveReleaseDir(version);
   let entries: Dirent[];
   try {
     entries = readdirSync(releaseDir, { withFileTypes: true });
@@ -804,34 +840,15 @@ function collectReleaseArtifacts(
       `Unable to read release output directory ${relativeToRepo(releaseDir)}: ${(error as Error).message}`,
     );
   }
-
   const files = entries
     .filter((entry) => entry.isFile())
     .map((entry) => path.join(releaseDir, entry.name));
-
-  const filesForRelease = files.filter((filePath) => {
-    const basename = path.basename(filePath);
-    const isReleaseMetadata =
-      basename === "latest-mac.yml" || basename === "latest.yml";
-    const isWindowsInstaller =
-      basename === `Chro Setup ${version}.exe` ||
-      basename === `Chro.Setup.${version}.exe`;
-    const isVersionedArtifact =
-      basename.startsWith(`Chro-${version}`) &&
-      (basename.endsWith(".dmg") ||
-        basename.endsWith(".dmg.blockmap") ||
-        basename.endsWith(".zip") ||
-        basename.endsWith(".zip.blockmap"));
-    return isReleaseMetadata || isWindowsInstaller || isVersionedArtifact;
-  });
-
-  if (filesForRelease.length === 0) {
+  if (files.length === 0) {
     throw new Error(
       `No release artifacts for version ${version} found in ${relativeToRepo(releaseDir)}. Did packaging succeed?`,
     );
   }
-
-  return filesForRelease.map((filePath) => ({
+  return files.map((filePath) => ({
     project: config.name,
     path: relativeToRepo(filePath),
   }));
@@ -848,8 +865,7 @@ function createGithubRelease(
   const artifacts: ReleaseArtifact[] = [];
 
   for (const config of configs) {
-    const files = collectReleaseArtifacts(config, version);
-    for (const artifact of files) {
+    for (const artifact of collectReleaseArtifacts(config, version)) {
       if (!artifactSet.has(artifact.path)) {
         artifactSet.add(artifact.path);
         artifacts.push(artifact);
@@ -865,162 +881,18 @@ function createGithubRelease(
     title,
     "--generate-notes",
   ];
-
   if (ghRepo) {
     args.push("--repo", ghRepo);
   }
-
   runCommand("gh", args, { cwd: repoRoot });
 
-  if (artifacts.length === 0) {
-    return;
-  }
-
-  const basenameCounts = new Map<string, number>();
   for (const artifact of artifacts) {
-    const baseName = path.basename(artifact.path);
-    basenameCounts.set(baseName, (basenameCounts.get(baseName) ?? 0) + 1);
-  }
-
-  for (const artifact of artifacts) {
-    const baseName = path.basename(artifact.path);
-    const needsPrefix = (basenameCounts.get(baseName) ?? 0) > 1;
-    const uploadName = needsPrefix
-      ? `${artifact.project}-${baseName}`
-      : baseName;
-
-    let uploadPath = artifact.path;
-    let tempPath: string | null = null;
-
-    // gh release upload does not support --name, so copy to temp file if rename needed
-    if (uploadName !== baseName) {
-      tempPath = path.join(path.dirname(artifact.path), uploadName);
-      copyFileSync(artifact.path, tempPath);
-      uploadPath = tempPath;
-    }
-
-    const uploadArgs = ["release", "upload", tagName, uploadPath, "--clobber"];
+    const uploadArgs = ["release", "upload", tagName, artifact.path, "--clobber"];
     if (ghRepo) {
       uploadArgs.push("--repo", ghRepo);
     }
-
-    try {
-      runCommand("gh", uploadArgs, { cwd: repoRoot });
-    } finally {
-      if (tempPath) {
-        unlinkSync(tempPath);
-      }
-    }
+    runCommand("gh", uploadArgs, { cwd: repoRoot });
   }
-}
-
-function normaliseTag(versionOrTag: string): string {
-  const trimmed = versionOrTag.trim();
-  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
-}
-
-interface LatestYmlFile {
-  url: string;
-  sha512: string;
-  size: number;
-}
-
-interface LatestYml {
-  version: string;
-  files: LatestYmlFile[];
-  path?: string;
-  sha512?: string;
-  releaseDate: string;
-}
-
-function mergeLatestMacYmlData(base: LatestYml, incoming: LatestYml): LatestYml {
-  const merged: LatestYml = {
-    ...base,
-    files: [...base.files],
-  };
-
-  const existingUrls = new Set(merged.files.map((file) => file.url));
-  for (const nextFile of incoming.files) {
-    if (!existingUrls.has(nextFile.url)) {
-      merged.files.push(nextFile);
-      existingUrls.add(nextFile.url);
-    }
-  }
-
-  merged.files.sort((a, b) => {
-    const aIsArm = a.url.includes("arm64");
-    const bIsArm = b.url.includes("arm64");
-    if (aIsArm && !bIsArm) return -1;
-    if (!aIsArm && bIsArm) return 1;
-    return a.url.localeCompare(b.url);
-  });
-
-  if (new Date(incoming.releaseDate) > new Date(merged.releaseDate)) {
-    merged.releaseDate = incoming.releaseDate;
-  }
-
-  return merged;
-}
-
-function mergeLatestMacYmlFromFilePaths(
-  targetPath: string,
-  incomingPath: string,
-): void {
-  const target = parseYaml(readFileSync(targetPath, "utf8")) as LatestYml;
-  const incoming = parseYaml(readFileSync(incomingPath, "utf8")) as LatestYml;
-  const merged = mergeLatestMacYmlData(target, incoming);
-  writeFileSync(targetPath, stringifyYaml(merged), "utf8");
-  console.log(`Merged latest-mac.yml with ${merged.files.length} files.`);
-}
-
-function downloadReleaseAsset(
-  ghRepo: string,
-  tagName: string,
-  assetName: string,
-): string | null {
-  const result = spawnSync(
-    "gh",
-    [
-      "release",
-      "download",
-      tagName,
-      "--repo",
-      ghRepo,
-      "--pattern",
-      assetName,
-      "--output",
-      "-",
-    ],
-    { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
-  );
-
-  if (result.status !== 0 || !result.stdout) {
-    return null;
-  }
-  return result.stdout;
-}
-
-function mergeLatestMacYml(
-  localPath: string,
-  ghRepo: string,
-  tagName: string,
-): void {
-  const localContent = readFileSync(localPath, "utf8");
-  const localYml = parseYaml(localContent) as LatestYml;
-
-  const remoteContent = downloadReleaseAsset(ghRepo, tagName, "latest-mac.yml");
-  if (!remoteContent) {
-    console.log(
-      "No existing latest-mac.yml found in release, using local version.",
-    );
-    return;
-  }
-
-  const remoteYml = parseYaml(remoteContent) as LatestYml;
-  const merged = mergeLatestMacYmlData(localYml, remoteYml);
-  const mergedContent = stringifyYaml(merged);
-  writeFileSync(localPath, mergedContent, "utf8");
-  console.log(`Merged latest-mac.yml with ${merged.files.length} files.`);
 }
 
 function uploadToExistingRelease(
@@ -1033,9 +905,6 @@ function uploadToExistingRelease(
     throw new Error("GH_REPO environment variable is required for upload.");
   }
 
-  const artifactSet = new Set<string>();
-  const artifacts: ReleaseArtifact[] = [];
-
   for (const config of configs) {
     let files: ReleaseArtifact[];
     try {
@@ -1045,42 +914,66 @@ function uploadToExistingRelease(
       continue;
     }
     for (const artifact of files) {
-      if (!artifactSet.has(artifact.path)) {
-        artifactSet.add(artifact.path);
-        artifacts.push(artifact);
-      }
+      const uploadArgs = [
+        "release",
+        "upload",
+        tagName,
+        artifact.path,
+        "--clobber",
+        "--repo",
+        ghRepo,
+      ];
+      console.log(`Uploading ${artifact.path}…`);
+      runCommand("gh", uploadArgs, { cwd: repoRoot });
     }
   }
+}
 
-  if (artifacts.length === 0) {
-    console.log("No artifacts to upload.");
-    return;
-  }
+function normaliseTag(versionOrTag: string): string {
+  const trimmed = versionOrTag.trim();
+  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+}
 
-  // Merge latest-mac.yml with existing release if present
-  const latestMacYmlArtifact = artifacts.find(
-    (a) => path.basename(a.path) === "latest-mac.yml",
-  );
-  if (latestMacYmlArtifact) {
-    const absolutePath = path.isAbsolute(latestMacYmlArtifact.path)
-      ? latestMacYmlArtifact.path
-      : path.join(repoRoot, latestMacYmlArtifact.path);
-    mergeLatestMacYml(absolutePath, ghRepo, tagName);
-  }
+function tagRelease(
+  configs: ProjectConfig[],
+  packageInfos: PackageInfo[],
+  requestedVersion: string | null,
+  tagOverride: string | null,
+) {
+  const baseVersion = packageInfos[0].version;
+  const targetVersion = requestedVersion
+    ? normaliseVersionInput(requestedVersion)
+    : incrementPatchVersion(baseVersion);
 
-  for (const artifact of artifacts) {
-    const uploadArgs = [
-      "release",
-      "upload",
-      tagName,
-      artifact.path,
-      "--clobber",
-    ];
-    uploadArgs.push("--repo", ghRepo);
+  assertSemver(targetVersion);
+  const releaseNotes = extractChangelogEntry(targetVersion);
+  ensureCleanWorkingTree();
 
-    console.log(`Uploading ${artifact.path}…`);
-    runCommand("gh", uploadArgs, { cwd: repoRoot });
-  }
+  console.log(`Bumping version ${baseVersion} → ${targetVersion}…`);
+  configs.forEach((config, index) => {
+    updatePackageVersion(config, targetVersion);
+    packageInfos[index] = { ...packageInfos[index], version: targetVersion };
+  });
+  updateTauriConfVersion(targetVersion);
+  updateCargoTomlVersion(tauriCargoTomlPath, targetVersion);
+  updateCargoTomlVersion(rustServerManifestPath, targetVersion);
+  updateNpxCliVersion(targetVersion);
+
+  console.log("Updating Cargo.lock…");
+  updateCargoLock();
+
+  console.log("Committing version bump…");
+  commitUnifiedVersionBump(targetVersion);
+  console.log("Pushing current branch to origin…");
+  pushCurrentBranch();
+
+  const tagName = normaliseTag(tagOverride ?? targetVersion);
+  console.log(`Creating git tag ${tagName}…`);
+  createGitTag(tagName, releaseNotes);
+  console.log(`Pushing tag ${tagName} to origin…`);
+  pushGitTag(tagName);
+
+  console.log(`Done. CI will create the Desktop release for ${tagName}.`);
 }
 
 function main(options: Options) {
@@ -1101,13 +994,11 @@ function main(options: Options) {
     );
   }
 
-  // Handle tag command (local mode: bump version, commit, tag, push - CI handles release)
   if (options.command === "tag") {
     tagRelease(configs, packageInfos, options.version, options.tag);
     return;
   }
 
-  // Handle upload command (CI mode: upload artifacts to existing release)
   if (options.command === "upload") {
     const version = packageInfos[0].version;
     const tagName = options.tag ?? `v${version}`;
@@ -1126,7 +1017,6 @@ function main(options: Options) {
     const requestedVersion = options.version
       ? normaliseVersionInput(options.version)
       : incrementPatchVersion(baseVersion);
-
     assertSemver(requestedVersion);
     releaseNotes = extractChangelogEntry(requestedVersion);
     ensureCleanWorkingTree();
@@ -1140,12 +1030,13 @@ function main(options: Options) {
         version: requestedVersion,
       };
     });
-    updateCargoTomlVersion(requestedVersion);
+    updateTauriConfVersion(requestedVersion);
+    updateCargoTomlVersion(tauriCargoTomlPath, requestedVersion);
+    updateCargoTomlVersion(rustServerManifestPath, requestedVersion);
     updateNpxCliVersion(requestedVersion);
 
     console.log("Updating Cargo.lock…");
     updateCargoLock();
-
     targetVersion = requestedVersion;
   }
 

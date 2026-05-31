@@ -37,6 +37,7 @@ export type {
 export { useImageUploads } from "./use-image-uploads";
 export type { ImageUploadItem, ImageUploadStatus } from "./use-image-uploads";
 
+export { usePromptDraftPersistence } from "./use-prompt-draft-persistence";
 export { usePromptEditor, usePromptEditorHandle } from "./use-prompt-editor";
 export type { UsePromptEditorResult } from "./use-prompt-editor";
 
@@ -60,3 +61,8 @@ export type { QueuedPromptItem } from "./use-prompt-queue-controller";
 
 export { useSessionExecutionOptions } from "./use-session-execution-options";
 export { useSessionSidebarState } from "./use-session-sidebar-state";
+export {
+  useSessionReadSync,
+  useTaskStatusDot,
+  useMarkViewedWhenActive,
+} from "./use-session-read-state";

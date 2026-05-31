@@ -48,7 +48,6 @@ No context switching between terminals. No manual worktree juggling. Your agents
 - **Local-First Knowledge** — your ideas, notes, and research stay as files you own. This context shapes how agents think and create.
 - **Unified Editor** — review every agent's commits, logs, and assets in one place with inline diffs.
 - **Approval Gates** — explicit approval required before agents apply sensitive commands or file operations.
-- **Kanban Task Board** — organize work visually with focus and peek modes.
 - **Built-in Git Workflow** — full diff and PR workflow without leaving the app.
 
 ## Getting Started
@@ -89,7 +88,7 @@ Launch Chro and open any Git repository as a workspace. Your local files become 
 
 ### 2. Create a task
 
-Use the Kanban board to create a task. Describe what you want — a feature, a bug fix, a refactor. Attach notes or files for additional context.
+Start a new session and describe what you want — a feature, a bug fix, a refactor. Attach notes or files for additional context.
 
 ### 3. Launch agents
 

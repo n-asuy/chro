@@ -1,27 +1,24 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import {
-  applyPendingSubmissionToTasks,
-  createPendingSessionSubmission,
-  resolveActiveTaskId,
-  resolvePendingSessionSubmission,
-  resolveStreamTaskId,
   type PendingSessionSubmission,
+  applyPendingSubmissionsToTasks,
+  isPendingSubmissionForTaskScope,
+  resolveActiveTaskId,
+  resolveStreamTaskId,
 } from "../domain/session-task-state";
-import type { StartClaudeResponse } from "../types/api";
+import {
+  type BeginPendingSessionSubmissionInput,
+  usePendingSessionSubmissions,
+  usePendingSessionSubmissionsStore,
+} from "../state/pending-session-submissions-store";
 import type { StoredTask } from "../types";
+import type { StartClaudeResponse } from "../types/api";
 
 type UseSessionTaskStateParams = {
+  scopeId: string;
   projectId: string | null;
   routeTaskSlug: string | null;
   streamedTasks: StoredTask[];
-};
-
-type BeginPendingSessionSubmissionInput = {
-  requestId: string;
-  prompt: string;
-  createdAt: string;
-  taskId: string | null;
-  taskSlug: string | null;
 };
 
 export type UseSessionTaskStateResult = {
@@ -39,17 +36,16 @@ export type UseSessionTaskStateResult = {
     requestId: string,
     response: StartClaudeResponse,
   ) => void;
+  finishPendingSubmission: (requestId: string, finishedAt: string) => void;
   clearPendingSubmission: (requestId?: string) => void;
 };
 
 export function useSessionTaskState({
+  scopeId,
   projectId,
   routeTaskSlug,
   streamedTasks,
 }: UseSessionTaskStateParams): UseSessionTaskStateResult {
-  const [pendingSubmission, setPendingSubmission] =
-    useState<PendingSessionSubmission | null>(null);
-
   const streamedTasksById = useMemo(
     () =>
       Object.fromEntries(
@@ -57,10 +53,35 @@ export function useSessionTaskState({
       ) as Record<string, StoredTask>,
     [streamedTasks],
   );
+  const pendingSubmissions = usePendingSessionSubmissions(
+    projectId,
+    streamedTasksById,
+  );
+  const scopedPendingSubmissions = useMemo(
+    () => pendingSubmissions.filter((pending) => pending.scopeId === scopeId),
+    [pendingSubmissions, scopeId],
+  );
+  const beginStorePendingSubmission = usePendingSessionSubmissionsStore(
+    (state) => state.beginPendingSubmission,
+  );
+  const resolveStorePendingSubmission = usePendingSessionSubmissionsStore(
+    (state) => state.resolvePendingSubmission,
+  );
+  const finishStorePendingSubmission = usePendingSessionSubmissionsStore(
+    (state) => state.finishPendingSubmission,
+  );
+  const clearStorePendingSubmission = usePendingSessionSubmissionsStore(
+    (state) => state.clearPendingSubmission,
+  );
 
   const tasks = useMemo(
-    () => applyPendingSubmissionToTasks(streamedTasks, pendingSubmission, projectId),
-    [projectId, pendingSubmission, streamedTasks],
+    () =>
+      applyPendingSubmissionsToTasks(
+        streamedTasks,
+        scopedPendingSubmissions,
+        projectId,
+      ),
+    [projectId, scopedPendingSubmissions, streamedTasks],
   );
 
   const tasksById = useMemo(
@@ -77,9 +98,40 @@ export function useSessionTaskState({
     [routeTaskSlug, tasks],
   );
 
+  const pendingSubmissionForActiveTask = useMemo(
+    () =>
+      scopedPendingSubmissions.find((pending) =>
+        isPendingSubmissionForTaskScope(
+          pending,
+          activeTaskId,
+          activeTaskId,
+          scopeId,
+        ),
+      ) ?? null,
+    [activeTaskId, scopedPendingSubmissions, scopeId],
+  );
+
   const activeStreamTaskId = useMemo(
-    () => resolveStreamTaskId(activeTaskId, streamedTasksById, pendingSubmission),
-    [activeTaskId, pendingSubmission, streamedTasksById],
+    () =>
+      resolveStreamTaskId(
+        activeTaskId,
+        streamedTasksById,
+        pendingSubmissionForActiveTask,
+      ),
+    [activeTaskId, pendingSubmissionForActiveTask, streamedTasksById],
+  );
+
+  const pendingSubmission = useMemo(
+    () =>
+      scopedPendingSubmissions.find((pending) =>
+        isPendingSubmissionForTaskScope(
+          pending,
+          activeTaskId,
+          activeStreamTaskId,
+          scopeId,
+        ),
+      ) ?? null,
+    [activeStreamTaskId, activeTaskId, scopedPendingSubmissions, scopeId],
   );
 
   const activeTask = useMemo(
@@ -88,39 +140,32 @@ export function useSessionTaskState({
   );
 
   const beginPendingSubmission = useCallback(
-    (
-      input: BeginPendingSessionSubmissionInput,
-    ): PendingSessionSubmission => {
-      const next = createPendingSessionSubmission(input);
-      setPendingSubmission(next);
-      return next;
+    (input: BeginPendingSessionSubmissionInput): PendingSessionSubmission => {
+      return beginStorePendingSubmission(projectId, { ...input, scopeId });
     },
-    [],
+    [beginStorePendingSubmission, projectId, scopeId],
   );
 
   const resolvePendingSubmissionWithResponse = useCallback(
     (requestId: string, response: StartClaudeResponse) => {
-      setPendingSubmission((current) => {
-        if (!current || current.requestId !== requestId) {
-          return current;
-        }
-        return resolvePendingSessionSubmission(current, response);
-      });
+      resolveStorePendingSubmission(projectId, requestId, response);
     },
-    [],
+    [projectId, resolveStorePendingSubmission],
   );
 
-  const clearPendingSubmission = useCallback((requestId?: string) => {
-    setPendingSubmission((current) => {
-      if (!current) {
-        return null;
-      }
-      if (requestId && current.requestId !== requestId) {
-        return current;
-      }
-      return null;
-    });
-  }, []);
+  const clearPendingSubmission = useCallback(
+    (requestId?: string) => {
+      clearStorePendingSubmission(projectId, requestId);
+    },
+    [clearStorePendingSubmission, projectId],
+  );
+
+  const finishPendingSubmission = useCallback(
+    (requestId: string, finishedAt: string) => {
+      finishStorePendingSubmission(projectId, requestId, finishedAt);
+    },
+    [finishStorePendingSubmission, projectId],
+  );
 
   return {
     tasks,
@@ -132,6 +177,7 @@ export function useSessionTaskState({
     pendingSubmission,
     beginPendingSubmission,
     resolvePendingSubmission: resolvePendingSubmissionWithResponse,
+    finishPendingSubmission,
     clearPendingSubmission,
   };
 }

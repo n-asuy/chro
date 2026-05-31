@@ -24,6 +24,7 @@ use ts_rs::TS;
 use crate::{
     apply_overrides,
     approvals::ExecutorApprovalService,
+    cli_manifest,
     command::{CmdOverrides, CommandBuildError, CommandBuilder},
     env::ExecutionEnv,
     executors::{
@@ -111,7 +112,7 @@ impl ClaudeCode {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new("claude").params([
+        let mut builder = CommandBuilder::for_manifest(&cli_manifest::CLAUDE).params([
             "--print",
             "--verbose",
             "--output-format=stream-json",
@@ -174,6 +175,17 @@ impl ClaudeCode {
             .stderr(Stdio::piped())
             .current_dir(current_dir)
             .args(&args);
+
+        // Bound MCP tool-call execution time. Claude Code's MCP client leaves
+        // MCP_TOOL_TIMEOUT unset by default, which it treats as effectively
+        // infinite, so a hanging MCP stdio tool (a slow SQL query, a web scrape
+        // that never returns) blocks the run forever with no tool result and no
+        // `result` message for the runtime to complete on. A finite default turns
+        // such a stall into a tool error the agent can recover from. The timer is
+        // progress-aware in the SDK, so long-but-live tools are not killed. Set
+        // before apply_to_command so a user-provided value in the execution env
+        // (e.g. a profile override) wins.
+        command.env("MCP_TOOL_TIMEOUT", "60000");
         env.apply_to_command(&mut command);
 
         if let Some(path) = build_claude_path_env() {
@@ -318,28 +330,21 @@ fn check_claude_auth_status() -> Option<bool> {
 }
 
 fn build_claude_path_env() -> Option<String> {
+    let sep = if cfg!(windows) { ';' } else { ':' };
     let mut combined = String::new();
-    if let Some(home) = dirs::home_dir() {
-        for bin in [
-            home.join(".local").join("bin"),
-            home.join(".claude").join("bin"),
-        ] {
-            if !bin.exists() {
-                continue;
-            }
-            if !combined.is_empty() {
-                combined.push(if cfg!(windows) { ';' } else { ':' });
-            }
-            combined.push_str(&bin.to_string_lossy());
+    for dir in cli_manifest::manifest_path_dirs(&cli_manifest::CLAUDE) {
+        if !combined.is_empty() {
+            combined.push(sep);
         }
+        combined.push_str(&dir.to_string_lossy());
     }
-    if let Ok(current) = std::env::var("PATH") {
-        if !current.is_empty() {
-            if !combined.is_empty() {
-                combined.push(if cfg!(windows) { ';' } else { ':' });
-            }
-            combined.push_str(&current);
+    if let Ok(current) = std::env::var("PATH")
+        && !current.is_empty()
+    {
+        if !combined.is_empty() {
+            combined.push(sep);
         }
+        combined.push_str(&current);
     }
     if combined.is_empty() {
         None

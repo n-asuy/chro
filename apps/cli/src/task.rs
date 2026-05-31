@@ -27,8 +27,8 @@ pub enum TaskCommand {
     /// Show or update task status
     Status {
         /// Task ID or slug
-        id: String,
-        /// New status (pending, in_progress, blocked, completed, failed, cancelled)
+        task: String,
+        /// New status (pending, in_progress, completed, failed, cancelled)
         #[arg(value_name = "STATUS")]
         new_status: Option<String>,
     },
@@ -36,46 +36,60 @@ pub enum TaskCommand {
     /// Start an agent execution on a task
     Run {
         /// Task ID or slug
-        id: String,
+        task: String,
         /// Prompt for the agent
         #[arg(short, long)]
         prompt: Option<String>,
     },
 
-    /// Show execution logs for a task run
+    /// Print the markdown transcript for a task (all runs combined,
+    /// chronological order). This is what other agents should fetch when a
+    /// `<past_session>` tag references this task.
     Logs {
-        /// Task run ID or slug
-        id: String,
+        /// Task ID or slug
+        task: String,
     },
 
     /// Cancel a running execution
     Cancel {
-        /// Task run ID or slug
-        id: String,
+        /// Task ID or slug
+        task: String,
+        /// Run sequence to cancel (1-indexed). Defaults to the latest run.
+        #[arg(short, long)]
+        run: Option<u32>,
     },
 
-    /// Show diff for a task run
+    /// Show diff for a task
     Diff {
-        /// Task run ID or slug
-        id: String,
+        /// Task ID or slug
+        task: String,
+        /// Run sequence to inspect (1-indexed). Defaults to the latest run.
+        #[arg(short, long)]
+        run: Option<u32>,
     },
 
-    /// Merge task run changes into target branch
+    /// Merge task changes into target branch
     Merge {
-        /// Task run ID or slug
-        id: String,
+        /// Task ID or slug
+        task: String,
         /// Commit message
         #[arg(short, long)]
         message: Option<String>,
+        /// Run sequence to merge (1-indexed). Defaults to the latest run.
+        #[arg(short, long)]
+        run: Option<u32>,
     },
 
-    /// Rebase task run branch onto a new base
+    /// Rebase task branch onto a new base
     Rebase {
-        /// Task run ID or slug
-        id: String,
+        /// Task ID or slug
+        task: String,
         /// Branch to rebase onto (default: target branch of the run)
         #[arg(short, long)]
         onto: Option<String>,
+        /// Run sequence to rebase (1-indexed). Defaults to the latest run.
+        #[arg(short, long)]
+        run: Option<u32>,
     },
 }
 
@@ -91,14 +105,21 @@ pub fn run(
             description,
             prompt,
             no_run,
-        } => create(client, project_override, title, description.as_deref(), prompt.as_deref(), !*no_run),
-        TaskCommand::Status { id, new_status } => status(client, id, new_status.as_deref()),
-        TaskCommand::Run { id, prompt } => run_task(client, project_override, id, prompt.as_deref()),
-        TaskCommand::Logs { id } => logs(client, id),
-        TaskCommand::Cancel { id } => cancel(client, id),
-        TaskCommand::Diff { id } => diff(client, id),
-        TaskCommand::Merge { id, message } => merge(client, id, message.as_deref()),
-        TaskCommand::Rebase { id, onto } => rebase(client, id, onto.as_deref()),
+        } => create(
+            client,
+            project_override,
+            title,
+            description.as_deref(),
+            prompt.as_deref(),
+            !*no_run,
+        ),
+        TaskCommand::Status { task, new_status } => status(client, task, new_status.as_deref()),
+        TaskCommand::Run { task, prompt } => run_task(client, project_override, task, prompt.as_deref()),
+        TaskCommand::Logs { task } => logs(client, task),
+        TaskCommand::Cancel { task, run } => cancel(client, task, *run),
+        TaskCommand::Diff { task, run } => diff(client, task, *run),
+        TaskCommand::Merge { task, message, run } => merge(client, task, message.as_deref(), *run),
+        TaskCommand::Rebase { task, onto, run } => rebase(client, task, onto.as_deref(), *run),
     }
 }
 
@@ -107,15 +128,9 @@ fn list(
     project_override: Option<&Path>,
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
-    let git_path = project
-        .git_repo_path
-        .as_deref()
-        .unwrap_or("unknown");
+    let git_path = project.git_repo_path.as_deref().unwrap_or("unknown");
 
-    let resp = client.get(&format!(
-        "/tasks?workspace_path={}",
-        urlencoded(git_path)
-    ))?;
+    let resp = client.get(&format!("/tasks?workspace_path={}", urlencoded(git_path)))?;
 
     let tasks = resp
         .get("tasks")
@@ -171,10 +186,7 @@ fn create(
     println!("Created task: {id}  {title}");
 
     if should_run {
-        let task_id = task
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(id);
+        let task_id = task.get("id").and_then(|v| v.as_str()).unwrap_or(id);
         let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
         let prompt_text = prompt.unwrap_or(title);
 
@@ -185,15 +197,10 @@ fn create(
             "mode": "auto",
         });
 
-        let run_resp = client.post(&format!("/rpc/tasks/{task_id}/messages"), &run_body)?;
-        let run_id = run_resp
-            .get("task_run_slug")
-            .and_then(|v| v.as_str())
-            .or_else(|| run_resp.get("task_run_id").and_then(|v| v.as_str()))
-            .unwrap_or("-");
+        client.post(&format!("/rpc/tasks/{task_id}/messages"), &run_body)?;
 
-        println!("Execution started: {run_id}");
-        println!("View logs: chro task logs {run_id}");
+        println!("Execution started.");
+        println!("View logs: chro task logs {id}");
     }
 
     Ok(())
@@ -201,20 +208,19 @@ fn create(
 
 fn status(
     client: &ServerClient,
-    id: &str,
+    task: &str,
     new_status: Option<&str>,
 ) -> Result<(), client::ClientError> {
     match new_status {
         Some(status_str) => {
             let body = serde_json::json!({ "status": status_str });
-            let resp = client.patch(&format!("/rpc/tasks/{id}/status"), &body)?;
-            let task = &resp["task"];
-            let current = task.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("Task {id} status: {current}");
+            let resp = client.patch(&format!("/rpc/tasks/{task}/status"), &body)?;
+            let returned = &resp["task"];
+            let current = returned.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            println!("Task {task} status: {current}");
         }
         None => {
-            // Get task runs to show current state
-            let resp = client.get(&format!("/rpc/tasks/{id}/runs"))?;
+            let resp = client.get(&format!("/rpc/tasks/{task}/runs"))?;
             let runs = resp
                 .get("runs")
                 .and_then(|v| v.as_array())
@@ -222,27 +228,19 @@ fn status(
                 .unwrap_or_default();
 
             if runs.is_empty() {
-                println!("Task {id}: no runs yet.");
+                println!("Task {task}: no runs yet.");
                 return Ok(());
             }
 
-            println!("Task {id} runs:");
-            for run in &runs {
-                let run_id = run
-                    .get("slug")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| run.get("id").and_then(|v| v.as_str()))
-                    .unwrap_or("-");
+            println!("Task {task} runs (latest first):");
+            // Server returns DESC; print sequence numbers as 1=earliest.
+            let total = runs.len();
+            for (offset, run) in runs.iter().enumerate() {
+                let sequence = total - offset;
                 let status = run.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                let branch = run
-                    .get("branch_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
-                let target = run
-                    .get("target_branch")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
-                println!("  {status:<12} {run_id:<20} branch:{branch}  target:{target}");
+                let branch = run.get("branch_name").and_then(|v| v.as_str()).unwrap_or("-");
+                let target = run.get("target_branch").and_then(|v| v.as_str()).unwrap_or("-");
+                println!("  #{sequence:<3} {status:<12} branch:{branch}  target:{target}");
             }
         }
     }
@@ -253,112 +251,59 @@ fn status(
 fn run_task(
     client: &ServerClient,
     project_override: Option<&Path>,
-    id: &str,
+    task: &str,
     prompt: Option<&str>,
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
-    let workspace_path = project
-        .git_repo_path
-        .as_deref()
-        .unwrap_or("");
-
+    let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
     let prompt_text = prompt.unwrap_or("Execute this task");
 
     let body = serde_json::json!({
         "prompt": prompt_text,
         "workspace_path": workspace_path,
-        "task_id": id,
+        "task_id": task,
         "mode": "auto",
     });
 
-    let resp = client.post(&format!("/rpc/tasks/{id}/messages"), &body)?;
-    let task_run_id = resp
-        .get("task_run_slug")
-        .and_then(|v| v.as_str())
-        .or_else(|| resp.get("task_run_id").and_then(|v| v.as_str()))
-        .unwrap_or("-");
+    client.post(&format!("/rpc/tasks/{task}/messages"), &body)?;
 
-    println!("Execution started: {task_run_id}");
-    println!("View logs: chro task logs {task_run_id}");
+    println!("Execution started for {task}.");
+    println!("View logs: chro task logs {task}");
     Ok(())
 }
 
-fn logs(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
-    let resp = client.get(&format!("/rpc/task-runs/{id}/logs"))?;
-    let entries = resp
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    if entries.is_empty() {
-        println!("No logs yet.");
-        return Ok(());
-    }
-
-    for entry in &entries {
-        match entry.get("type").and_then(|v| v.as_str()) {
-            Some("stdout") => {
-                if let Some(text) = entry.get("payload").and_then(|v| v.as_str()) {
-                    print!("{text}");
-                }
-            }
-            Some("stderr") => {
-                if let Some(text) = entry.get("payload").and_then(|v| v.as_str()) {
-                    eprint!("{text}");
-                }
-            }
-            Some("user_prompt") => {
-                if let Some(text) = entry.get("payload").and_then(|v| v.as_str()) {
-                    println!(">>> {text}");
-                }
-            }
-            Some("finished") => {
-                println!("--- Execution finished ---");
-            }
-            _ => {}
-        }
-    }
-
+fn logs(client: &ServerClient, task: &str) -> Result<(), client::ClientError> {
+    let resp = client.get(&format!("/rpc/tasks/{task}/transcript"))?;
+    let markdown = resp.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
+    print!("{markdown}");
     Ok(())
 }
 
-fn cancel(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
-    client.post_no_content(&format!("/rpc/task-runs/{id}/cancel"), &serde_json::json!({}))?;
-    println!("Cancelled: {id}");
+fn cancel(client: &ServerClient, task: &str, run: Option<u32>) -> Result<(), client::ClientError> {
+    let path = match run {
+        Some(n) => format!("/rpc/tasks/{task}/cancel?run={n}"),
+        None => format!("/rpc/tasks/{task}/cancel"),
+    };
+    client.post_no_content(&path, &serde_json::json!({}))?;
+    println!("Cancelled: {task}");
     Ok(())
 }
 
-fn diff(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
-    // Get task run info to find the worktree/branch context
-    let resp = client.get(&format!("/rpc/task-runs/{id}/with-task"))?;
+fn diff(client: &ServerClient, task: &str, run: Option<u32>) -> Result<(), client::ClientError> {
+    let path = match run {
+        Some(n) => format!("/rpc/tasks/{task}/diff?run={n}"),
+        None => format!("/rpc/tasks/{task}/diff"),
+    };
+    let resp = client.get(&path)?;
 
-    let branch = resp
-        .get("task_run")
-        .and_then(|r| r.get("branch_name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let target = resp
-        .get("task_run")
-        .and_then(|r| r.get("target_branch"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("main");
-    let status = resp
-        .get("task_run")
-        .and_then(|r| r.get("status"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
+    let branch = resp.get("branch_name").and_then(|v| v.as_str()).unwrap_or("?");
+    let target = resp.get("target_branch").and_then(|v| v.as_str()).unwrap_or("main");
+    let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("?");
 
-    println!("Run {id}  status:{status}  branch:{branch}  target:{target}");
+    println!("Task {task}  status:{status}  branch:{branch}  target:{target}");
 
-    let before = resp
-        .get("task_run")
-        .and_then(|r| r.get("before_head_commit"))
-        .and_then(|v| v.as_str());
-    let after = resp
-        .get("task_run")
-        .and_then(|r| r.get("after_head_commit"))
-        .and_then(|v| v.as_str());
+    let before = resp.get("before_head_commit").and_then(|v| v.as_str());
+    let after = resp.get("after_head_commit").and_then(|v| v.as_str());
 
     match (before, after) {
         (Some(b), Some(a)) => println!("Commits: {b:.8}..{a:.8}"),
@@ -370,32 +315,40 @@ fn diff(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
 
 fn merge(
     client: &ServerClient,
-    id: &str,
+    task: &str,
     message: Option<&str>,
+    run: Option<u32>,
 ) -> Result<(), client::ClientError> {
     let body = serde_json::json!({ "commit_message": message });
-    let resp = client.post(&format!("/rpc/task-runs/{id}/merge"), &body)?;
+    let path = match run {
+        Some(n) => format!("/rpc/tasks/{task}/merge?run={n}"),
+        None => format!("/rpc/tasks/{task}/merge"),
+    };
+    let resp = client.post(&path, &body)?;
 
-    let commit = resp
-        .get("merge_commit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let target = resp
-        .get("target_branch")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
+    let commit = resp.get("merge_commit").and_then(|v| v.as_str()).unwrap_or("?");
+    let target = resp.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?");
 
     println!("Merged into {target}  commit:{commit:.8}");
     Ok(())
 }
 
-fn rebase(client: &ServerClient, id: &str, onto: Option<&str>) -> Result<(), client::ClientError> {
+fn rebase(
+    client: &ServerClient,
+    task: &str,
+    onto: Option<&str>,
+    run: Option<u32>,
+) -> Result<(), client::ClientError> {
     let new_base = match onto {
         Some(branch) => branch.to_string(),
         None => {
-            let resp = client.get(&format!("/rpc/task-runs/{id}/with-task"))?;
-            resp.get("task_run")
-                .and_then(|r| r.get("target_branch"))
+            // Look up the run's target branch.
+            let path = match run {
+                Some(n) => format!("/rpc/tasks/{task}/diff?run={n}"),
+                None => format!("/rpc/tasks/{task}/diff"),
+            };
+            let resp = client.get(&path)?;
+            resp.get("target_branch")
                 .and_then(|v| v.as_str())
                 .unwrap_or("main")
                 .to_string()
@@ -403,13 +356,17 @@ fn rebase(client: &ServerClient, id: &str, onto: Option<&str>) -> Result<(), cli
     };
 
     let body = serde_json::json!({ "new_base_branch": new_base });
-    let resp = client.post(&format!("/rpc/task-runs/{id}/rebase"), &body)?;
+    let path = match run {
+        Some(n) => format!("/rpc/tasks/{task}/rebase?run={n}"),
+        None => format!("/rpc/tasks/{task}/rebase"),
+    };
+    let resp = client.post(&path, &body)?;
 
     let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
     if success {
-        println!("Rebased {id} onto {new_base}");
+        println!("Rebased {task} onto {new_base}");
     } else {
-        eprintln!("Rebase failed for {id}");
+        eprintln!("Rebase failed for {task}");
         std::process::exit(1);
     }
 

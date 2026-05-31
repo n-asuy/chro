@@ -15,7 +15,28 @@ export interface FileAttachmentPart extends PartBase {
   branch?: string | null;
 }
 
-export type ContentPart = TextPart | FileAttachmentPart;
+/**
+ * Past chro session attachment. The runtime never copies a file or inlines
+ * markdown; the rendered prompt carries a self-describing tag and the agent
+ * fetches the transcript on demand via `chro task transcript <task_id>`.
+ */
+export interface SessionAttachmentPart extends PartBase {
+  type: "session";
+  taskId: string;
+  branch?: string | null;
+}
+
+export interface SkillAttachmentPart extends PartBase {
+  type: "skill";
+  id: string;
+  name: string;
+}
+
+export type ContentPart =
+  | TextPart
+  | FileAttachmentPart
+  | SessionAttachmentPart
+  | SkillAttachmentPart;
 export type Prompt = ContentPart[];
 
 export const DEFAULT_PROMPT: Prompt = [
@@ -29,22 +50,62 @@ const escapeXmlAttr = (s: string): string =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-export interface ContextEntry {
+export interface FileContextEntry {
+  kind: "file";
   path: string;
   isFile: boolean;
   branch?: string | null;
 }
 
+export interface SessionContextEntry {
+  kind: "session";
+  taskId: string;
+  branch?: string | null;
+}
+
+export type ContextEntry = FileContextEntry | SessionContextEntry;
+
+export interface SkillEntry {
+  id: string;
+  name: string;
+}
+
+const renderFileContextEntry = (e: FileContextEntry): string => {
+  const tag = e.isFile ? "file" : "directory";
+  const branchAttr = e.branch ? ` branch="${escapeXmlAttr(e.branch)}"` : "";
+  return `<${tag} path="${escapeXmlAttr(e.path)}"${branchAttr} />`;
+};
+
+const renderSessionContextEntry = (e: SessionContextEntry): string => {
+  const branchAttr = e.branch ? ` branch="${escapeXmlAttr(e.branch)}"` : "";
+  return [
+    `<past_session task_id="${escapeXmlAttr(e.taskId)}"${branchAttr}>`,
+    `Run \`chro task logs ${e.taskId}\` to view the full transcript of this previous chro session.`,
+    "</past_session>",
+  ].join("\n");
+};
+
 export function formatContextForPrompt(entries: ContextEntry[]): string {
   if (entries.length === 0) return "";
   const tags = entries
-    .map((e) => {
-      const tag = e.isFile ? "file" : "directory";
-      const branchAttr = e.branch ? ` branch="${escapeXmlAttr(e.branch)}"` : "";
-      return `<${tag} path="${escapeXmlAttr(e.path)}"${branchAttr} />`;
-    })
+    .map((e) =>
+      e.kind === "file"
+        ? renderFileContextEntry(e)
+        : renderSessionContextEntry(e),
+    )
     .join("\n");
   return `<context>\n${tags}\n</context>`;
+}
+
+export function formatSkillContextForPrompt(entries: SkillEntry[]): string {
+  if (entries.length === 0) return "";
+  const tags = entries
+    .map(
+      (entry) =>
+        `<skill id="${escapeXmlAttr(entry.id)}" name="${escapeXmlAttr(entry.name)}" />`,
+    )
+    .join("\n");
+  return `<skills_context>\n${tags}\n</skills_context>`;
 }
 
 export interface ImageEntry {
@@ -54,6 +115,7 @@ export interface ImageEntry {
 
 interface ParsedUserContent {
   contextEntries: ContextEntry[];
+  skillEntries: SkillEntry[];
   imageEntries: ImageEntry[];
   text: string;
 }
@@ -72,37 +134,104 @@ function extractImages(text: string): {
   text: string;
 } {
   const imageEntries: ImageEntry[] = [];
-  const stripped = text.replace(IMAGE_MD_RE, (_, name: string, path: string) => {
-    imageEntries.push({ name, path });
-    return "";
-  });
-  return { imageEntries, text: stripped.replace(/^\n+/, "").replace(/\n+$/, "") };
+  const stripped = text.replace(
+    IMAGE_MD_RE,
+    (_, name: string, path: string) => {
+      imageEntries.push({ name, path });
+      return "";
+    },
+  );
+  return {
+    imageEntries,
+    text: stripped.replace(/^\n+/, "").replace(/\n+$/, ""),
+  };
+}
+
+const FILE_TAG_RE =
+  /<(file|directory)\s+path="([^"]*?)"(?:\s+branch="([^"]*?)")?\s*\/>/g;
+const SESSION_TAG_RE =
+  /<past_session\s+task_id="([^"]*?)"(?:\s+branch="([^"]*?)")?\s*>([\s\S]*?)<\/past_session>/g;
+const SKILL_TAG_RE = /<skill\s+id="([^"]*?)"\s+name="([^"]*?)"\s*\/>/g;
+const CONTEXT_BLOCK_RE = /^<context>\n([\s\S]*?)\n<\/context>/;
+const SKILLS_CONTEXT_BLOCK_RE =
+  /^<skills_context>\n([\s\S]*?)\n<\/skills_context>/;
+
+function parseContextEntries(inner: string): ContextEntry[] {
+  const indexed: Array<{ index: number; entry: ContextEntry }> = [];
+
+  let fileMatch: RegExpExecArray | null = FILE_TAG_RE.exec(inner);
+  while (fileMatch !== null) {
+    const entry: FileContextEntry = {
+      kind: "file",
+      path: unescapeXmlAttr(fileMatch[2]),
+      isFile: fileMatch[1] === "file",
+    };
+    if (fileMatch[3]) {
+      entry.branch = unescapeXmlAttr(fileMatch[3]);
+    }
+    indexed.push({ index: fileMatch.index, entry });
+    fileMatch = FILE_TAG_RE.exec(inner);
+  }
+
+  let sessionMatch: RegExpExecArray | null = SESSION_TAG_RE.exec(inner);
+  while (sessionMatch !== null) {
+    const entry: SessionContextEntry = {
+      kind: "session",
+      taskId: unescapeXmlAttr(sessionMatch[1]),
+    };
+    if (sessionMatch[2]) {
+      entry.branch = unescapeXmlAttr(sessionMatch[2]);
+    }
+    indexed.push({ index: sessionMatch.index, entry });
+    sessionMatch = SESSION_TAG_RE.exec(inner);
+  }
+
+  indexed.sort((a, b) => a.index - b.index);
+  return indexed.map((i) => i.entry);
+}
+
+function parseSkillEntries(inner: string): SkillEntry[] {
+  const entries: SkillEntry[] = [];
+
+  let skillMatch: RegExpExecArray | null = SKILL_TAG_RE.exec(inner);
+  while (skillMatch !== null) {
+    entries.push({
+      id: unescapeXmlAttr(skillMatch[1]),
+      name: unescapeXmlAttr(skillMatch[2]),
+    });
+    skillMatch = SKILL_TAG_RE.exec(inner);
+  }
+
+  return entries;
 }
 
 export function parseContextFromContent(content: string): ParsedUserContent {
-  const match = content.match(/^<context>\n([\s\S]*?)\n<\/context>/);
-  if (!match) {
-    const { imageEntries, text } = extractImages(content);
-    return { contextEntries: [], imageEntries, text };
-  }
+  const contextEntries: ContextEntry[] = [];
+  const skillEntries: SkillEntry[] = [];
+  let remaining = content;
 
-  const entries: ContextEntry[] = [];
-  const tagRegex = /<(file|directory)\s+path="([^"]*?)"(?:\s+branch="([^"]*?)")?\s*\/>/g;
-  let tagMatch: RegExpExecArray | null;
-  while ((tagMatch = tagRegex.exec(match[1])) !== null) {
-    const entry: ContextEntry = {
-      path: unescapeXmlAttr(tagMatch[2]),
-      isFile: tagMatch[1] === "file",
-    };
-    if (tagMatch[3]) {
-      entry.branch = unescapeXmlAttr(tagMatch[3]);
+  let consumedBlock = true;
+  while (consumedBlock) {
+    consumedBlock = false;
+
+    const contextMatch = remaining.match(CONTEXT_BLOCK_RE);
+    if (contextMatch) {
+      contextEntries.push(...parseContextEntries(contextMatch[1]));
+      remaining = remaining.slice(contextMatch[0].length).replace(/^\n+/, "");
+      consumedBlock = true;
+      continue;
     }
-    entries.push(entry);
+
+    const skillsMatch = remaining.match(SKILLS_CONTEXT_BLOCK_RE);
+    if (skillsMatch) {
+      skillEntries.push(...parseSkillEntries(skillsMatch[1]));
+      remaining = remaining.slice(skillsMatch[0].length).replace(/^\n+/, "");
+      consumedBlock = true;
+    }
   }
 
-  const remaining = content.slice(match[0].length).replace(/^\n/, "");
   const { imageEntries, text } = extractImages(remaining);
-  return { contextEntries: entries, imageEntries, text };
+  return { contextEntries, skillEntries, imageEntries, text };
 }
 
 function createGeneratedSessionTitle(now: Date = new Date()): string {
@@ -113,8 +242,8 @@ export function inferTaskTitleFromContent(
   content: string,
   fallback: () => string = () => createGeneratedSessionTitle(),
 ): string {
-  const firstLine = parseContextFromContent(content).text
-    .split(/\r?\n/)
+  const firstLine = parseContextFromContent(content)
+    .text.split(/\r?\n/)
     .find((line) => line.trim().length > 0)
     ?.trim();
 
@@ -125,7 +254,9 @@ export function inferTaskTitleFromContent(
   return firstLine.slice(0, 80);
 }
 
-export function inferTaskDescriptionFromContent(content: string): string | null {
+export function inferTaskDescriptionFromContent(
+  content: string,
+): string | null {
   const textLines = parseContextFromContent(content).text.split(/\r?\n/);
   const firstLineIndex = textLines.findIndex((line) => line.trim().length > 0);
   if (firstLineIndex === -1) {
@@ -142,26 +273,49 @@ export function inferTaskDescriptionFromContent(content: string): string | null 
   return remainingText || null;
 }
 
-const SESSION_PATH_RE =
-  /^\.chro-context\/sessions\/([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$/;
-
-/** Return short session ID (first 8 hex chars) if `path` is a session transcript, else `null`. */
-export function extractSessionId(path: string): string | null {
-  const m = SESSION_PATH_RE.exec(path);
-  return m ? m[1] : null;
+/** Short display id (first 8 chars of UUID) for a past session. */
+export function shortSessionId(taskId: string): string {
+  return taskId.slice(0, 8);
 }
 
 export function getContextEntries(prompt: Prompt): ContextEntry[] {
-  const seen = new Set<string>();
+  const seenFiles = new Set<string>();
+  const seenSessions = new Set<string>();
   const entries: ContextEntry[] = [];
   for (const part of prompt) {
-    if (part.type === "file" && !seen.has(part.path)) {
-      seen.add(part.path);
-      const entry: ContextEntry = { path: part.path, isFile: part.isFile };
+    if (part.type === "file" && !seenFiles.has(part.path)) {
+      seenFiles.add(part.path);
+      const entry: FileContextEntry = {
+        kind: "file",
+        path: part.path,
+        isFile: part.isFile,
+      };
       if (part.branch) {
         entry.branch = part.branch;
       }
       entries.push(entry);
+    } else if (part.type === "session" && !seenSessions.has(part.taskId)) {
+      seenSessions.add(part.taskId);
+      const entry: SessionContextEntry = {
+        kind: "session",
+        taskId: part.taskId,
+      };
+      if (part.branch) {
+        entry.branch = part.branch;
+      }
+      entries.push(entry);
+    }
+  }
+  return entries;
+}
+
+export function getSkillEntries(prompt: Prompt): SkillEntry[] {
+  const seen = new Set<string>();
+  const entries: SkillEntry[] = [];
+  for (const part of prompt) {
+    if (part.type === "skill" && !seen.has(part.id)) {
+      seen.add(part.id);
+      entries.push({ id: part.id, name: part.name });
     }
   }
   return entries;

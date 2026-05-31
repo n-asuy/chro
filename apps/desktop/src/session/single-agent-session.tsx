@@ -8,20 +8,26 @@ import {
 } from "@/hooks/use-global-file-drop";
 import { useRebase } from "@/hooks/use-rebase";
 import { useLanguage } from "@/i18n";
-import { updateTaskTitle } from "@/kanban/state/task-store";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
-import { slugOrId } from "@/lib/slug";
 import {
   type BaseCodingAgent,
   type ExecutorConfigs,
   type ExecutorProfileId,
   fetchExecutorProfile,
 } from "@/lib/executor-client";
-import { generateTaskTranscript } from "@/lib/project-client";
+import { slugOrId } from "@/lib/slug";
 import { isUuidIdentifier } from "@/lib/uuid";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
 import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
+import { updateTaskTitle } from "@/tasks/task-api";
+import {
+  useOptionalTab,
+  useOptionalTabKind,
+  useResolvedRunId,
+  useResolvedTaskId,
+} from "@/workspace-layout/hooks/use-tab-params";
+import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import { Button } from "@chro/ui/button";
 import {
   DropdownMenu,
@@ -39,11 +45,16 @@ import {
 } from "@chro/ui/tooltip";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
+  BookOpen,
   Check,
   ChevronDown,
+  ChevronRight,
+  FolderOpen,
   GitBranch,
   Image as ImageIcon,
   Laptop,
+  MessageSquare,
+  Plus,
   Search,
 } from "lucide-react";
 import {
@@ -59,7 +70,10 @@ import {
 import type { AgentUserQuestionHandle } from "./components/agent-user-question";
 import type { GitBranch as GitBranchType } from "./components/branch-selector";
 import { ConflictBanner } from "./components/conflict-banner";
-import { DiffViewerPanel } from "./components/diff-viewer-panel";
+import { ConversationFindBar } from "./components/conversation-find-bar";
+// DiffViewerPanel is no longer rendered inline; the "Open Diff" header
+// action now opens a dedicated diff tab via the layout store. The panel
+// itself is rendered by DiffTabBody under workspace-layout/registry.
 import { ImageUploadPreviewList } from "./components/image-upload-preview-list";
 import type { AtPopoverHandle } from "./components/prompt-editor/at-popover";
 import {
@@ -75,6 +89,7 @@ import {
 } from "./components/session-input-controls";
 import { SessionSidebarContent } from "./components/session-sidebar-content";
 import { TaskConversation } from "./components/task-conversation";
+import { useOptionalProjectTasks } from "./context/project-tasks-context";
 import {
   isWorktreeExecutionPath,
   resolveUseWorktreeForRun,
@@ -85,22 +100,29 @@ import {
   useConversationHistory,
   useDiffStream,
   useProjectTasksStream,
-  useSessionTaskState,
+  usePromptDraftPersistence,
   useSessionExecutionOptions,
   useSessionSidebarState,
+  useSessionTaskState,
   useSingleSessionController,
   useTaskRunsStream,
   useTaskSessionsStream,
 } from "./hooks";
+import { useConversationFind } from "./hooks/use-conversation-find";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
 import type { PreparedPromptPayload } from "./hooks/use-single-session-controller";
+import { usePromptEditorStore } from "./state/prompt-editor-store";
+import { useTaskTitleOverridesStore } from "./state/task-title-overrides-store";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
   useUserQuestionStore,
 } from "./state/user-question-store";
 import type { StoredTask, UiEventMessage } from "./types";
-import { formatContextForPrompt } from "./types/context";
+import {
+  formatContextForPrompt,
+  formatSkillContextForPrompt,
+} from "./types/context";
 import {
   SESSION_DRAG_DATA_TYPE,
   parseSessionDragPayload,
@@ -161,23 +183,42 @@ export function SingleAgentSessionView({
     isLoading: isProjectLoading,
   } = useProjectContext();
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
+  const openFilePath = useFilesStore((state) => state.openFilePath);
   const navigate = useNavigate();
 
-  // Route params — may contain slugs or UUIDs (backward compat)
+  // Route params — may contain slugs or UUIDs (backward compat).
+  // Resolver hooks unify "rendered at /session/:taskId" and "rendered as a
+  // session tab inside the workspace layout"; outside a tab they fall back
+  // to TanStack Router useParams.
   const params = useParams({ strict: false }) as {
     projectId?: string;
     taskId?: string;
     runId?: string;
   };
-  // projectId resolved by context (UUID); slug used for navigation
+  const tab = useOptionalTab();
+  const tabKind = useOptionalTabKind();
+  const resolvedTaskSlug = useResolvedTaskId();
+  const resolvedRunSlug = useResolvedRunId();
   const routeProjectSlug = projectSlug ?? params.projectId ?? null;
   const routeProjectId =
     resolvedProjectId ??
     (isUuidIdentifier(params.projectId) ? params.projectId : null);
-  const routeTaskSlug = params.taskId ?? null;
-  const routeRunSlug = params.runId ?? null;
+  const routeTaskSlug = resolvedTaskSlug;
+  const routeRunSlug = resolvedRunSlug;
+  // Inside a tab, do not consume mounting URL state if the tab kind doesn't
+  // describe a session; this prevents stale navigations from leaking in.
+  void tabKind;
   const isSessionMountedRef = useRef(true);
   const latestRouteProjectIdRef = useRef<string | null>(routeProjectId);
+  const promptScopeId = useMemo(() => {
+    if (tab) return `tab:${tab.id}`;
+    return [
+      "route",
+      routeProjectSlug ?? routeProjectId ?? "unknown-project",
+      routeTaskSlug ?? "new",
+      routeRunSlug ?? "latest",
+    ].join(":");
+  }, [routeProjectId, routeProjectSlug, routeRunSlug, routeTaskSlug, tab]);
 
   const previousWorkspaceRef = useRef<string | null | undefined>(undefined);
 
@@ -185,19 +226,33 @@ export function SingleAgentSessionView({
   const [currentContainerRef, setCurrentContainerRef] = useState<string | null>(
     null,
   );
+  const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
 
   // UI state — prompt editor handle (non-reactive, no re-renders on typing)
-  const editor = usePromptEditorHandle();
+  const editor = usePromptEditorHandle(promptScopeId);
+  usePromptDraftPersistence(editor);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const atPopoverRef = useRef<AtPopoverHandle>(null);
+  const setPromptPopover = usePromptEditorStore((s) => s.setPopover);
+  // Open the "@" context popover directly into a category (from the "+" menu).
+  const openContextCategory = useCallback(
+    (category: "skills" | "files" | "sessions") => {
+      setPromptPopover(editor.scopeId, "at");
+      atPopoverRef.current?.openCategory(category);
+      // Keep the editor focused so arrow-key navigation works and the
+      // inserted pill lands at the cursor (the dropdown returns focus to
+      // its trigger on close, so restore it on the next tick).
+      setTimeout(() => editor.focus(), 0);
+    },
+    [editor, setPromptPopover],
+  );
   // Track stopping state for immediate UI feedback
   const [isStopping, setIsStopping] = useState(false);
-  const [diffViewerOpen, setDiffViewerOpen] = useState(false);
+  const openLayoutTab = useLayoutStore((s) => s.openTab);
   const [rebaseDialogOpen, setRebaseDialogOpen] = useState(false);
   const [isMergingDiffs, setIsMergingDiffs] = useState(false);
   const [mergeSuccess, setMergeSuccess] = useState(false);
   const [isAbortingConflicts, setIsAbortingConflicts] = useState(false);
-  const [pendingSessionDrops, setPendingSessionDrops] = useState(0);
   const [branches, setBranches] = useState<GitBranchType[]>([]);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [executorProfileId, setExecutorProfileId] =
@@ -209,6 +264,10 @@ export function SingleAgentSessionView({
     useState<ExecutorProfileId | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const questionRef = useRef<AgentUserQuestionHandle>(null);
+
+  const requestConversationScrollToBottom = useCallback(() => {
+    setScrollToBottomSignal((signal) => signal + 1);
+  }, []);
 
   useEffect(() => {
     latestRouteProjectIdRef.current = routeProjectId;
@@ -319,12 +378,12 @@ export function SingleAgentSessionView({
         });
       } else if (taskSlug) {
         navigate({
-          to: "/projects/$projectId/session/$taskId/",
+          to: "/projects/$projectId/session/$taskId",
           params: { projectId: routeProjectSlug, taskId: taskSlug },
         });
       } else {
         navigate({
-          to: "/projects/$projectId/session/",
+          to: "/projects/$projectId/session",
           params: { projectId: routeProjectSlug },
         });
       }
@@ -359,14 +418,17 @@ export function SingleAgentSessionView({
     };
   }, [t]);
 
+  const sharedProjectTasks = useOptionalProjectTasks();
+  const fallbackProjectTasks = useProjectTasksStream({
+    projectId: routeProjectId,
+    enabled: Boolean(routeProjectId) && !sharedProjectTasks,
+  });
+  const projectTasks = sharedProjectTasks ?? fallbackProjectTasks;
   const {
     tasks: streamedTasks,
     isLoading: isTasksLoading,
     error: tasksStreamError,
-  } = useProjectTasksStream({
-    projectId: routeProjectId,
-    enabled: Boolean(routeProjectId),
-  });
+  } = projectTasks;
 
   const isSessionsLoading = isTasksLoading;
   const sessionsError = tasksStreamError;
@@ -379,8 +441,10 @@ export function SingleAgentSessionView({
     pendingSubmission,
     beginPendingSubmission,
     resolvePendingSubmission,
+    finishPendingSubmission,
     clearPendingSubmission,
   } = useSessionTaskState({
+    scopeId: promptScopeId,
     projectId: routeProjectId,
     routeTaskSlug,
     streamedTasks,
@@ -432,12 +496,11 @@ export function SingleAgentSessionView({
   useDocumentTitle(activeTask?.title ?? null);
 
   const isTaskRunning = Boolean(activeTask?.active_session_id);
-  const isSending = isTaskRunning || Boolean(pendingSubmission);
-  const isAttachingSession = pendingSessionDrops > 0;
-  const canSend =
-    Boolean(activeStreamTaskId || workspace) &&
-    !isSending &&
-    !isAttachingSession;
+  const isPendingSubmissionRunning = Boolean(
+    pendingSubmission && !pendingSubmission.finishedAt,
+  );
+  const isSending = isTaskRunning || isPendingSubmissionRunning;
+  const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
   const isExecutorLocked = Boolean(taskRunId) || isSending;
 
   useEffect(() => {
@@ -543,18 +606,27 @@ export function SingleAgentSessionView({
   // The useProjectTasksStream hook handles all real-time updates automatically
 
   // Full reset for new session
-  const handleFullReset = useCallback(() => {
-    setCurrentTaskRunTargetBranch(null);
-    setCurrentContainerRef(null);
-    setUseWorktree(true);
-    setForceNewAttempt(false);
-    setSessionExecutorProfile(executorProfileId);
-    clearPendingSubmission();
-    editor.clear();
-    // Clear active taskRunId ref
-    activeTaskRunIdRef.current = null;
-    // Note: activeTaskId and taskRunId are derived from URL, so navigation clears them
-  }, [clearPendingSubmission, executorProfileId, editor]);
+  const handleFullReset = useCallback(
+    (options?: { clearPending?: boolean }) => {
+      setCurrentTaskRunTargetBranch(null);
+      setCurrentContainerRef(null);
+      setUseWorktree(true);
+      setForceNewAttempt(false);
+      setSessionExecutorProfile(executorProfileId);
+      if (
+        options?.clearPending !== false &&
+        pendingSubmission?.requestId &&
+        !pendingSubmission.runId
+      ) {
+        clearPendingSubmission(pendingSubmission.requestId);
+      }
+      editor.clear();
+      // Clear active taskRunId ref
+      activeTaskRunIdRef.current = null;
+      // Note: activeTaskId and taskRunId are derived from URL, so navigation clears them
+    },
+    [clearPendingSubmission, executorProfileId, editor, pendingSubmission],
+  );
 
   // Handle workspace change - reset session state when project changes
   useEffect(() => {
@@ -570,7 +642,7 @@ export function SingleAgentSessionView({
       previousWorkspaceRef.current !== undefined &&
       previousWorkspaceRef.current !== workspace
     ) {
-      handleFullReset();
+      handleFullReset({ clearPending: false });
     }
 
     previousWorkspaceRef.current = workspace;
@@ -711,9 +783,11 @@ export function SingleAgentSessionView({
 
   const buildPromptPayload = useCallback((): PreparedPromptPayload | null => {
     const contextPrefix = formatContextForPrompt(editor.getContextEntries());
+    const skillEntries = editor.getSkillEntries();
+    const skillPrefix = formatSkillContextForPrompt(skillEntries);
     const imagesMarkdown = getImagesMarkdown();
     const text = editor.getText().trim();
-    const prompt = [contextPrefix, imagesMarkdown, text]
+    const prompt = [contextPrefix, skillPrefix, imagesMarkdown, text]
       .filter(Boolean)
       .join("\n")
       .trim();
@@ -723,6 +797,7 @@ export function SingleAgentSessionView({
     return {
       prompt,
       imageIds: getImageIds(),
+      selectedSkillIds: skillEntries.map((skill) => skill.id),
     };
   }, [editor, getImageIds, getImagesMarkdown]);
 
@@ -737,7 +812,7 @@ export function SingleAgentSessionView({
       return;
     }
 
-    if (isUploading || isAttachingSession) return;
+    if (isUploading) return;
 
     const payload = buildPromptPayload();
     if (!payload) {
@@ -747,6 +822,8 @@ export function SingleAgentSessionView({
     if (isSending) {
       return;
     }
+
+    requestConversationScrollToBottom();
 
     const requestId = createPerfRequestId();
     const createdAt = new Date().toISOString();
@@ -782,13 +859,13 @@ export function SingleAgentSessionView({
     addErrorMessage,
     t,
     isUploading,
-    isAttachingSession,
     buildPromptPayload,
     isSending,
     clearUploadItems,
     submitPrompt,
     resolvePendingSubmission,
     routeTaskSlug,
+    requestConversationScrollToBottom,
   ]);
 
   // User question handlers
@@ -799,6 +876,7 @@ export function SingleAgentSessionView({
       const { toolUseId } = pendingQuestions;
 
       try {
+        requestConversationScrollToBottom();
         // Store result immediately for real-time UI update
         setQuestionResult(toolUseId, answers);
 
@@ -821,7 +899,13 @@ export function SingleAgentSessionView({
         console.error("[handleQuestionAnswer] Failed to submit answer", error);
       }
     },
-    [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions],
+    [
+      pendingQuestions,
+      taskRunId,
+      requestConversationScrollToBottom,
+      setQuestionResult,
+      setPendingQuestions,
+    ],
   );
 
   const handleQuestionSkip = useCallback(async () => {
@@ -830,6 +914,7 @@ export function SingleAgentSessionView({
     const { toolUseId } = pendingQuestions;
 
     try {
+      requestConversationScrollToBottom();
       // Store skipped result
       setQuestionResult(toolUseId, { error: QUESTIONS_SKIPPED_MESSAGE });
 
@@ -850,28 +935,93 @@ export function SingleAgentSessionView({
     } catch (error) {
       console.error("[handleQuestionSkip] Failed to skip question", error);
     }
-  }, [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions]);
+  }, [
+    pendingQuestions,
+    taskRunId,
+    requestConversationScrollToBottom,
+    setQuestionResult,
+    setPendingQuestions,
+  ]);
 
   // Stream finished handler - called when task run completes
   const handleStreamFinished = useCallback(() => {
-    clearPendingSubmission();
-  }, [clearPendingSubmission]);
+    if (pendingSubmission?.requestId) {
+      finishPendingSubmission(
+        pendingSubmission.requestId,
+        new Date().toISOString(),
+      );
+    }
+  }, [finishPendingSubmission, pendingSubmission?.requestId]);
 
-  const { entries, isLoading: isConversationLoading, error: conversationError } =
-    useConversationHistory({
-      taskId: activeStreamTaskId,
-      enabled: Boolean(activeTaskId || pendingSubmission),
-      runs: taskRuns,
-      runsLoading: isTaskRunsLoading,
-      runsError: taskRunsError,
-      sessions: taskSessions,
-      sessionsLoading: isTaskSessionsLoading,
-      sessionsError: taskSessionsError,
-      pendingSubmission,
-      callbacks: {
-        onFinished: handleStreamFinished,
-      },
-    });
+  const {
+    entries,
+    isLoading: isConversationLoading,
+    isStreaming: isConversationStreaming,
+    error: conversationError,
+  } = useConversationHistory({
+    sessionScopeId: promptScopeId,
+    taskId: activeStreamTaskId,
+    enabled: Boolean(activeTaskId || pendingSubmission),
+    runs: taskRuns,
+    runsLoading: isTaskRunsLoading,
+    runsError: taskRunsError,
+    sessions: taskSessions,
+    sessionsLoading: isTaskSessionsLoading,
+    sessionsError: taskSessionsError,
+    pendingSubmission,
+    callbacks: {
+      onFinished: handleStreamFinished,
+    },
+  });
+
+  // Find-in-conversation (Cmd/Ctrl+F), mirroring the file editor's find UX.
+  const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  const sessionRootRef = useRef<HTMLDivElement | null>(null);
+  const pendingConversationScrollRef = useRef<{
+    requestId: string;
+    key: string;
+    taskId: string | null;
+  } | null>(null);
+  const conversationScrollCacheKey = (() => {
+    if (pendingSubmission) {
+      const pendingScroll = pendingConversationScrollRef.current;
+      if (
+        !pendingScroll ||
+        pendingScroll.requestId !== pendingSubmission.requestId
+      ) {
+        const key =
+          pendingSubmission.tempTaskId ??
+          pendingSubmission.taskId ??
+          activeTaskId ??
+          `pending-${pendingSubmission.requestId}`;
+        pendingConversationScrollRef.current = {
+          requestId: pendingSubmission.requestId,
+          key,
+          taskId: pendingSubmission.taskId ?? activeTaskId,
+        };
+        return key;
+      }
+
+      if (pendingSubmission.taskId || activeTaskId) {
+        pendingScroll.taskId = pendingSubmission.taskId ?? activeTaskId;
+      }
+      return pendingScroll.key;
+    }
+
+    const pendingScroll = pendingConversationScrollRef.current;
+    if (activeTaskId && pendingScroll?.taskId === activeTaskId) {
+      return pendingScroll.key;
+    }
+
+    return activeTaskId ?? "session";
+  })();
+  const find = useConversationFind({
+    enabled: Boolean(activeTaskId || pendingSubmission),
+    scrollContainerRef: conversationScrollRef,
+    rootRef: sessionRootRef,
+    recomputeKey: entries.length,
+    resetKey: activeTaskId,
+  });
 
   useEffect(() => {
     if (!pendingSubmission?.runId) {
@@ -885,9 +1035,14 @@ export function SingleAgentSessionView({
       matchingRun.status !== "running" &&
       matchingRun.status !== "pending"
     ) {
-      clearPendingSubmission(pendingSubmission.requestId);
+      finishPendingSubmission(
+        pendingSubmission.requestId,
+        matchingRun.completed_at ??
+          matchingRun.updated_at ??
+          new Date().toISOString(),
+      );
     }
-  }, [clearPendingSubmission, pendingSubmission, taskRuns]);
+  }, [finishPendingSubmission, pendingSubmission, taskRuns]);
 
   const { status: branchStatus, refetch: refetchBranchStatus } =
     useBranchStatus({
@@ -1013,7 +1168,8 @@ export function SingleAgentSessionView({
   const handleTitleChange = useCallback(
     async (newTitle: string) => {
       if (!activeStreamTaskId) return;
-      await updateTaskTitle(activeStreamTaskId, newTitle);
+      const task = await updateTaskTitle(activeStreamTaskId, newTitle);
+      useTaskTitleOverridesStore.getState().setTaskTitleOverride(task);
     },
     [activeStreamTaskId],
   );
@@ -1036,28 +1192,7 @@ export function SingleAgentSessionView({
         const dropX = event.clientX;
         const dropY = event.clientY;
         editor.setCursorFromPoint(dropX, dropY);
-        setPendingSessionDrops((count) => count + 1);
-
-        void generateTaskTranscript(
-          sessionPayload.taskId,
-          workspace,
-          currentContainerRef,
-        )
-          .then((filePath) => {
-            editor.addFilePart(filePath, true, sessionPayload.branch);
-          })
-          .catch((error) => {
-            console.error("[session] Failed to attach dragged session", error);
-            addErrorMessage(
-              error instanceof Error ? error.message : t("internalError"),
-            );
-          })
-          .finally(() => {
-            if (!isSessionMountedRef.current) {
-              return;
-            }
-            setPendingSessionDrops((count) => Math.max(0, count - 1));
-          });
+        editor.addSessionPart(sessionPayload.taskId, sessionPayload.branch);
         return;
       }
 
@@ -1067,7 +1202,7 @@ export function SingleAgentSessionView({
       }
       handleFiles(files);
     },
-    [workspace, editor, currentContainerRef, addErrorMessage, t, handleFiles],
+    [workspace, editor, addErrorMessage, t, handleFiles],
   );
 
   const handlePasteFiles = useCallback(
@@ -1083,14 +1218,6 @@ export function SingleAgentSessionView({
   );
 
   useGlobalFileDrop(handleFiles);
-
-  // Auto-scroll to bottom
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "end",
-    });
-  }, [entries, isSending]);
 
   // Focus prompt editor when task/run session route changes
   useEffect(() => {
@@ -1215,12 +1342,10 @@ export function SingleAgentSessionView({
             atPopoverRef={atPopoverRef}
             projectId={routeProjectId ?? null}
             workspacePath={workspace}
-            containerRef={currentContainerRef}
             tasks={sortedTasks}
             atActiveIndex={atActiveIndex}
             onActiveIndexChange={setAtActiveIndex}
             disabled={!workspace && !activeStreamTaskId}
-            isAttachingSession={isAttachingSession}
             onSubmit={handleSend}
             onDrop={handleDropFiles}
             onPaste={handlePasteFiles}
@@ -1229,32 +1354,66 @@ export function SingleAgentSessionView({
 
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1">
-              <TooltipProvider delayDuration={120}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label={t("attachmentButtonAria")}
-                      disabled={isStopping}
-                      onClick={handleSelectFiles}
-                      className={cn(
-                        "flex h-9 w-9 items-center justify-center rounded-[4px] text-muted-foreground transition hover:bg-muted/40 hover:text-primary",
-                        uploadItems.length > 0
-                          ? "bg-primary/10 text-primary"
-                          : "",
-                        "disabled:cursor-not-allowed disabled:opacity-40",
-                      )}
-                    >
-                      <ImageIcon className="h-4 w-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="text-[11px]">
-                    {t("attachmentButtonAria")}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <DropdownMenu>
+                <TooltipProvider delayDuration={120}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("addContextButtonAria")}
+                          disabled={isStopping}
+                          className={cn(
+                            "flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:!bg-muted hover:!text-foreground",
+                            "disabled:cursor-not-allowed disabled:opacity-40",
+                          )}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="text-[11px]">
+                      {t("addContextButtonAria")}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <DropdownMenuContent align="start" className="w-56">
+                  <DropdownMenuItem
+                    onSelect={handleSelectFiles}
+                    className="gap-2.5 text-[13px]"
+                  >
+                    <ImageIcon className="h-4 w-4 text-muted-foreground" />
+                    <span>{t("addPhotosLabel")}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => openContextCategory("skills")}
+                    className="gap-2.5 text-[13px]"
+                  >
+                    <BookOpen className="h-4 w-4 text-muted-foreground" />
+                    <span>Skills</span>
+                    <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => openContextCategory("files")}
+                    className="gap-2.5 text-[13px]"
+                  >
+                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                    <span>Files &amp; Folders</span>
+                    <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => openContextCategory("sessions")}
+                    className="gap-2.5 text-[13px]"
+                  >
+                    <MessageSquare className="h-4 w-4 text-muted-foreground" />
+                    <span>Sessions</span>
+                    <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
 
               <div className="mx-1 h-4 w-px bg-border" />
 
@@ -1303,6 +1462,7 @@ export function SingleAgentSessionView({
 
             <div className="flex items-center gap-2">
               <SendButtonWithState
+                editorHandle={editor}
                 isSending={isSending}
                 isStopping={isStopping}
                 canSend={canSend}
@@ -1500,6 +1660,7 @@ export function SingleAgentSessionView({
       <div className="mx-auto w-full max-w-2xl px-4">
         {pendingQuestions && (
           <AgentUserQuestionWithEditorState
+            editorHandle={editor}
             questionRef={questionRef}
             pendingQuestions={pendingQuestions}
             onAnswer={handleQuestionAnswer}
@@ -1525,12 +1686,20 @@ export function SingleAgentSessionView({
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTaskId || pendingSubmission ? (
           <TaskConversation
-            key={activeTaskId ?? pendingSubmission?.tempTaskId ?? "session"}
+            key={conversationScrollCacheKey}
             entries={entries}
             isLoading={isConversationLoading}
             error={conversationError}
             messagesEndRef={messagesEndRef}
+            scrollContainerRef={conversationScrollRef}
+            searchActive={find.searchActive}
+            scrollCacheKey={conversationScrollCacheKey}
+            isStreaming={isConversationStreaming}
+            scrollToBottomSignal={scrollToBottomSignal}
             onWikilinkClick={navigateToWikilink}
+            onFilePathClick={(path) =>
+              openFilePath(path, taskRunId ?? undefined)
+            }
           />
         ) : (
           <SessionEmptyState title={t("sessionEmptyHeroTitle")} />
@@ -1553,36 +1722,13 @@ export function SingleAgentSessionView({
       />
       <div className="flex h-full w-full justify-end bg-muted text-foreground">
         <div className="flex h-full w-full max-w-full bg-background">
-          <ResizableSidebar
-            width={sessionSidebarWidth}
-            setWidth={setSessionSidebarWidth}
-            defaultWidth={SESSION_SIDEBAR_DEFAULT_WIDTH}
-            minWidth={220}
-            maxWidth={400}
-            isCollapsed={sessionSidebarCollapsed}
-            toggleCollapsed={toggleSessionSidebarCollapsed}
-            showPeek={sessionSidebarPeek}
-            togglePeek={toggleSessionSidebarPeek}
-            disablePeekTrigger={true}
-            sidebarClassName="bg-custom-sidebar-background-90"
+          {/* The session list previously lived here as a ResizableSidebar.
+              It now lives in the LeftDock's Sessions panel and is hidden
+              from the tab body to avoid a double-sidebar. */}
+          <div
+            ref={sessionRootRef}
+            className="flex min-w-0 flex-1 flex-col bg-background"
           >
-            <SessionSidebarContent
-              newSessionUrl={newSessionUrl}
-              onNewSessionClick={handleNewSessionClick}
-              archivedSessions={archivedSessions}
-              onRestoreSession={restoreSession}
-              showSessionListLoading={showSessionListLoading}
-              sessionsError={sessionsError}
-              sortedTasks={sortedTasks}
-              activeTaskId={sidebarActiveTaskId}
-              onLoadTask={handleLoadTask}
-              onArchiveTask={archiveSession}
-              onCloseSidebar={() => toggleSessionSidebarCollapsed(true)}
-              sidebarButtonClassName={sessionSidebarButtonClass}
-              t={t}
-            />
-          </ResizableSidebar>
-          <div className="flex min-w-0 flex-1 flex-col border-l border-border/60 bg-background">
             <SessionHeader
               taskId={sidebarActiveTaskId}
               taskTitle={activeTaskTitle}
@@ -1593,7 +1739,10 @@ export function SingleAgentSessionView({
               isRebasing={isRebasing}
               isMergingDiffs={isMergingDiffs}
               commitsBehind={commitsBehind}
-              onOpenDiffViewer={() => setDiffViewerOpen(true)}
+              onOpenDiffViewer={() => {
+                if (!taskRunId) return;
+                openLayoutTab({ type: "diff", runId: taskRunId });
+              }}
               onRebase={() => setRebaseDialogOpen(true)}
               onMergeDiffs={handleMergeDiffs}
               onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
@@ -1602,21 +1751,10 @@ export function SingleAgentSessionView({
               t={t}
             />
             <main className="flex-1 overflow-hidden">
-              {diffViewerOpen && (
-                <DiffViewerPanel
-                  onClose={() => setDiffViewerOpen(false)}
-                  diffs={diffViewerItems}
-                  taskRunId={taskRunId}
-                />
-              )}
-              <div
-                className={cn(
-                  "flex h-full flex-col overflow-hidden",
-                  diffViewerOpen && "hidden",
-                )}
-              >
-                <div className="flex-1 overflow-hidden">
+              <div className="flex h-full flex-col overflow-hidden">
+                <div className="relative flex-1 overflow-hidden">
                   {conversationContent}
+                  <ConversationFindBar controller={find} />
                 </div>
               </div>
             </main>

@@ -16,9 +16,15 @@ interface PdfViewerProps {
   relativePath: string;
   fileName: string;
   contentVersion?: number;
+  sourceUrl?: string;
 }
 
-export const PdfViewer = ({ relativePath, fileName, contentVersion }: PdfViewerProps) => {
+export const PdfViewer = ({
+  relativePath,
+  fileName,
+  contentVersion,
+  sourceUrl,
+}: PdfViewerProps) => {
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [numPages, setNumPages] = useState<number | null>(null);
@@ -29,10 +35,11 @@ export const PdfViewer = ({ relativePath, fileName, contentVersion }: PdfViewerP
 
   const projectId = useProjectId();
   const pdfUrl = useMemo(() => {
+    if (sourceUrl) return sourceUrl;
     if (!projectId) return "";
     const base = getProjectBinaryFileUrl(projectId, relativePath);
     return contentVersion ? `${base}&_v=${contentVersion}` : base;
-  }, [projectId, relativePath, contentVersion]);
+  }, [projectId, relativePath, contentVersion, sourceUrl]);
 
   useEffect(() => {
     setZoom(1);
@@ -81,7 +88,9 @@ export const PdfViewer = ({ relativePath, fileName, contentVersion }: PdfViewerP
       const styles = window.getComputedStyle(viewport);
       const paddingLeft = Number.parseFloat(styles.paddingLeft) || 0;
       const paddingRight = Number.parseFloat(styles.paddingRight) || 0;
-      const nextWidth = Math.floor(viewport.clientWidth - paddingLeft - paddingRight);
+      const nextWidth = Math.floor(
+        viewport.clientWidth - paddingLeft - paddingRight,
+      );
       setAvailableWidth(Math.max(240, nextWidth));
     };
 
@@ -103,9 +112,13 @@ export const PdfViewer = ({ relativePath, fileName, contentVersion }: PdfViewerP
     <div className="flex h-full w-full flex-1 flex-col bg-custom-background-90 font-workspace">
       <header className="flex h-14 items-center justify-between bg-custom-background-100/95 px-5 border-b border-custom-border-200">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-custom-text-100">{fileName}</span>
+          <span className="text-sm font-medium text-custom-text-100">
+            {fileName}
+          </span>
           {numPages && (
-            <span className="text-xs text-muted-foreground">{numPages} pages</span>
+            <span className="text-xs text-muted-foreground">
+              {numPages} pages
+            </span>
           )}
         </div>
         <div className="flex items-center gap-1">

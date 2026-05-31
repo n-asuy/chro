@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use super::path_resolve::{read_binary_resolving, read_text_resolving, require_internal};
 use crate::{format_system_time, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
@@ -31,6 +32,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/projects/:project_id/binary-file",
             get(read_project_binary_file).post(write_project_binary_file),
+        )
+        .route(
+            "/projects/:project_id/asset/*relative_path",
+            get(read_project_asset),
         )
         .route(
             "/projects/:project_id/directory",
@@ -79,7 +84,12 @@ async fn get_project(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> Result<Json<ProjectEnvelope>, ApiError> {
-    let project = ProjectRecord::get_by_identifier(state.pool(), &identifier).await?;
+    let project = ProjectRecord::get_by_identifier(state.pool(), &identifier)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::NotFound,
+            other => ApiError::Sqlx(other),
+        })?;
     Ok(Json(ProjectEnvelope { project }))
 }
 
@@ -219,13 +229,40 @@ async fn read_project_file(
         ));
     }
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
-    let file = ProjectFileService::new(state.runtime(), project_path)
-        .read_file(&query.relative_path)
-        .await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let service = ProjectFileService::new(state.runtime(), project_path);
+    let file =
+        read_text_resolving(&service, &query.relative_path, &[project_root.as_str()]).await?;
 
     Ok(Json(ProjectFileEnvelope {
         file: ProjectFileResponse::from(file),
     }))
+}
+
+/// Path-based asset endpoint for HTML preview. Unlike `binary-file` (which uses
+/// a query parameter), this puts the relative file path directly into the URL
+/// so that relative URLs in served HTML (e.g. `<link href="style.css">`)
+/// resolve naturally to sibling assets via the same endpoint.
+async fn read_project_asset(
+    State(state): State<AppState>,
+    Path((project_id, relative_path)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest("asset path is required".into()));
+    }
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let service = ProjectFileService::new(state.runtime(), project_path);
+    let binary_file =
+        read_binary_resolving(&service, &relative_path, &[project_root.as_str()]).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, binary_file.mime_type)
+        .header(header::CONTENT_LENGTH, binary_file.size)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(binary_file.data))
+        .unwrap())
 }
 
 async fn read_project_binary_file(
@@ -239,9 +276,10 @@ async fn read_project_binary_file(
         ));
     }
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
-    let binary_file = ProjectFileService::new(state.runtime(), project_path)
-        .read_binary_file(&query.relative_path)
-        .await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let service = ProjectFileService::new(state.runtime(), project_path);
+    let binary_file =
+        read_binary_resolving(&service, &query.relative_path, &[project_root.as_str()]).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -330,8 +368,10 @@ async fn write_project_file(
         return Err(ApiError::BadRequest("relative_path is required".into()));
     }
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let resolved = require_internal(&payload.relative_path, &project_root)?;
     let file = ProjectFileService::new(state.runtime(), project_path)
-        .write_file(&payload.relative_path, &payload.content)
+        .write_file(&resolved, &payload.content)
         .await?;
 
     Ok(Json(ProjectFileEnvelope {
@@ -355,8 +395,10 @@ async fn delete_project_file(
         ));
     }
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let resolved = require_internal(&query.relative_path, &project_root)?;
     let deleted_path = ProjectFileService::new(state.runtime(), project_path)
-        .delete_entry(&query.relative_path)
+        .delete_entry(&resolved)
         .await?;
 
     Ok(Json(DeleteProjectFileResponse { deleted_path }))

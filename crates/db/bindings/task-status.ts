@@ -3,4 +3,4 @@
 /**
  * Task record status
  */
-export type TaskStatus = "pending" | "in_progress" | "blocked" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled";

@@ -3,6 +3,7 @@ import type { DisplayEntry, TaskSessionRecord } from "../../types";
 import {
   type TaskRunConversationState,
   buildTaskSessionPromptMap,
+  createConversationFlattenCache,
   createLoadingEntry,
   createSyntheticUserMessageEntry,
   filterConversationLogEntries,
@@ -233,5 +234,183 @@ describe("flattenConversationEntries", () => {
       makeAssistantEntry("run-1"),
       createLoadingEntry("run-1"),
     ]);
+  });
+});
+
+describe("createConversationFlattenCache", () => {
+  it("produces the same output as the pure flatten on the first call", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [makeSession()];
+    const states = [
+      makeState("run-1", "2025-01-01T00:00:00.000Z", [
+        makeUserMessageEntry("run-1"),
+        makeAssistantEntry("run-1"),
+      ]),
+    ];
+
+    expect(cache.flatten(states, sessions)).toEqual(
+      flattenConversationEntries(states, sessions),
+    );
+  });
+
+  it("returns the same array reference when nothing changed", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [makeSession()];
+    const entries = [
+      makeUserMessageEntry("run-1"),
+      makeAssistantEntry("run-1"),
+    ];
+    const states = [makeState("run-1", "2025-01-01T00:00:00.000Z", entries)];
+
+    const first = cache.flatten(states, sessions);
+    const second = cache.flatten(states, sessions);
+
+    expect(second).toBe(first);
+  });
+
+  it("only rebuilds the slice whose entries changed", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [
+      makeSession({
+        id: "session-1",
+        task_run_id: "run-1",
+        prompt: "First prompt",
+      }),
+      makeSession({
+        id: "session-2",
+        task_run_id: "run-2",
+        prompt: "Second prompt",
+      }),
+    ];
+
+    const run1Entry = makeAssistantEntry("run-1", "assistant-run1", "Done");
+    const run2Initial = makeAssistantEntry(
+      "run-2",
+      "assistant-run2-a",
+      "Partial",
+    );
+    const run2Extended = makeAssistantEntry(
+      "run-2",
+      "assistant-run2-b",
+      "More tokens",
+    );
+
+    const statesBefore = [
+      makeState("run-1", "2025-01-01T00:00:00.000Z", [run1Entry]),
+      makeState("run-2", "2025-01-02T00:00:00.000Z", [run2Initial]),
+    ];
+    const before = cache.flatten(statesBefore, sessions);
+
+    const statesAfter = [
+      // run-1 untouched (same `entries` reference)
+      statesBefore[0],
+      makeState("run-2", "2025-01-02T00:00:00.000Z", [
+        run2Initial,
+        run2Extended,
+      ]),
+    ];
+    const after = cache.flatten(statesAfter, sessions);
+
+    expect(after).not.toBe(before);
+    // run-1 synthetic + assistant entries kept their identity
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+    // run-2 synthetic entry kept its identity (prompt unchanged)
+    expect(after[2]).toBe(before[2]);
+    // run-2's first assistant entry kept its identity
+    expect(after[3]).toBe(before[3]);
+    // Only the newly-appended assistant entry is new
+    expect(after[4]).toBe(run2Extended);
+  });
+
+  it("keeps the loading entry reference stable across patches", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [makeSession()];
+    const initialEntries = [makeAssistantEntry("run-1", "a-1", "first")];
+
+    const before = cache.flatten(
+      [makeState("run-1", "2025-01-01T00:00:00.000Z", initialEntries)],
+      sessions,
+      { loadingRunIds: ["run-1"] },
+    );
+
+    const extendedEntries = [
+      ...initialEntries,
+      makeAssistantEntry("run-1", "a-2", "second"),
+    ];
+    const after = cache.flatten(
+      [makeState("run-1", "2025-01-01T00:00:00.000Z", extendedEntries)],
+      sessions,
+      { loadingRunIds: ["run-1"] },
+    );
+
+    // Last element of both is the loading entry; reference must be reused
+    expect(after[after.length - 1]).toBe(before[before.length - 1]);
+  });
+
+  it("invalidates a run when its prompt changes", () => {
+    const cache = createConversationFlattenCache();
+    const entries = [makeAssistantEntry("run-1", "a-1", "reply")];
+    const state = makeState("run-1", "2025-01-01T00:00:00.000Z", entries);
+
+    const first = cache.flatten(
+      [state],
+      [
+        makeSession({
+          id: "session-1",
+          task_run_id: "run-1",
+          prompt: "Old prompt",
+        }),
+      ],
+    );
+
+    const second = cache.flatten(
+      [state],
+      [
+        makeSession({
+          id: "session-1",
+          task_run_id: "run-1",
+          prompt: "New prompt",
+        }),
+      ],
+    );
+
+    expect(second[0]).not.toBe(first[0]);
+    expect(second[0]).toEqual(
+      createSyntheticUserMessageEntry("run-1", "New prompt", "session-1"),
+    );
+    // Assistant entry reference remains stable
+    expect(second[1]).toBe(first[1]);
+  });
+
+  it("drops cached slices for runs no longer present", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [makeSession()];
+    const state = makeState("run-1", "2025-01-01T00:00:00.000Z", [
+      makeAssistantEntry("run-1"),
+    ]);
+
+    cache.flatten([state], sessions);
+    const emptied = cache.flatten([], sessions);
+    expect(emptied).toEqual([]);
+
+    // Re-adding the same state must rebuild rather than serve stale cached entries
+    const rebuilt = cache.flatten([state], sessions);
+    expect(rebuilt).toEqual(flattenConversationEntries([state], sessions));
+  });
+
+  it("clear() empties the cache", () => {
+    const cache = createConversationFlattenCache();
+    const sessions = [makeSession()];
+    const state = makeState("run-1", "2025-01-01T00:00:00.000Z", [
+      makeAssistantEntry("run-1"),
+    ]);
+
+    const before = cache.flatten([state], sessions);
+    cache.clear();
+    const after = cache.flatten([state], sessions);
+
+    expect(after).toEqual(before);
+    expect(after).not.toBe(before);
   });
 });

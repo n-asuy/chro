@@ -10,8 +10,9 @@ import { useAutoSave } from "../../hooks/use-auto-save";
 import { useProjectId } from "../../context/project-context";
 import { useLanguage } from "@/i18n";
 import {
-  uploadProjectBinaryFile,
   getProjectBinaryFileUrl,
+  getWorkspaceBinaryFileUrl,
+  uploadProjectBinaryFile,
 } from "@/lib/project-client";
 
 // Excalidraw requires its CSS to be loaded
@@ -69,13 +70,14 @@ interface FileReference {
 type ExcalidrawAPI = any;
 
 const Excalidraw = lazy(() =>
-  import("@excalidraw/excalidraw").then((mod) => ({ default: mod.Excalidraw }))
+  import("@excalidraw/excalidraw").then((mod) => ({ default: mod.Excalidraw })),
 );
 
 interface ExcalidrawEditorProps {
   relativePath: string;
   fileName: string;
   initialContent: string;
+  workspaceRootPath?: string;
 }
 
 // Extended file data format with file references
@@ -111,9 +113,7 @@ const parseExcalidrawContent = (content: string): ExcalidrawFileData => {
   try {
     const parsed = JSON.parse(content) as ExcalidrawFileData;
     if (parsed.type !== "excalidraw") {
-      console.warn(
-        "[ExcalidrawEditor] Invalid file type, creating empty data"
-      );
+      console.warn("[ExcalidrawEditor] Invalid file type, creating empty data");
       return createEmptyExcalidrawData();
     }
     return parsed;
@@ -128,7 +128,7 @@ const serializeExcalidrawData = (
   elements: readonly ExcalidrawElement[],
   appState: AppState,
   files: BinaryFiles,
-  fileRefs: Record<string, FileReference>
+  fileRefs: Record<string, FileReference>,
 ): string => {
   // Only keep file data for files without refs (backward compatibility)
   const filteredFiles: BinaryFiles = {};
@@ -170,6 +170,7 @@ export const ExcalidrawEditor = ({
   relativePath,
   fileName,
   initialContent,
+  workspaceRootPath,
 }: ExcalidrawEditorProps) => {
   const projectId = useProjectId();
   const { language } = useLanguage();
@@ -179,10 +180,12 @@ export const ExcalidrawEditor = ({
   const isInitialLoadRef = useRef(true);
 
   // Track file references (fileId -> path)
-  const [fileRefs, setFileRefs] = useState<Record<string, FileReference>>(() => {
-    const parsed = parseExcalidrawContent(initialContent);
-    return parsed.fileRefs ?? {};
-  });
+  const [fileRefs, setFileRefs] = useState<Record<string, FileReference>>(
+    () => {
+      const parsed = parseExcalidrawContent(initialContent);
+      return parsed.fileRefs ?? {};
+    },
+  );
   const fileRefsRef = useRef(fileRefs);
   fileRefsRef.current = fileRefs;
 
@@ -192,12 +195,14 @@ export const ExcalidrawEditor = ({
   // Load file references and convert to BinaryFileData for Excalidraw
   const loadFileRefsAsDataURLs = useCallback(
     async (refs: Record<string, FileReference>): Promise<BinaryFiles> => {
-      if (!projectId) return {};
+      if (!projectId && !workspaceRootPath) return {};
 
       const files: BinaryFiles = {};
       for (const [fileId, ref] of Object.entries(refs)) {
         try {
-          const url = getProjectBinaryFileUrl(projectId, ref.path);
+          const url = workspaceRootPath
+            ? getWorkspaceBinaryFileUrl(workspaceRootPath, ref.path)
+            : getProjectBinaryFileUrl(projectId!, ref.path);
           const response = await fetch(url);
           if (!response.ok) continue;
 
@@ -217,13 +222,13 @@ export const ExcalidrawEditor = ({
         } catch (error) {
           console.warn(
             `[ExcalidrawEditor] Failed to load file ref: ${ref.path}`,
-            error
+            error,
           );
         }
       }
       return files;
     },
-    [projectId]
+    [projectId, workspaceRootPath],
   );
 
   // Initial data with loaded file references
@@ -256,7 +261,7 @@ export const ExcalidrawEditor = ({
   const { saveNow, isDirty } = useAutoSave({
     relativePath,
     content,
-    enabled: true,
+    enabled: !workspaceRootPath,
     debounceMs: 2000,
   });
 
@@ -289,9 +294,9 @@ export const ExcalidrawEditor = ({
     async (
       fileId: string,
       dataURL: string,
-      mimeType: string
+      mimeType: string,
     ): Promise<FileReference | null> => {
-      if (!projectId) return null;
+      if (!projectId || workspaceRootPath) return null;
 
       try {
         // Convert dataURL to Blob
@@ -312,7 +317,7 @@ export const ExcalidrawEditor = ({
         return null;
       }
     },
-    [projectId, relativePath]
+    [projectId, relativePath, workspaceRootPath],
   );
 
   // Handle onChange - detect new images and upload them
@@ -331,7 +336,7 @@ export const ExcalidrawEditor = ({
         elements,
         appState,
         files,
-        currentRefs
+        currentRefs,
       );
       setContent(serialized);
 
@@ -351,7 +356,7 @@ export const ExcalidrawEditor = ({
           const ref = await uploadImageFile(
             fileId,
             file.dataURL,
-            file.mimeType
+            file.mimeType,
           );
           if (ref) {
             updatedRefs[fileId] = ref;
@@ -366,7 +371,7 @@ export const ExcalidrawEditor = ({
             elements,
             appState,
             files,
-            updatedRefs
+            updatedRefs,
           );
           setContent(updated);
         }
@@ -374,7 +379,7 @@ export const ExcalidrawEditor = ({
 
       void uploadNewImages();
     },
-    [uploadImageFile]
+    [uploadImageFile],
   );
 
   const elementCount = excalidrawAPI

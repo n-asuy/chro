@@ -1,4 +1,3 @@
-import { installTool } from "@/lib/executor-install";
 import {
   type SupportedLanguage,
   type TranslationFunction,
@@ -14,8 +13,8 @@ import {
   fetchAuthStatus,
   fetchExecutorInstallStatus,
   triggerAuthLogin,
-
 } from "@/lib/executor-client";
+import { installTool } from "@/lib/executor-install";
 import type { AppTheme } from "@/lib/preferences-client";
 import { setUiValue } from "@/lib/ui-state-client";
 import { Alert, AlertDescription, AlertTitle } from "@chro/ui/alert";
@@ -38,7 +37,6 @@ import {
 } from "@chro/ui/dropdown-menu";
 import { Label } from "@chro/ui/label";
 import { Switch } from "@chro/ui/switch";
-import { useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -216,10 +214,8 @@ function AuthStatusControl({
 
 export function SettingsPanel({
   variant = "page",
-  onCloseRequest,
   className,
 }: SettingsPanelProps) {
-  const navigate = useNavigate();
   const {
     language: activeLanguage,
     setLanguage: setAppLanguage,
@@ -559,13 +555,6 @@ export function SettingsPanel({
     [t],
   );
   const isModal = variant === "modal";
-  const handlePrimaryAction = useCallback(() => {
-    if (isModal) {
-      onCloseRequest?.();
-      return;
-    }
-    navigate({ to: "/workspace" });
-  }, [isModal, onCloseRequest, navigate]);
 
   const shouldShowPreferencesAlerts = Boolean(
     preferencesError ||
@@ -1146,7 +1135,10 @@ export function SettingsPanel({
           title="Authentication"
           description={
             installStatus?.CLAUDE_CODE?.installed
-              ? [t("authClaudeDescription"), formatDetectedVersion(t, installStatus?.CLAUDE_CODE ?? null)]
+              ? [
+                  t("authClaudeDescription"),
+                  formatDetectedVersion(t, installStatus?.CLAUDE_CODE ?? null),
+                ]
                   .filter(Boolean)
                   .join(" ")
               : t("authClaudeInstallDescription")
@@ -1228,7 +1220,10 @@ export function SettingsPanel({
           title="Authentication"
           description={
             installStatus?.CODEX?.installed
-              ? [t("authCodexDescription"), formatDetectedVersion(t, installStatus?.CODEX ?? null)]
+              ? [
+                  t("authCodexDescription"),
+                  formatDetectedVersion(t, installStatus?.CODEX ?? null),
+                ]
                   .filter(Boolean)
                   .join(" ")
               : t("authCodexInstallDescription")

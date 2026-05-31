@@ -21,8 +21,10 @@ mod filesystem;
 mod git;
 mod images;
 mod merges;
+mod path_resolve;
 mod projects;
 mod sessions;
+mod skills;
 mod task_runs;
 mod tasks;
 mod workspace;
@@ -37,6 +39,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(tasks::router())
         .merge(task_runs::router())
         .merge(sessions::router())
+        .merge(skills::router())
         .merge(workspace::router())
         .merge(approvals::router())
         .merge(config::router())

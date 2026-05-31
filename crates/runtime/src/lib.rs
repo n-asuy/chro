@@ -76,6 +76,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     FileSearch(#[from] file_search_cache::FileSearchError),
     #[error(transparent)]
+    Skills(#[from] skills::SkillError),
+    #[error(transparent)]
     Container(#[from] container::ContainerError),
     #[error("task run not found: {0}")]
     TaskRunNotFound(Uuid),
@@ -206,15 +208,10 @@ pub trait Runtime: Clone + Send + Sync + 'static {
         Ok(store)
     }
 
-    /// Generate a Markdown transcript for an entire task (all runs combined)
-    /// and write it to `.chro-context/sessions/{task_id}.md`.
-    ///
-    /// Returns the relative path to the generated file.
-    async fn generate_task_transcript(
-        &self,
-        task_id: Uuid,
-        workspace_path: &Path,
-    ) -> Result<String, RuntimeError>;
+    /// Render the Markdown transcript for an entire task (all runs combined,
+    /// chronological order) and return the content. Used by the executor to
+    /// inline past sessions into prompts and by the CLI to print transcripts.
+    async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError>;
 
     fn touch_session(&self, session_id: &str) {
         let _ = session_id;

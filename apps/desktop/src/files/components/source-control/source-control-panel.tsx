@@ -4,6 +4,7 @@ import {
   type FileChangeStatus,
   listGitBranches,
 } from "@/lib/git-client";
+import { DockBackButton } from "@/workspace-layout/components/dock-panels/dock-back-button";
 import {
   Tooltip,
   TooltipContent,
@@ -22,7 +23,6 @@ import {
   FileX,
   GitBranch,
   Minus,
-  PanelRightClose,
   Plus,
   RefreshCw,
   Search,
@@ -230,11 +230,7 @@ const CollapsibleSection = ({
   );
 };
 
-type SourceControlPanelProps = {
-  onClose?: () => void;
-};
-
-export const SourceControlPanel = ({ onClose }: SourceControlPanelProps) => {
+export const SourceControlPanel = () => {
   const { projectId } = useProjectContext();
   const {
     status,
@@ -404,29 +400,11 @@ export const SourceControlPanel = ({ onClose }: SourceControlPanelProps) => {
   const pullCount = Math.max(0, commitsBehind);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
       {/* Header with toolbar */}
-      <div className="flex h-11 items-center justify-between border-b border-custom-border-200 px-2">
-        {onClose && (
-          <TooltipProvider delayDuration={150}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
-                  aria-label="Close panel"
-                >
-                  <PanelRightClose className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                Close panel
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
+      <div className="flex h-11 min-w-0 items-center justify-between gap-1 overflow-x-auto px-2">
         <div className="flex items-center gap-2">
+          <DockBackButton />
           <TooltipProvider delayDuration={150}>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -538,7 +516,7 @@ export const SourceControlPanel = ({ onClose }: SourceControlPanelProps) => {
       </div>
 
       {/* Branch selector dropdown */}
-      <div className="relative border-b border-custom-border-200 px-3 py-2">
+      <div className="relative px-3 py-2">
         <button
           type="button"
           onClick={() => setBranchDropdownOpen(!branchDropdownOpen)}
@@ -629,14 +607,14 @@ export const SourceControlPanel = ({ onClose }: SourceControlPanelProps) => {
       </div>
 
       {/* Commit message input */}
-      <div className="border-b border-custom-border-200 px-3 py-2">
+      <div className="bg-custom-background-80 px-3 py-2">
         <textarea
           value={commitMessage}
           onChange={(e) => setCommitMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           onFocus={handleCommitMessageFocus}
           placeholder="Commit message (Ctrl+Enter to commit)"
-          className="w-full resize-none rounded border border-custom-border-200 bg-custom-background-100 px-2 py-1.5 text-sm text-custom-text-100 placeholder:text-custom-text-300 focus:border-custom-primary-100 focus:outline-none"
+          className="w-full resize-none border-0 bg-transparent px-0 py-0 text-sm text-custom-text-100 placeholder:text-custom-text-300 focus:outline-none focus:ring-0"
           rows={2}
         />
       </div>

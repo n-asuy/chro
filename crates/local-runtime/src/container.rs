@@ -73,6 +73,14 @@ struct ExecutionHandle {
     join: JoinHandle<()>,
 }
 
+fn task_status_for_terminal_run_status(run_status: RunStatus) -> Option<TaskStatus> {
+    match run_status {
+        RunStatus::Completed | RunStatus::Cancelled => Some(TaskStatus::Completed),
+        RunStatus::Failed => Some(TaskStatus::Failed),
+        _ => None,
+    }
+}
+
 impl LocalContainerService {
     pub fn new(
         db: DBService,
@@ -302,18 +310,13 @@ impl LocalContainerService {
             "[complete_task_execution] start"
         );
 
-        let task_status = match run_status {
-            RunStatus::Completed => TaskStatus::Completed,
-            RunStatus::Failed => TaskStatus::Failed,
-            RunStatus::Cancelled => TaskStatus::Cancelled,
-            _ => {
-                tracing::debug!(
-                    %run_id,
-                    ?run_status,
-                    "[complete_task_execution] skipping - run status not terminal"
-                );
-                return Ok(());
-            }
+        let Some(task_status) = task_status_for_terminal_run_status(run_status) else {
+            tracing::debug!(
+                %run_id,
+                ?run_status,
+                "[complete_task_execution] skipping - run status not terminal"
+            );
+            return Ok(());
         };
 
         let run = match TaskRun::find_by_id(self.db.pool(), run_id).await? {
@@ -1018,7 +1021,7 @@ impl ContainerService for LocalContainerService {
                  SET status = ?, active_session_id = NULL, updated_at = datetime('now')
                  WHERE id = ?",
             )
-            .bind(TaskStatus::Blocked)
+            .bind(TaskStatus::Completed)
             .bind(run.task_id)
             .execute(self.db.pool())
             .await;
@@ -1304,4 +1307,37 @@ fn diff_to_entry(diff: Diff) -> LogEntry {
 
 fn escape_json_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_run_marks_task_completed() {
+        assert_eq!(
+            task_status_for_terminal_run_status(RunStatus::Cancelled),
+            Some(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn terminal_run_status_maps_to_task_status() {
+        assert_eq!(
+            task_status_for_terminal_run_status(RunStatus::Completed),
+            Some(TaskStatus::Completed)
+        );
+        assert_eq!(
+            task_status_for_terminal_run_status(RunStatus::Failed),
+            Some(TaskStatus::Failed)
+        );
+        assert_eq!(
+            task_status_for_terminal_run_status(RunStatus::Pending),
+            None
+        );
+        assert_eq!(
+            task_status_for_terminal_run_status(RunStatus::Running),
+            None
+        );
+    }
 }

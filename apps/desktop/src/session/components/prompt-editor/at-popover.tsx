@@ -1,4 +1,25 @@
 import {
+  type ProjectSearchResult,
+  listProjectEntries,
+  searchProjectFiles,
+} from "@/lib/project-client";
+import {
+  type SkillSummary,
+  listSkills,
+  skillSourceLabel,
+} from "@/lib/skill-client";
+import type { StoredTask } from "@/session/types";
+import { cn } from "@chro/ui/utils";
+import {
+  ArrowLeft,
+  BookOpen,
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderOpen,
+  MessageSquare,
+} from "lucide-react";
+import {
   forwardRef,
   useCallback,
   useEffect,
@@ -6,25 +27,18 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  ArrowLeft,
-  ChevronRight,
-  FileText,
-  Folder,
-  FolderOpen,
-  MessageSquare,
-  Loader2,
-} from "lucide-react";
-import { cn } from "@chro/ui/utils";
-import {
-  searchProjectFiles,
-  generateTaskTranscript,
-  type ProjectSearchResult,
-} from "@/lib/project-client";
-import type { StoredTask } from "@/session/types";
+
+const DEFAULT_FILE_SUGGESTIONS = 5;
+
+export type AtPopoverSelection =
+  | { kind: "file"; path: string; isFile: boolean; branch?: string | null }
+  | { kind: "session"; taskId: string; branch?: string | null }
+  | { kind: "skill"; id: string; name: string };
 
 export interface AtPopoverHandle {
   handleKeyDown: (e: React.KeyboardEvent) => boolean;
+  /** Open the popover directly into a category sub-view (used by the "+" menu). */
+  openCategory: (category: CategoryView) => void;
 }
 
 interface AtPopoverProps {
@@ -32,9 +46,8 @@ interface AtPopoverProps {
   query: string;
   projectId: string | null;
   workspacePath: string | null;
-  containerRef: string | null;
   tasks: StoredTask[];
-  onSelect: (path: string, isFile: boolean, branch?: string | null) => void;
+  onSelect: (selection: AtPopoverSelection) => void;
   onClose: () => void;
   activeIndex: number;
   onActiveIndexChange: (index: number) => void;
@@ -43,9 +56,19 @@ interface AtPopoverProps {
 type PopoverItem =
   | { kind: "file"; path: string; is_file: boolean }
   | { kind: "task"; task: StoredTask }
+  | { kind: "skill"; skill: SkillSummary }
   | { kind: "category"; category: CategoryView };
 
-type CategoryView = "files" | "sessions";
+type CategoryView = "skills" | "files" | "sessions";
+
+const CATEGORY_META: Record<
+  CategoryView,
+  { label: string; icon: typeof FolderOpen }
+> = {
+  skills: { label: "Skills", icon: BookOpen },
+  files: { label: "Files & Folders", icon: FolderOpen },
+  sessions: { label: "Sessions", icon: MessageSquare },
+};
 
 const DEBOUNCE_MS = 150;
 
@@ -56,7 +79,6 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       query,
       projectId,
       workspacePath,
-      containerRef,
       tasks,
       onSelect,
       onClose,
@@ -66,10 +88,13 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
     ref,
   ) => {
     const [fileResults, setFileResults] = useState<ProjectSearchResult[]>([]);
+    const [defaultFiles, setDefaultFiles] = useState<ProjectSearchResult[]>([]);
+    const [skills, setSkills] = useState<SkillSummary[]>([]);
     const [debouncedQuery, setDebouncedQuery] = useState(query);
-    const [generatingId, setGeneratingId] = useState<string | null>(null);
     const [view, setView] = useState<"categories" | CategoryView>("categories");
     const requestIdRef = useRef(0);
+    const defaultRequestIdRef = useRef(0);
+    const skillRequestIdRef = useRef(0);
     const listRef = useRef<HTMLDivElement>(null);
 
     // Reset view when popover closes
@@ -110,16 +135,63 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         });
     }, [projectId, debouncedQuery, onActiveIndexChange]);
 
+    // Load default file suggestions when popover opens with no query
+    useEffect(() => {
+      if (!open || !projectId) return;
+      const id = ++defaultRequestIdRef.current;
+      listProjectEntries(projectId, { detail: "basic" })
+        .then((entries) => {
+          if (id !== defaultRequestIdRef.current) return;
+          const files = entries
+            .filter((e) => e.type === "file")
+            .slice(0, DEFAULT_FILE_SUGGESTIONS)
+            .map<ProjectSearchResult>((e) => ({
+              path: e.relativePath,
+              is_file: true,
+              match_type: "FileName",
+            }));
+          setDefaultFiles(files);
+        })
+        .catch(() => {
+          if (id !== defaultRequestIdRef.current) return;
+          setDefaultFiles([]);
+        });
+    }, [open, projectId]);
+
+    // Load skills when the popover opens
+    useEffect(() => {
+      if (!open) return;
+      const id = ++skillRequestIdRef.current;
+      listSkills(workspacePath)
+        .then((res) => {
+          if (id !== skillRequestIdRef.current) return;
+          setSkills(res);
+        })
+        .catch(() => {
+          if (id !== skillRequestIdRef.current) return;
+          setSkills([]);
+        });
+    }, [open, workspacePath]);
+
     // Build combined items list
     const items: PopoverItem[] = [];
 
     if (view === "categories" && !debouncedQuery) {
       // Top-level category menu
+      items.push({ kind: "category", category: "skills" });
       items.push({ kind: "category", category: "files" });
       items.push({ kind: "category", category: "sessions" });
     } else if (view === "categories" && debouncedQuery) {
       // Flat search across all categories
       const q = debouncedQuery.toLowerCase();
+      for (const s of skills) {
+        if (
+          s.name.toLowerCase().includes(q) ||
+          s.description.toLowerCase().includes(q)
+        ) {
+          items.push({ kind: "skill", skill: s });
+        }
+      }
       for (const t of tasks) {
         const matchesTitle = t.title?.toLowerCase().includes(q);
         const matchesId = t.id.toLowerCase().startsWith(q);
@@ -129,6 +201,19 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       }
       for (const r of fileResults) {
         items.push({ kind: "file", path: r.path, is_file: r.is_file });
+      }
+    } else if (view === "skills") {
+      // Show skills, optionally filtered
+      const q = debouncedQuery?.toLowerCase();
+      for (const s of skills) {
+        if (q) {
+          const matches =
+            s.name.toLowerCase().includes(q) ||
+            s.description.toLowerCase().includes(q) ||
+            s.source_path.toLowerCase().includes(q);
+          if (!matches) continue;
+        }
+        items.push({ kind: "skill", skill: s });
       }
     } else if (view === "sessions") {
       // Show tasks, optionally filtered
@@ -142,8 +227,9 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         items.push({ kind: "task", task: t });
       }
     } else if (view === "files") {
-      // Show file results
-      for (const r of fileResults) {
+      // Show search results, or default suggestions if no query yet
+      const source = debouncedQuery ? fileResults : defaultFiles;
+      for (const r of source) {
         items.push({ kind: "file", path: r.path, is_file: r.is_file });
       }
     }
@@ -171,34 +257,24 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
     }, [onActiveIndexChange]);
 
     const handleSelectItem = useCallback(
-      async (item: PopoverItem) => {
+      (item: PopoverItem) => {
         if (item.kind === "category") {
           navigateToCategory(item.category);
           return;
         }
         if (item.kind === "file") {
-          onSelect(item.path, item.is_file);
+          onSelect({ kind: "file", path: item.path, isFile: item.is_file });
         } else if (item.kind === "task") {
-          if (!workspacePath) return;
-          const task = item.task;
-          setGeneratingId(task.id);
-          try {
-            const filePath = await generateTaskTranscript(
-              task.id,
-              workspacePath,
-              containerRef,
-            );
-            onSelect(filePath, true, task.branch);
-          } catch {
-            // Silently close on error (transcript generation may fail for
-            // incomplete runs).
-            onClose();
-          } finally {
-            setGeneratingId(null);
-          }
+          onSelect({
+            kind: "session",
+            taskId: item.task.id,
+            branch: item.task.branch,
+          });
+        } else if (item.kind === "skill") {
+          onSelect({ kind: "skill", id: item.skill.id, name: item.skill.name });
         }
       },
-      [workspacePath, containerRef, onSelect, onClose, navigateToCategory],
+      [onSelect, navigateToCategory],
     );
 
     const handleKeyDownInternal = useCallback(
@@ -224,7 +300,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
           case "Tab":
           case "Enter": {
             const selected = items[activeIndex];
-            if (selected) void handleSelectItem(selected);
+            if (selected) handleSelectItem(selected);
             return true;
           }
           case "Escape":
@@ -253,8 +329,9 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       ref,
       () => ({
         handleKeyDown: handleKeyDownInternal,
+        openCategory: navigateToCategory,
       }),
-      [handleKeyDownInternal],
+      [handleKeyDownInternal, navigateToCategory],
     );
 
     if (!open) return null;
@@ -263,51 +340,53 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
 
     return (
       <div
-        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-lg border border-border bg-popover shadow-lg"
+        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-lg border border-border/60 bg-popover shadow-custom-shadow-sm"
         onMouseDown={(e) => e.preventDefault()}
       >
         <div ref={listRef} className="max-h-[320px] overflow-y-auto p-1">
           {showBackButton && (
             <button
               type="button"
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/50"
+              className="flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent/40"
               onMouseDown={(e) => {
                 e.preventDefault();
                 navigateBack();
               }}
             >
-              <ArrowLeft className="h-4 w-4 shrink-0" />
-              <span className="font-medium">Back</span>
+              <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
+              <span>Back</span>
             </button>
           )}
 
           {items.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-muted-foreground">
+            <div className="px-2 py-1.5 text-[13px] text-muted-foreground">
               {view === "files"
                 ? debouncedQuery
                   ? "No results found"
                   : "Type to search files"
                 : view === "sessions"
-                  ? debouncedQuery
-                    ? "No sessions found"
-                    : "No sessions found"
-                  : debouncedQuery
-                    ? "No results found"
-                    : "Type to search"}
+                  ? "No sessions found"
+                  : view === "skills"
+                    ? debouncedQuery
+                      ? "No matching skills"
+                      : "No skills found"
+                    : debouncedQuery
+                      ? "No results found"
+                      : "Type to search"}
             </div>
           ) : (
             items.map((item, index) => {
               if (item.kind === "category") {
-                const isSessions = item.category === "sessions";
+                const { label, icon: Icon } = CATEGORY_META[item.category];
                 return (
                   <button
                     key={item.category}
                     type="button"
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                      "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
                       index === activeIndex
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/50",
+                        ? "bg-accent/60 text-accent-foreground"
+                        : "hover:bg-accent/30",
                     )}
                     onMouseDown={(e) => {
                       e.preventDefault();
@@ -315,46 +394,68 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
                     }}
                     onMouseEnter={() => onActiveIndexChange(index)}
                   >
-                    {isSessions ? (
-                      <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span>{label}</span>
+                    <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  </button>
+                );
+              }
+
+              if (item.kind === "skill") {
+                const s = item.skill;
+                return (
+                  <button
+                    key={`skill-${s.id}`}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-start gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
+                      index === activeIndex
+                        ? "bg-accent/60 text-accent-foreground"
+                        : "hover:bg-accent/30",
                     )}
-                    <span className="font-medium">
-                      {isSessions ? "Sessions" : "Files & Folders"}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onSelect({ kind: "skill", id: s.id, name: s.name });
+                    }}
+                    onMouseEnter={() => onActiveIndexChange(index)}
+                  >
+                    <BookOpen className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">{s.name}</span>
+                      {s.description ? (
+                        <span className="block truncate text-[11px] text-muted-foreground">
+                          {s.description}
+                        </span>
+                      ) : null}
                     </span>
-                    <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="mt-[3px] shrink-0 text-[10px] text-muted-foreground">
+                      {skillSourceLabel(s)}
+                    </span>
                   </button>
                 );
               }
 
               if (item.kind === "task") {
                 const t = item.task;
-                const isGenerating = generatingId === t.id;
                 const label = t.title || "Task";
                 return (
                   <button
                     key={`task-${t.id}`}
                     type="button"
-                    disabled={isGenerating}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                      "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
                       index === activeIndex
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/50",
+                        ? "bg-accent/60 text-accent-foreground"
+                        : "hover:bg-accent/30",
                     )}
                     onMouseDown={(e) => {
                       e.preventDefault();
-                      void handleSelectItem(item);
+                      handleSelectItem(item);
                     }}
                     onMouseEnter={() => onActiveIndexChange(index)}
                   >
-                    {isGenerating ? (
-                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-                    ) : (
-                      <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    )}
-                    <span className="truncate font-medium">{label}</span>
+                    <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{label}</span>
                     <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">
                       {t.id.slice(0, 8)}
                     </span>
@@ -373,27 +474,31 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
                   key={item.path}
                   type="button"
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                    "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
                     index === activeIndex
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-accent/50",
+                      ? "bg-accent/60 text-accent-foreground"
+                      : "hover:bg-accent/30",
                   )}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    onSelect(item.path, item.is_file);
+                    onSelect({
+                      kind: "file",
+                      path: item.path,
+                      isFile: item.is_file,
+                    });
                   }}
                   onMouseEnter={() => onActiveIndexChange(index)}
                 >
                   {item.is_file ? (
-                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   ) : (
-                    <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <span className="truncate">
                     {dirPath && (
                       <span className="text-muted-foreground">{dirPath}</span>
                     )}
-                    <span className="font-medium">{fileName}</span>
+                    <span>{fileName}</span>
                   </span>
                 </button>
               );

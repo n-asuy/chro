@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState, useRef } from "react";
 import { ZoomIn, ZoomOut, RotateCw } from "lucide-react";
 import { Button } from "@chro/ui/button";
@@ -9,9 +8,15 @@ interface VideoViewerProps {
   relativePath: string;
   fileName: string;
   contentVersion?: number;
+  sourceUrl?: string;
 }
 
-export const VideoViewer = ({ relativePath, fileName, contentVersion }: VideoViewerProps) => {
+export const VideoViewer = ({
+  relativePath,
+  fileName,
+  contentVersion,
+  sourceUrl,
+}: VideoViewerProps) => {
   const [scale, setScale] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [naturalSize, setNaturalSize] = useState<{
@@ -24,10 +29,11 @@ export const VideoViewer = ({ relativePath, fileName, contentVersion }: VideoVie
 
   const projectId = useProjectId();
   const videoUrl = useMemo(() => {
+    if (sourceUrl) return sourceUrl;
     if (!projectId) return "";
     const base = getProjectBinaryFileUrl(projectId, relativePath);
     return contentVersion ? `${base}&_v=${contentVersion}` : base;
-  }, [projectId, relativePath, contentVersion]);
+  }, [projectId, relativePath, contentVersion, sourceUrl]);
 
   useEffect(() => {
     setScale(1);
@@ -35,7 +41,7 @@ export const VideoViewer = ({ relativePath, fileName, contentVersion }: VideoVie
     setNaturalSize(null);
     setLoading(true);
     setError(null);
-  }, [relativePath]);
+  }, [videoUrl]);
 
   const handleZoomIn = () => {
     setScale((prev) => Math.min(prev + 0.25, 5));
@@ -66,7 +72,9 @@ export const VideoViewer = ({ relativePath, fileName, contentVersion }: VideoVie
     <div className="flex h-full w-full flex-1 flex-col bg-custom-background-90 font-workspace">
       <header className="flex h-14 items-center justify-between bg-custom-background-100/95 px-5 border-b border-custom-border-200">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-custom-text-100">{fileName}</span>
+          <span className="text-sm font-medium text-custom-text-100">
+            {fileName}
+          </span>
           {naturalSize && (
             <span className="text-xs text-muted-foreground">
               {naturalSize.width} × {naturalSize.height}

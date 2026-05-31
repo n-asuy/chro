@@ -1,4 +1,6 @@
 pub mod approvals;
+pub mod cli_manifest;
+pub mod cli_resolver;
 pub mod command;
 pub mod env;
 pub mod executors;

@@ -1,16 +1,8 @@
+import { writeProjectFile } from "@/lib/project-client";
 /**
  * BaseViewer - main component for viewing a .cbase file
  * Parses the .cbase definition, indexes matching files, and renders the view.
  */
-import {
-  type FC,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { writeProjectFile } from "@/lib/project-client";
 import {
   type FC,
   useCallback,
@@ -223,7 +215,7 @@ export const BaseViewer: FC<BaseViewerProps> = ({
       const updated: CbaseDefinition = {
         ...definition,
         views: definition.views.map((v) => {
-          if (v.id !== activeViewId) return v;
+          if (v.id !== activeViewId || !v.table) return v;
           return {
             ...v,
             table: { ...v.table, column_widths: columnWidths },

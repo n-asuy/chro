@@ -1,4 +1,3 @@
-
 import {
   isValidElement,
   memo,
@@ -13,6 +12,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HelpCircle, Loader2 } from "lucide-react";
 import { remarkWikilink } from "./remark-wikilink";
+import { looksLikeFilePath, stripLineColumnSuffix } from "./file-path-utils";
 import { useLanguage } from "@/i18n";
 import type { LocalImageMetadata } from "@/session/context/local-images-context";
 import { useImageMetadata } from "@/session/hooks/use-image-metadata";
@@ -20,6 +20,7 @@ import { useImageMetadata } from "@/session/hooks/use-image-metadata";
 type MarkdownProps = {
   children: string;
   onWikilinkClick?: (path: string, subpath?: string) => void;
+  onFilePathClick?: (path: string) => void;
   tone?: "default" | "muted";
   localImages?: LocalImageMetadata[];
 };
@@ -76,7 +77,10 @@ const getCodeElementFromPreChildren = (
   if (Array.isArray(children)) {
     for (const child of children) {
       if (isValidElement(child)) {
-        return child as ReactElement<{ className?: string; children?: ReactNode }>;
+        return child as ReactElement<{
+          className?: string;
+          children?: ReactNode;
+        }>;
       }
     }
     return null;
@@ -224,8 +228,10 @@ const MermaidCodeBlock = ({ code }: { code: string }) => {
       </div>
 
       {showRaw ? (
-        <pre className="overflow-x-auto p-3 text-xs leading-relaxed font-mono">
-          <code className="font-mono text-xs text-foreground">{code}</code>
+        <pre className="max-w-full overflow-x-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] p-3 text-xs leading-relaxed font-mono">
+          <code className="font-mono text-xs text-foreground [overflow-wrap:anywhere]">
+            {code}
+          </code>
         </pre>
       ) : (
         <div className="overflow-x-auto p-3">
@@ -252,55 +258,97 @@ const MermaidCodeBlock = ({ code }: { code: string }) => {
   );
 };
 
-const codeRenderer: NonNullable<Components["code"]> = ({
-  children,
-  node,
-  className,
-  ...props
-}) => {
-  const isCodeBlock =
-    (node?.position
-      ? node.position.start.line !== node.position.end.line
-      : false) || extractText(children).includes("\n");
-  const mergedClassName = [className, "font-mono text-xs text-foreground"]
-    .filter(Boolean)
-    .join(" ");
+const createCodeRenderer = (
+  onFilePathClick?: (path: string) => void,
+): NonNullable<Components["code"]> => {
+  const CodeRenderer: NonNullable<Components["code"]> = ({
+    children,
+    node,
+    className,
+    ...props
+  }) => {
+    const text = extractText(children);
+    const isCodeBlock =
+      (node?.position
+        ? node.position.start.line !== node.position.end.line
+        : false) || text.includes("\n");
+    const mergedClassName = [
+      className,
+      "font-mono text-xs text-foreground [overflow-wrap:anywhere]",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
-  if (isCodeBlock) {
+    if (isCodeBlock) {
+      return (
+        <code className={mergedClassName} {...props}>
+          {children}
+        </code>
+      );
+    }
+
+    const inlineClassName = [
+      className,
+      "box-decoration-clone rounded bg-muted px-1 font-mono text-xs text-foreground [overflow-wrap:anywhere]",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (onFilePathClick && looksLikeFilePath(text)) {
+      const target = stripLineColumnSuffix(text.trim());
+      const handle = (event: React.SyntheticEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onFilePathClick(target);
+      };
+      const interactiveClassName = [
+        inlineClassName,
+        "cursor-pointer text-blue-600 hover:underline underline-offset-2",
+      ].join(" ");
+      return (
+        <code
+          className={interactiveClassName}
+          role="link"
+          tabIndex={0}
+          onClick={handle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") handle(event);
+          }}
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
+
     return (
-      <code className={mergedClassName} {...props}>
+      <code className={inlineClassName} {...props}>
         {children}
       </code>
     );
-  }
-
-  const inlineClassName = [
-    className,
-    "box-decoration-clone rounded bg-muted px-1 font-mono text-xs text-foreground",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return (
-    <code className={inlineClassName} {...props}>
-      {children}
-    </code>
-  );
+  };
+  return CodeRenderer;
 };
 
-const preRenderer: NonNullable<Components["pre"]> = ({ children, ...props }) => {
+const preRenderer: NonNullable<Components["pre"]> = ({
+  children,
+  ...props
+}) => {
   const codeElement = getCodeElementFromPreChildren(children);
   const className = codeElement?.props.className ?? "";
   const isMermaidBlock = /\blanguage-mermaid\b/i.test(className);
 
   if (isMermaidBlock) {
-    const code = extractText(codeElement?.props.children ?? "").replace(/\n$/, "");
+    const code = extractText(codeElement?.props.children ?? "").replace(
+      /\n$/,
+      "",
+    );
     return <MermaidCodeBlock code={code} />;
   }
 
   return (
     <pre
-      className="overflow-x-auto rounded-md border border-border/50 bg-muted p-3 text-xs leading-relaxed font-mono"
+      className="max-w-full overflow-x-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-md border border-border/50 bg-muted p-3 text-xs leading-relaxed font-mono"
       {...props}
     >
       {children}
@@ -321,7 +369,10 @@ type MarkdownImageProps = {
 };
 
 const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
-  const { data: metadata, isLoading } = useImageMetadata(src ?? "", localImages);
+  const { data: metadata, isLoading } = useImageMetadata(
+    src ?? "",
+    localImages,
+  );
   const isChroImage = src?.startsWith(".chro-context/");
 
   if (isChroImage && src) {
@@ -395,6 +446,7 @@ const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
 
 const createComponents = (
   onWikilinkClick?: (path: string, subpath?: string) => void,
+  onFilePathClick?: (path: string) => void,
   tone: MarkdownProps["tone"] = "default",
   localImages?: LocalImageMetadata[],
 ): Partial<Components> => {
@@ -408,7 +460,11 @@ const createComponents = (
       <MarkdownImage src={src} alt={alt} localImages={localImages} />
     ),
     p: ({ children }) => (
-      <p className={`text-sm leading-relaxed ${textClass}`}>{children}</p>
+      <p
+        className={`break-words [overflow-wrap:anywhere] text-sm leading-relaxed ${textClass}`}
+      >
+        {children}
+      </p>
     ),
     strong: ({ children }) => (
       <strong className={`font-semibold ${textClass}`}>{children}</strong>
@@ -418,17 +474,24 @@ const createComponents = (
     ),
     ul: ({ children, className }) => {
       const isTaskList =
-        typeof className === "string" && className.includes("contains-task-list");
+        typeof className === "string" &&
+        className.includes("contains-task-list");
+      // Task lists have no marker, so they need no marker gutter; bulleted
+      // lists keep `list-outside` markers and reserve room for them via
+      // padding so they are never clipped by the renderer's overflow box.
       return (
         <ul
-          className={`ml-4 space-y-1 text-sm leading-relaxed ${isTaskList ? "list-none" : "list-disc"}`}
+          className={`space-y-1 text-sm leading-relaxed ${isTaskList ? "list-none ps-1" : "list-disc list-outside ps-6"}`}
         >
           {children}
         </ul>
       );
     },
+    // `list-outside` markers render in the start-edge gutter, so the <ol>
+    // needs enough `padding-inline-start` (ps-6) to keep multi-digit numbers
+    // (e.g. "10.") fully visible instead of being clipped by the overflow box.
     ol: ({ children }) => (
-      <ol className="ml-4 list-decimal space-y-1 text-sm leading-relaxed">
+      <ol className="list-decimal list-outside space-y-1 ps-6 text-sm leading-relaxed">
         {children}
       </ol>
     ),
@@ -436,7 +499,9 @@ const createComponents = (
       const isTask =
         typeof className === "string" && className.includes("task-list-item");
       return (
-        <li className={`${textClass} ${isTask ? "[&>input]:mr-1.5 [&>input]:align-middle" : ""}`}>
+        <li
+          className={`${textClass} ${isTask ? "[&>input]:mr-1.5 [&>input]:align-middle" : ""}`}
+        >
           {children}
         </li>
       );
@@ -454,7 +519,9 @@ const createComponents = (
           />
         );
       }
-      return <input type={type} checked={checked} disabled={disabled} {...props} />;
+      return (
+        <input type={type} checked={checked} disabled={disabled} {...props} />
+      );
     },
     blockquote: ({ children }) => (
       <blockquote
@@ -467,7 +534,37 @@ const createComponents = (
       const safeHref = resolveSafeHref(href);
 
       if (!safeHref) {
-        return <span className={textClass}>{children}</span>;
+        if (
+          onFilePathClick &&
+          typeof href === "string" &&
+          looksLikeFilePath(href)
+        ) {
+          const target = stripLineColumnSuffix(href.trim());
+          const handle = (event: React.SyntheticEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onFilePathClick(target);
+          };
+          return (
+            <a
+              href={href}
+              className="break-words [overflow-wrap:anywhere] font-medium text-blue-600 underline-offset-2 hover:underline cursor-pointer"
+              role="link"
+              tabIndex={0}
+              onClick={handle}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") handle(event);
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
+        return (
+          <span className={`break-words [overflow-wrap:anywhere] ${textClass}`}>
+            {children}
+          </span>
+        );
       }
 
       const external = isExternalHref(safeHref);
@@ -475,7 +572,7 @@ const createComponents = (
       return (
         <a
           href={safeHref}
-          className="font-medium text-blue-600 underline-offset-2 hover:underline"
+          className="break-words [overflow-wrap:anywhere] font-medium text-blue-600 underline-offset-2 hover:underline"
           rel={external ? "noreferrer" : undefined}
           target={external ? "_blank" : undefined}
         >
@@ -511,7 +608,7 @@ const createComponents = (
         {children}
       </h6>
     ),
-    code: codeRenderer,
+    code: createCodeRenderer(onFilePathClick),
     pre: preRenderer,
     hr: () => <hr className="my-6 border-muted" />,
     table: ({ children }) => (
@@ -528,17 +625,14 @@ const createComponents = (
     tr: ({ children }) => <tr className="hover:bg-muted/50">{children}</tr>,
     th: ({ children, style }) => (
       <th
-        className="whitespace-nowrap px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        className="break-words px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
         style={style}
       >
         {children}
       </th>
     ),
     td: ({ children, style }) => (
-      <td
-        className="whitespace-nowrap px-4 py-2.5 text-foreground"
-        style={style}
-      >
+      <td className="break-words px-4 py-2.5 text-foreground" style={style}>
         {children}
       </td>
     ),
@@ -590,20 +684,29 @@ const createComponents = (
 };
 
 export const Markdown = memo(
-  ({ children, onWikilinkClick, tone = "default", localImages }: MarkdownProps) => {
+  ({
+    children,
+    onWikilinkClick,
+    onFilePathClick,
+    tone = "default",
+    localImages,
+  }: MarkdownProps) => {
     const formatted = useMemo(
       () => toChapterHeading(children ?? ""),
       [children],
     );
     const components = useMemo(
-      () => createComponents(onWikilinkClick, tone, localImages),
-      [onWikilinkClick, tone, localImages],
+      () =>
+        createComponents(onWikilinkClick, onFilePathClick, tone, localImages),
+      [onWikilinkClick, onFilePathClick, tone, localImages],
     );
     const toneClass =
       tone === "muted" ? "text-muted-foreground" : "text-foreground";
 
     return (
-      <div className={`space-y-3 text-sm leading-relaxed ${toneClass}`}>
+      <div
+        className={`min-w-0 max-w-full overflow-hidden space-y-3 break-words [overflow-wrap:anywhere] text-sm leading-relaxed ${toneClass}`}
+      >
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkWikilink]}
           components={components}

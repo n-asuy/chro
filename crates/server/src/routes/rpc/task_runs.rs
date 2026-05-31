@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::images::{ImageListResponse, ImageResponse};
+use super::path_resolve::{read_binary_resolving, read_text_resolving};
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
     perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES,
@@ -52,7 +53,11 @@ pub(super) fn router() -> Router<AppState> {
             get(get_task_run_logs).post(append_task_run_logs),
         )
         .route("/task-runs/:id/diff", get(stream_task_run_diff))
-        .route("/tasks/:id/transcript", post(generate_transcript))
+        .route("/tasks/:id/transcript", get(get_task_transcript))
+        .route("/tasks/:id/cancel", post(cancel_task_execution))
+        .route("/tasks/:id/diff", get(get_task_diff))
+        .route("/tasks/:id/merge", post(merge_task))
+        .route("/tasks/:id/rebase", post(rebase_task))
         .route(
             "/task-runs/:id/worktree-deleted",
             patch(mark_worktree_deleted),
@@ -71,6 +76,11 @@ pub(super) fn router() -> Router<AppState> {
             post(upload_task_run_image).layer(DefaultBodyLimit::max(MAX_IMAGE_UPLOAD_BYTES)),
         )
         .route("/task-runs/:id/binary-file", get(read_task_run_binary_file))
+        .route(
+            "/task-runs/:id/asset/*relative_path",
+            get(read_task_run_asset),
+        )
+        .route("/task-runs/:id/file", get(read_task_run_file))
         .route(
             "/task-runs/by-session/:session_id",
             get(find_task_run_by_session_handler),
@@ -168,6 +178,8 @@ struct StartExecutionSessionRequest {
     /// Base branch to create the worktree from.
     /// If None, falls back to the current branch of the workspace (then "main").
     target_branch: Option<String>,
+    #[serde(default)]
+    selected_skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +219,8 @@ struct SendTaskMessageRequest {
     image_ids: Option<Vec<Uuid>>,
     use_worktree: Option<bool>,
     target_branch: Option<String>,
+    #[serde(default)]
+    selected_skill_ids: Vec<String>,
 }
 
 fn start_execution_response(
@@ -263,6 +277,7 @@ async fn start_execution_session(
             "workspace_path": payload.workspace_path,
             "force_new_attempt": payload.force_new_attempt,
             "image_count": image_count,
+            "skill_count": payload.selected_skill_ids.len(),
             "use_worktree": payload.use_worktree,
             "target_branch": payload.target_branch,
             "executor_profile_set": payload.executor_profile_id.is_some(),
@@ -280,6 +295,7 @@ async fn start_execution_session(
             image_ids: payload.image_ids.clone(),
             use_worktree: payload.use_worktree,
             target_branch: payload.target_branch.clone(),
+            selected_skill_ids: payload.selected_skill_ids.clone(),
         })
         .await;
 
@@ -396,51 +412,132 @@ async fn get_task_run_logs(
     Ok(Json(TaskRunLogsResponse { entries }))
 }
 
+#[derive(Debug, Serialize)]
+struct TaskTranscriptResponse {
+    task_id: Uuid,
+    markdown: String,
+}
+
+/// Render the markdown transcript for a task without writing to disk. The
+/// runtime inlines this content into prompts at execution time, so the
+/// desktop UI and CLI both rely on this read-only endpoint.
+async fn get_task_transcript(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskTranscriptResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let markdown = state.runtime().task_transcript_markdown(task_id).await?;
+    Ok(Json(TaskTranscriptResponse { task_id, markdown }))
+}
+
 #[derive(Debug, Deserialize)]
-struct GenerateTranscriptRequest {
-    workspace_path: String,
-    /// Worktree path where the executor runs (container_ref).
-    /// When present and different from workspace_path, the transcript file is
-    /// copied there — same pattern as image uploads.
-    container_ref: Option<String>,
+struct TaskRunSelector {
+    /// 1-indexed run sequence (chronological). When omitted, the latest run
+    /// for the task is used.
+    run: Option<u32>,
+}
+
+async fn resolve_task_run_for_task(
+    state: &AppState,
+    task_id: Uuid,
+    run: Option<u32>,
+) -> Result<TaskRun, ApiError> {
+    let mut runs = TaskRun::list_by_task_id(state.pool(), task_id).await?;
+    if runs.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+    // list_by_task_id returns DESC; reverse to chronological order.
+    runs.reverse();
+    let index = match run {
+        Some(n) if n >= 1 => (n as usize) - 1,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "run must be a positive 1-indexed sequence".into(),
+            ));
+        }
+        None => runs.len() - 1,
+    };
+    runs.into_iter().nth(index).ok_or(ApiError::NotFound)
+}
+
+async fn cancel_task_execution(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Query(selector): Query<TaskRunSelector>,
+) -> Result<StatusCode, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let run = resolve_task_run_for_task(&state, task_id, selector.run).await?;
+    state.runtime().cancel_execution(run.id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Serialize)]
-struct GenerateTranscriptResponse {
-    file_path: String,
+struct TaskDiffResponse {
+    task_id: Uuid,
+    task_run_id: Uuid,
+    branch_name: Option<String>,
+    target_branch: Option<String>,
+    status: RunStatus,
+    before_head_commit: Option<String>,
+    after_head_commit: Option<String>,
 }
 
-async fn generate_transcript(
+async fn get_task_diff(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
-    Json(payload): Json<GenerateTranscriptRequest>,
-) -> Result<Json<GenerateTranscriptResponse>, ApiError> {
+    Query(selector): Query<TaskRunSelector>,
+) -> Result<Json<TaskDiffResponse>, ApiError> {
     let task_id = resolve_task_id(state.pool(), &task_id).await?;
-    let workspace_path = PathBuf::from(&payload.workspace_path);
-    let file_path = state
-        .runtime()
-        .generate_task_transcript(task_id, &workspace_path)
+    let run = resolve_task_run_for_task(&state, task_id, selector.run).await?;
+    Ok(Json(TaskDiffResponse {
+        task_id,
+        task_run_id: run.id,
+        branch_name: run.branch_name.clone(),
+        target_branch: run.target_branch.clone(),
+        status: run.status,
+        before_head_commit: run.before_head_commit.clone(),
+        after_head_commit: run.after_head_commit.clone(),
+    }))
+}
+
+async fn merge_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Query(selector): Query<TaskRunSelector>,
+    Json(payload): Json<MergeTaskRunRequest>,
+) -> Result<Json<MergeTaskRunResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let run = resolve_task_run_for_task(&state, task_id, selector.run).await?;
+    let result = TaskService::new(state.runtime())
+        .merge_task_run(run.id, payload.commit_message)
         .await?;
 
-    // Copy transcript to the worktree (same pattern as image upload).
-    if let Some(ref cr) = payload.container_ref {
-        let worktree_path = PathBuf::from(&cr);
-        if worktree_path != workspace_path {
-            if let Err(err) = chro_image::ensure_context_dir(&worktree_path) {
-                tracing::warn!("Failed to bootstrap context dir in worktree: {}", err);
-            }
-            let src = workspace_path.join(&file_path);
-            let dst = worktree_path.join(&file_path);
-            if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(err) = std::fs::copy(&src, &dst) {
-                tracing::warn!("Failed to copy transcript to worktree: {}", err);
-            }
-        }
-    }
+    Ok(Json(MergeTaskRunResponse {
+        merge_commit: result.merge_commit,
+        target_branch: result.target_branch,
+    }))
+}
 
-    Ok(Json(GenerateTranscriptResponse { file_path }))
+async fn rebase_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Query(selector): Query<TaskRunSelector>,
+    Json(payload): Json<RebaseTaskRunRequest>,
+) -> Result<Json<RebaseTaskRunResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let run = resolve_task_run_for_task(&state, task_id, selector.run).await?;
+    let outcome = TaskService::new(state.runtime())
+        .rebase_task_run(
+            run.id,
+            payload.new_base_branch.clone(),
+            payload.old_base_branch.clone(),
+        )
+        .await?;
+
+    Ok(Json(RebaseTaskRunResponse {
+        success: true,
+        new_base_branch: outcome.new_base_branch,
+    }))
 }
 
 async fn cancel_execution(
@@ -455,6 +552,8 @@ async fn cancel_execution(
 #[derive(Debug, Deserialize)]
 struct FollowUpRequest {
     prompt: String,
+    #[serde(default)]
+    selected_skill_ids: Vec<String>,
 }
 
 async fn follow_up_execution(
@@ -474,11 +573,16 @@ async fn follow_up_execution(
             "kind": "follow_up",
             "task_run_id": id,
             "prompt_chars": payload.prompt.chars().count(),
+            "skill_count": payload.selected_skill_ids.len(),
         }),
     );
 
     let result = TaskService::new(state.runtime())
-        .follow_up_execution(id, payload.prompt.clone())
+        .follow_up_execution(
+            id,
+            payload.prompt.clone(),
+            payload.selected_skill_ids.clone(),
+        )
         .await;
 
     let result = match result {
@@ -544,6 +648,7 @@ async fn send_task_message(
             "requested_mode": requested_mode,
             "prompt_chars": payload.prompt.chars().count(),
             "image_count": image_count,
+            "skill_count": payload.selected_skill_ids.len(),
             "use_worktree": payload.use_worktree,
             "target_branch": payload.target_branch,
             "executor_profile_set": payload.executor_profile_id.is_some(),
@@ -559,6 +664,7 @@ async fn send_task_message(
             image_ids: payload.image_ids.clone(),
             use_worktree: payload.use_worktree,
             target_branch: payload.target_branch.clone(),
+            selected_skill_ids: payload.selected_skill_ids.clone(),
         })
         .await;
 
@@ -627,6 +733,7 @@ async fn follow_up_by_task(
             "kind": "follow_up",
             "task_id": task_id,
             "prompt_chars": payload.prompt.chars().count(),
+            "skill_count": payload.selected_skill_ids.len(),
         }),
     );
 
@@ -639,6 +746,7 @@ async fn follow_up_by_task(
             image_ids: None,
             use_worktree: None,
             target_branch: None,
+            selected_skill_ids: payload.selected_skill_ids.clone(),
         })
         .await;
 
@@ -987,6 +1095,31 @@ struct TaskRunFileQuery {
     relative_path: String,
 }
 
+/// Resolve a task run to its worktree root plus the project's main-checkout
+/// path. The worktree is the actual location reads/writes target; the project
+/// root is a secondary candidate so absolute paths emitted by the agent
+/// (which often reference the host source checkout) can be normalized.
+async fn task_run_path_candidates(
+    state: &AppState,
+    run: &TaskRun,
+) -> Result<(String, Vec<String>), ApiError> {
+    let worktree = run
+        .container_ref
+        .as_deref()
+        .or(run.workspace_path.as_deref())
+        .ok_or_else(|| ApiError::BadRequest("task run has no workspace path".into()))?
+        .to_string();
+    let mut candidates = vec![worktree.clone()];
+    if let Ok(task) = TaskRecord::get(state.pool(), run.task_id).await {
+        if let Ok(project) = ProjectRecord::get(state.pool(), task.project_id).await {
+            if !project.git_repo_path.is_empty() && project.git_repo_path != worktree {
+                candidates.push(project.git_repo_path);
+            }
+        }
+    }
+    Ok((worktree, candidates))
+}
+
 async fn read_task_run_binary_file(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -999,15 +1132,11 @@ async fn read_task_run_binary_file(
         ));
     }
     let run = TaskRun::get(state.pool(), id).await?;
-    let root = run
-        .container_ref
-        .as_deref()
-        .or(run.workspace_path.as_deref())
-        .ok_or_else(|| ApiError::BadRequest("task run has no workspace path".into()))?;
-
-    let binary_file = ProjectFileService::new(state.runtime(), PathBuf::from(root))
-        .read_binary_file(&query.relative_path)
-        .await?;
+    let (worktree, candidates) = task_run_path_candidates(&state, &run).await?;
+    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
+    let binary_file =
+        read_binary_resolving(&service, &query.relative_path, &candidate_refs).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -1016,6 +1145,70 @@ async fn read_task_run_binary_file(
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(binary_file.data))
         .unwrap())
+}
+
+/// Path-based asset endpoint for HTML preview. See `read_project_asset`.
+async fn read_task_run_asset(
+    State(state): State<AppState>,
+    Path((id, relative_path)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest("asset path is required".into()));
+    }
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, candidates) = task_run_path_candidates(&state, &run).await?;
+    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
+    let binary_file = read_binary_resolving(&service, &relative_path, &candidate_refs).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, binary_file.mime_type)
+        .header(header::CONTENT_LENGTH, binary_file.size)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(binary_file.data))
+        .unwrap())
+}
+
+#[derive(Debug, Serialize)]
+struct TaskRunFileEnvelope {
+    file: TaskRunFileResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskRunFileResponse {
+    relative_path: String,
+    content: String,
+    size: u64,
+    modified_at: Option<String>,
+}
+
+async fn read_task_run_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TaskRunFileQuery>,
+) -> Result<Json<TaskRunFileEnvelope>, ApiError> {
+    if query.relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter 'relative_path' is required".into(),
+        ));
+    }
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, candidates) = task_run_path_candidates(&state, &run).await?;
+    let candidate_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
+    let file = read_text_resolving(&service, &query.relative_path, &candidate_refs).await?;
+
+    Ok(Json(TaskRunFileEnvelope {
+        file: TaskRunFileResponse {
+            relative_path: file.relative_path,
+            content: file.content,
+            size: file.size,
+            modified_at: crate::format_system_time(file.modified),
+        },
+    }))
 }
 
 #[derive(Debug, Serialize)]

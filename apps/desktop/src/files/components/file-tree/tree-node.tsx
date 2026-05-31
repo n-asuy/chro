@@ -212,7 +212,7 @@ export const TreeNode = ({
 
     return (
       <div className="flex flex-col gap-0.5">
-        <span className="font-medium">{node.displayName}</span>
+        <span className="font-medium">{node.name}</span>
         {lines.map((line, index) => (
           <span key={index}>{line}</span>
         ))}
@@ -258,7 +258,7 @@ export const TreeNode = ({
           onClick={(e) => e.stopPropagation()}
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate">{node.displayName}</span>
+        <span className="min-w-0 flex-1 truncate">{node.name}</span>
       )}
     </div>
   );

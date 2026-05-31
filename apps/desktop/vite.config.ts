@@ -483,8 +483,16 @@ function perfPlugin(): Plugin {
   };
 }
 
+// Tauri reads these env vars at build time. We pass them through so renderer
+// code that wants to e.g. detect the active OS can do so without an invoke.
+const TAURI_PLATFORM = process.env.TAURI_ENV_PLATFORM;
+
 export default defineConfig({
   customLogger: viteLogger,
+  // Tauri's CLI is the source of truth for the build status; let it own the
+  // output so its progress doesn't get clobbered.
+  clearScreen: false,
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   plugins: [
     nativeFilesystemPlugin(),
     TanStackRouterVite({
@@ -497,6 +505,7 @@ export default defineConfig({
   define: {
     __PERF_ENABLED__: JSON.stringify(perfEnabled),
     __APP_VERSION__: JSON.stringify(appVersion),
+    __TAURI_PLATFORM__: JSON.stringify(TAURI_PLATFORM ?? null),
   },
   resolve: {
     alias: {
@@ -508,6 +517,14 @@ export default defineConfig({
   server: {
     port: 3400,
     strictPort: true,
+    host: process.env.TAURI_DEV_HOST ?? false,
+    hmr: process.env.TAURI_DEV_HOST
+      ? {
+          protocol: "ws",
+          host: process.env.TAURI_DEV_HOST,
+          port: 3401,
+        }
+      : undefined,
     proxy: {
       "/rpc": backendProxy({ ws: true }),
       "/streams": backendProxy({ ws: true }),
@@ -515,10 +532,18 @@ export default defineConfig({
       "/sessions": backendProxy(),
       "/tasks": backendProxy(),
     },
+    watch: {
+      // Don't burn cycles watching the Rust crate; cargo handles it.
+      ignored: ["**/src-tauri/**"],
+    },
   },
   build: {
     outDir: "dist-vite",
     emptyOutDir: true,
+    // WebView2 ships modern V8 so esnext is safe; this keeps the bundle lean.
+    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
   optimizeDeps: {
     include: ["react", "react-dom"],

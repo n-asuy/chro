@@ -28,7 +28,7 @@ pub enum TaskCommand {
     Status {
         /// Task ID or slug
         id: String,
-        /// New status (pending, in_progress, blocked, completed, failed, cancelled)
+        /// New status (pending, in_progress, completed, failed, cancelled)
         #[arg(value_name = "STATUS")]
         new_status: Option<String>,
     },

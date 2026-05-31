@@ -7,16 +7,24 @@ import {
   TooltipTrigger,
 } from "@chro/ui/tooltip";
 import { ArrowUp, Command, Loader2, Square, X } from "lucide-react";
+import { useRef, useState } from "react";
+import type { PromptEditorHandle } from "../state/prompt-editor-store";
+import {
+  getPromptEditorScopeState,
+  usePromptEditorStore,
+} from "../state/prompt-editor-store";
+import type { PendingUserQuestions } from "../state/user-question-store";
+import type { StoredTask } from "../types";
 import {
   AgentUserQuestion,
   type AgentUserQuestionHandle,
 } from "./agent-user-question";
 import { AtPopover, type AtPopoverHandle } from "./prompt-editor/at-popover";
 import { PromptEditor } from "./prompt-editor/prompt-editor";
-import type { StoredTask } from "../types";
-import type { PromptEditorHandle } from "../state/prompt-editor-store";
-import type { PendingUserQuestions } from "../state/user-question-store";
-import { usePromptEditorStore } from "../state/prompt-editor-store";
+import {
+  SkillPopover,
+  type SkillPopoverHandle,
+} from "./prompt-editor/skill-popover";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
@@ -25,6 +33,7 @@ type PromptQueueItem = {
   id: string;
   prompt: string;
   imageIds: string[] | null;
+  selectedSkillIds: string[];
   createdAt: number;
 };
 
@@ -33,12 +42,10 @@ export function PromptEditorWithPopover({
   atPopoverRef,
   projectId,
   workspacePath,
-  containerRef,
   tasks,
   atActiveIndex,
   onActiveIndexChange,
   disabled,
-  isAttachingSession,
   onSubmit,
   onDrop,
   onPaste,
@@ -48,52 +55,75 @@ export function PromptEditorWithPopover({
   atPopoverRef: React.RefObject<AtPopoverHandle | null>;
   projectId: string | null;
   workspacePath: string | null;
-  containerRef: string | null;
   tasks: StoredTask[];
   atActiveIndex: number;
   onActiveIndexChange: (index: number) => void;
   disabled: boolean;
-  isAttachingSession: boolean;
   onSubmit: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
   t: TranslationFunction;
 }) {
-  const popover = usePromptEditorStore((s) => s.popover);
-  const atQuery = usePromptEditorStore((s) => s.atQuery);
+  const popover = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).popover,
+  );
+  const atQuery = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).atQuery,
+  );
+  const skillQuery = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).skillQuery,
+  );
   const setPopover = usePromptEditorStore((s) => s.setPopover);
+  const skillPopoverRef = useRef<SkillPopoverHandle | null>(null);
+  const [skillActiveIndex, setSkillActiveIndex] = useState(0);
 
   return (
     <div className="relative">
+      <SkillPopover
+        ref={skillPopoverRef}
+        open={popover === "skill"}
+        query={skillQuery}
+        workspacePath={workspacePath}
+        onSelect={(skill) => editorHandle.addSkillPart(skill.id, skill.name)}
+        onClose={() => setPopover(editorHandle.scopeId, null)}
+        activeIndex={skillActiveIndex}
+        onActiveIndexChange={setSkillActiveIndex}
+      />
       <AtPopover
         ref={atPopoverRef}
         open={popover === "at"}
         query={atQuery}
         projectId={projectId}
         workspacePath={workspacePath}
-        containerRef={containerRef}
         tasks={tasks}
-        onSelect={(path, isFile, branch) =>
-          editorHandle.addFilePart(path, isFile, branch)
-        }
-        onClose={() => setPopover(null)}
+        onSelect={(selection) => {
+          if (selection.kind === "file") {
+            editorHandle.addFilePart(
+              selection.path,
+              selection.isFile,
+              selection.branch,
+            );
+          } else if (selection.kind === "session") {
+            editorHandle.addSessionPart(selection.taskId, selection.branch);
+          } else {
+            editorHandle.addSkillPart(selection.id, selection.name);
+          }
+        }}
+        onClose={() => setPopover(editorHandle.scopeId, null)}
         activeIndex={atActiveIndex}
         onActiveIndexChange={onActiveIndexChange}
       />
-      {isAttachingSession ? (
-        <div className="mb-2 inline-flex items-center gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          <span>{t("sessionAttachLoading")}</span>
-        </div>
-      ) : null}
       <PromptEditor
         handle={editorHandle}
         disabled={disabled}
-        placeholder={`${t("inputPlaceholder")} @ to add files`}
+        placeholder={`${t("inputPlaceholder")} @ for files, / for skills`}
         onSubmit={onSubmit}
-        onPopoverKeyDown={(e) =>
-          atPopoverRef.current?.handleKeyDown(e) ?? false
-        }
+        onPopoverKeyDown={(e) => {
+          if (popover === "skill") {
+            return skillPopoverRef.current?.handleKeyDown(e) ?? false;
+          }
+          return atPopoverRef.current?.handleKeyDown(e) ?? false;
+        }}
         onDrop={onDrop}
         onPaste={onPaste}
       />
@@ -102,6 +132,7 @@ export function PromptEditorWithPopover({
 }
 
 export function SendButtonWithState({
+  editorHandle,
   isSending,
   isStopping,
   canSend,
@@ -110,6 +141,7 @@ export function SendButtonWithState({
   onCancel,
   t,
 }: {
+  editorHandle: PromptEditorHandle;
   isSending: boolean;
   isStopping: boolean;
   canSend: boolean;
@@ -118,7 +150,9 @@ export function SendButtonWithState({
   onCancel: () => void;
   t: TranslationFunction;
 }) {
-  const isEmpty = usePromptEditorStore((s) => s.isEmpty);
+  const isEmpty = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).isEmpty,
+  );
   const isDisabled = isSending
     ? isStopping
     : !canSend || isEmpty || isUploading;
@@ -242,17 +276,21 @@ function PromptQueueIndicator({
 }
 
 export function AgentUserQuestionWithEditorState({
+  editorHandle,
   questionRef,
   pendingQuestions,
   onAnswer,
   onSkip,
 }: {
+  editorHandle: PromptEditorHandle;
   questionRef: React.RefObject<AgentUserQuestionHandle | null>;
   pendingQuestions: PendingUserQuestions;
   onAnswer: (answers: Record<string, string>) => void;
   onSkip: () => void;
 }) {
-  const hasText = usePromptEditorStore((s) => s.hasText);
+  const hasText = usePromptEditorStore(
+    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).hasText,
+  );
 
   return (
     <AgentUserQuestion

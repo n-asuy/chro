@@ -23,6 +23,35 @@
     text-rendering: optimizeLegibility;
     font-synthesis: none;
   }
+
+  [data-session-select-active="true"] * {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+
+  [data-session-select-active="true"] *::selection {
+    background: transparent;
+  }
+
+  [data-session-select-active="true"] [data-session-select-text="true"],
+  [data-session-select-active="true"] [data-session-select-text="true"] * {
+    -webkit-user-select: text !important;
+    user-select: text !important;
+  }
+
+  [data-session-select-active="true"] [data-session-select-text="true"]::selection,
+  [data-session-select-active="true"] [data-session-select-text="true"] *::selection {
+    background: rgba(37, 99, 235, 0.28);
+  }
+
+  [data-session-select-active="true"] [data-session-select-text="true"] button,
+  [data-session-select-active="true"] [data-session-select-text="true"] canvas,
+  [data-session-select-active="true"] [data-session-select-text="true"] img,
+  [data-session-select-active="true"] [data-session-select-text="true"] input,
+  [data-session-select-active="true"] [data-session-select-text="true"] svg {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
 }
 @layer base {
   html {
@@ -2737,4 +2766,151 @@ body {
 [data-theme="dark"] .cm-tooltip.cm-tooltip-autocomplete {
   border-color: rgb(var(--color-border-300));
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* In-editor find bar (Obsidian-style) ----------------------------------- */
+
+/* The mount sits at the top of the file's scroll container and sticks there
+   so the bar floats above title / frontmatter while the document scrolls. */
+.chro-find-bar-mount {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0 0 8px;
+}
+
+.chro-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 4px 4px;
+  background: rgb(var(--color-background-100));
+  border: 1px solid rgb(var(--color-border-200));
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
+}
+
+.chro-find-input-wrap {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  padding: 0 8px;
+  height: 28px;
+}
+
+.chro-find-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(var(--color-text-300));
+  flex-shrink: 0;
+}
+
+.chro-find-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgb(var(--color-text-100));
+}
+
+.chro-find-input::placeholder {
+  color: rgb(var(--color-text-300));
+}
+
+/* Hide the browser-supplied search clear "X" so it doesn't collide with our
+   own close button. */
+.chro-find-input::-webkit-search-cancel-button,
+.chro-find-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.chro-find-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.chro-find-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgb(var(--color-text-200));
+  cursor: pointer;
+  padding: 0;
+}
+
+.chro-find-icon-btn:hover {
+  background: rgb(var(--color-background-90));
+  color: rgb(var(--color-text-100));
+}
+
+.chro-find-icon-btn:active {
+  background: rgb(var(--color-background-80));
+}
+
+.chro-find-close {
+  color: rgb(var(--color-text-300));
+}
+
+/* The find UI lives in our own .chro-find-bar. CodeMirror's search panel is
+   opened only to enable match highlighting, so keep its empty DOM hidden. */
+.cm-editor-container .cm-panels {
+  display: none;
+}
+
+/* Match highlights rendered inline by the CodeMirror search extension. */
+.cm-editor-container .cm-searchMatch {
+  background-color: hsl(var(--primary) / 0.25);
+  border-radius: 2px;
+}
+
+.cm-editor-container .cm-searchMatch.cm-searchMatch-selected {
+  background-color: hsl(var(--primary) / 0.5);
+}
+
+/* Match counter shown inside the find bar (e.g. session conversation). */
+.chro-find-count {
+  flex-shrink: 0;
+  padding: 0 6px;
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--color-text-300));
+  white-space: nowrap;
+}
+
+/* Floating find bar for the session conversation. Pinned to the top-right of
+   the conversation pane so it overlays the messages without scrolling away. */
+.chro-conversation-find {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 30;
+  width: min(360px, calc(100% - 32px));
+}
+
+/* Match highlights painted over the conversation via the CSS Custom Highlight
+   API (see conversation-find-highlighter.ts). Mirrors the editor's styling. */
+::highlight(chro-find-match) {
+  background-color: hsl(var(--primary) / 0.25);
+}
+
+::highlight(chro-find-match-current) {
+  background-color: hsl(var(--primary) / 0.5);
 }

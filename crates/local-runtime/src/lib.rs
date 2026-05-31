@@ -657,12 +657,8 @@ impl Runtime for LocalRuntime {
         Ok(stream::iter(entries.into_iter().map(Ok)).boxed())
     }
 
-    async fn generate_task_transcript(
-        &self,
-        task_id: Uuid,
-        workspace_path: &Path,
-    ) -> Result<String, RuntimeError> {
-        self.generate_task_transcript(task_id, workspace_path).await
+    async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError> {
+        self.task_transcript_markdown(task_id).await
     }
 }
 

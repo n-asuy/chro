@@ -24,6 +24,16 @@ import type {
 } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import {
+  SearchQuery,
+  closeSearchPanel,
+  findNext as cmFindNext,
+  findPrevious as cmFindPrevious,
+  getSearchQuery,
+  openSearchPanel,
+  search,
+  setSearchQuery,
+} from "@codemirror/search";
+import {
   Compartment,
   EditorState,
   type Extension,
@@ -61,6 +71,10 @@ export interface CodeMirrorEditorHandle {
   getContent: () => string;
   setContent: (content: string) => void;
   focus: () => void;
+  setSearchQuery: (query: string) => void;
+  findNext: () => void;
+  findPrevious: () => void;
+  clearSearch: () => void;
 }
 
 interface CodeMirrorEditorProps {
@@ -100,6 +114,11 @@ interface CodeMirrorEditorProps {
   embedConfig?: EmbedPluginConfig;
   /** Callback when an embed is clicked */
   onEmbedClick?: (path: string, type: string) => void;
+  /**
+   * Called when the user presses Mod+F inside the editor. Lets the host
+   * render its own find UI instead of CodeMirror's default panel.
+   */
+  onFindRequest?: () => void;
 }
 
 /**
@@ -174,9 +193,14 @@ export const CodeMirrorEditor = forwardRef<
     onInternalLinkClick,
     embedConfig,
     onEmbedClick,
+    onFindRequest,
   },
   ref,
 ) {
+  const onFindRequestRef = useRef(onFindRequest);
+  useEffect(() => {
+    onFindRequestRef.current = onFindRequest;
+  }, [onFindRequest]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -227,6 +251,43 @@ export const CodeMirrorEditor = forwardRef<
     },
     focus: () => {
       viewRef.current?.focus();
+    },
+    setSearchQuery: (query: string) => {
+      const view = viewRef.current;
+      if (!view) return;
+      const current = getSearchQuery(view.state);
+      view.dispatch({
+        effects: setSearchQuery.of(
+          new SearchQuery({
+            search: query,
+            caseSensitive: current.caseSensitive,
+            regexp: current.regexp,
+            wholeWord: current.wholeWord,
+            replace: current.replace,
+            literal: current.literal,
+          }),
+        ),
+      });
+      // CodeMirror only paints match highlights while its search panel is
+      // considered open. The panel itself renders an empty, hidden element
+      // (see the search() config below); our own find bar is the visible UI.
+      openSearchPanel(view);
+    },
+    findNext: () => {
+      const view = viewRef.current;
+      if (view) cmFindNext(view);
+    },
+    findPrevious: () => {
+      const view = viewRef.current;
+      if (view) cmFindPrevious(view);
+    },
+    clearSearch: () => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        effects: setSearchQuery.of(new SearchQuery({ search: "" })),
+      });
+      closeSearchPanel(view);
     },
   }));
 
@@ -290,7 +351,23 @@ export const CodeMirrorEditor = forwardRef<
       // Syntax highlighting
       syntaxHighlighting(defaultHighlightStyle),
 
-      // Keymaps
+      // Search extension powers match highlighting and the query state. We
+      // suppress its built-in panel and instead let the host (files-editor)
+      // render an Obsidian-style find bar above the document.
+      search({ createPanel: () => ({ dom: document.createElement("div") }) }),
+      // Intercept Mod-f so it doesn't escape to the browser's native find.
+      // Delegate to the host so the find bar appears outside the CodeMirror
+      // editor (above title / frontmatter).
+      keymap.of([
+        {
+          key: "Mod-f",
+          preventDefault: true,
+          run: () => {
+            onFindRequestRef.current?.();
+            return true;
+          },
+        },
+      ]),
       keymap.of([...standardKeymap, ...historyKeymap, indentWithTab]),
 
       // Editable state (via compartment for dynamic updates)

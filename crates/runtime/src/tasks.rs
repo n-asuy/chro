@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -17,6 +16,7 @@ use image::ImageService;
 use log_types::LogEntry;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use skills::{apply_materialized_skills, SkillRegistry};
 use sqlx::{Pool, Sqlite};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -85,6 +85,9 @@ pub struct StartExecutionSessionParams {
     /// Base branch to create the worktree from.
     /// If None, falls back to the current branch of the workspace (then "main").
     pub target_branch: Option<String>,
+    /// Skill IDs selected in the prompt editor. These are materialized into
+    /// executor instructions while the stored user prompt remains unchanged.
+    pub selected_skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +119,7 @@ pub struct SendTaskMessageParams {
     pub image_ids: Option<Vec<Uuid>>,
     pub use_worktree: Option<bool>,
     pub target_branch: Option<String>,
+    pub selected_skill_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +379,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             image_ids,
             use_worktree,
             target_branch,
+            selected_skill_ids,
         } = params;
 
         info!(
@@ -484,7 +489,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 return Err(RuntimeError::BadRequest("prompt is required"));
             }
 
-            return self.follow_up_execution(run.id, execution_prompt).await;
+            return self
+                .follow_up_execution_with_options(
+                    run.id,
+                    execution_prompt,
+                    None,
+                    selected_skill_ids,
+                )
+                .await;
         }
 
         self.lifecycle().mark_in_progress(&task).await?;
@@ -563,8 +575,13 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             (path, container)
         };
 
+        let materialized_skills =
+            SkillRegistry::new().materialize(Some(&workspace_path), &selected_skill_ids)?;
         let execution_prompt =
             ImageService::canonicalize_worktree_links(&execution_prompt, &worktree_path);
+        let executor_user_prompt = strip_display_skill_context_blocks(&execution_prompt);
+        let executor_prompt =
+            apply_materialized_skills(&executor_user_prompt, materialized_skills.as_ref());
 
         if let Err(err) = self
             .runtime()
@@ -577,13 +594,6 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 error = %err,
                 "failed to copy task images to worktree"
             );
-        }
-
-        // Copy .chro-context files referenced in the prompt to the worktree.
-        // The transcript dump writes to workspace_path, but execution happens in
-        // worktree_path. When these differ, the executor cannot read the files.
-        if worktree_path != workspace_path {
-            copy_context_files_to_worktree(&execution_prompt, &workspace_path, &worktree_path);
         }
 
         sqlx::query(
@@ -664,7 +674,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .start_execution(ExecutionStartParams {
                 task_run_id: run.id,
                 executor_session_id: session.id,
-                prompt: execution_prompt.clone(),
+                prompt: executor_prompt,
                 workspace_path: worktree_path.clone(),
                 resume_session_id: resume_session_id.clone(),
                 force_new_attempt,
@@ -699,8 +709,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         &self,
         run_id: Uuid,
         prompt: String,
+        selected_skill_ids: Vec<String>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
-        self.follow_up_execution_with_options(run_id, prompt, None)
+        self.follow_up_execution_with_options(run_id, prompt, None, selected_skill_ids)
             .await
     }
 
@@ -709,6 +720,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         run_id: Uuid,
         prompt: String,
         image_ids: Option<Vec<Uuid>>,
+        selected_skill_ids: Vec<String>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
         if prompt.trim().is_empty() {
             return Err(RuntimeError::BadRequest("prompt is required"));
@@ -735,6 +747,18 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         let prompt = ImageService::canonicalize_worktree_links(&prompt, &workspace_path_buf);
+        let project_workspace_path = PathBuf::from(&project.git_repo_path);
+        let skill_workspace_path =
+            if project_workspace_path.is_absolute() && project_workspace_path.exists() {
+                project_workspace_path
+            } else {
+                workspace_path_buf.clone()
+            };
+        let materialized_skills =
+            SkillRegistry::new().materialize(Some(&skill_workspace_path), &selected_skill_ids)?;
+        let executor_user_prompt = strip_display_skill_context_blocks(&prompt);
+        let executor_prompt =
+            apply_materialized_skills(&executor_user_prompt, materialized_skills.as_ref());
 
         if let Some(ids) = image_ids.as_ref().filter(|items| !items.is_empty()) {
             if let Err(err) = self
@@ -828,7 +852,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .start_execution(ExecutionStartParams {
                 task_run_id: new_run.id,
                 executor_session_id: session.id,
-                prompt: prompt.clone(),
+                prompt: executor_prompt,
                 workspace_path: workspace_path_buf.clone(),
                 resume_session_id,
                 force_new_attempt: Some(false),
@@ -913,6 +937,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             image_ids,
             use_worktree,
             target_branch,
+            selected_skill_ids,
         } = params;
 
         match mode {
@@ -928,6 +953,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                         image_ids,
                         use_worktree,
                         target_branch,
+                        selected_skill_ids,
                     })
                     .await?;
 
@@ -941,7 +967,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 if let Some(latest_run) = TaskRun::latest_for_task(self.pool(), task_id).await? {
                     let previous_task_run_id = latest_run.id;
                     let execution = self
-                        .follow_up_execution_with_options(latest_run.id, prompt, image_ids)
+                        .follow_up_execution_with_options(
+                            latest_run.id,
+                            prompt,
+                            image_ids,
+                            selected_skill_ids,
+                        )
                         .await?;
                     return Ok(TaskMessageStart {
                         execution,
@@ -961,6 +992,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                         image_ids,
                         use_worktree,
                         target_branch,
+                        selected_skill_ids,
                     })
                     .await?;
 
@@ -991,6 +1023,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             image_ids: None,
             use_worktree: None,
             target_branch: None,
+            selected_skill_ids: Vec::new(),
         })
         .await
         .map(|result| result.execution)
@@ -1388,25 +1421,80 @@ fn infer_task_description(prompt: &str) -> Option<String> {
 }
 
 fn extract_task_text(prompt: &str) -> String {
-    let remaining = strip_leading_context_block(prompt.trim());
-    remaining
+    // Drop image attachments first so a leading image cannot shield the
+    // metadata blocks that follow it (otherwise the `<context>` line survives
+    // and leaks into the inferred title).
+    let without_images = prompt
+        .trim()
         .lines()
         .filter(|line| !is_image_markdown_line(line.trim()))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    strip_leading_prompt_metadata_blocks(without_images.trim())
         .trim()
         .to_string()
 }
 
-fn strip_leading_context_block(prompt: &str) -> &str {
+fn strip_leading_prompt_metadata_blocks(prompt: &str) -> &str {
     let mut remaining = prompt;
-    while let Some(after_context) = remaining.strip_prefix("<context>").and_then(|rest| {
-        rest.find("</context>")
-            .map(|end| &rest[end + "</context>".len()..])
-    }) {
-        remaining = after_context.trim_start();
+    while let Some((_, after_block)) = take_leading_tag_block(remaining, "<context>", "</context>")
+        .or_else(|| take_leading_tag_block(remaining, "<skills_context>", "</skills_context>"))
+    {
+        remaining = after_block.trim_start();
     }
     remaining
+}
+
+fn strip_display_skill_context_blocks(prompt: &str) -> String {
+    let mut remaining = prompt.trim_start();
+    let mut kept_blocks: Vec<&str> = Vec::new();
+    let mut removed_skill_context = false;
+
+    loop {
+        if let Some((_, after_block)) =
+            take_leading_tag_block(remaining, "<skills_context>", "</skills_context>")
+        {
+            removed_skill_context = true;
+            remaining = after_block.trim_start();
+            continue;
+        }
+
+        if let Some((block, after_block)) =
+            take_leading_tag_block(remaining, "<context>", "</context>")
+        {
+            kept_blocks.push(block.trim_end());
+            remaining = after_block.trim_start();
+            continue;
+        }
+
+        break;
+    }
+
+    if !removed_skill_context {
+        return prompt.to_string();
+    }
+
+    if kept_blocks.is_empty() {
+        return remaining.to_string();
+    }
+
+    let prefix = kept_blocks.join("\n\n");
+    if remaining.is_empty() {
+        prefix
+    } else {
+        format!("{}\n\n{}", prefix, remaining)
+    }
+}
+
+fn take_leading_tag_block<'a>(
+    prompt: &'a str,
+    open_tag: &str,
+    close_tag: &str,
+) -> Option<(&'a str, &'a str)> {
+    let rest = prompt.strip_prefix(open_tag)?;
+    let close_start = rest.find(close_tag)?;
+    let block_end = open_tag.len() + close_start + close_tag.len();
+    Some((&prompt[..block_end], &prompt[block_end..]))
 }
 
 fn is_image_markdown_line(line: &str) -> bool {
@@ -1437,69 +1525,6 @@ fn extract_session_id_from_entries(entries: &[LogEntry]) -> Option<String> {
         LogEntry::SessionId(id) if !id.trim().is_empty() => Some(id.clone()),
         _ => None,
     })
-}
-
-/// Extract `.chro-context/…` relative paths from `<file path="…" />`
-/// context tags in the prompt and copy them from `src_root` to `dst_root`.
-///
-/// This mirrors the image-copy step: the transcript dump is written to the
-/// original workspace, but the executor runs inside a worktree that does not
-/// share the same directory tree.
-fn copy_context_files_to_worktree(prompt: &str, src_root: &Path, dst_root: &Path) {
-    let context_dir = image::WORKTREE_IMAGES_DIR;
-    let files = extract_context_file_paths(prompt, context_dir);
-    if files.is_empty() {
-        return;
-    }
-
-    if let Err(err) = image::ensure_context_dir(dst_root) {
-        warn!(error = %err, "failed to bootstrap context dir in worktree");
-        return;
-    }
-
-    for relative in &files {
-        let src = src_root.join(relative);
-        if !src.is_file() {
-            continue;
-        }
-        let dst = dst_root.join(relative);
-        if dst.exists() {
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            if let Err(err) = fs::create_dir_all(parent) {
-                warn!(error = %err, path = %parent.display(), "failed to create context dir in worktree");
-                continue;
-            }
-        }
-        if let Err(err) = fs::copy(&src, &dst) {
-            warn!(
-                error = %err,
-                src = %src.display(),
-                dst = %dst.display(),
-                "failed to copy context file to worktree"
-            );
-        }
-    }
-}
-
-/// Parse `<file path="…" />` tags and return paths that start with the given
-/// context directory prefix.
-fn extract_context_file_paths<'a>(prompt: &'a str, context_dir: &str) -> Vec<&'a str> {
-    let mut paths = Vec::new();
-    let needle = "<file path=\"";
-    let mut haystack = prompt;
-    while let Some(start) = haystack.find(needle) {
-        let after = &haystack[start + needle.len()..];
-        if let Some(end) = after.find('"') {
-            let path = &after[..end];
-            if path.starts_with(context_dir) {
-                paths.push(path);
-            }
-        }
-        haystack = &haystack[start + needle.len()..];
-    }
-    paths
 }
 
 fn build_merge_commit_message(
@@ -1544,13 +1569,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_context_paths_from_prompt() {
-        let prompt = "<context>\n<file path=\".chro-context/sessions/abc.md\" />\n<file path=\"src/main.rs\" />\n</context>\nfix the bug";
-        let paths = extract_context_file_paths(prompt, ".chro-context");
-        assert_eq!(paths, vec![".chro-context/sessions/abc.md"]);
-    }
-
-    #[test]
     fn infer_task_title_ignores_leading_context_block() {
         let prompt =
             "<context>\n<file path=\"src/main.rs\" />\n</context>\n\nfix the bug\nmore detail";
@@ -1564,9 +1582,34 @@ mod tests {
     }
 
     #[test]
+    fn infer_task_title_ignores_leading_skill_context_block() {
+        let prompt = "<skills_context>\n<skill id=\"workspace:.agents/skills:release\" name=\"release\" />\n</skills_context>\n\nfix the release";
+        assert_eq!(infer_task_title(prompt), "fix the release");
+    }
+
+    #[test]
+    fn infer_task_title_ignores_context_and_skill_context_blocks() {
+        let prompt = "<context>\n<file path=\"src/main.rs\" />\n</context>\n\n<skills_context>\n<skill id=\"workspace:.agents/skills:release\" name=\"release\" />\n</skills_context>\n\nfix the bug";
+        assert_eq!(infer_task_title(prompt), "fix the bug");
+    }
+
+    #[test]
     fn infer_task_title_ignores_leading_images() {
         let prompt = "![img.png](.chro-context/img.png)\nfix the bug";
         assert_eq!(infer_task_title(prompt), "fix the bug");
+    }
+
+    #[test]
+    fn infer_task_title_ignores_context_block_after_leading_image() {
+        let prompt =
+            "![img.png](.chro-context/img.png)\n<context>\n<file path=\"src/main.rs\" />\n</context>\nfix the bug";
+        assert_eq!(infer_task_title(prompt), "fix the bug");
+    }
+
+    #[test]
+    fn infer_task_title_falls_back_when_only_image_and_context() {
+        let prompt = "![img.png](.chro-context/img.png)\n<context>\n<past_session task_id=\"abc\" />\n</context>";
+        assert!(infer_task_title(prompt).starts_with("Session "));
     }
 
     #[test]
@@ -1579,79 +1622,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_context_paths_empty_when_no_match() {
-        let prompt = "just a plain prompt with no context tags";
-        let paths = extract_context_file_paths(prompt, ".chro-context");
-        assert!(paths.is_empty());
-    }
-
-    #[test]
-    fn extract_context_paths_multiple() {
-        let prompt = "<context>\n<file path=\".chro-context/sessions/a.md\" />\n<file path=\".chro-context/sessions/b.md\" />\n</context>";
-        let paths = extract_context_file_paths(prompt, ".chro-context");
+    fn strip_display_skill_context_blocks_preserves_regular_context() {
+        let prompt = "<context>\n<file path=\"src/main.rs\" />\n</context>\n\n<skills_context>\n<skill id=\"workspace:.agents/skills:release\" name=\"release\" />\n</skills_context>\n\nfix the bug";
         assert_eq!(
-            paths,
-            vec![".chro-context/sessions/a.md", ".chro-context/sessions/b.md",]
+            strip_display_skill_context_blocks(prompt),
+            "<context>\n<file path=\"src/main.rs\" />\n</context>\n\nfix the bug"
         );
     }
 
     #[test]
-    fn copies_context_files_to_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("workspace");
-        let dst = tmp.path().join("worktree");
-        let sessions_dir = src.join(".chro-context/sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::write(sessions_dir.join("run1.md"), "# transcript").unwrap();
-
-        let prompt =
-            "<context>\n<file path=\".chro-context/sessions/run1.md\" />\n</context>\ndo the thing";
-        copy_context_files_to_worktree(prompt, &src, &dst);
-
-        let copied = dst.join(".chro-context/sessions/run1.md");
-        assert!(copied.exists());
-        assert_eq!(fs::read_to_string(&copied).unwrap(), "# transcript");
-
-        // .gitignore must be bootstrapped so copied files stay untracked.
-        let gitignore = dst.join(".chro-context/.gitignore");
-        assert!(gitignore.exists());
-        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "*\n");
+    fn strip_display_skill_context_blocks_removes_skill_only_prefix() {
+        let prompt = "<skills_context>\n<skill id=\"workspace:.agents/skills:release\" name=\"release\" />\n</skills_context>\n\nfix the bug";
+        assert_eq!(strip_display_skill_context_blocks(prompt), "fix the bug");
     }
 
     #[test]
-    fn skip_when_dst_already_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("workspace");
-        let dst = tmp.path().join("worktree");
-
-        let src_sessions = src.join(".chro-context/sessions");
-        let dst_sessions = dst.join(".chro-context/sessions");
-        fs::create_dir_all(&src_sessions).unwrap();
-        fs::create_dir_all(&dst_sessions).unwrap();
-        fs::write(src_sessions.join("run1.md"), "new content").unwrap();
-        fs::write(dst_sessions.join("run1.md"), "old content").unwrap();
-
-        let prompt = "<context>\n<file path=\".chro-context/sessions/run1.md\" />\n</context>";
-        copy_context_files_to_worktree(prompt, &src, &dst);
-
-        assert_eq!(
-            fs::read_to_string(dst_sessions.join("run1.md")).unwrap(),
-            "old content"
-        );
-    }
-
-    #[test]
-    fn skip_missing_source_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("workspace");
-        let dst = tmp.path().join("worktree");
-        fs::create_dir_all(&src).unwrap();
-
-        let prompt =
-            "<context>\n<file path=\".chro-context/sessions/nonexistent.md\" />\n</context>";
-        copy_context_files_to_worktree(prompt, &src, &dst);
-
-        assert!(!dst.join(".chro-context/sessions/nonexistent.md").exists());
+    fn strip_display_skill_context_blocks_preserves_prompt_without_skill_context() {
+        let prompt = "  <context>\n<file path=\"src/main.rs\" />\n</context>\n\nfix the bug";
+        assert_eq!(strip_display_skill_context_blocks(prompt), prompt);
     }
 
     #[test]
