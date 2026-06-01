@@ -89,6 +89,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     rootPath,
     roots,
     selectedPaths,
+    scopeTaskRunId,
     selectNode,
     clearSelection,
     createFile,
@@ -103,6 +104,10 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     addRoot,
     removeRoot,
   } = useFilesStore();
+
+  // A session sandbox (task-run worktree) is read-only here: it lists and
+  // opens files, but project-scoped mutations are hidden/disabled.
+  const isWorktreeScope = scopeTaskRunId != null;
 
   const deriveAdHocRootName = useCallback((absolutePath: string): string => {
     const trimmed = absolutePath.replace(/[\\/]+$/, "");
@@ -166,9 +171,11 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     onDropToPromptEditor: handleDropToPromptEditor,
   });
 
-  // External drop hook (files from OS)
+  // External drop hook (files from OS). Disabled in worktree scope so OS file
+  // drops cannot import into the project checkout while a sandbox is shown.
   const { dropState: externalDropState } = useFileTreeExternalDrop({
     rootPath,
+    enabled: !isWorktreeScope,
     onDrop: importExternalFiles,
   });
 
@@ -596,72 +603,80 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                 {t("collapseAll")}
               </TooltipContent>
             </Tooltip>
-            <DropdownMenu>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
+            {!isWorktreeScope && (
+              <>
+                <DropdownMenu>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
+                          aria-label={t("newFile")}
+                        >
+                          <Plus className="size-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" align="center">
+                      {t("newFile")}
+                    </TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent
+                    align="start"
+                    sideOffset={4}
+                    className="z-20 min-w-[160px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg"
+                  >
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        void quickCreate(FileNodeType.File, undefined, "md")
+                      }
+                      className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                    >
+                      <FileText className="h-3.5 w-3.5 shrink-0" />
+                      <span>{t("newFileMarkdown")}</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        void quickCreate(
+                          FileNodeType.File,
+                          undefined,
+                          "excalidraw",
+                        )
+                      }
+                      className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                    >
+                      <PenLine className="h-3.5 w-3.5 shrink-0" />
+                      <span>{t("newFileExcalidraw")}</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        void quickCreate(FileNodeType.File, undefined, "cbase")
+                      }
+                      className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                    >
+                      <Database className="h-3.5 w-3.5 shrink-0" />
+                      <span>{t("newFileBase")}</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <button
                       type="button"
                       className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
-                      aria-label={t("newFile")}
+                      aria-label="Create folder"
+                      onClick={() => void quickCreate(FileNodeType.Directory)}
                     >
-                      <Plus className="size-4" />
+                      <FolderPlus className="size-4" />
                     </button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" align="center">
-                  {t("newFile")}
-                </TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent
-                align="start"
-                sideOffset={4}
-                className="z-20 min-w-[160px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg"
-              >
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void quickCreate(FileNodeType.File, undefined, "md")
-                  }
-                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                >
-                  <FileText className="h-3.5 w-3.5 shrink-0" />
-                  <span>{t("newFileMarkdown")}</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void quickCreate(FileNodeType.File, undefined, "excalidraw")
-                  }
-                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                >
-                  <PenLine className="h-3.5 w-3.5 shrink-0" />
-                  <span>{t("newFileExcalidraw")}</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void quickCreate(FileNodeType.File, undefined, "cbase")
-                  }
-                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                >
-                  <Database className="h-3.5 w-3.5 shrink-0" />
-                  <span>{t("newFileBase")}</span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Create folder"
-                  onClick={() => void quickCreate(FileNodeType.Directory)}
-                >
-                  <FolderPlus className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                {t("newFolder")}
-              </TooltipContent>
-            </Tooltip>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="center">
+                    {t("newFolder")}
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -760,6 +775,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                       <TreeContextMenu
                         node={node}
                         workspacePath={workspacePath}
+                        readOnly={isWorktreeScope}
                         onDelete={handleDelete}
                         onRename={handleRename}
                         onDuplicate={handleDuplicate}
@@ -800,71 +816,73 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             ) : null}
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="z-20 w-48 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
-          <ContextMenuSub>
-            <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
-              <FilePlus className="h-3.5 w-3.5 shrink-0" />
-              <span>{t("newFile")}</span>
-            </ContextMenuSubTrigger>
-            <ContextMenuSubContent className="z-20 min-w-[140px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
-              <ContextMenuItem
-                onSelect={() =>
-                  void quickCreate(FileNodeType.File, rootTargetPath, "md")
-                }
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-              >
-                <FileText className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("newFileMarkdown")}</span>
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() =>
-                  void quickCreate(
-                    FileNodeType.File,
-                    rootTargetPath,
-                    "excalidraw",
-                  )
-                }
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-              >
-                <PenLine className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("newFileExcalidraw")}</span>
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() =>
-                  void quickCreate(FileNodeType.File, rootTargetPath, "cbase")
-                }
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-              >
-                <Database className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("newFileBase")}</span>
-              </ContextMenuItem>
-            </ContextMenuSubContent>
-          </ContextMenuSub>
-          <ContextMenuItem
-            onSelect={() =>
-              void quickCreate(FileNodeType.Directory, rootTargetPath)
-            }
-            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-          >
-            <FolderPlus className="h-3.5 w-3.5 shrink-0" />
-            <span>{t("newFolder")}</span>
-          </ContextMenuItem>
-          <ContextMenuItem
-            onSelect={handleAddFolderToProject}
-            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-          >
-            <FolderInput className="h-3.5 w-3.5 shrink-0" />
-            <span>{t("addFolderToProject")}</span>
-          </ContextMenuItem>
-          <ContextMenuItem
-            onSelect={handleRevealRootInFinder}
-            disabled={!projectId}
-            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
-          >
-            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-            <span>{t("revealInFinder")}</span>
-          </ContextMenuItem>
-        </ContextMenuContent>
+        {!isWorktreeScope && (
+          <ContextMenuContent className="z-20 w-48 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+            <ContextMenuSub>
+              <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
+                <FilePlus className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("newFile")}</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent className="z-20 min-w-[140px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(FileNodeType.File, rootTargetPath, "md")
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileMarkdown")}</span>
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(
+                      FileNodeType.File,
+                      rootTargetPath,
+                      "excalidraw",
+                    )
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <PenLine className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileExcalidraw")}</span>
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(FileNodeType.File, rootTargetPath, "cbase")
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <Database className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileBase")}</span>
+                </ContextMenuItem>
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuItem
+              onSelect={() =>
+                void quickCreate(FileNodeType.Directory, rootTargetPath)
+              }
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+            >
+              <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("newFolder")}</span>
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={handleAddFolderToProject}
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+            >
+              <FolderInput className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("addFolderToProject")}</span>
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={handleRevealRootInFinder}
+              disabled={!projectId}
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+            >
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("revealInFinder")}</span>
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
       </ContextMenu>
       <FolderPickerDialog
         open={folderPickerOpen}

@@ -123,6 +123,26 @@ describe("createSyntheticUserMessageEntry", () => {
       },
     });
   });
+
+  it("stamps the entry with the run creation time when provided", () => {
+    expect(
+      createSyntheticUserMessageEntry(
+        "run-1",
+        "Follow up prompt",
+        "session-9",
+        "2025-01-01T00:00:00.000Z",
+      ),
+    ).toEqual({
+      type: "NORMALIZED_ENTRY",
+      key: "run-1:synthetic-user-session-9",
+      content: {
+        id: "synthetic-user-session-9",
+        timestamp: "2025-01-01T00:00:00.000Z",
+        entry_type: { type: "user_message" },
+        content: "Follow up prompt",
+      },
+    });
+  });
 });
 
 describe("flattenConversationEntries", () => {
@@ -137,7 +157,12 @@ describe("flattenConversationEntries", () => {
     const flattened = flattenConversationEntries(states, [makeSession()]);
 
     expect(flattened).toEqual([
-      createSyntheticUserMessageEntry("run-1", "Follow up prompt", "session-1"),
+      createSyntheticUserMessageEntry(
+        "run-1",
+        "Follow up prompt",
+        "session-1",
+        "2025-01-01T00:00:00.000Z",
+      ),
       makeAssistantEntry("run-1"),
     ]);
   });
@@ -214,7 +239,12 @@ describe("flattenConversationEntries", () => {
     });
 
     expect(flattened).toEqual([
-      createSyntheticUserMessageEntry("run-pending", "Pending prompt"),
+      createSyntheticUserMessageEntry(
+        "run-pending",
+        "Pending prompt",
+        undefined,
+        "2025-01-01T00:00:00.000Z",
+      ),
       makeAssistantEntry("run-pending", "assistant-pending", "Pending reply"),
     ]);
   });
@@ -377,7 +407,12 @@ describe("createConversationFlattenCache", () => {
 
     expect(second[0]).not.toBe(first[0]);
     expect(second[0]).toEqual(
-      createSyntheticUserMessageEntry("run-1", "New prompt", "session-1"),
+      createSyntheticUserMessageEntry(
+        "run-1",
+        "New prompt",
+        "session-1",
+        "2025-01-01T00:00:00.000Z",
+      ),
     );
     // Assistant entry reference remains stable
     expect(second[1]).toBe(first[1]);

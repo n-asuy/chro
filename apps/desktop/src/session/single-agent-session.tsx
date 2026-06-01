@@ -120,6 +120,7 @@ import {
 } from "./state/user-question-store";
 import type { StoredTask, UiEventMessage } from "./types";
 import {
+  contextEntriesToRefs,
   formatContextForPrompt,
   formatSkillContextForPrompt,
 } from "./types/context";
@@ -226,7 +227,6 @@ export function SingleAgentSessionView({
   const [currentContainerRef, setCurrentContainerRef] = useState<string | null>(
     null,
   );
-  const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
 
   // UI state — prompt editor handle (non-reactive, no re-renders on typing)
   const editor = usePromptEditorHandle(promptScopeId);
@@ -253,6 +253,7 @@ export function SingleAgentSessionView({
   const [isMergingDiffs, setIsMergingDiffs] = useState(false);
   const [mergeSuccess, setMergeSuccess] = useState(false);
   const [isAbortingConflicts, setIsAbortingConflicts] = useState(false);
+  const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
   const [branches, setBranches] = useState<GitBranchType[]>([]);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [executorProfileId, setExecutorProfileId] =
@@ -264,10 +265,6 @@ export function SingleAgentSessionView({
     useState<ExecutorProfileId | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const questionRef = useRef<AgentUserQuestionHandle>(null);
-
-  const requestConversationScrollToBottom = useCallback(() => {
-    setScrollToBottomSignal((signal) => signal + 1);
-  }, []);
 
   useEffect(() => {
     latestRouteProjectIdRef.current = routeProjectId;
@@ -435,6 +432,7 @@ export function SingleAgentSessionView({
 
   const {
     tasks: displayedTasks,
+    tasksById,
     activeTaskId,
     activeStreamTaskId,
     activeTask,
@@ -782,7 +780,8 @@ export function SingleAgentSessionView({
   );
 
   const buildPromptPayload = useCallback((): PreparedPromptPayload | null => {
-    const contextPrefix = formatContextForPrompt(editor.getContextEntries());
+    const contextEntries = editor.getContextEntries();
+    const contextPrefix = formatContextForPrompt(contextEntries);
     const skillEntries = editor.getSkillEntries();
     const skillPrefix = formatSkillContextForPrompt(skillEntries);
     const imagesMarkdown = getImagesMarkdown();
@@ -796,6 +795,7 @@ export function SingleAgentSessionView({
     }
     return {
       prompt,
+      contextRefs: contextEntriesToRefs(contextEntries),
       imageIds: getImageIds(),
       selectedSkillIds: skillEntries.map((skill) => skill.id),
     };
@@ -823,8 +823,6 @@ export function SingleAgentSessionView({
       return;
     }
 
-    requestConversationScrollToBottom();
-
     const requestId = createPerfRequestId();
     const createdAt = new Date().toISOString();
     beginPendingSubmission({
@@ -834,6 +832,7 @@ export function SingleAgentSessionView({
       taskId: activeStreamTaskId,
       taskSlug: routeTaskSlug,
     });
+    setScrollToBottomSignal((value) => value + 1);
     activeTaskRunIdRef.current = null;
 
     editor.clearWithSnapshot();
@@ -862,10 +861,10 @@ export function SingleAgentSessionView({
     buildPromptPayload,
     isSending,
     clearUploadItems,
+    setScrollToBottomSignal,
     submitPrompt,
     resolvePendingSubmission,
     routeTaskSlug,
-    requestConversationScrollToBottom,
   ]);
 
   // User question handlers
@@ -876,7 +875,6 @@ export function SingleAgentSessionView({
       const { toolUseId } = pendingQuestions;
 
       try {
-        requestConversationScrollToBottom();
         // Store result immediately for real-time UI update
         setQuestionResult(toolUseId, answers);
 
@@ -899,13 +897,7 @@ export function SingleAgentSessionView({
         console.error("[handleQuestionAnswer] Failed to submit answer", error);
       }
     },
-    [
-      pendingQuestions,
-      taskRunId,
-      requestConversationScrollToBottom,
-      setQuestionResult,
-      setPendingQuestions,
-    ],
+    [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions],
   );
 
   const handleQuestionSkip = useCallback(async () => {
@@ -914,7 +906,6 @@ export function SingleAgentSessionView({
     const { toolUseId } = pendingQuestions;
 
     try {
-      requestConversationScrollToBottom();
       // Store skipped result
       setQuestionResult(toolUseId, { error: QUESTIONS_SKIPPED_MESSAGE });
 
@@ -935,13 +926,7 @@ export function SingleAgentSessionView({
     } catch (error) {
       console.error("[handleQuestionSkip] Failed to skip question", error);
     }
-  }, [
-    pendingQuestions,
-    taskRunId,
-    requestConversationScrollToBottom,
-    setQuestionResult,
-    setPendingQuestions,
-  ]);
+  }, [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions]);
 
   // Stream finished handler - called when task run completes
   const handleStreamFinished = useCallback(() => {
@@ -977,44 +962,6 @@ export function SingleAgentSessionView({
   // Find-in-conversation (Cmd/Ctrl+F), mirroring the file editor's find UX.
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
   const sessionRootRef = useRef<HTMLDivElement | null>(null);
-  const pendingConversationScrollRef = useRef<{
-    requestId: string;
-    key: string;
-    taskId: string | null;
-  } | null>(null);
-  const conversationScrollCacheKey = (() => {
-    if (pendingSubmission) {
-      const pendingScroll = pendingConversationScrollRef.current;
-      if (
-        !pendingScroll ||
-        pendingScroll.requestId !== pendingSubmission.requestId
-      ) {
-        const key =
-          pendingSubmission.tempTaskId ??
-          pendingSubmission.taskId ??
-          activeTaskId ??
-          `pending-${pendingSubmission.requestId}`;
-        pendingConversationScrollRef.current = {
-          requestId: pendingSubmission.requestId,
-          key,
-          taskId: pendingSubmission.taskId ?? activeTaskId,
-        };
-        return key;
-      }
-
-      if (pendingSubmission.taskId || activeTaskId) {
-        pendingScroll.taskId = pendingSubmission.taskId ?? activeTaskId;
-      }
-      return pendingScroll.key;
-    }
-
-    const pendingScroll = pendingConversationScrollRef.current;
-    if (activeTaskId && pendingScroll?.taskId === activeTaskId) {
-      return pendingScroll.key;
-    }
-
-    return activeTaskId ?? "session";
-  })();
   const find = useConversationFind({
     enabled: Boolean(activeTaskId || pendingSubmission),
     scrollContainerRef: conversationScrollRef,
@@ -1677,6 +1624,8 @@ export function SingleAgentSessionView({
 
   const sessionSidebarButtonClass =
     "text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
+  const conversationScrollKey =
+    activeTaskId ?? pendingSubmission?.tempTaskId ?? "session";
 
   // This ensures follow-up messages (which create new TaskRuns) are visible
   const conversationContent = (
@@ -1686,14 +1635,14 @@ export function SingleAgentSessionView({
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTaskId || pendingSubmission ? (
           <TaskConversation
-            key={conversationScrollCacheKey}
+            key={conversationScrollKey}
             entries={entries}
             isLoading={isConversationLoading}
             error={conversationError}
             messagesEndRef={messagesEndRef}
             scrollContainerRef={conversationScrollRef}
             searchActive={find.searchActive}
-            scrollCacheKey={conversationScrollCacheKey}
+            scrollCacheKey={conversationScrollKey}
             isStreaming={isConversationStreaming}
             scrollToBottomSignal={scrollToBottomSignal}
             onWikilinkClick={navigateToWikilink}
@@ -1741,11 +1690,21 @@ export function SingleAgentSessionView({
               commitsBehind={commitsBehind}
               onOpenDiffViewer={() => {
                 if (!taskRunId) return;
-                openLayoutTab({ type: "diff", runId: taskRunId });
+                openLayoutTab(
+                  { type: "diff", runId: taskRunId },
+                  { returnFocusOnClose: true },
+                );
               }}
               onRebase={() => setRebaseDialogOpen(true)}
               onMergeDiffs={handleMergeDiffs}
               onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
+              referenceTasksById={tasksById}
+              onOpenReferenceTask={(taskIdOrSlug) =>
+                navigateToSession(taskIdOrSlug, null)
+              }
+              onOpenReferenceFile={(path) =>
+                openFilePath(path, taskRunId ?? undefined)
+              }
               isSidebarCollapsed={sessionSidebarCollapsed}
               onOpenSidebar={() => toggleSessionSidebarCollapsed(false)}
               t={t}

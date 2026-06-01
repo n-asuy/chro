@@ -12,10 +12,12 @@
 //! the migrated layout. Ported from `apps/desktop/electron/migration.ts`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tracing::{info, warn};
+
+const USER_DATA_DIR_ENV: &str = "CHRO_USER_DATA_DIR";
 
 /// Drive every migration step in order. The function is best-effort: if a
 /// rename fails, we log and keep going so a single corrupt entry doesn't
@@ -146,7 +148,10 @@ fn flatten_nested_runtime_dir(nested_dir: &Path, root: &Path) -> Result<()> {
     // Remove the nested dir if it's empty so the layout fully flattens.
     if fs::read_dir(nested_dir)?.next().is_none() {
         if let Err(err) = fs::remove_dir(nested_dir) {
-            warn!("[migration] Failed to remove {}: {err}", nested_dir.display());
+            warn!(
+                "[migration] Failed to remove {}: {err}",
+                nested_dir.display()
+            );
         } else {
             info!("[migration] Removed empty {}", nested_dir.display());
         }
@@ -171,7 +176,20 @@ fn legacy_stamp() -> String {
 /// Windows: `%APPDATA%\chro\`
 ///
 /// Mirrors `configureSharedUserData` in `apps/desktop/electron/db.ts`.
-pub fn shared_user_data_dir() -> Result<std::path::PathBuf> {
+pub fn user_data_dir_overridden() -> bool {
+    std::env::var(USER_DATA_DIR_ENV)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub fn shared_user_data_dir() -> Result<PathBuf> {
+    if let Ok(value) = std::env::var(USER_DATA_DIR_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
     let base = if cfg!(target_os = "macos") {
         dirs::data_dir()
     } else if cfg!(target_os = "linux") {

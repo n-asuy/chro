@@ -416,7 +416,8 @@ fn normalize_optional_text(text: Option<String>) -> Option<String> {
 fn legacy_prompt_from_parts(title: &str, description: Option<&str>) -> Option<String> {
     let trimmed_title = title.trim();
 
-    if let Some(trimmed_description) = description.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(trimmed_description) = description.map(str::trim).filter(|value| !value.is_empty())
+    {
         if let Some((context_block, trailing)) = split_leading_context_block(trimmed_description) {
             if trailing.is_empty() {
                 if is_generated_session_title(trimmed_title) {
@@ -431,7 +432,10 @@ fn legacy_prompt_from_parts(title: &str, description: Option<&str>) -> Option<St
             if trimmed_title.is_empty() {
                 return Some(format!("{}\n{}", context_block, trailing));
             }
-            return Some(format!("{}\n{}\n{}", context_block, trimmed_title, trailing));
+            return Some(format!(
+                "{}\n{}\n{}",
+                context_block, trimmed_title, trailing
+            ));
         }
 
         if trimmed_title.is_empty() {

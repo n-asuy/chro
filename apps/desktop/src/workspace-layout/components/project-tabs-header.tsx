@@ -32,12 +32,10 @@ const isDarwin = (): boolean =>
 
 const OPEN_IN_APP_IDS = [
   "file-manager",
-  "vscode",
   "cursor",
   "zed",
   "terminal",
   "iterm2",
-  "ghostty",
   "powershell",
 ] as const;
 
@@ -99,12 +97,6 @@ const openInOptions = (): OpenInOption[] => {
   const fileManagerIcon = platform === "darwin" ? "finder" : "file-explorer";
   const editorOptions: OpenInOption[] = [
     {
-      id: "vscode",
-      label: "VS Code",
-      with: platform === "darwin" ? "Visual Studio Code" : "code",
-      icon: "vscode",
-    },
-    {
       id: "cursor",
       label: "Cursor",
       with: platform === "darwin" ? "Cursor" : "cursor",
@@ -124,7 +116,6 @@ const openInOptions = (): OpenInOption[] => {
       ...editorOptions,
       { id: "terminal", label: "Terminal", with: "Terminal", icon: "terminal" },
       { id: "iterm2", label: "iTerm2", with: "iTerm", icon: "iterm2" },
-      { id: "ghostty", label: "Ghostty", with: "Ghostty", icon: "ghostty" },
     ];
   }
 

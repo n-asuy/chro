@@ -115,6 +115,33 @@ export const listWorkspaceEntriesAtPath = async (
   return entries.map(toDesktopEntry);
 };
 
+/**
+ * List entries inside a task run's worktree (sandbox). Mirrors
+ * {@link listProjectEntries} but roots the listing at the run's worktree so
+ * the file tree can browse a session's sandbox rather than the project's main
+ * checkout. For "local" runs the server resolves this to the project checkout.
+ */
+export const listTaskRunEntries = async (
+  taskRunId: string,
+  options?: ListProjectEntriesOptions,
+): Promise<DesktopWorkspaceEntry[]> => {
+  const params = new URLSearchParams();
+  if (options?.relativePath) {
+    params.set("relative_path", options.relativePath);
+  }
+  if (options?.recursive) {
+    params.set("recursive", "true");
+  }
+  if (options?.detail) {
+    params.set("detail", options.detail);
+  }
+  const query = params.toString();
+  const { entries } = await desktopFetch<ProjectEntriesEnvelope>(
+    `/rpc/task-runs/${taskRunId}/entries${query ? `?${query}` : ""}`,
+  );
+  return entries.map(toDesktopEntry);
+};
+
 export const readProjectFile = async (
   projectId: string,
   relativePath: string,
@@ -370,10 +397,7 @@ const encodeRelativePathSegments = (relativePath: string): string =>
  */
 const base64UrlEncode = (input: string): string => {
   const utf8 = unescape(encodeURIComponent(input));
-  return btoa(utf8)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 };
 
 /**
@@ -502,4 +526,3 @@ export const revealInFinder = async (
     },
   );
 };
-

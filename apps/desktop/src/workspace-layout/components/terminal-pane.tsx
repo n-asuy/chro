@@ -404,6 +404,30 @@ const reapClosedSessions = (
   }
 };
 
+/**
+ * Whether a tab's existing session should adopt `resolvedProjectId` and restart
+ * its shell so it opens in that project's cwd.
+ *
+ * Fires for exactly one case: a shell we opened before the project UUID had
+ * resolved (`sessionProjectId === null`). Once the cwd is known we recycle it
+ * into the right directory.
+ *
+ * It must NOT fire when a session already belongs to a project and the resolved
+ * id merely changes to a *different* project. A tab lives in exactly one
+ * project's persisted layout, so that transition is never a real reparent — it
+ * is the transient `projectId` flip during a project switch: the still-mounted
+ * pane's effect re-runs with the incoming project's id (child effects run
+ * before LayoutShell's parent effect swaps the layout out). Restarting there
+ * would `kill` the live PTY and clear its stored id, destroying the previous
+ * project's terminal history before the pane even unmounts.
+ */
+export function shouldAdoptProject(
+  sessionProjectId: string | null,
+  resolvedProjectId: string | null,
+): boolean {
+  return resolvedProjectId !== null && sessionProjectId === null;
+}
+
 let layoutSubscribed = false;
 const ensureLayoutSubscription = () => {
   if (layoutSubscribed) return;
@@ -449,11 +473,12 @@ export function TerminalPane({ tabId }: TerminalPaneProps) {
       // session survives until the real id lands.
       session = createSession(tabId, projectId);
       sessions.set(tabId, session);
-    } else if (projectId && session.projectId !== projectId) {
-      // Project resolved (or changed) for an existing tab — recycle the
-      // session so the new shell starts in the right cwd. Guarded on a
-      // non-null projectId so a still-resolving context never tears down a
-      // working shell.
+    } else if (shouldAdoptProject(session.projectId, projectId)) {
+      // The cwd just resolved for a shell we opened before the project UUID
+      // was known — recycle it so the new shell starts in the right directory.
+      // Deliberately scoped to sessions with no project yet: a session that
+      // already belongs to a project must survive the transient projectId flip
+      // during a project switch, or switching projects would kill its live PTY.
       session.projectId = projectId;
       restartSession(session);
     }

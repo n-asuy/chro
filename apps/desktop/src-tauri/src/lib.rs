@@ -6,16 +6,16 @@ pub mod runtime;
 pub mod tray;
 pub mod windows;
 
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
-use tauri::{
-    AppHandle, Manager, RunEvent, Runtime as TauriRuntime, WebviewWindow, WindowEvent,
-};
+use tauri::{AppHandle, Manager, RunEvent, Runtime as TauriRuntime, WebviewWindow, WindowEvent};
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::runtime::server::{launch_runtime, LaunchOptions, ServerState};
-use crate::runtime::{migrate_legacy_user_data, shared_user_data_dir, WindowPool};
+use crate::runtime::{
+    migrate_legacy_user_data, shared_user_data_dir, user_data_dir_overridden, WindowPool,
+};
 use crate::windows::{create_renderer_window, RendererWindowOptions, WindowMode};
 
 pub fn run() {
@@ -23,7 +23,9 @@ pub fn run() {
 
     let user_data_dir = match shared_user_data_dir() {
         Ok(dir) => {
-            migrate_legacy_user_data(dir.parent().unwrap_or(&dir));
+            if !user_data_dir_overridden() {
+                migrate_legacy_user_data(dir.parent().unwrap_or(&dir));
+            }
             dir
         }
         Err(err) => {
@@ -32,9 +34,10 @@ pub fn run() {
         }
     };
 
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+
+    if !env_flag("CHRO_DISABLE_SINGLE_INSTANCE") {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             info!("[single-instance] received: {argv:?}");
             // Re-deliver any deep-link URLs that came in via argv to the
             // running instance so chro://... navigations don't get lost.
@@ -49,7 +52,11 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+
+    #[allow(unused_mut)]
+    let mut builder = builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -147,6 +154,17 @@ pub fn run() {
     });
 }
 
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 async fn bootstrap_runtime<R: TauriRuntime>(
     app: AppHandle<R>,
     runtime_dir: PathBuf,
@@ -193,9 +211,7 @@ async fn on_window_destroyed<R: TauriRuntime>(app: &AppHandle<R>, label: &str) {
         // Drop the runtime if nothing else references it AND no other windows
         // are open. The "any open window" guard matches the Electron behavior
         // where untracked `window.open()` children can still need the backend.
-        if !pool.runtime_in_use(&meta.runtime_id).await
-            && app.webview_windows().is_empty()
-        {
+        if !pool.runtime_in_use(&meta.runtime_id).await && app.webview_windows().is_empty() {
             let state = app.state::<ServerState>();
             if let Some(runtime) = state.registry.remove(&meta.runtime_id).await {
                 runtime.kill().await;
@@ -206,9 +222,8 @@ async fn on_window_destroyed<R: TauriRuntime>(app: &AppHandle<R>, label: &str) {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_env("CHRO_LOG").unwrap_or_else(|_| {
-        EnvFilter::new("info,chro_desktop_lib=debug,chro_server=info")
-    });
+    let filter = EnvFilter::try_from_env("CHRO_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info,chro_desktop_lib=debug,chro_server=info"));
     let _ = tracing_subscriber::registry()
         .with(fmt::layer().with_target(true))
         .with(filter)

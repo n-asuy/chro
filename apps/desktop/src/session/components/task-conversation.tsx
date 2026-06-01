@@ -1,12 +1,4 @@
-import { Button } from "@chro/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@chro/ui/tooltip";
-import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
   type MutableRefObject,
   type RefObject,
@@ -15,7 +7,6 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
-  useState,
 } from "react";
 import { ConversationEntries } from "../conversation-view";
 import type { DisplayEntry } from "../types";
@@ -90,10 +81,8 @@ export const TaskConversation = memo(function TaskConversation({
   const isInitializingScrollRef = useRef(false);
   const scrollInitializedRef = useRef(false);
   const prevScrollTopRef = useRef(0);
-  const pendingConversationAnchorAdjustRef = useRef(false);
   const observedScrollHeightRef = useRef(0);
   const resizeRafRef = useRef<number | null>(null);
-  const scrollAnimationFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -102,15 +91,12 @@ export const TaskConversation = memo(function TaskConversation({
         cancelAnimationFrame(resizeRafRef.current);
         resizeRafRef.current = null;
       }
-      if (scrollAnimationFrameRef.current !== null) {
-        cancelAnimationFrame(scrollAnimationFrameRef.current);
-        scrollAnimationFrameRef.current = null;
-      }
     };
   }, []);
 
   const saveScrollPosition = useCallback(() => {
     if (!scrollInitializedRef.current) return;
+
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -139,85 +125,19 @@ export const TaskConversation = memo(function TaskConversation({
     );
   }, [scrollContainerRef]);
 
-  const cancelAutoScroll = useCallback(() => {
-    shouldAutoScrollRef.current = false;
-    isAutoScrollingRef.current = false;
-    if (resizeRafRef.current !== null) {
-      cancelAnimationFrame(resizeRafRef.current);
-      resizeRafRef.current = null;
-    }
-    if (scrollAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(scrollAnimationFrameRef.current);
-      scrollAnimationFrameRef.current = null;
-    }
-  }, []);
-
   const jumpToBottom = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
     isAutoScrollingRef.current = true;
+    shouldAutoScrollRef.current = true;
     container.scrollTop = container.scrollHeight;
     prevScrollTopRef.current = container.scrollTop;
     observedScrollHeightRef.current = container.scrollHeight;
+
     requestAnimationFrame(() => {
       isAutoScrollingRef.current = false;
     });
-  }, [scrollContainerRef]);
-
-  const scrollToBottom = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    if (scrollAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(scrollAnimationFrameRef.current);
-      scrollAnimationFrameRef.current = null;
-    }
-
-    isAutoScrollingRef.current = true;
-    shouldAutoScrollRef.current = true;
-
-    const start = container.scrollTop;
-    const duration = 300;
-    const startTime = performance.now();
-    const easeInOutCubic = (t: number) =>
-      t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
-
-    const animateScroll = (currentTime: number) => {
-      const elapsed = currentTime - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const easedProgress = easeInOutCubic(progress);
-      const end = container.scrollHeight - container.clientHeight;
-
-      container.scrollTop = start + (end - start) * easedProgress;
-      prevScrollTopRef.current = container.scrollTop;
-
-      if (progress < 1) {
-        scrollAnimationFrameRef.current = requestAnimationFrame(animateScroll);
-        return;
-      }
-
-      container.scrollTop = container.scrollHeight;
-      prevScrollTopRef.current = container.scrollTop;
-      observedScrollHeightRef.current = container.scrollHeight;
-      isAutoScrollingRef.current = false;
-      scrollAnimationFrameRef.current = null;
-    };
-
-    scrollAnimationFrameRef.current = requestAnimationFrame(animateScroll);
-  }, [scrollContainerRef]);
-
-  const handleConversationAnchorWillAdjust = useCallback(() => {
-    pendingConversationAnchorAdjustRef.current = true;
-  }, []);
-
-  const handleConversationAnchorAdjusted = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (container) {
-      observedScrollHeightRef.current = container.scrollHeight;
-      prevScrollTopRef.current = container.scrollTop;
-    }
-    pendingConversationAnchorAdjustRef.current = false;
   }, [scrollContainerRef]);
 
   useLayoutEffect(() => {
@@ -226,7 +146,6 @@ export const TaskConversation = memo(function TaskConversation({
 
     scrollInitializedRef.current = false;
     isInitializingScrollRef.current = true;
-    pendingConversationAnchorAdjustRef.current = false;
 
     const savedPosition =
       conversationScrollPositionCache.get(scrollCacheKey) ?? null;
@@ -246,18 +165,15 @@ export const TaskConversation = memo(function TaskConversation({
     isInitializingScrollRef.current = false;
 
     const contentWrapper = contentWrapperRef.current;
-    let lastContentHeight = contentWrapper?.getBoundingClientRect().height ?? 0;
+    if (!contentWrapper || typeof ResizeObserver === "undefined") return;
+
+    let lastContentHeight = contentWrapper.getBoundingClientRect().height;
+    let prevScrollHeight = container.scrollHeight;
 
     const resizeObserver = new ResizeObserver(() => {
-      const nextContentHeight =
-        contentWrapper?.getBoundingClientRect().height ?? 0;
+      const nextContentHeight = contentWrapper.getBoundingClientRect().height;
       if (nextContentHeight === lastContentHeight) return;
       lastContentHeight = nextContentHeight;
-
-      if (pendingConversationAnchorAdjustRef.current) {
-        observedScrollHeightRef.current = container.scrollHeight;
-        return;
-      }
 
       if (shouldAutoScrollRef.current) {
         if (resizeRafRef.current !== null) {
@@ -265,24 +181,30 @@ export const TaskConversation = memo(function TaskConversation({
         }
         resizeRafRef.current = requestAnimationFrame(() => {
           resizeRafRef.current = null;
-          if (!shouldAutoScrollRef.current) {
-            observedScrollHeightRef.current = container.scrollHeight;
-            return;
-          }
           jumpToBottom();
+          prevScrollHeight = container.scrollHeight;
         });
         return;
       }
 
+      const nextScrollHeight = container.scrollHeight;
+      if (nextScrollHeight !== prevScrollHeight && prevScrollHeight > 0) {
+        const delta = nextScrollHeight - prevScrollHeight;
+        container.scrollTop += delta;
+        prevScrollTopRef.current = container.scrollTop;
+      }
+      prevScrollHeight = container.scrollHeight;
       observedScrollHeightRef.current = container.scrollHeight;
     });
 
-    if (contentWrapper) {
-      resizeObserver.observe(contentWrapper);
-    }
+    resizeObserver.observe(contentWrapper);
 
     return () => {
       resizeObserver.disconnect();
+      if (resizeRafRef.current !== null) {
+        cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
     };
   }, [jumpToBottom, scrollCacheKey, scrollContainerRef]);
 
@@ -297,14 +219,14 @@ export const TaskConversation = memo(function TaskConversation({
     if (isInitializingScrollRef.current) return;
 
     if (currentScrollTop < prevScrollTop) {
-      cancelAutoScroll();
+      shouldAutoScrollRef.current = false;
       return;
     }
 
     if (isAutoScrollingRef.current) return;
 
     shouldAutoScrollRef.current = isAtBottom();
-  }, [cancelAutoScroll, isAtBottom, scrollContainerRef]);
+  }, [isAtBottom, scrollContainerRef]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -317,40 +239,19 @@ export const TaskConversation = memo(function TaskConversation({
   }, [handleScroll, scrollContainerRef]);
 
   useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) {
-        cancelAutoScroll();
-      }
-    };
-
-    container.addEventListener("wheel", handleWheel, { passive: true });
-    return () => {
-      container.removeEventListener("wheel", handleWheel);
-    };
-  }, [cancelAutoScroll, scrollContainerRef]);
-
-  useEffect(() => {
     if (!scrollInitializedRef.current) return;
     if (!isStreaming) return;
     if (!shouldAutoScrollRef.current) return;
 
-    const animationFrameId = requestAnimationFrame(() => {
-      if (!shouldAutoScrollRef.current) return;
+    requestAnimationFrame(() => {
       jumpToBottom();
     });
-
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-    };
-  }, [entries, isStreaming, jumpToBottom, scrollCacheKey]);
+  }, [entries, isStreaming, jumpToBottom]);
 
   useEffect(() => {
     if (scrollToBottomSignal <= 0) return;
-    scrollToBottom();
-  }, [scrollToBottom, scrollToBottomSignal]);
+    jumpToBottom();
+  }, [jumpToBottom, scrollToBottomSignal]);
 
   const activateSelectScope = useCallback(() => {
     activateSessionSelectScope(scrollContainerRef.current);
@@ -439,119 +340,21 @@ export const TaskConversation = memo(function TaskConversation({
         onFilePathClick={onFilePathClick}
         scrollContainerRef={scrollContainerRef}
         searchActive={searchActive}
-        onScrollAnchorWillAdjust={handleConversationAnchorWillAdjust}
-        onScrollAnchorAdjusted={handleConversationAnchorAdjusted}
       />
     );
 
   return (
-    <div className="relative flex min-h-0 flex-1">
-      <div
-        ref={scrollContainerRef}
-        {...{ [SESSION_SELECT_SCOPE_ATTR]: "true" }}
-        className="show-scrollbar flex-1 overflow-y-auto px-6 py-5"
-        style={{ contain: "strict", overflowAnchor: "none" }}
-        onFocusCapture={activateSelectScope}
-        onPointerDownCapture={activateSelectScope}
-      >
-        <div ref={contentWrapperRef} className="min-h-full">
-          {conversationContent}
-        </div>
+    <div
+      ref={scrollContainerRef}
+      {...{ [SESSION_SELECT_SCOPE_ATTR]: "true" }}
+      className="show-scrollbar flex-1 overflow-y-auto px-6 py-5"
+      style={{ contain: "strict" }}
+      onFocusCapture={activateSelectScope}
+      onPointerDownCapture={activateSelectScope}
+    >
+      <div ref={contentWrapperRef} className="min-h-full">
+        {conversationContent}
       </div>
-      <ScrollToBottomButton
-        containerRef={scrollContainerRef}
-        onScrollToBottom={scrollToBottom}
-        scrollCacheKey={scrollCacheKey}
-      />
     </div>
-  );
-});
-
-const ScrollToBottomButton = memo(function ScrollToBottomButton({
-  containerRef,
-  onScrollToBottom,
-  scrollCacheKey,
-}: {
-  containerRef: MutableRefObject<HTMLDivElement | null>;
-  onScrollToBottom: () => void;
-  scrollCacheKey: string;
-}) {
-  const [isVisible, setIsVisible] = useState(false);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    let rafId: number | null = null;
-    let lastAtBottom: boolean | null = null;
-
-    const setVisibilityFromScroll = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        const atBottom =
-          container.scrollHeight -
-            container.scrollTop -
-            container.clientHeight <=
-          SCROLL_BOTTOM_THRESHOLD;
-        if (lastAtBottom !== atBottom) {
-          lastAtBottom = atBottom;
-          setIsVisible(!atBottom);
-        }
-      });
-    };
-
-    const timeoutId = window.setTimeout(() => {
-      const atBottom =
-        container.scrollHeight - container.scrollTop - container.clientHeight <=
-        SCROLL_BOTTOM_THRESHOLD;
-      lastAtBottom = atBottom;
-      setIsVisible(!atBottom);
-    }, 50);
-
-    container.addEventListener("scroll", setVisibilityFromScroll, {
-      passive: true,
-    });
-    return () => {
-      window.clearTimeout(timeoutId);
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
-      container.removeEventListener("scroll", setVisibilityFromScroll);
-    };
-  }, [containerRef, scrollCacheKey]);
-
-  return (
-    <AnimatePresence>
-      {isVisible && (
-        <TooltipProvider delayDuration={300}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <motion.div
-                initial={{ opacity: 0, scale: 0.96, y: 8 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.96, y: 8 }}
-                transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
-                className="absolute bottom-3 right-4 z-20"
-              >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={onScrollToBottom}
-                  aria-label="Scroll to bottom"
-                  className="h-9 w-9 rounded-full border-border bg-background shadow-md hover:bg-accent"
-                >
-                  <ArrowDown className="h-4 w-4 text-muted-foreground" />
-                </Button>
-              </motion.div>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="text-[11px]">
-              Scroll to bottom
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      )}
-    </AnimatePresence>
   );
 });

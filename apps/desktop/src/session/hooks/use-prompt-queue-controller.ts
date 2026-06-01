@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ContextRefPayload } from "../types/context";
 import type { PreparedPromptPayload } from "./use-single-session-controller";
 
 const PENDING_QUEUE_KEY = "__pending__";
@@ -28,6 +29,7 @@ type SubmitPrompt = (
 export type QueuedPromptItem = {
   id: string;
   prompt: string;
+  contextRefs: ContextRefPayload[];
   imageIds: string[] | null;
   selectedSkillIds: string[];
   createdAt: number;
@@ -210,6 +212,7 @@ export function usePromptQueueController({
       const isSent = await submitPrompt(
         {
           prompt: queuedItem.prompt,
+          contextRefs: queuedItem.contextRefs,
           imageIds: queuedItem.imageIds,
           selectedSkillIds: queuedItem.selectedSkillIds,
         },
@@ -304,6 +307,7 @@ export function usePromptQueueController({
         const isSent = await submitPrompt(
           {
             prompt: queuedItem.prompt,
+            contextRefs: queuedItem.contextRefs,
             imageIds: queuedItem.imageIds,
             selectedSkillIds: queuedItem.selectedSkillIds,
           },

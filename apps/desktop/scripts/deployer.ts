@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  cpSync,
   Dirent,
   existsSync,
   mkdirSync,
@@ -10,6 +11,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -588,10 +590,9 @@ function tauriBuildEnv(skipSigning: boolean): NodeJS.ProcessEnv | undefined {
     return undefined;
   }
   // `--skip-sign` only disables Apple code signing/notarization. Updater
-  // artifact signing is independent: with `createUpdaterArtifacts` + a configured
-  // `pubkey`, Tauri still requires `TAURI_SIGNING_PRIVATE_KEY`, so we must NOT
-  // clear it here — doing so breaks both local nosign builds and the CI Windows
-  // job (Apple-unsigned, but still signs its updater bundle via the secret key).
+  // artifact signing is independent and is disabled by runTauriBuild for local
+  // unsigned builds, so leave TAURI_SIGNING_PRIVATE_KEY untouched for CI builds
+  // that still provide it.
   return {
     APPLE_CERTIFICATE: undefined,
     APPLE_CERTIFICATE_PASSWORD: undefined,
@@ -603,37 +604,150 @@ function tauriBuildEnv(skipSigning: boolean): NodeJS.ProcessEnv | undefined {
   };
 }
 
-function runTauriBuild(context: TauriBuildContext, skipSigning: boolean) {
-  // The updater bundle (.app.tar.gz / .zip) is signed with TAURI_SIGNING_PRIVATE_KEY.
-  // --skip-sign clears that key, so producing the updater artifact would fail with
-  // "public key found, but no private key". Local unsigned builds don't need the
-  // updater feed, so drop it and keep just the installable bundles.
-  const bundles = skipSigning
-    ? context.bundles.filter((bundle) => bundle !== "updater")
-    : context.bundles;
-  const tauriArgs = [
-    "tauri",
-    "build",
-    "--target",
-    context.triple,
-    "--bundles",
-    bundles.join(","),
-  ];
-  runCommand("bunx", tauriArgs, {
-    cwd: desktopProjectDir,
-    env: tauriBuildEnv(skipSigning),
-  });
-}
-
-function collectBundleArtifacts(context: TauriBuildContext): string[] {
-  // Tauri 2 writes outputs to <crate>/target/<triple>/release/bundle/<format>/.
-  const bundleRoot = path.join(
+function bundleRootForContext(context: TauriBuildContext): string {
+  return path.join(
     srcTauriDir,
     "target",
     context.triple,
     "release",
     "bundle",
   );
+}
+
+function cleanBundleArtifacts(context: TauriBuildContext) {
+  rmSync(bundleRootForContext(context), { recursive: true, force: true });
+}
+
+function withUnsignedTauriConfig<T>(skipSigning: boolean, run: () => T): T {
+  if (!skipSigning) {
+    return run();
+  }
+
+  const originalConfig = readFileSync(tauriConfPath, "utf8");
+  const conf = JSON.parse(originalConfig) as Record<string, unknown>;
+  const bundle =
+    typeof conf.bundle === "object" && conf.bundle !== null
+      ? { ...(conf.bundle as Record<string, unknown>) }
+      : {};
+
+  conf.bundle = {
+    ...bundle,
+    createUpdaterArtifacts: false,
+  };
+  writeFileSync(tauriConfPath, `${JSON.stringify(conf, null, 2)}\n`, "utf8");
+
+  try {
+    return run();
+  } finally {
+    writeFileSync(tauriConfPath, originalConfig, "utf8");
+  }
+}
+
+function runTauriBuild(
+  context: TauriBuildContext,
+  packageInfo: PackageInfo,
+  skipSigning: boolean,
+) {
+  // The updater bundle (.app.tar.gz / .zip) is signed with
+  // TAURI_SIGNING_PRIVATE_KEY. Local unsigned builds don't need the updater feed,
+  // so keep only installable bundles and temporarily disable updater artifacts.
+  const unsignedMacBuild =
+    skipSigning && context.triple.includes("apple-darwin");
+  const bundles = skipSigning
+    ? context.bundles.filter((bundle) => bundle !== "updater")
+    : context.bundles;
+  const tauriBundles = unsignedMacBuild
+    ? bundles.filter((bundle) => bundle !== "dmg")
+    : bundles;
+  const tauriArgs = [
+    "tauri",
+    "build",
+    "--target",
+    context.triple,
+    "--bundles",
+    tauriBundles.join(","),
+  ];
+  withUnsignedTauriConfig(skipSigning, () => {
+    runCommand("bunx", tauriArgs, {
+      cwd: desktopProjectDir,
+      env: tauriBuildEnv(skipSigning),
+    });
+  });
+
+  if (unsignedMacBuild && bundles.includes("dmg")) {
+    createUnsignedMacDmg(context, packageInfo);
+  }
+}
+
+function createUnsignedMacDmg(
+  context: TauriBuildContext,
+  packageInfo: PackageInfo,
+) {
+  const bundleRoot = bundleRootForContext(context);
+  const appPath = path.join(
+    bundleRoot,
+    "macos",
+    `${packageInfo.productName}.app`,
+  );
+  if (!existsSync(appPath)) {
+    throw new Error(
+      `Expected macOS app bundle at ${relativeToRepo(appPath)}, but it was not found.`,
+    );
+  }
+
+  const dmgDir = path.join(bundleRoot, "dmg");
+  const stageDir = path.join(dmgDir, "unsigned-stage");
+  const dmgPath = path.join(
+    dmgDir,
+    `${packageInfo.productName}_${packageInfo.version}_${macDmgArchSuffix(
+      context.triple,
+    )}.dmg`,
+  );
+  const volumeName = path.basename(dmgPath, ".dmg");
+
+  rmSync(stageDir, { recursive: true, force: true });
+  rmSync(dmgPath, { force: true });
+  mkdirSync(stageDir, { recursive: true });
+
+  cpSync(appPath, path.join(stageDir, path.basename(appPath)), {
+    recursive: true,
+  });
+  symlinkSync("/Applications", path.join(stageDir, "Applications"));
+
+  try {
+    runCommand(
+      "hdiutil",
+      [
+        "create",
+        "-volname",
+        volumeName,
+        "-srcfolder",
+        stageDir,
+        "-ov",
+        "-format",
+        "UDZO",
+        dmgPath,
+      ],
+      { cwd: repoRoot },
+    );
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+}
+
+function macDmgArchSuffix(triple: string): string {
+  if (triple === "aarch64-apple-darwin") {
+    return "aarch64";
+  }
+  if (triple === "x86_64-apple-darwin") {
+    return "x64";
+  }
+  return triple;
+}
+
+function collectBundleArtifacts(context: TauriBuildContext): string[] {
+  // Tauri 2 writes outputs to <crate>/target/<triple>/release/bundle/<format>/.
+  const bundleRoot = bundleRootForContext(context);
   if (!existsSync(bundleRoot)) {
     return [];
   }
@@ -657,7 +771,7 @@ function collectBundleArtifacts(context: TauriBuildContext): string[] {
 
 function packageDesktop(
   builderArgs: string[],
-  version: string,
+  packageInfo: PackageInfo,
   options: { skipSigning: boolean },
 ) {
   // Build the renderer once; Tauri's beforeBuildCommand also calls this but
@@ -665,7 +779,11 @@ function packageDesktop(
   runCommand("bun", ["run", "build:vite"], { cwd: desktopProjectDir });
 
   const contexts = detectBuildContexts(builderArgs);
-  const releaseDir = path.join(desktopProjectDir, "release", version);
+  const releaseDir = path.join(
+    desktopProjectDir,
+    "release",
+    packageInfo.version,
+  );
   if (existsSync(releaseDir)) {
     rmSync(releaseDir, { recursive: true, force: true });
   }
@@ -680,7 +798,8 @@ function packageDesktop(
 
   for (const ctx of contexts) {
     buildAndStageRustBinary(ctx);
-    runTauriBuild(ctx, options.skipSigning);
+    cleanBundleArtifacts(ctx);
+    runTauriBuild(ctx, packageInfo, options.skipSigning);
 
     const artifacts = collectBundleArtifacts(ctx);
     if (artifacts.length === 0) {
@@ -802,9 +921,10 @@ function packageProject(
   _config: ProjectConfig,
   builderArgs: string[],
   version: string,
+  packageInfo: PackageInfo,
   options: { skipSigning: boolean },
 ) {
-  packageDesktop(builderArgs, version, options);
+  packageDesktop(builderArgs, { ...packageInfo, version }, options);
 }
 
 function createGitTag(tagName: string, message: string | null) {
@@ -1048,7 +1168,7 @@ function main(options: Options) {
         ? targetVersion
         : info.version;
     console.log(`Packaging ${info.name} (${versionForPackaging})…`);
-    packageProject(config, builderArgs, versionForPackaging, {
+    packageProject(config, builderArgs, versionForPackaging, info, {
       skipSigning: options.skipSigning,
     });
   });

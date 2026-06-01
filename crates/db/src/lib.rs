@@ -222,7 +222,7 @@ mod tests {
 
         // Verify schema version
         let version = db.schema_version().await.unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[tokio::test]

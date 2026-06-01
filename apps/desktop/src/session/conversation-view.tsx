@@ -1,9 +1,17 @@
 import { type TranslationFunction, useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@chro/ui/tooltip";
+import {
+  Check,
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  Copy,
   Edit,
   Eye,
   FileText,
@@ -51,11 +59,17 @@ const COLLAPSED_HEIGHT = 192; // 12rem = 48 * 4px
 interface ExpandableUserMessageProps {
   children: ReactNode;
   dataUserMessageId: string;
+  /**
+   * Hover-revealed actions (timestamp + copy) rendered below the bubble,
+   * outside the collapsible region so they stay reachable for long messages.
+   */
+  footer?: ReactNode;
 }
 
 const ExpandableUserMessage = ({
   children,
   dataUserMessageId,
+  footer,
 }: ExpandableUserMessageProps) => {
   const [expanded, setExpanded] = useState(false);
   const [needsExpansion, setNeedsExpansion] = useState(false);
@@ -81,7 +95,7 @@ const ExpandableUserMessage = ({
       data-user-message-id={dataUserMessageId}
       className="sticky -top-5 z-10 w-full bg-background pt-5"
     >
-      <div className="mx-auto w-full max-w-2xl">
+      <div className="group/message mx-auto w-full max-w-2xl">
         <div
           ref={contentRef}
           className={cn(
@@ -118,7 +132,100 @@ const ExpandableUserMessage = ({
             <ChevronDown className="h-4 w-4 rotate-180" />
           </button>
         )}
+        {footer}
       </div>
+    </div>
+  );
+};
+
+const formatMessageTime = (timestamp?: string | null): string | null => {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
+/** Resolve the text a copy button should place on the clipboard for a user
+ * message: the human-readable prompt with internal context markup stripped. */
+const resolveUserCopyText = (content: string): string => {
+  const { text } = parseContextFromContent(content);
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed : content;
+};
+
+interface MessageActionsProps {
+  /** Exact text the copy button writes to the clipboard. */
+  copyText: string;
+  /** ISO timestamp; rendered as a clock time when present, hidden otherwise. */
+  timestamp?: string | null;
+  /** Horizontal alignment within the message column. */
+  align?: "start" | "end";
+}
+
+/**
+ * Hover-revealed metadata row shown below a chat message: the time it was sent
+ * plus a copy button. The row reserves its own height and only fades in on
+ * hover (responding to a `group/message` ancestor), so revealing it never
+ * shifts the conversation. Reused for both user and assistant messages.
+ */
+const MessageActions = ({
+  copyText,
+  timestamp,
+  align = "end",
+}: MessageActionsProps) => {
+  const { t } = useLanguage();
+  const [copied, setCopied] = useState(false);
+  const time = formatMessageTime(timestamp);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+    } catch (error) {
+      console.warn("[message-actions] copy failed", error);
+    }
+  }, [copyText]);
+
+  const copyLabel = copied ? t("copied") : t("copyMessage");
+
+  return (
+    <div
+      className={cn(
+        "flex h-6 items-center gap-2 px-1 text-muted-foreground opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/message:opacity-100",
+        align === "end" ? "justify-end" : "justify-start",
+      )}
+    >
+      {time && (
+        <span className="text-[11px] leading-none tabular-nums">{time}</span>
+      )}
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={handleCopy}
+              aria-label={copyLabel}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-custom-sidebar-background-80 hover:text-foreground"
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">{copyLabel}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </div>
   );
 };
@@ -836,9 +943,6 @@ const getEntryWrapperClasses = (entry: NormalizedEntry) => {
       return `${base} text-muted-foreground`;
     case "tool_use":
       return `${base}`;
-    case "execution_summary":
-      // Compact, like the model-info row: the footer carries its own padding.
-      return "px-4 pb-1";
     default:
       return `${base}`;
   }
@@ -1436,63 +1540,6 @@ const UserMessageContent = ({ content }: { content: string }) => {
   );
 };
 
-// Format an elapsed duration for compact status labels:
-// sub-second as `ms`, under a minute as `Ns`, otherwise `Nm Ns`.
-const formatDuration = (ms: number): string => {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  const seconds = ms / 1000;
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)}s`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.round(seconds % 60);
-  return `${minutes}m ${remainingSeconds}s`;
-};
-
-// Format an ISO timestamp as a short wall-clock time (e.g. "10:42 AM").
-// Returns null when the timestamp is missing or unparseable.
-const formatClockTime = (timestamp?: string | null): string | null => {
-  if (!timestamp) return null;
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-};
-
-// End-of-turn footer: "10:42 AM · 4.3s · 1 turn", mid-dot separated.
-// Each segment is optional; the footer renders nothing if all are absent.
-const ExecutionSummaryFooter = ({
-  timestamp,
-  durationMs,
-  numTurns,
-}: {
-  timestamp?: string | null;
-  durationMs?: number | null;
-  numTurns?: number | null;
-}) => {
-  const segments: string[] = [];
-
-  const clock = formatClockTime(timestamp);
-  if (clock) segments.push(clock);
-
-  if (typeof durationMs === "number" && durationMs > 0) {
-    segments.push(formatDuration(durationMs));
-  }
-
-  if (typeof numTurns === "number" && numTurns > 0) {
-    segments.push(`${numTurns} ${numTurns === 1 ? "turn" : "turns"}`);
-  }
-
-  if (segments.length === 0) return null;
-
-  return (
-    <div className="flex items-center text-[11px] text-muted-foreground/60">
-      <span className="font-mono">{segments.join(" · ")}</span>
-    </div>
-  );
-};
-
 const renderEntryBody = (
   entry: NormalizedEntry,
   translate: ReturnType<typeof useLanguage>["t"],
@@ -1558,14 +1605,6 @@ const renderEntryBody = (
             </TextShimmer>
           </BrailleSpinner>
         </div>
-      );
-    case "execution_summary":
-      return (
-        <ExecutionSummaryFooter
-          timestamp={entry.timestamp}
-          durationMs={entry.entry_type.duration_ms}
-          numTurns={entry.entry_type.num_turns}
-        />
       );
     default:
       return (
@@ -1909,34 +1948,67 @@ interface GroupProps {
 }
 
 const Group = memo(
-  ({ group, t, onWikilinkClick, onFilePathClick }: GroupProps) => (
-    <div className="relative">
-      {group.userEntry && (
-        <ExpandableUserMessage dataUserMessageId={group.key}>
-          <EntryRenderer
-            displayEntry={group.userEntry}
-            t={t}
-            onWikilinkClick={onWikilinkClick}
-            onFilePathClick={onFilePathClick}
-          />
-        </ExpandableUserMessage>
-      )}
-      {group.followingEntries.map((displayEntry) =>
-        displayEntry ? (
-          <div key={displayEntry.key} className="mx-auto w-full max-w-2xl">
-            <div className="pb-2">
-              <EntryRenderer
-                displayEntry={displayEntry}
-                t={t}
-                onWikilinkClick={onWikilinkClick}
-                onFilePathClick={onFilePathClick}
-              />
+  ({ group, t, onWikilinkClick, onFilePathClick }: GroupProps) => {
+    const userMessage =
+      group.userEntry?.type === "NORMALIZED_ENTRY"
+        ? group.userEntry.content
+        : null;
+    const turnTimestamp = userMessage?.timestamp ?? null;
+    // Only the final assistant message of a turn carries the actions row, so
+    // intermediate replies (between tool calls) stay clean.
+    let lastAssistantKey: string | null = null;
+    for (let i = group.followingEntries.length - 1; i >= 0; i--) {
+      const candidate = group.followingEntries[i];
+      if (
+        candidate?.type === "NORMALIZED_ENTRY" &&
+        candidate.content.entry_type.type === "assistant_message"
+      ) {
+        lastAssistantKey = candidate.key;
+        break;
+      }
+    }
+    return (
+      <div className="relative">
+        {group.userEntry && (
+          <ExpandableUserMessage
+            dataUserMessageId={group.key}
+            footer={
+              userMessage ? (
+                <MessageActions
+                  copyText={resolveUserCopyText(userMessage.content)}
+                  timestamp={userMessage.timestamp}
+                  align="start"
+                />
+              ) : null
+            }
+          >
+            <EntryRenderer
+              displayEntry={group.userEntry}
+              t={t}
+              onWikilinkClick={onWikilinkClick}
+              onFilePathClick={onFilePathClick}
+            />
+          </ExpandableUserMessage>
+        )}
+        {group.followingEntries.map((displayEntry) =>
+          displayEntry ? (
+            <div key={displayEntry.key} className="mx-auto w-full max-w-2xl">
+              <div className="pb-2">
+                <EntryRenderer
+                  displayEntry={displayEntry}
+                  t={t}
+                  onWikilinkClick={onWikilinkClick}
+                  onFilePathClick={onFilePathClick}
+                  messageTimestamp={turnTimestamp}
+                  showActions={displayEntry.key === lastAssistantKey}
+                />
+              </div>
             </div>
-          </div>
-        ) : null,
-      )}
-    </div>
-  ),
+          ) : null,
+        )}
+      </div>
+    );
+  },
   (prev, next) =>
     prev.group === next.group &&
     prev.t === next.t &&
@@ -1987,6 +2059,17 @@ interface EntryRendererProps {
   t: TranslationFunction;
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
+  /**
+   * Fallback timestamp for assistant messages, taken from the turn's user
+   * message (run creation time). The backend does not stamp individual
+   * entries, so this is the closest available time for the exchange.
+   */
+  messageTimestamp?: string | null;
+  /**
+   * Whether this entry should render the hover actions row. Set only for the
+   * final assistant message of a turn so intermediate replies stay clean.
+   */
+  showActions?: boolean;
 }
 
 const EntryRenderer = memo(
@@ -1995,6 +2078,8 @@ const EntryRenderer = memo(
     t,
     onWikilinkClick,
     onFilePathClick,
+    messageTimestamp,
+    showActions,
   }: EntryRendererProps) => {
     if (displayEntry.type === "AGGREGATED_THINKING_GROUP") {
       return <CollapsedThinkingGroup group={displayEntry} />;
@@ -2034,15 +2119,29 @@ const EntryRenderer = memo(
       return null;
     }
     const isTool = entry.entry_type.type === "tool_use";
+    const isAssistant = entry.entry_type.type === "assistant_message";
+    const showAssistantActions = isAssistant && Boolean(showActions);
 
     return (
-      <div className={getEntryWrapperClasses(entry)}>
+      <div
+        className={cn(
+          getEntryWrapperClasses(entry),
+          showAssistantActions && "group/message",
+        )}
+      >
         {isTool ? (
           <ToolCallEntry entry={entry} onFilePathClick={onFilePathClick} />
         ) : (
           <div className="flex items-start gap-3">
             <div className="flex-1 space-y-2">
               {renderEntryBody(entry, t, onWikilinkClick, onFilePathClick)}
+              {showAssistantActions && (
+                <MessageActions
+                  copyText={entry.content}
+                  timestamp={entry.timestamp ?? messageTimestamp}
+                  align="start"
+                />
+              )}
             </div>
           </div>
         )}

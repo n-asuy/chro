@@ -441,6 +441,8 @@ const en = {
   authCodexDescription: "Sign in to OpenAI to use Codex.",
   authDetectedVersion: "Detected version: {version}",
   authNotSignedIn: "Not signed in",
+  copyMessage: "Copy",
+  copied: "Copied",
 } satisfies TranslationDictionary;
 
 export default en;

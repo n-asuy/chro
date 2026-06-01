@@ -5,6 +5,7 @@ import { recordPerfEvent, startPerfTimer } from "@/perf/recorder";
 import { useCallback } from "react";
 import type { PromptEditorHandle } from "../state/prompt-editor-store";
 import type { StartClaudeResponse } from "../types";
+import type { ContextRefPayload } from "../types/context";
 import { sendTaskMessage } from "../utils/task-message-api";
 
 type MutableRef<T> = {
@@ -15,6 +16,7 @@ type SetState<T> = (value: T | ((prev: T) => T)) => void;
 
 export type PreparedPromptPayload = {
   prompt: string;
+  contextRefs: ContextRefPayload[];
   imageIds: string[] | null;
   selectedSkillIds: string[];
 };
@@ -104,6 +106,7 @@ export function useSingleSessionController({
               requestId,
               executorProfileId: executorProfilePayload,
               imageIds: payload.imageIds,
+              contextRefs: payload.contextRefs,
               selectedSkillIds: payload.selectedSkillIds,
               useWorktree,
               targetBranch: baseBranch,
@@ -122,6 +125,7 @@ export function useSingleSessionController({
                 use_worktree: useWorktree,
                 executor_profile_id: executorProfilePayload ?? undefined,
                 image_ids: payload.imageIds ?? undefined,
+                context_refs: payload.contextRefs,
                 selected_skill_ids: payload.selectedSkillIds,
                 target_branch: baseBranch ?? undefined,
               }),

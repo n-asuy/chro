@@ -18,7 +18,7 @@ export interface FileAttachmentPart extends PartBase {
 /**
  * Past chro session attachment. The runtime never copies a file or inlines
  * markdown; the rendered prompt carries a self-describing tag and the agent
- * fetches the transcript on demand via `chro task transcript <task_id>`.
+ * fetches the transcript on demand via `chro task logs <task_id>`.
  */
 export interface SessionAttachmentPart extends PartBase {
   type: "session";
@@ -65,6 +65,20 @@ export interface SessionContextEntry {
 
 export type ContextEntry = FileContextEntry | SessionContextEntry;
 
+export type ContextRefPayload =
+  | {
+      kind: "file" | "directory";
+      path: string;
+      branch?: string | null;
+      mode?: "link";
+    }
+  | {
+      kind: "session";
+      task_id: string;
+      branch?: string | null;
+      mode?: "transcript";
+    };
+
 export interface SkillEntry {
   id: string;
   name: string;
@@ -95,6 +109,27 @@ export function formatContextForPrompt(entries: ContextEntry[]): string {
     )
     .join("\n");
   return `<context>\n${tags}\n</context>`;
+}
+
+export function contextEntriesToRefs(
+  entries: ContextEntry[],
+): ContextRefPayload[] {
+  return entries.map((entry) => {
+    if (entry.kind === "file") {
+      return {
+        kind: entry.isFile ? "file" : "directory",
+        path: entry.path,
+        ...(entry.branch ? { branch: entry.branch } : {}),
+        mode: "link",
+      };
+    }
+    return {
+      kind: "session",
+      task_id: entry.taskId,
+      ...(entry.branch ? { branch: entry.branch } : {}),
+      mode: "transcript",
+    };
+  });
 }
 
 export function formatSkillContextForPrompt(entries: SkillEntry[]): string {

@@ -6,7 +6,8 @@ use std::{
 use chrono::Utc;
 use db::{
     models::{
-        AgentProfile, ProjectRecord, TaskMerge, TaskRecord, TaskRun, TaskRunLog, TaskSession,
+        AgentProfile, ProjectRecord, TaskContextRef, TaskContextRefInput, TaskMerge, TaskRecord,
+        TaskRun, TaskRunLog, TaskSession,
     },
     types::{RunStatus, TaskStatus},
 };
@@ -88,6 +89,9 @@ pub struct StartExecutionSessionParams {
     /// Skill IDs selected in the prompt editor. These are materialized into
     /// executor instructions while the stored user prompt remains unchanged.
     pub selected_skill_ids: Vec<String>,
+    /// Semantic context references selected with the prompt. These are stored
+    /// separately from rendered prompt tags so Chro can traverse provenance.
+    pub context_refs: Vec<TaskContextRefInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +124,7 @@ pub struct SendTaskMessageParams {
     pub use_worktree: Option<bool>,
     pub target_branch: Option<String>,
     pub selected_skill_ids: Vec<String>,
+    pub context_refs: Vec<TaskContextRefInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,12 +159,31 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         TaskLifecycle::new(self.pool())
     }
 
+    async fn validate_context_refs_for_project(
+        &self,
+        project_id: Uuid,
+        refs: &[TaskContextRefInput],
+    ) -> Result<(), RuntimeError> {
+        for context_ref in refs {
+            if let Some(target_task_id) = context_ref.target_task_id {
+                let target = TaskRecord::get(self.pool(), target_task_id).await?;
+                if target.project_id != project_id {
+                    return Err(RuntimeError::BadRequest(
+                        "context ref target task does not belong to the project",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn create_task(
         &self,
         project_id: Uuid,
         title: Option<String>,
         description: Option<String>,
         prompt: Option<String>,
+        context_refs: Vec<TaskContextRefInput>,
     ) -> Result<TaskRecord, RuntimeError> {
         let prompt = normalize_optional_text(prompt);
         let title = normalize_optional_text(title)
@@ -167,8 +191,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .ok_or(RuntimeError::BadRequest("title or prompt is required"))?;
         let description = normalize_optional_text(description)
             .or_else(|| prompt.as_deref().and_then(infer_task_description));
+        self.validate_context_refs_for_project(project_id, &context_refs)
+            .await?;
         let task = TaskRecord::new_with_prompt(project_id, title, description, prompt);
         task.insert(self.pool()).await?;
+        if !context_refs.is_empty() {
+            TaskContextRef::replace_for_task_scope(self.pool(), task.id, None, None, &context_refs)
+                .await?;
+        }
         Ok(task)
     }
 
@@ -380,6 +410,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             use_worktree,
             target_branch,
             selected_skill_ids,
+            context_refs,
         } = params;
 
         info!(
@@ -425,6 +456,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let repo_path_str = repo_path.to_string_lossy().into_owned();
         let project =
             ProjectRecord::ensure_with_name_hint(self.pool(), &repo_path_str, None).await?;
+        self.validate_context_refs_for_project(project.id, &context_refs)
+            .await?;
 
         let requested_task = if let Some(task_id) = task_id {
             let task = TaskRecord::get(self.pool(), task_id).await?;
@@ -495,6 +528,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                     execution_prompt,
                     None,
                     selected_skill_ids,
+                    context_refs,
                 )
                 .await;
         }
@@ -662,6 +696,17 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         .execute(self.pool())
         .await?;
 
+        if !context_refs.is_empty() {
+            TaskContextRef::replace_for_task_scope(
+                self.pool(),
+                task.id,
+                Some(session.id),
+                Some(run.id),
+                &context_refs,
+            )
+            .await?;
+        }
+
         sqlx::query(
             "UPDATE task_records SET active_session_id = ?, updated_at = datetime('now') WHERE id = ?",
         )
@@ -711,8 +756,25 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         prompt: String,
         selected_skill_ids: Vec<String>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
-        self.follow_up_execution_with_options(run_id, prompt, None, selected_skill_ids)
+        self.follow_up_execution_with_options(run_id, prompt, None, selected_skill_ids, Vec::new())
             .await
+    }
+
+    pub async fn follow_up_execution_with_context_refs(
+        &self,
+        run_id: Uuid,
+        prompt: String,
+        selected_skill_ids: Vec<String>,
+        context_refs: Vec<TaskContextRefInput>,
+    ) -> Result<ExecutionSessionStart, RuntimeError> {
+        self.follow_up_execution_with_options(
+            run_id,
+            prompt,
+            None,
+            selected_skill_ids,
+            context_refs,
+        )
+        .await
     }
 
     async fn follow_up_execution_with_options(
@@ -721,6 +783,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         prompt: String,
         image_ids: Option<Vec<Uuid>>,
         selected_skill_ids: Vec<String>,
+        context_refs: Vec<TaskContextRefInput>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
         if prompt.trim().is_empty() {
             return Err(RuntimeError::BadRequest("prompt is required"));
@@ -729,6 +792,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let previous_run = TaskRun::get(self.pool(), run_id).await?;
         let task = TaskRecord::get(self.pool(), previous_run.task_id).await?;
         let project = ProjectRecord::get(self.pool(), task.project_id).await?;
+        self.validate_context_refs_for_project(project.id, &context_refs)
+            .await?;
 
         let resume_session_id = self
             .resolve_resume_session_id_for_follow_up(&previous_run)
@@ -838,6 +903,17 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         .execute(self.pool())
         .await?;
 
+        if !context_refs.is_empty() {
+            TaskContextRef::replace_for_task_scope(
+                self.pool(),
+                task.id,
+                Some(session.id),
+                Some(new_run.id),
+                &context_refs,
+            )
+            .await?;
+        }
+
         sqlx::query(
             "UPDATE task_records SET active_session_id = ?, updated_at = datetime('now') WHERE id = ?",
         )
@@ -938,6 +1014,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             use_worktree,
             target_branch,
             selected_skill_ids,
+            context_refs,
         } = params;
 
         match mode {
@@ -954,6 +1031,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                         use_worktree,
                         target_branch,
                         selected_skill_ids,
+                        context_refs,
                     })
                     .await?;
 
@@ -972,6 +1050,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                             prompt,
                             image_ids,
                             selected_skill_ids,
+                            context_refs,
                         )
                         .await?;
                     return Ok(TaskMessageStart {
@@ -993,6 +1072,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                         use_worktree,
                         target_branch,
                         selected_skill_ids,
+                        context_refs,
                     })
                     .await?;
 
@@ -1024,6 +1104,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             use_worktree: None,
             target_branch: None,
             selected_skill_ids: Vec::new(),
+            context_refs: Vec::new(),
         })
         .await
         .map(|result| result.execution)

@@ -19,6 +19,7 @@ use db::{
     types::RunStatus,
 };
 use executors::ExecutorProfileId;
+use filesystem::WorkspaceEntryDetail;
 use futures::{SinkExt, StreamExt};
 use log_types::LogEntry;
 use runtime::{
@@ -28,6 +29,7 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use super::images::{ImageListResponse, ImageResponse};
 use super::path_resolve::{read_binary_resolving, read_text_resolving};
 use crate::{
@@ -81,6 +83,7 @@ pub(super) fn router() -> Router<AppState> {
             get(read_task_run_asset),
         )
         .route("/task-runs/:id/file", get(read_task_run_file))
+        .route("/task-runs/:id/entries", get(list_task_run_entries))
         .route(
             "/task-runs/by-session/:session_id",
             get(find_task_run_by_session_handler),
@@ -180,6 +183,8 @@ struct StartExecutionSessionRequest {
     target_branch: Option<String>,
     #[serde(default)]
     selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    context_refs: Vec<ContextRefRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,6 +226,8 @@ struct SendTaskMessageRequest {
     target_branch: Option<String>,
     #[serde(default)]
     selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    context_refs: Vec<ContextRefRequest>,
 }
 
 fn start_execution_response(
@@ -278,12 +285,15 @@ async fn start_execution_session(
             "force_new_attempt": payload.force_new_attempt,
             "image_count": image_count,
             "skill_count": payload.selected_skill_ids.len(),
+            "context_ref_count": payload.context_refs.len(),
             "use_worktree": payload.use_worktree,
             "target_branch": payload.target_branch,
             "executor_profile_set": payload.executor_profile_id.is_some(),
         }),
     );
 
+    let context_refs =
+        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
     let result = TaskService::new(state.runtime())
         .start_execution_session(StartExecutionSessionParams {
             prompt: Some(payload.prompt.clone()),
@@ -296,6 +306,7 @@ async fn start_execution_session(
             use_worktree: payload.use_worktree,
             target_branch: payload.target_branch.clone(),
             selected_skill_ids: payload.selected_skill_ids.clone(),
+            context_refs,
         })
         .await;
 
@@ -554,6 +565,8 @@ struct FollowUpRequest {
     prompt: String,
     #[serde(default)]
     selected_skill_ids: Vec<String>,
+    #[serde(default)]
+    context_refs: Vec<ContextRefRequest>,
 }
 
 async fn follow_up_execution(
@@ -574,14 +587,18 @@ async fn follow_up_execution(
             "task_run_id": id,
             "prompt_chars": payload.prompt.chars().count(),
             "skill_count": payload.selected_skill_ids.len(),
+            "context_ref_count": payload.context_refs.len(),
         }),
     );
 
+    let context_refs =
+        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
     let result = TaskService::new(state.runtime())
-        .follow_up_execution(
+        .follow_up_execution_with_context_refs(
             id,
             payload.prompt.clone(),
             payload.selected_skill_ids.clone(),
+            context_refs,
         )
         .await;
 
@@ -649,12 +666,15 @@ async fn send_task_message(
             "prompt_chars": payload.prompt.chars().count(),
             "image_count": image_count,
             "skill_count": payload.selected_skill_ids.len(),
+            "context_ref_count": payload.context_refs.len(),
             "use_worktree": payload.use_worktree,
             "target_branch": payload.target_branch,
             "executor_profile_set": payload.executor_profile_id.is_some(),
         }),
     );
 
+    let context_refs =
+        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
     let result = TaskService::new(state.runtime())
         .send_task_message(SendTaskMessageParams {
             task_id,
@@ -665,6 +685,7 @@ async fn send_task_message(
             use_worktree: payload.use_worktree,
             target_branch: payload.target_branch.clone(),
             selected_skill_ids: payload.selected_skill_ids.clone(),
+            context_refs,
         })
         .await;
 
@@ -734,9 +755,12 @@ async fn follow_up_by_task(
             "task_id": task_id,
             "prompt_chars": payload.prompt.chars().count(),
             "skill_count": payload.selected_skill_ids.len(),
+            "context_ref_count": payload.context_refs.len(),
         }),
     );
 
+    let context_refs =
+        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
     let result = TaskService::new(state.runtime())
         .send_task_message(SendTaskMessageParams {
             task_id,
@@ -747,6 +771,7 @@ async fn follow_up_by_task(
             use_worktree: None,
             target_branch: None,
             selected_skill_ids: payload.selected_skill_ids.clone(),
+            context_refs,
         })
         .await;
 
@@ -1209,6 +1234,54 @@ async fn read_task_run_file(
             modified_at: crate::format_system_time(file.modified),
         },
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskRunEntriesQuery {
+    relative_path: Option<String>,
+    /// If true, returns the entire tree structure recursively.
+    #[serde(default)]
+    recursive: bool,
+    /// Entry payload detail level: "basic" | "full" (default: "full").
+    detail: Option<String>,
+}
+
+/// List entries inside a task run's worktree. Mirrors `list_project_entries`
+/// but roots the listing at the run's worktree (`container_ref`, falling back
+/// to `workspace_path`) so the file tree can browse a session's sandbox rather
+/// than the project's main checkout.
+async fn list_task_run_entries(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TaskRunEntriesQuery>,
+) -> Result<Json<super::projects::ProjectEntriesEnvelope>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, _candidates) = task_run_path_candidates(&state, &run).await?;
+    let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
+    let detail = match query.detail.as_deref() {
+        None => WorkspaceEntryDetail::Full,
+        Some("basic") => WorkspaceEntryDetail::Basic,
+        Some("full") => WorkspaceEntryDetail::Full,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "query parameter 'detail' must be 'basic' or 'full'".into(),
+            ));
+        }
+    };
+    let entries = if query.recursive {
+        service
+            .list_entries_recursive(query.relative_path.as_deref(), detail)
+            .await?
+    } else {
+        service
+            .list_entries(query.relative_path.as_deref(), detail)
+            .await?
+    };
+
+    Ok(Json(super::projects::ProjectEntriesEnvelope::from_entries(
+        entries,
+    )))
 }
 
 #[derive(Debug, Serialize)]

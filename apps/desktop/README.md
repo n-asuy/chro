@@ -31,7 +31,7 @@ In dev, `dev:vite` also builds a small `napi-rs` addon (`.native/chro-filesystem
 
 Set `CHRO_ENABLE_NAPI_FS=0` to disable the addon and force pure HTTP proxy behavior.
 
-The bundled Rust server now uses an explicit CORS allowlist. Defaults cover the desktop renderer in dev (`http://localhost:3400`, `http://127.0.0.1:3400`) and the packaged app (`app://.`). Add browser extension origins with `CHRO_ALLOWED_ORIGINS`, for example `CHRO_ALLOWED_ORIGINS=chrome-extension://<extension-id>`.
+The bundled Rust server now uses an explicit CORS allowlist. Defaults cover the desktop renderer in dev (`http://localhost:3400`, `http://127.0.0.1:3400`) and the packaged app (`app://.`, `tauri://localhost`). Add browser extension origins with `CHRO_ALLOWED_ORIGINS`, for example `CHRO_ALLOWED_ORIGINS=chrome-extension://<extension-id>`.
 
 ## Directory Layout
 

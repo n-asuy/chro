@@ -91,15 +91,6 @@ pub enum NormalizedEntryType {
         execution_processes: usize,
         needs_setup: bool,
     },
-    /// End-of-turn execution summary (wall-clock time on `timestamp`,
-    /// elapsed duration, and number of agent turns). Rendered as a small
-    /// footer beneath the assistant's final message.
-    ExecutionSummary {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        num_turns: Option<u32>,
-    },
 }
 
 /// A normalized entry representing a single piece of agent conversation.

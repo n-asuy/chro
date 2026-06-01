@@ -19,6 +19,9 @@ pub enum TaskCommand {
         /// Prompt for the agent
         #[arg(long)]
         prompt: Option<String>,
+        /// Attach a previous task/session as structured context
+        #[arg(long = "ref-session", value_name = "TASK")]
+        ref_sessions: Vec<String>,
         /// Skip agent execution (create task only)
         #[arg(long)]
         no_run: bool,
@@ -40,6 +43,21 @@ pub enum TaskCommand {
         /// Prompt for the agent
         #[arg(short, long)]
         prompt: Option<String>,
+        /// Attach a previous task/session as structured context
+        #[arg(long = "ref-session", value_name = "TASK")]
+        ref_sessions: Vec<String>,
+    },
+
+    /// List context references attached to a task
+    Refs {
+        /// Task ID or slug
+        id: String,
+    },
+
+    /// List tasks/sessions that reference this task
+    ReferencedBy {
+        /// Task ID or slug
+        id: String,
     },
 
     /// Show execution logs for a task run
@@ -81,6 +99,7 @@ pub fn run(
             title,
             description,
             prompt,
+            ref_sessions,
             no_run,
         } => create(
             client,
@@ -88,12 +107,23 @@ pub fn run(
             title,
             description.as_deref(),
             prompt.as_deref(),
+            ref_sessions,
             !*no_run,
         ),
         TaskCommand::Status { id, new_status } => status(client, id, new_status.as_deref()),
-        TaskCommand::Run { id, prompt } => {
-            run_task(client, project_override, id, prompt.as_deref())
-        }
+        TaskCommand::Run {
+            id,
+            prompt,
+            ref_sessions,
+        } => run_task(
+            client,
+            project_override,
+            id,
+            prompt.as_deref(),
+            ref_sessions,
+        ),
+        TaskCommand::Refs { id } => refs(client, id),
+        TaskCommand::ReferencedBy { id } => referenced_by(client, id),
         TaskCommand::Logs { id } => logs(client, id),
         TaskCommand::Cancel { id } => cancel(client, id),
         TaskCommand::Diff { id } => diff(client, id),
@@ -138,15 +168,18 @@ fn create(
     title: &str,
     description: Option<&str>,
     prompt: Option<&str>,
+    ref_sessions: &[String],
     should_run: bool,
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
+    let prompt_for_task = prompt.map(|value| with_session_context(value, ref_sessions));
 
     let body = serde_json::json!({
         "project_id": project.id,
         "title": title,
         "description": description,
-        "prompt": prompt,
+        "prompt": prompt_for_task.as_deref(),
+        "context_refs": context_refs_json(ref_sessions),
     });
 
     let resp = client.post("/rpc/tasks", &body)?;
@@ -163,13 +196,16 @@ fn create(
     if should_run {
         let task_id = task.get("id").and_then(|v| v.as_str()).unwrap_or(id);
         let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
-        let prompt_text = prompt.unwrap_or(title);
+        let prompt_text = prompt_for_task
+            .clone()
+            .unwrap_or_else(|| with_session_context(title, ref_sessions));
 
         let run_body = serde_json::json!({
             "prompt": prompt_text,
             "workspace_path": workspace_path,
             "task_id": task_id,
             "mode": "auto",
+            "context_refs": context_refs_json(ref_sessions),
         });
 
         let run_resp = client.post(&format!("/rpc/tasks/{task_id}/messages"), &run_body)?;
@@ -237,17 +273,19 @@ fn run_task(
     project_override: Option<&Path>,
     id: &str,
     prompt: Option<&str>,
+    ref_sessions: &[String],
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
     let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
 
-    let prompt_text = prompt.unwrap_or("Execute this task");
+    let prompt_text = with_session_context(prompt.unwrap_or("Execute this task"), ref_sessions);
 
     let body = serde_json::json!({
         "prompt": prompt_text,
         "workspace_path": workspace_path,
         "task_id": id,
         "mode": "auto",
+        "context_refs": context_refs_json(ref_sessions),
     });
 
     let resp = client.post(&format!("/rpc/tasks/{id}/messages"), &body)?;
@@ -260,6 +298,87 @@ fn run_task(
     println!("Execution started: {task_run_id}");
     println!("View logs: chro task logs {task_run_id}");
     Ok(())
+}
+
+fn refs(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
+    print_refs_response(client.get(&format!("/rpc/tasks/{id}/context-refs"))?)
+}
+
+fn referenced_by(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
+    print_refs_response(client.get(&format!("/rpc/tasks/{id}/referenced-by"))?)
+}
+
+fn print_refs_response(resp: serde_json::Value) -> Result<(), client::ClientError> {
+    let refs = resp
+        .get("refs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if refs.is_empty() {
+        println!("No context refs found.");
+        return Ok(());
+    }
+
+    for context_ref in refs {
+        let kind = context_ref
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let mode = context_ref
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("link");
+        let target = context_ref
+            .get("target_task_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| context_ref.get("path").and_then(|v| v.as_str()))
+            .unwrap_or("-");
+        println!("{kind:<10} {mode:<10} {target}");
+    }
+
+    Ok(())
+}
+
+fn context_refs_json(ref_sessions: &[String]) -> Vec<serde_json::Value> {
+    ref_sessions
+        .iter()
+        .map(|task| {
+            serde_json::json!({
+                "kind": "session",
+                "task_id": task,
+                "mode": "transcript",
+            })
+        })
+        .collect()
+}
+
+fn with_session_context(prompt: &str, ref_sessions: &[String]) -> String {
+    if ref_sessions.is_empty() {
+        return prompt.to_string();
+    }
+
+    let tags = ref_sessions
+        .iter()
+        .map(|task| {
+            format!(
+                "<past_session task_id=\"{}\">\nRun `chro task logs {}` to view the full transcript of this previous chro session.\n</past_session>",
+                escape_xml_attr(task),
+                task
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("<context>\n{tags}\n</context>\n{prompt}")
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn logs(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {

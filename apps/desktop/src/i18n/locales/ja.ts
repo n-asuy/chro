@@ -450,6 +450,8 @@ const ja = {
     "Codex を使用するには OpenAI にサインインしてください。",
   authDetectedVersion: "検出したバージョン: {version}",
   authNotSignedIn: "未認証",
+  copyMessage: "コピー",
+  copied: "コピーしました",
 } as const;
 
 type TranslationKeys = keyof typeof ja;

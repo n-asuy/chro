@@ -8,6 +8,7 @@ import {
   type SessionContextEntry,
   type SkillEntry,
   type TextPart,
+  contextEntriesToRefs,
   formatContextForPrompt,
   formatSkillContextForPrompt,
   getContextEntries,
@@ -208,6 +209,27 @@ describe("getContextEntries", () => {
     };
     expect(getContextEntries([part])).toEqual([
       fileEntry("session.md", true, "feature/xyz"),
+    ]);
+  });
+});
+
+describe("contextEntriesToRefs", () => {
+  it("converts session and file context entries to API refs", () => {
+    expect(
+      contextEntriesToRefs([
+        sessionEntry(TASK_ID, "feature/x"),
+        fileEntry("src/main.ts"),
+        fileEntry("src/lib", false, "main"),
+      ]),
+    ).toEqual([
+      {
+        kind: "session",
+        task_id: TASK_ID,
+        branch: "feature/x",
+        mode: "transcript",
+      },
+      { kind: "file", path: "src/main.ts", mode: "link" },
+      { kind: "directory", path: "src/lib", branch: "main", mode: "link" },
     ]);
   });
 });

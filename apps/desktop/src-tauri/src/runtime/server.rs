@@ -18,6 +18,7 @@ use super::port::{find_available_port, write_port_file};
 
 const SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: u16 = 4310;
+const SERVER_PORT_ENV: &str = "CHRO_DESKTOP_SERVER_PORT";
 const HEALTH_CHECK_ATTEMPTS: u32 = 40;
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_CHECK_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -136,7 +137,7 @@ pub async fn launch_runtime<R: TauriRuntime>(
         .with_context(|| format!("create runtime dir {}", options.dir.display()))?;
 
     let db_path = options.dir.join("db.sqlite");
-    let port = find_available_port(SERVER_HOST, DEFAULT_SERVER_PORT)?;
+    let port = find_available_port(SERVER_HOST, server_start_port())?;
 
     if let Err(err) = write_port_file(port) {
         warn!("[runtime] failed to write port file: {err:#}");
@@ -223,6 +224,24 @@ pub async fn launch_runtime<R: TauriRuntime>(
     })
 }
 
+fn server_start_port() -> u16 {
+    match std::env::var(SERVER_PORT_ENV) {
+        Ok(value) => match value.trim().parse::<u16>() {
+            Ok(port) if port != 0 => port,
+            Ok(_) | Err(_) => {
+                warn!(
+                    env = SERVER_PORT_ENV,
+                    value,
+                    default = DEFAULT_SERVER_PORT,
+                    "invalid server start port override"
+                );
+                DEFAULT_SERVER_PORT
+            }
+        },
+        Err(_) => DEFAULT_SERVER_PORT,
+    }
+}
+
 fn split_lines(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes)
         .split(|c: char| c == '\n' || c == '\r')
@@ -240,6 +259,12 @@ fn resolve_sidecar<R: TauriRuntime>(
     let mut cmd = if let Ok(sidecar) = shell.sidecar("chro-server") {
         debug!("[runtime] using bundled chro-server sidecar");
         sidecar
+    } else if let Some(local) = sidecar_next_to_current_exe() {
+        debug!(
+            "[runtime] using bundled chro-server binary at {}",
+            local.display()
+        );
+        shell.command(local.to_string_lossy().into_owned())
     } else if let Some(local) = dev_binary_path() {
         debug!(
             "[runtime] using local chro-server binary at {}",
@@ -257,6 +282,16 @@ fn resolve_sidecar<R: TauriRuntime>(
         cmd = cmd.env(key, value);
     }
     Ok(cmd)
+}
+
+fn sidecar_next_to_current_exe() -> Option<PathBuf> {
+    let binary_name = if cfg!(target_os = "windows") {
+        "chro-server.exe"
+    } else {
+        "chro-server"
+    };
+    let candidate = std::env::current_exe().ok()?.parent()?.join(binary_name);
+    candidate.exists().then_some(candidate)
 }
 
 /// Locate the cargo target binary for `chro-server`. We anchor on the repo

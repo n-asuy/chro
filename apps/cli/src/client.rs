@@ -58,7 +58,9 @@ impl ServerClient {
     pub fn get(&self, path: &str) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}{path}", self.base_url);
         let resp = self.agent.get(&url).call().map_err(map_ureq_error)?;
-        let body: serde_json::Value = resp.into_json().map_err(|e| ClientError::Http(e.to_string()))?;
+        let body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| ClientError::Http(e.to_string()))?;
         Ok(body)
     }
 
@@ -73,8 +75,9 @@ impl ServerClient {
             .post(&url)
             .send_json(body.clone())
             .map_err(map_ureq_error)?;
-        let response_body: serde_json::Value =
-            resp.into_json().map_err(|e| ClientError::Http(e.to_string()))?;
+        let response_body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| ClientError::Http(e.to_string()))?;
         Ok(response_body)
     }
 
@@ -89,16 +92,13 @@ impl ServerClient {
             .request("PATCH", &url)
             .send_json(body.clone())
             .map_err(map_ureq_error)?;
-        let response_body: serde_json::Value =
-            resp.into_json().map_err(|e| ClientError::Http(e.to_string()))?;
+        let response_body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| ClientError::Http(e.to_string()))?;
         Ok(response_body)
     }
 
-    pub fn post_no_content(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<(), ClientError> {
+    pub fn post_no_content(&self, path: &str, body: &serde_json::Value) -> Result<(), ClientError> {
         let url = format!("{}{path}", self.base_url);
         let _resp = self
             .agent
@@ -113,10 +113,7 @@ fn map_ureq_error(err: ureq::Error) -> ClientError {
     match err {
         ureq::Error::Status(status, resp) => {
             let body = resp.into_string().unwrap_or_default();
-            ClientError::Api {
-                status,
-                body,
-            }
+            ClientError::Api { status, body }
         }
         ureq::Error::Transport(t) => ClientError::Http(t.to_string()),
     }
@@ -158,7 +155,8 @@ pub fn resolve_project(
 }
 
 fn read_port_file() -> Result<u16, ClientError> {
-    let content = fs::read_to_string(port_file_path()).map_err(|_| ClientError::ServerNotRunning)?;
+    let content =
+        fs::read_to_string(port_file_path()).map_err(|_| ClientError::ServerNotRunning)?;
     content
         .trim()
         .parse::<u16>()

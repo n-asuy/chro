@@ -54,6 +54,11 @@ interface TreeContextMenuProps {
   isPrimaryRoot?: boolean;
   onAddFolderToProject?: () => void;
   onRemoveFolderFromProject?: (path: string) => void;
+  /**
+   * Read-only scope (a session sandbox): mutating actions are suppressed and
+   * only scope-correct, non-destructive items (copy relative path) remain.
+   */
+  readOnly?: boolean;
 }
 
 export const TreeContextMenu = ({
@@ -69,6 +74,7 @@ export const TreeContextMenu = ({
   isPrimaryRoot = false,
   onAddFolderToProject,
   onRemoveFolderFromProject,
+  readOnly = false,
 }: TreeContextMenuProps) => {
   const { t } = useLanguage();
   const projectId = useProjectId();
@@ -133,6 +139,31 @@ export const TreeContextMenu = ({
   const handleCreateFolder = () => {
     onCreateFolder(targetParentPath);
   };
+
+  // Read-only scope (session sandbox): no create/rename/delete/reveal — those
+  // are project-scoped. Root rows get no menu; file/dir rows keep only the
+  // scope-agnostic "copy relative path".
+  if (readOnly) {
+    if (isWorkspaceRoot) {
+      return <div className="block">{children}</div>;
+    }
+    return (
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="block">{children}</div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="z-20 w-48 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+          <ContextMenuItem
+            onSelect={handleCopyRelativePath}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("copyRelativePath")}</span>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    );
+  }
 
   if (isWorkspaceRoot) {
     return (

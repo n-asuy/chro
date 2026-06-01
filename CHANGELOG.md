@@ -1,32 +1,25 @@
 # Changelog
 
-## 0.2.5
+## 0.1.33
 
-- Reissued the 0.2.4 release with the obsolete Argos visual-test integration removed, so the OSS sync no longer tries to publish an unused GitHub Actions workflow
+- Added structured task/session context references, storing prompt references in `task_context_refs`, exposing context refs and referenced-by RPC/CLI surfaces, and preserving `<context>` prompt tags for executor compatibility
+- Added a desktop `Refs` popover in the session header that shows outgoing session references and incoming "referenced by" relationships, with linked task/session rows
+- Added CLI support for attaching referenced sessions to new tasks and follow-ups, plus `chro task refs` and `chro task referenced-by` for inspecting the reference graph
+- Fixed the file tree scope for session tabs whose route key is a task slug by resolving it to the task UUID before subscribing to task runs
+- Fixed project switching from killing live terminal PTY sessions by only recycling terminals that were opened before their project UUID resolved
+- Fixed release checks by applying Rust formatting and aligning shared React/TypeScript dependency versions across workspaces
+- Documented the Remote SSH/app-server architecture for future VS Code-style remote workspace support
 
-## 0.2.4
+## 0.1.32
 
-- Fixed the Windows desktop build, which produced no installer because the release script cleared the updater signing key on Apple-unsigned builds, so `tauri build` aborted with "a public key has been found, but no private key"
-
-## 0.2.3
-
-- Fixed the CLI release pipeline, which failed to build its bundled web frontend on Linux after the Tauri migration redefined the desktop `build` script to also run a (Linux-incompatible) native bundle step
-
-## 0.2.2
-
-- First published Tauri build of the desktop app — the 0.2.1 Electron→Tauri migration described below never reached users because the release pipeline pointed at a non-existent release repository, so this build delivers that migration for the first time
-- Fixed the auto-updater to resolve its update manifest from the correct release repository, so update checks no longer fail against a missing feed
-- Signed updater artifacts with a committed public key so the app can cryptographically verify each update before installing it
-
-## 0.2.1
-
-- Migrated the desktop app from Electron to Tauri 2, so it now ships as a native Rust shell running on the system WebView instead of a bundled Chromium + Node runtime, shrinking the download from ~150MB to ~10–15MB; auto-update, the dynamic tray badge, the `chro://` deep-link handler, and the custom asset protocol were all reimplemented natively while the React renderer stays byte-for-byte identical behind a compatibility shim
-- Added a right-side dock that holds its own panel independently of the left dock, so Files, Search, and Source Control can be open on both sides at once, with the toggle chrome living in the project tabs header
+- Migrated the desktop app from Electron to Tauri 2, so it now ships as a native Rust shell running on the system WebView instead of a bundled Chromium + Node runtime; auto-update, the dynamic tray badge, the `chro://` deep-link handler, and the custom asset protocol were reimplemented natively while the React renderer stays behind a compatibility shim
+- Added a right-side dock that can hold Files, Search, and Source Control independently of the left dock, with the toggle chrome living in the project tabs header
 - Added a Projects panel listing each project's chats with inline archive, new-chat, drag-to-reorder, and "open another project" actions
-- Added an Obsidian-style in-file find bar (Cmd+F) that floats above the file content — including the title and frontmatter — with previous/next navigation and live match highlighting
+- Added an Obsidian-style in-file find bar for Cmd+F, with previous/next navigation and live match highlighting across file content, titles, and frontmatter
 - Replaced the global command-palette search overlay with a dockable Search panel and a dedicated search shortcut, so file search results live alongside the other workspace panels
-- Rebuilt conversation history with an incremental flatten cache that reuses array references and only rebuilds the slices whose entries actually changed, making session rendering and live streaming noticeably smoother
+- Rebuilt conversation history with an incremental flatten cache that reuses array references and only rebuilds the slices whose entries actually changed, making session rendering and live streaming smoother
 - Reworked agent CLI discovery with a layered resolver that honors an environment override, probes known install locations in order, and refreshes PATH from a login shell, so apps launched from Finder reliably find Claude/Codex binaries installed via Homebrew or NVM
+- Fixed release packaging for the Tauri desktop app, including the update manifest repository, updater signing artifacts, Windows installer output, bundled CLI web frontend build, and removal of the unused Argos workflow from OSS sync
 
 ## 0.1.31
 

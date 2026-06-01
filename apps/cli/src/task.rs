@@ -19,6 +19,9 @@ pub enum TaskCommand {
         /// Prompt for the agent
         #[arg(long)]
         prompt: Option<String>,
+        /// Attach a previous task/session as structured context
+        #[arg(long = "ref-session", value_name = "TASK")]
+        ref_sessions: Vec<String>,
         /// Skip agent execution (create task only)
         #[arg(long)]
         no_run: bool,
@@ -40,12 +43,27 @@ pub enum TaskCommand {
         /// Prompt for the agent
         #[arg(short, long)]
         prompt: Option<String>,
+        /// Attach a previous task/session as structured context
+        #[arg(long = "ref-session", value_name = "TASK")]
+        ref_sessions: Vec<String>,
     },
 
     /// Print the markdown transcript for a task (all runs combined,
     /// chronological order). This is what other agents should fetch when a
     /// `<past_session>` tag references this task.
     Logs {
+        /// Task ID or slug
+        task: String,
+    },
+
+    /// List context references attached to a task
+    Refs {
+        /// Task ID or slug
+        task: String,
+    },
+
+    /// List tasks/sessions that reference this task
+    ReferencedBy {
         /// Task ID or slug
         task: String,
     },
@@ -104,6 +122,7 @@ pub fn run(
             title,
             description,
             prompt,
+            ref_sessions,
             no_run,
         } => create(
             client,
@@ -111,11 +130,24 @@ pub fn run(
             title,
             description.as_deref(),
             prompt.as_deref(),
+            ref_sessions,
             !*no_run,
         ),
         TaskCommand::Status { task, new_status } => status(client, task, new_status.as_deref()),
-        TaskCommand::Run { task, prompt } => run_task(client, project_override, task, prompt.as_deref()),
+        TaskCommand::Run {
+            task,
+            prompt,
+            ref_sessions,
+        } => run_task(
+            client,
+            project_override,
+            task,
+            prompt.as_deref(),
+            ref_sessions,
+        ),
         TaskCommand::Logs { task } => logs(client, task),
+        TaskCommand::Refs { task } => refs(client, task),
+        TaskCommand::ReferencedBy { task } => referenced_by(client, task),
         TaskCommand::Cancel { task, run } => cancel(client, task, *run),
         TaskCommand::Diff { task, run } => diff(client, task, *run),
         TaskCommand::Merge { task, message, run } => merge(client, task, message.as_deref(), *run),
@@ -123,10 +155,7 @@ pub fn run(
     }
 }
 
-fn list(
-    client: &ServerClient,
-    project_override: Option<&Path>,
-) -> Result<(), client::ClientError> {
+fn list(client: &ServerClient, project_override: Option<&Path>) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
     let git_path = project.git_repo_path.as_deref().unwrap_or("unknown");
 
@@ -163,15 +192,18 @@ fn create(
     title: &str,
     description: Option<&str>,
     prompt: Option<&str>,
+    ref_sessions: &[String],
     should_run: bool,
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
+    let prompt_for_task = prompt.map(|value| with_session_context(value, ref_sessions));
 
     let body = serde_json::json!({
         "project_id": project.id,
         "title": title,
         "description": description,
-        "prompt": prompt,
+        "prompt": prompt_for_task.as_deref(),
+        "context_refs": context_refs_json(ref_sessions),
     });
 
     let resp = client.post("/rpc/tasks", &body)?;
@@ -188,13 +220,16 @@ fn create(
     if should_run {
         let task_id = task.get("id").and_then(|v| v.as_str()).unwrap_or(id);
         let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
-        let prompt_text = prompt.unwrap_or(title);
+        let prompt_text = prompt_for_task
+            .clone()
+            .unwrap_or_else(|| with_session_context(title, ref_sessions));
 
         let run_body = serde_json::json!({
             "prompt": prompt_text,
             "workspace_path": workspace_path,
             "task_id": task_id,
             "mode": "auto",
+            "context_refs": context_refs_json(ref_sessions),
         });
 
         client.post(&format!("/rpc/tasks/{task_id}/messages"), &run_body)?;
@@ -216,7 +251,10 @@ fn status(
             let body = serde_json::json!({ "status": status_str });
             let resp = client.patch(&format!("/rpc/tasks/{task}/status"), &body)?;
             let returned = &resp["task"];
-            let current = returned.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let current = returned
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             println!("Task {task} status: {current}");
         }
         None => {
@@ -238,8 +276,14 @@ fn status(
             for (offset, run) in runs.iter().enumerate() {
                 let sequence = total - offset;
                 let status = run.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                let branch = run.get("branch_name").and_then(|v| v.as_str()).unwrap_or("-");
-                let target = run.get("target_branch").and_then(|v| v.as_str()).unwrap_or("-");
+                let branch = run
+                    .get("branch_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let target = run
+                    .get("target_branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
                 println!("  #{sequence:<3} {status:<12} branch:{branch}  target:{target}");
             }
         }
@@ -253,16 +297,18 @@ fn run_task(
     project_override: Option<&Path>,
     task: &str,
     prompt: Option<&str>,
+    ref_sessions: &[String],
 ) -> Result<(), client::ClientError> {
     let project = client::resolve_project(client, project_override)?;
     let workspace_path = project.git_repo_path.as_deref().unwrap_or("");
-    let prompt_text = prompt.unwrap_or("Execute this task");
+    let prompt_text = with_session_context(prompt.unwrap_or("Execute this task"), ref_sessions);
 
     let body = serde_json::json!({
         "prompt": prompt_text,
         "workspace_path": workspace_path,
         "task_id": task,
         "mode": "auto",
+        "context_refs": context_refs_json(ref_sessions),
     });
 
     client.post(&format!("/rpc/tasks/{task}/messages"), &body)?;
@@ -277,6 +323,87 @@ fn logs(client: &ServerClient, task: &str) -> Result<(), client::ClientError> {
     let markdown = resp.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
     print!("{markdown}");
     Ok(())
+}
+
+fn refs(client: &ServerClient, task: &str) -> Result<(), client::ClientError> {
+    print_refs_response(client.get(&format!("/rpc/tasks/{task}/context-refs"))?)
+}
+
+fn referenced_by(client: &ServerClient, task: &str) -> Result<(), client::ClientError> {
+    print_refs_response(client.get(&format!("/rpc/tasks/{task}/referenced-by"))?)
+}
+
+fn print_refs_response(resp: serde_json::Value) -> Result<(), client::ClientError> {
+    let refs = resp
+        .get("refs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if refs.is_empty() {
+        println!("No context refs found.");
+        return Ok(());
+    }
+
+    for context_ref in refs {
+        let kind = context_ref
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let mode = context_ref
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("link");
+        let target = context_ref
+            .get("target_task_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| context_ref.get("path").and_then(|v| v.as_str()))
+            .unwrap_or("-");
+        println!("{kind:<10} {mode:<10} {target}");
+    }
+
+    Ok(())
+}
+
+fn context_refs_json(ref_sessions: &[String]) -> Vec<serde_json::Value> {
+    ref_sessions
+        .iter()
+        .map(|task| {
+            serde_json::json!({
+                "kind": "session",
+                "task_id": task,
+                "mode": "transcript",
+            })
+        })
+        .collect()
+}
+
+fn with_session_context(prompt: &str, ref_sessions: &[String]) -> String {
+    if ref_sessions.is_empty() {
+        return prompt.to_string();
+    }
+
+    let tags = ref_sessions
+        .iter()
+        .map(|task| {
+            format!(
+                "<past_session task_id=\"{}\">\nRun `chro task logs {}` to view the full transcript of this previous chro session.\n</past_session>",
+                escape_xml_attr(task),
+                task
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("<context>\n{tags}\n</context>\n{prompt}")
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn cancel(client: &ServerClient, task: &str, run: Option<u32>) -> Result<(), client::ClientError> {
@@ -296,8 +423,14 @@ fn diff(client: &ServerClient, task: &str, run: Option<u32>) -> Result<(), clien
     };
     let resp = client.get(&path)?;
 
-    let branch = resp.get("branch_name").and_then(|v| v.as_str()).unwrap_or("?");
-    let target = resp.get("target_branch").and_then(|v| v.as_str()).unwrap_or("main");
+    let branch = resp
+        .get("branch_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let target = resp
+        .get("target_branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
     let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("?");
 
     println!("Task {task}  status:{status}  branch:{branch}  target:{target}");
@@ -326,8 +459,14 @@ fn merge(
     };
     let resp = client.post(&path, &body)?;
 
-    let commit = resp.get("merge_commit").and_then(|v| v.as_str()).unwrap_or("?");
-    let target = resp.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?");
+    let commit = resp
+        .get("merge_commit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let target = resp
+        .get("target_branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
 
     println!("Merged into {target}  commit:{commit:.8}");
     Ok(())
@@ -362,7 +501,10 @@ fn rebase(
     };
     let resp = client.post(&path, &body)?;
 
-    let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let success = resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if success {
         println!("Rebased {task} onto {new_base}");
     } else {

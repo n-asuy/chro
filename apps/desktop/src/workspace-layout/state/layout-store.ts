@@ -28,6 +28,7 @@ interface LayoutState {
   /** Currently bound project; null until `bindProject` runs */
   projectId: string | null;
   layout: PaneLayout;
+  closeFocusTargets: Record<string, FocusTarget>;
 }
 
 interface LayoutActions {
@@ -45,6 +46,7 @@ interface LayoutActions {
       iconName?: string;
       targetLeafId?: string;
       activate?: boolean;
+      returnFocusOnClose?: boolean;
     },
   ) => string;
 
@@ -83,6 +85,11 @@ interface LayoutActions {
 
 type LayoutStore = LayoutState & LayoutActions;
 
+interface FocusTarget {
+  leafId: string;
+  tabId: string;
+}
+
 function persist(state: LayoutState) {
   if (state.projectId) saveLayout(state.projectId, state.layout);
 }
@@ -102,6 +109,36 @@ function findTabInLayout(
     if (tab) return { leaf, tab };
   }
   return null;
+}
+
+function getFocusedTabTarget(layout: PaneLayout): FocusTarget | null {
+  const leaf = findLeaf(layout.root, layout.focusedPaneId);
+  if (!leaf?.activeTabId) return null;
+  return { leafId: leaf.id, tabId: leaf.activeTabId };
+}
+
+function focusTargetIfPresent(
+  layout: PaneLayout,
+  target: FocusTarget,
+): PaneLayout {
+  const leaf = findLeaf(layout.root, target.leafId);
+  if (!leaf?.tabs.some((tab) => tab.id === target.tabId)) return layout;
+  return {
+    root: mapLeaf(layout.root, target.leafId, (l) => ({
+      ...l,
+      activeTabId: target.tabId,
+    })),
+    focusedPaneId: target.leafId,
+  };
+}
+
+function omitCloseFocusTarget(
+  targets: Record<string, FocusTarget>,
+  tabId: string,
+): Record<string, FocusTarget> {
+  if (!(tabId in targets)) return targets;
+  const { [tabId]: _, ...rest } = targets;
+  return rest;
 }
 
 function focusOrInsertTab(layout: PaneLayout, kind: TabKind): PaneLayout {
@@ -156,6 +193,7 @@ function withRoot(state: LayoutState, root: PaneNode | null): LayoutState {
 export const useLayoutStore = create<LayoutStore>()((set, get) => ({
   projectId: null,
   layout: createInitialLayout(),
+  closeFocusTargets: {},
 
   bindProject: (projectId, options = {}) => {
     const state = get();
@@ -169,17 +207,27 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
       layout: options.initialTab
         ? focusOrInsertTab(nextLayout, options.initialTab)
         : nextLayout,
+      closeFocusTargets: {},
     });
     if (options.initialTab) persist(get());
   },
 
-  unbind: () => set({ projectId: null, layout: createInitialLayout() }),
+  unbind: () =>
+    set({
+      projectId: null,
+      layout: createInitialLayout(),
+      closeFocusTargets: {},
+    }),
 
   openTab: (kind, options = {}) => {
     const state = get();
     const key = tabKey(kind);
     const duplicable =
       isDuplicableKind(kind.type) || (kind.type === "session" && !kind.taskId);
+    const returnTarget =
+      options.returnFocusOnClose && options.activate !== false
+        ? getFocusedTabTarget(state.layout)
+        : null;
 
     if (!duplicable) {
       const existing = findTabInLayout(
@@ -191,6 +239,10 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
         if (options.activate !== false) {
           set((prev) => ({
             ...prev,
+            closeFocusTargets:
+              returnTarget && returnTarget.tabId !== tab.id
+                ? { ...prev.closeFocusTargets, [tab.id]: returnTarget }
+                : prev.closeFocusTargets,
             layout: {
               root: mapLeaf(prev.layout.root, leaf.id, (l) => ({
                 ...l,
@@ -217,6 +269,10 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
 
     set((prev) => ({
       ...prev,
+      closeFocusTargets:
+        returnTarget && returnTarget.tabId !== tab.id
+          ? { ...prev.closeFocusTargets, [tab.id]: returnTarget }
+          : prev.closeFocusTargets,
       layout: {
         root: mapLeaf(prev.layout.root, leaf.id, (l) => ({
           ...l,
@@ -236,50 +292,56 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     if (!owner) return;
     const remaining = owner.tabs.filter((t) => t.id !== tabId);
     let nextActive = owner.activeTabId;
-    if (owner.activeTabId === tabId) {
+    const closingActiveTab = owner.activeTabId === tabId;
+    if (closingActiveTab) {
       const closingIdx = owner.tabs.findIndex((t) => t.id === tabId);
       const fallback =
         remaining[closingIdx] ?? remaining[closingIdx - 1] ?? remaining[0];
       nextActive = fallback?.id ?? null;
     }
+    let nextLayout: PaneLayout;
     if (remaining.length === 0) {
       // Empty leaf: collapse it from the tree unless it's the only leaf
       const root = state.layout.root;
       if (root.type === "leaf" && root.id === owner.id) {
-        set((prev) => ({
-          ...prev,
-          layout: {
-            root: createLeaf({ id: owner.id }),
-            focusedPaneId: owner.id,
-          },
-        }));
+        nextLayout = {
+          root: createLeaf({ id: owner.id }),
+          focusedPaneId: owner.id,
+        };
       } else {
         const nextRoot = replaceLeaf(root, owner.id, null);
-        set((prev) => ({
-          ...prev,
-          layout: {
-            root: nextRoot ?? createInitialLayout().root,
-            focusedPaneId: focusableLeafIdAfterRemoval(
-              nextRoot ?? createInitialLayout().root,
-              owner.id,
-              prev.layout.focusedPaneId,
-            ),
-          },
-        }));
+        const fallbackRoot = createInitialLayout().root;
+        const resolvedRoot = nextRoot ?? fallbackRoot;
+        nextLayout = {
+          root: resolvedRoot,
+          focusedPaneId: focusableLeafIdAfterRemoval(
+            resolvedRoot,
+            owner.id,
+            state.layout.focusedPaneId,
+          ),
+        };
       }
     } else {
-      set((prev) => ({
-        ...prev,
-        layout: {
-          ...prev.layout,
-          root: mapLeaf(prev.layout.root, owner.id, (l) => ({
-            ...l,
-            tabs: remaining,
-            activeTabId: nextActive,
-          })),
-        },
-      }));
+      nextLayout = {
+        ...state.layout,
+        root: mapLeaf(state.layout.root, owner.id, (l) => ({
+          ...l,
+          tabs: remaining,
+          activeTabId: nextActive,
+        })),
+      };
     }
+    const returnTarget = closingActiveTab
+      ? state.closeFocusTargets[tabId]
+      : undefined;
+    if (returnTarget) {
+      nextLayout = focusTargetIfPresent(nextLayout, returnTarget);
+    }
+    set((prev) => ({
+      ...prev,
+      closeFocusTargets: omitCloseFocusTarget(prev.closeFocusTargets, tabId),
+      layout: nextLayout,
+    }));
     persist(get());
   },
 

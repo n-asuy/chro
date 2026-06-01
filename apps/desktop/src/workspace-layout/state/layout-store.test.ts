@@ -24,6 +24,7 @@ function resetStore() {
   useLayoutStore.setState({
     projectId: null,
     layout: createInitialLayout(),
+    closeFocusTargets: {},
   });
 }
 
@@ -49,5 +50,32 @@ describe("useLayoutStore", () => {
     );
 
     expect(focusedTab?.kind).toEqual({ type: "session", taskId: "task-1" });
+  });
+
+  it("restores the previously focused tab when a return-focus tab closes", () => {
+    const store = useLayoutStore.getState();
+    const sessionId = store.openTab({ type: "session", taskId: "task-1" });
+    const diffId = store.openTab({ type: "diff", runId: "run-1" });
+    store.openTab({ type: "terminal" });
+
+    const leafId = useLayoutStore.getState().layout.focusedPaneId;
+    useLayoutStore.getState().setActiveTab(leafId, sessionId);
+    expect(
+      useLayoutStore
+        .getState()
+        .openTab(
+          { type: "diff", runId: "run-1" },
+          { returnFocusOnClose: true },
+        ),
+    ).toBe(diffId);
+
+    useLayoutStore.getState().closeTab(diffId);
+
+    const { layout } = useLayoutStore.getState();
+    const focusedLeaf = allLeaves(layout.root).find(
+      (leaf) => leaf.id === layout.focusedPaneId,
+    );
+
+    expect(focusedLeaf?.activeTabId).toBe(sessionId);
   });
 });

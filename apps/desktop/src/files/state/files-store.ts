@@ -99,6 +99,12 @@ interface FilesState {
   // Project context
   projectId: string | null;
 
+  // Active workspace scope. When set, the tree is displaying a task run's
+  // worktree (a session sandbox) rather than the project's main checkout:
+  // file opens are routed through that run and project-scoped mutations are
+  // disabled. Null means the project root is the active scope.
+  scopeTaskRunId: string | null;
+
   // Tree state
   roots: WorkspaceRoot[];
   rootPath: string | null;
@@ -121,14 +127,16 @@ interface FilesState {
   // openFile/closeFile call this to update the URL in addition to the store.
   // The optional `taskRunId` lets callers route file reads through a specific
   // task run's worktree (e.g. when opening a file from a session view).
-  _onFilePathChange:
-    | ((path: string | null, taskRunId?: string) => void)
-    | null;
+  _onFilePathChange: ((path: string | null, taskRunId?: string) => void) | null;
 }
 
 interface FilesActions {
   // Project management
   setProjectId: (projectId: string | null) => void;
+
+  // Active workspace scope (see `scopeTaskRunId`). Setting a non-null run id
+  // switches the tree into read-only worktree mode.
+  setScopeTaskRunId: (taskRunId: string | null) => void;
 
   // Root management
   setRoots: (roots: WorkspaceRoot[]) => void;
@@ -196,6 +204,7 @@ type FilesStore = FilesState & FilesActions;
 export const useFilesStore = create<FilesStore>()((set, get) => ({
   // Initial state
   projectId: null,
+  scopeTaskRunId: null,
   roots: [],
   rootPath: null,
   selectedPaths: [],
@@ -208,6 +217,11 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   // Project management
   setProjectId: (projectId) => set({ projectId }),
+
+  setScopeTaskRunId: (taskRunId) => {
+    if (get().scopeTaskRunId === taskRunId) return;
+    set({ scopeTaskRunId: taskRunId });
+  },
 
   // Root management
   setRoots: (roots) =>
@@ -322,6 +336,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     initialContent = "",
   ) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] createFile is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] createFile requires projectId");
       throw new Error("Project not initialized");
@@ -371,6 +389,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   createFolder: async (parentPath, name) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] createFolder is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] createFolder requires projectId");
       throw new Error("Project not initialized");
@@ -415,6 +437,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   deleteNode: async (path) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] deleteNode is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] deleteNode requires projectId");
       throw new Error("Project not initialized");
@@ -436,6 +462,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   renameNode: async (oldPath, newName) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] renameNode is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] renameNode requires projectId");
       throw new Error("Project not initialized");
@@ -522,6 +552,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   duplicateNode: async (path) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] duplicateNode is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[vault-store] duplicateNode requires projectId");
       throw new Error("Project not initialized");
@@ -602,6 +636,10 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   moveNode: async (sourcePath, targetParentPath) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] moveNode is disabled in worktree scope");
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] moveNode requires projectId");
       throw new Error("Project not initialized");
@@ -703,6 +741,12 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   importExternalFiles: async (files, targetParentPath) => {
     const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn(
+        "[files-store] importExternalFiles is disabled in worktree scope",
+      );
+      return;
+    }
     if (!state.projectId) {
       console.error("[files-store] importExternalFiles requires projectId");
       throw new Error("Project not initialized");
@@ -821,11 +865,14 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   // Current file
   openFile: (path, taskRunId) => {
     if (!path) return;
-    const prev = get().currentFilePath;
-    if (prev !== path) {
+    const state = get();
+    if (state.currentFilePath !== path) {
       set({ currentFilePath: path });
     }
-    get()._onFilePathChange?.(path, taskRunId);
+    // Default to the active worktree scope so files clicked in a session
+    // sandbox tree read from that run's worktree, not the project checkout.
+    const effectiveRunId = taskRunId ?? state.scopeTaskRunId ?? undefined;
+    state._onFilePathChange?.(path, effectiveRunId);
   },
   closeFile: () => {
     if (get().currentFilePath === null) return;
@@ -912,6 +959,12 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
       selectNode(targetNode.path);
       openFile(targetNode.path);
     } else {
+      // In worktree (read-only) scope we never create files; just attempt to
+      // open so the server resolves the path against the run's worktree.
+      if (state.scopeTaskRunId) {
+        openFile(`/${pathWithExt}`);
+        return;
+      }
       // Create the file if it doesn't exist (Obsidian behavior)
       const { projectId, rootPath, addNodeToTree } = state;
       if (!projectId) {

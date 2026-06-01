@@ -109,13 +109,26 @@ struct ProjectFileQuery {
 }
 
 #[derive(Debug, Serialize)]
-struct ProjectEntriesEnvelope {
+pub(super) struct ProjectEntriesEnvelope {
     entries: Vec<ProjectEntryResponse>,
+}
+
+impl ProjectEntriesEnvelope {
+    /// Build an envelope from raw workspace entries. Shared with the task-run
+    /// entries endpoint so both project and worktree listings use one shape.
+    pub(super) fn from_entries(entries: Vec<WorkspaceEntry>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(ProjectEntryResponse::from)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectEntryResponse {
+pub(super) struct ProjectEntryResponse {
     r#type: String,
     name: String,
     display_name: String,
@@ -210,12 +223,7 @@ async fn list_project_entries(
             .await?
     };
 
-    Ok(Json(ProjectEntriesEnvelope {
-        entries: entries
-            .into_iter()
-            .map(ProjectEntryResponse::from)
-            .collect(),
-    }))
+    Ok(Json(ProjectEntriesEnvelope::from_entries(entries)))
 }
 
 async fn read_project_file(

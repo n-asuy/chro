@@ -1,4 +1,5 @@
 import type { TranslationFunction } from "@/i18n";
+import type { StoredTask } from "@/session/types";
 import { Button } from "@chro/ui/button";
 import {
   Tooltip,
@@ -8,7 +9,6 @@ import {
 } from "@chro/ui/tooltip";
 import {
   FileDiff,
-  GitBranch,
   GitMerge,
   GitPullRequestArrow,
   Loader2,
@@ -16,6 +16,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SessionReferencesPopover } from "./session-references-popover";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
@@ -26,6 +27,8 @@ const shortIdFromUuid = (id?: string | null, length = 8): string | null => {
   if (!compact) return null;
   return compact.slice(0, length).toLowerCase();
 };
+
+const EMPTY_TASKS_BY_ID: Record<string, StoredTask> = {};
 
 type SessionHeaderProps = {
   taskId?: string | null;
@@ -42,6 +45,9 @@ type SessionHeaderProps = {
   onRebase: () => void;
   onMergeDiffs: () => void;
   onTitleChange?: (newTitle: string) => Promise<void>;
+  referenceTasksById?: Record<string, StoredTask>;
+  onOpenReferenceTask?: (taskIdOrSlug: string) => void;
+  onOpenReferenceFile?: (path: string) => void;
   /** Whether the sidebar is collapsed */
   isSidebarCollapsed?: boolean;
   /** Handler to open the sidebar */
@@ -64,6 +70,9 @@ export function SessionHeader({
   onRebase,
   onMergeDiffs,
   onTitleChange,
+  referenceTasksById = EMPTY_TASKS_BY_ID,
+  onOpenReferenceTask,
+  onOpenReferenceFile,
   isSidebarCollapsed,
   onOpenSidebar,
   t,
@@ -217,6 +226,12 @@ export function SessionHeader({
             </Tooltip>
           </TooltipProvider>
         ) : null}
+        <SessionReferencesPopover
+          taskId={taskId}
+          tasksById={referenceTasksById}
+          onOpenTask={onOpenReferenceTask}
+          onOpenFile={onOpenReferenceFile}
+        />
         <TooltipProvider delayDuration={120}>
           <Tooltip>
             <TooltipTrigger asChild>

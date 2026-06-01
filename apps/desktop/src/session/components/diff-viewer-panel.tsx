@@ -242,7 +242,7 @@ function FileTree({ items, activeId, onSelect }: FileTreeProps) {
 
   return (
     <nav
-      className="w-64 shrink-0 overflow-y-auto border-r border-custom-border-200 pt-2 pb-4 pr-1"
+      className="w-64 shrink-0 overflow-y-auto border-l border-custom-border-200 pt-2 pb-4 pl-1"
       aria-label="Changed files"
     >
       <ul className="space-y-0.5">{renderNodes(tree, 0)}</ul>
@@ -571,15 +571,6 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
 
       {/* Content */}
       <div className="flex min-h-0 flex-1 overflow-hidden px-3 gap-4">
-        {/* File tree sidebar */}
-        {keyedItems.length > 0 && (
-          <FileTree
-            items={keyedItems}
-            activeId={activeId}
-            onSelect={handleSelectFromTree}
-          />
-        )}
-
         {/* Scrollable diff cards */}
         <div className="flex-1 overflow-y-auto">
           {keyedItems.length === 0 ? (
@@ -606,6 +597,15 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
             ))
           )}
         </div>
+
+        {/* File tree sidebar */}
+        {keyedItems.length > 0 && (
+          <FileTree
+            items={keyedItems}
+            activeId={activeId}
+            onSelect={handleSelectFromTree}
+          />
+        )}
       </div>
     </div>
   );

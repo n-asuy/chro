@@ -12,8 +12,12 @@ use tracing::warn;
 
 pub(crate) const ALLOWED_ORIGINS_ENV: &str = "CHRO_ALLOWED_ORIGINS";
 
-const DEFAULT_ALLOWED_ORIGINS: &[&str] =
-    &["http://localhost:3400", "http://127.0.0.1:3400", "app://."];
+const DEFAULT_ALLOWED_ORIGINS: &[&str] = &[
+    "http://localhost:3400",
+    "http://127.0.0.1:3400",
+    "app://.",
+    "tauri://localhost",
+];
 
 #[derive(Clone, Debug)]
 pub(crate) struct AllowedOrigins {
@@ -118,4 +122,18 @@ fn split_origins(raw: &str) -> impl Iterator<Item = String> + '_ {
 
 fn normalize_origin(origin: &str) -> String {
     origin.trim().trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_origins_include_packaged_tauri_origin() {
+        std::env::remove_var(ALLOWED_ORIGINS_ENV);
+
+        let origins = AllowedOrigins::load(4410).expect("load allowed origins");
+
+        assert!(origins.values().contains(&"tauri://localhost".to_string()));
+    }
 }

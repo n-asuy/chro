@@ -112,11 +112,6 @@ export type NormalizedEntryType =
       failed: boolean;
       execution_processes: number;
       needs_setup: boolean;
-    }
-  | {
-      type: "execution_summary";
-      duration_ms?: number | null;
-      num_turns?: number | null;
     };
 
 /**

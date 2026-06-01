@@ -3,20 +3,26 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
-use db::{models::TaskRecord, types::TaskStatus};
+use db::{
+    models::{TaskContextRef, TaskRecord},
+    types::TaskStatus,
+};
 use runtime::TaskService;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use crate::{identifiers::resolve_task_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/tasks", post(create_task))
         .route("/tasks/reorder", post(reorder_tasks))
+        .route("/tasks/:id/context-refs", get(list_task_context_refs))
+        .route("/tasks/:id/referenced-by", get(list_task_referenced_by))
         .route("/tasks/:id", delete(delete_task))
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
@@ -27,12 +33,19 @@ struct TaskEnvelope {
     task: TaskRecord,
 }
 
+#[derive(Debug, Serialize)]
+struct TaskContextRefsEnvelope {
+    refs: Vec<TaskContextRef>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateTaskRequest {
     project_id: Uuid,
     title: Option<String>,
     description: Option<String>,
     prompt: Option<String>,
+    #[serde(default)]
+    context_refs: Vec<ContextRefRequest>,
 }
 
 async fn create_task(
@@ -44,11 +57,35 @@ async fn create_task(
         title,
         description,
         prompt,
+        context_refs,
     } = payload;
+    let prompt_for_refs = prompt
+        .as_deref()
+        .or(description.as_deref())
+        .unwrap_or_default();
+    let context_refs = resolve_context_refs(state.pool(), prompt_for_refs, &context_refs).await?;
     let task = TaskService::new(state.runtime())
-        .create_task(project_id, title, description, prompt)
+        .create_task(project_id, title, description, prompt, context_refs)
         .await?;
     Ok(Json(TaskEnvelope { task }))
+}
+
+async fn list_task_context_refs(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<TaskContextRefsEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let refs = TaskContextRef::list_by_task_id(state.pool(), task_id).await?;
+    Ok(Json(TaskContextRefsEnvelope { refs }))
+}
+
+async fn list_task_referenced_by(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<TaskContextRefsEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let refs = TaskContextRef::list_referencing_task_id(state.pool(), task_id).await?;
+    Ok(Json(TaskContextRefsEnvelope { refs }))
 }
 
 async fn delete_task(
