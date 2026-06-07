@@ -18,6 +18,7 @@ mod cors;
 mod errors;
 mod helpers;
 pub(crate) mod identifiers;
+mod parent_watch;
 mod perf;
 mod port_file;
 mod pty;
@@ -135,10 +136,22 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         });
     }
 
+    let parent_pid = parent_watch::owner_pid_from_env();
+    if let Some(pid) = parent_pid {
+        info!(
+            owner_pid = pid,
+            "watching owner process; will shut down if it exits"
+        );
+    }
     let pty_for_shutdown = state_pty_handle.clone();
     let browser_for_shutdown = state_browser_handle.clone();
     let shutdown = async move {
-        shutdown_signal().await;
+        tokio::select! {
+            _ = shutdown_signal() => info!("received shutdown signal"),
+            _ = parent_watch::parent_lost(parent_pid) => {
+                info!(parent_pid = ?parent_pid, "owner process exited; shutting down chro-server");
+            }
+        }
         pty_for_shutdown.shutdown_all().await;
         browser_for_shutdown.shutdown_all().await;
     };

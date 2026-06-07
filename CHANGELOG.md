@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.34
+
+- Fixed the Windows desktop app failing to start its `chro-server` sidecar with a "VCRUNTIME140.dll was not found" error on machines without the Visual C++ Redistributable, by statically linking the C runtime into the sidecar binary
+
 ## 0.1.33
 
 - Added structured task/session context references, storing prompt references in `task_context_refs`, exposing context refs and referenced-by RPC/CLI surfaces, and preserving `<context>` prompt tags for executor compatibility

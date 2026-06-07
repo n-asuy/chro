@@ -78,6 +78,7 @@ pub fn run() {
             commands::show_notification,
             commands::open_external_url,
             commands::open_path,
+            commands::open_in_cmux,
             commands::install_executor,
             commands::update_check,
             commands::update_download,

@@ -6,7 +6,8 @@ use axum::{
     Json, Router,
 };
 use db::models::ProjectRecord;
-use git::{BranchInfo, DiffSummary, GitService, GitStatus};
+use git::{BranchInfo, DiffTarget, GitService, GitStatus};
+use log_types::Diff;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -59,9 +60,19 @@ struct CommitResponse {
     commit_sha: Option<String>,
 }
 
+/// One changed file in the working tree, paired with its full before/after
+/// content so the renderer can show only the changed regions (not the whole
+/// file). Mirrors the task-run diff stream payload so the same DiffViewerPanel
+/// renders both.
 #[derive(Debug, Serialize)]
-struct DiffResponse {
-    diff: DiffSummary,
+struct WorkingDiffEntry {
+    path: String,
+    diff: Diff,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkingDiffResponse {
+    diffs: Vec<WorkingDiffEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,18 +223,44 @@ async fn commit_changes(
     Ok(Json(CommitResponse { commit_sha }))
 }
 
+/// Working-tree diff against HEAD, including untracked files, with full
+/// before/after content per file. Returns an empty list when the path is not a
+/// repository or has no commit yet (nothing to diff against).
 async fn get_diff(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-) -> Result<Json<DiffResponse>, ApiError> {
+) -> Result<Json<WorkingDiffResponse>, ApiError> {
     let project_path = get_project_path(&state, &project_id).await?;
     let git_service = GitService::new();
 
-    let diff = git_service
-        .diff_commits(&project_path, "HEAD", "HEAD")
-        .unwrap_or_default();
+    if !git_service.is_repository(&project_path) {
+        return Ok(Json(WorkingDiffResponse { diffs: Vec::new() }));
+    }
 
-    Ok(Json(DiffResponse { diff }))
+    let base_commit = match git_service.head_commit(&project_path) {
+        Ok(commit) => commit,
+        Err(_) => return Ok(Json(WorkingDiffResponse { diffs: Vec::new() })),
+    };
+
+    let diffs = git_service
+        .get_diffs(
+            DiffTarget::Worktree {
+                worktree_path: &project_path,
+                base_commit,
+            },
+            None,
+        )
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let entries = diffs
+        .into_iter()
+        .filter_map(|diff| {
+            let path = diff.path_key()?.to_string();
+            Some(WorkingDiffEntry { path, diff })
+        })
+        .collect();
+
+    Ok(Json(WorkingDiffResponse { diffs: entries }))
 }
 
 async fn push_changes(

@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "analytics",
  "anyhow",
@@ -626,6 +626,7 @@ dependencies = [
  "filesystem",
  "futures",
  "git",
+ "libc",
  "local-runtime",
  "log-types",
  "mime_guess",
@@ -649,6 +650,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "windows-sys 0.59.0",
  "worktree",
 ]
 
@@ -3191,6 +3193,7 @@ dependencies = [
  "log-types",
  "nix 0.29.0",
  "notify-debouncer-full 0.4.0",
+ "regex",
  "runtime",
  "serde",
  "serde_json",

@@ -73,6 +73,7 @@ declare global {
       }) => Promise<void>;
       openExternalUrl?: (url: string) => Promise<void>;
       openPath?: (path: string, app?: string) => Promise<void>;
+      openInCmux?: (path: string) => Promise<void>;
       installExecutor?: (
         executor: DesktopExecutor,
       ) => Promise<ExecutorInstallResult>;

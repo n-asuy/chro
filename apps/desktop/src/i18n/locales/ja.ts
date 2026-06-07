@@ -145,6 +145,8 @@ const ja = {
   sessionTranscriptMissing: "このセッションの履歴は保存されていません。",
   sessionHistoryDisabled:
     "セッション履歴の保存機能は現在無効化されています。会話は右側のビューのみで確認できます。",
+  loadEarlierMessages: "以前の履歴を読み込む",
+  loadingEarlierMessages: "以前の履歴を読み込み中...",
   sessionEmptyHeroTitle: "Turn knowledge into something",
   noSessionLabel: "セッションなし",
   rendererAccessError: "レンダラーからメインプロセスにアクセスできません。",

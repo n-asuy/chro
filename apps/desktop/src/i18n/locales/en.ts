@@ -148,6 +148,8 @@ const en = {
   sessionTranscriptMissing: "No conversation history stored for this session.",
   sessionHistoryDisabled:
     "Session history storage is temporarily disabled. Conversations remain visible only in the main panel.",
+  loadEarlierMessages: "Load earlier history",
+  loadingEarlierMessages: "Loading earlier history...",
   sessionEmptyHeroTitle: "Turn knowledge into something",
   noSessionLabel: "No Session",
   rendererAccessError: "The renderer cannot reach the main process.",

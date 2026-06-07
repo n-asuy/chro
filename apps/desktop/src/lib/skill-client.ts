@@ -5,7 +5,8 @@ export type SkillSource =
   | "workspace_agents"
   | "workspace_chro"
   | "user_claude"
-  | "user_agents";
+  | "user_agents"
+  | "user_codex";
 
 export interface SkillSummary {
   id: string;
@@ -34,6 +35,8 @@ export function skillSourceLabel(skill: SkillSummary): string {
       return "~/.claude";
     case "user_agents":
       return "~/.agents";
+    case "user_codex":
+      return "~/.codex";
   }
 }
 

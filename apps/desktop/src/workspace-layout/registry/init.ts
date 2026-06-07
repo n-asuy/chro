@@ -4,6 +4,7 @@ import {
   DiffTabBody,
   FileTabBody,
   InBrowserTabBody,
+  ProjectDiffTabBody,
   SessionTabBody,
   SettingsTabBody,
   TerminalTabBody,
@@ -51,6 +52,13 @@ export function ensurePaneItemsRegistered(): void {
       const file = kind.path?.split("/").pop();
       return file ? `Diff: ${file}` : "Diff";
     },
+  });
+
+  registerPaneItem({
+    type: "project-diff",
+    iconName: "diff",
+    Content: ProjectDiffTabBody,
+    resolveTitle: () => "Working changes",
   });
 
   registerPaneItem({

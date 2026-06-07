@@ -1,3 +1,4 @@
+import type { DiffContent } from "@/session/hooks";
 import { desktopFetch } from "./backend-client";
 
 // --- Types ---
@@ -54,22 +55,18 @@ type CommitResponse = {
   commitSha: string | null;
 };
 
-export type FileDiff = {
+/**
+ * A single changed file in the project working tree, paired with its full
+ * before/after content. Shares the `DiffContent` shape used by task-run diffs
+ * so the same DiffViewerPanel renders both.
+ */
+export type WorkingDiffEntry = {
   path: string;
-  additions: number;
-  deletions: number;
-  patch: string;
+  diff: DiffContent;
 };
 
-type DiffSummary = {
-  files: FileDiff[];
-  files_changed: number;
-  insertions: number;
-  deletions: number;
-};
-
-type DiffResponse = {
-  diff: DiffSummary;
+type WorkingDiffResponse = {
+  diffs: WorkingDiffEntry[];
 };
 
 // --- API Functions ---
@@ -190,4 +187,18 @@ export const discardFiles = async (
       body: JSON.stringify({ paths }),
     },
   );
+};
+
+/**
+ * Working-tree diffs against HEAD (including untracked files), each with full
+ * before/after content. Feeds the working-changes diff tab and the per-file
+ * +/- counts shown in the source-control panel.
+ */
+export const getWorkingDiffs = async (
+  projectId: string,
+): Promise<WorkingDiffEntry[]> => {
+  const response = await desktopFetch<WorkingDiffResponse>(
+    `/rpc/projects/${projectId}/git/diff`,
+  );
+  return response.diffs;
 };

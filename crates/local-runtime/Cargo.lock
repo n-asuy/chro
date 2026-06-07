@@ -3031,6 +3031,7 @@ dependencies = [
  "log-types",
  "nix 0.29.0",
  "notify-debouncer-full 0.4.0",
+ "regex",
  "runtime",
  "serde",
  "serde_json",

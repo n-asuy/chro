@@ -115,6 +115,9 @@ fn spawn_server(desktop_dir: &Path, server_manifest: &Path, repo_root: &Path, pe
         .arg("--")
         .arg("--port")
         .arg(SERVER_PORT.to_string())
+        // Watch this CLI's PID (inherited across the `cargo run` wrapper) so a
+        // killed dev session does not leave chro-server holding the port.
+        .env("CHRO_PARENT_PID", std::process::id().to_string())
         .current_dir(desktop_dir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

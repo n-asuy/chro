@@ -1623,6 +1623,9 @@ type ConversationEntriesProps = {
   scrollContainerRef?: MutableRefObject<HTMLDivElement | null>;
   onScrollAnchorWillAdjust?: () => void;
   onScrollAnchorAdjusted?: () => void;
+  hasMoreHistory?: boolean;
+  isLoadingMoreHistory?: boolean;
+  onLoadMoreHistory?: () => Promise<void> | void;
   /**
    * When active (find-in-conversation open with a query), bypass tail
    * virtualization and mount every entry so off-screen matches are searchable.
@@ -1643,6 +1646,9 @@ export const ConversationEntries = memo(
     scrollContainerRef,
     onScrollAnchorWillAdjust,
     onScrollAnchorAdjusted,
+    hasMoreHistory = false,
+    isLoadingMoreHistory = false,
+    onLoadMoreHistory,
     searchActive,
   }: ConversationEntriesProps) => {
     const { t } = useLanguage();
@@ -1698,6 +1704,31 @@ export const ConversationEntries = memo(
       [scrollContainerRef],
     );
 
+    const captureScrollAnchor = useCallback(() => {
+      const scrollElement = getScrollElement();
+      if (!scrollElement) return;
+
+      onScrollAnchorWillAdjust?.();
+      scrollAdjustRef.current = {
+        prevScrollHeight: scrollElement.scrollHeight,
+        prevScrollTop: scrollElement.scrollTop,
+      };
+    }, [getScrollElement, onScrollAnchorWillAdjust]);
+
+    const handleLoadMoreHistory = useCallback(() => {
+      if (visibleCount < conversationEntries.length) return;
+      if (!hasMoreHistory || isLoadingMoreHistory || !onLoadMoreHistory) return;
+      captureScrollAnchor();
+      void onLoadMoreHistory();
+    }, [
+      captureScrollAnchor,
+      conversationEntries.length,
+      hasMoreHistory,
+      isLoadingMoreHistory,
+      onLoadMoreHistory,
+      visibleCount,
+    ]);
+
     // While searching, mount the whole conversation so matches in older,
     // virtualized-out entries are reachable. Anchor the viewport so prepending
     // older entries above the fold doesn't visibly shift the content (the
@@ -1706,20 +1737,12 @@ export const ConversationEntries = memo(
     useEffect(() => {
       if (!searchActive) return;
       if (visibleCount >= conversationEntries.length) return;
-      const scrollElement = getScrollElement();
-      if (scrollElement) {
-        onScrollAnchorWillAdjust?.();
-        scrollAdjustRef.current = {
-          prevScrollHeight: scrollElement.scrollHeight,
-          prevScrollTop: scrollElement.scrollTop,
-        };
-      }
+      captureScrollAnchor();
       setVisibleCount(conversationEntries.length);
     }, [
+      captureScrollAnchor,
       searchActive,
       conversationEntries.length,
-      getScrollElement,
-      onScrollAnchorWillAdjust,
       visibleCount,
     ]);
 
@@ -1727,11 +1750,24 @@ export const ConversationEntries = memo(
       const firstKey = conversationEntries[0]?.key ?? null;
       const prevLength = prevVisibleEntriesLengthRef.current;
       const prevFirstKey = prevFirstEntryKeyRef.current;
+      const prevFirstKeyIndex =
+        prevFirstKey === null
+          ? -1
+          : conversationEntries.findIndex(
+              (entry) => entry.key === prevFirstKey,
+            );
+      const hasPrependedEntries =
+        prevFirstKeyIndex > 0 && conversationEntries.length > prevLength;
       const hasReset =
-        (prevFirstKey && firstKey && prevFirstKey !== firstKey) ||
-        conversationEntries.length < prevLength;
+        !hasPrependedEntries &&
+        ((prevFirstKey && firstKey && prevFirstKey !== firstKey) ||
+          conversationEntries.length < prevLength);
 
-      if (hasReset) {
+      if (hasPrependedEntries) {
+        setVisibleCount((prev) =>
+          Math.min(conversationEntries.length, prev + LOAD_MORE_COUNT),
+        );
+      } else if (hasReset) {
         setVisibleCount(
           Math.min(conversationEntries.length, INITIAL_RENDER_COUNT),
         );
@@ -1763,13 +1799,12 @@ export const ConversationEntries = memo(
 
       const handleScroll = () => {
         if (scrollElement.scrollTop > LOAD_MORE_THRESHOLD) return;
-        if (visibleCount >= conversationEntries.length) return;
+        if (visibleCount >= conversationEntries.length) {
+          handleLoadMoreHistory();
+          return;
+        }
 
-        onScrollAnchorWillAdjust?.();
-        scrollAdjustRef.current = {
-          prevScrollHeight: scrollElement.scrollHeight,
-          prevScrollTop: scrollElement.scrollTop,
-        };
+        captureScrollAnchor();
         setVisibleCount((prev) =>
           Math.min(conversationEntries.length, prev + LOAD_MORE_COUNT),
         );
@@ -1781,8 +1816,9 @@ export const ConversationEntries = memo(
       };
     }, [
       conversationEntries.length,
+      captureScrollAnchor,
       getScrollElement,
-      onScrollAnchorWillAdjust,
+      handleLoadMoreHistory,
       visibleCount,
     ]);
 
@@ -1811,6 +1847,22 @@ export const ConversationEntries = memo(
 
     const startIndex = Math.max(conversationEntries.length - visibleCount, 0);
     const visibleEntries = conversationEntries.slice(startIndex);
+    const canLoadMoreHistory =
+      hasMoreHistory && visibleCount >= conversationEntries.length;
+    const historyLoader = canLoadMoreHistory ? (
+      <div className="flex w-full justify-center pb-4">
+        <button
+          type="button"
+          className="rounded-sm px-3 py-1.5 text-xs font-medium text-muted-foreground transition hover:bg-custom-sidebar-background-80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+          disabled={isLoadingMoreHistory}
+          onClick={handleLoadMoreHistory}
+        >
+          {isLoadingMoreHistory
+            ? t("loadingEarlierMessages")
+            : t("loadEarlierMessages")}
+        </button>
+      </div>
+    ) : null;
 
     // If no external scroll container, use internal wrapper
     if (!scrollContainerRef) {
@@ -1822,6 +1874,7 @@ export const ConversationEntries = memo(
           )}
           style={{ height: "100%", contain: "strict" }}
         >
+          {historyLoader}
           <EntryList
             entries={visibleEntries}
             t={t}
@@ -1834,13 +1887,16 @@ export const ConversationEntries = memo(
     }
 
     return (
-      <EntryList
-        entries={visibleEntries}
-        t={t}
-        onWikilinkClick={stableOnWikilinkClick}
-        onFilePathClick={stableOnFilePathClick}
-        endRef={endRef}
-      />
+      <>
+        {historyLoader}
+        <EntryList
+          entries={visibleEntries}
+          t={t}
+          onWikilinkClick={stableOnWikilinkClick}
+          onFilePathClick={stableOnFilePathClick}
+          endRef={endRef}
+        />
+      </>
     );
   },
 );

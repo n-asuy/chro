@@ -135,6 +135,8 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
         a.runId === b.runId &&
         (a.path ?? null) === (b.path ?? null)
       );
+    case "project-diff":
+      return b.type === "project-diff" && a.projectId === b.projectId;
     case "terminal":
       return b.type === "terminal" && a.terminalId === b.terminalId;
     case "browser":
@@ -201,6 +203,8 @@ export function pathFromKind(
     case "file":
       return `${base}/files`;
     case "diff":
+      return null;
+    case "project-diff":
       return null;
     case "terminal":
       return null;

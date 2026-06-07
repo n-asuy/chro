@@ -42,6 +42,8 @@ function defaultIconForKind(tab: Tab): LucideIcon | null {
       return FileText;
     case "diff":
       return FileDiff;
+    case "project-diff":
+      return FileDiff;
     case "settings":
       return Settings;
     case "terminal":

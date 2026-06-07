@@ -34,6 +34,7 @@ const OPEN_IN_APP_IDS = [
   "file-manager",
   "cursor",
   "zed",
+  "cmux",
   "terminal",
   "iterm2",
   "powershell",
@@ -114,6 +115,10 @@ const openInOptions = (): OpenInOption[] => {
     return [
       { id: "file-manager", label: fileManager, icon: fileManagerIcon },
       ...editorOptions,
+      // cmux is a macOS-only native app. We hand the workspace to its own
+      // `cmux open <path>` CLI (see the open_in_cmux Tauri command) instead of
+      // LaunchServices, so it works regardless of how cmux was launched.
+      { id: "cmux", label: "cmux", icon: "cmux" },
       { id: "terminal", label: "Terminal", with: "Terminal", icon: "terminal" },
       { id: "iterm2", label: "iTerm2", with: "iTerm", icon: "iterm2" },
     ];
@@ -232,6 +237,29 @@ function OpenInMenu() {
   const openIn = useCallback(
     async (option: OpenInOption) => {
       if (!workspacePath) return;
+
+      if (option.id === "cmux") {
+        const openInCmux = window.desktop?.openInCmux;
+        if (!openInCmux) {
+          toast({
+            variant: "destructive",
+            title: "Cannot open project",
+            description: "Open in is available in the desktop app.",
+          });
+          return;
+        }
+        try {
+          await openInCmux(workspacePath);
+        } catch (error) {
+          console.warn("[open-in] cmux failed", { workspacePath, error });
+          toast({
+            title: `Could not open in ${option.label}`,
+            description: getOpenInErrorDescription(option.label, error),
+          });
+        }
+        return;
+      }
+
       const openPath = window.desktop?.openPath;
       if (!openPath) {
         toast({

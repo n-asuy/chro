@@ -1,6 +1,7 @@
 import { cn } from "@/lib/cn";
 
 export type OpenInIconId =
+  | "cmux"
   | "cursor"
   | "file-explorer"
   | "finder"
@@ -12,6 +13,7 @@ export type OpenInIconId =
   | "zed";
 
 const iconUrls = {
+  cmux: new URL("./open-in-app-icons/cmux.png", import.meta.url).href,
   cursor: new URL("./open-in-app-icons/cursor.svg", import.meta.url).href,
   "file-explorer": new URL(
     "./open-in-app-icons/file-explorer.svg",

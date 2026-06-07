@@ -103,6 +103,7 @@ function installDesktopBridge() {
       invoke<void>("open_external_url", { url }),
     openPath: (path: string, app?: string) =>
       invoke<void>("open_path", { path, with: app ?? null }),
+    openInCmux: (path: string) => invoke<void>("open_in_cmux", { path }),
     installExecutor: (executor: DesktopExecutor) =>
       invoke<ExecutorInstallResult>("install_executor", { executor }),
     update: {

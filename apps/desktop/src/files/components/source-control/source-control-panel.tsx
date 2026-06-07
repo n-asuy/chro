@@ -5,6 +5,7 @@ import {
   listGitBranches,
 } from "@/lib/git-client";
 import { DockBackButton } from "@/workspace-layout/components/dock-panels/dock-back-button";
+import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import {
   Tooltip,
   TooltipContent,
@@ -18,6 +19,7 @@ import {
   Download,
   ExternalLink,
   File,
+  FileDiff,
   FileEdit,
   FilePlus,
   FileX,
@@ -33,6 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
 import { useGitStatus } from "../../hooks/use-git-status";
 import { useFilesStore } from "../../state/files-store";
+import { useWorkingDiffs } from "../../state/working-diffs-store";
 
 const formatDate = (date: Date): string => {
   const pad = (n: number) => n.toString().padStart(2, "0");
@@ -81,10 +84,13 @@ interface FileItemProps {
   path: string;
   status?: FileChangeStatus;
   isUntracked?: boolean;
+  additions?: number;
+  deletions?: number;
   onStage?: () => void;
   onUnstage?: () => void;
   onDiscard?: () => void;
   onOpenFile?: () => void;
+  onOpenDiff?: () => void;
   isStaged?: boolean;
 }
 
@@ -92,10 +98,13 @@ const FileItem = ({
   path,
   status,
   isUntracked,
+  additions,
+  deletions,
   onStage,
   onUnstage,
   onDiscard,
   onOpenFile,
+  onOpenDiff,
   isStaged,
 }: FileItemProps) => {
   // Display only the terminal path segment.
@@ -108,22 +117,39 @@ const FileItem = ({
 
   return (
     <div
-      className="group flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-custom-background-80"
+      className="group flex items-center gap-2 rounded pr-2 text-sm hover:bg-custom-background-80"
       title={path}
     >
-      <div className="flex-shrink-0">
-        {isUntracked ? (
-          <FilePlus className="size-4 text-green-500" />
-        ) : status ? (
-          getStatusIcon(status)
-        ) : (
-          <File className="size-4 text-custom-text-300" />
-        )}
-      </div>
-      <div className="min-w-0 flex-1 overflow-hidden">
-        <span className="block truncate text-custom-text-100">{fileName}</span>
-      </div>
+      <button
+        type="button"
+        onClick={onOpenDiff}
+        disabled={!onOpenDiff}
+        className="flex min-w-0 flex-1 items-center gap-2 rounded py-1 pl-2 text-left disabled:cursor-default"
+      >
+        <span className="flex-shrink-0">
+          {isUntracked ? (
+            <FilePlus className="size-4 text-green-500" />
+          ) : status ? (
+            getStatusIcon(status)
+          ) : (
+            <File className="size-4 text-custom-text-300" />
+          )}
+        </span>
+        <span className="block min-w-0 flex-1 truncate text-custom-text-100">
+          {fileName}
+        </span>
+      </button>
       <div className="flex flex-shrink-0 items-center gap-1">
+        {(additions ?? 0) > 0 && (
+          <span className="text-[11px] font-medium tabular-nums text-emerald-500 dark:text-emerald-400">
+            +{additions}
+          </span>
+        )}
+        {(deletions ?? 0) > 0 && (
+          <span className="text-[11px] font-medium tabular-nums text-rose-500 dark:text-rose-400">
+            -{deletions}
+          </span>
+        )}
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
           {onOpenFile && (
             <button
@@ -249,6 +275,20 @@ export const SourceControlPanel = () => {
   } = useGitStatus({ projectId });
 
   const openFileInEditor = useFilesStore((state) => state.openFile);
+  const openTab = useLayoutStore((state) => state.openTab);
+  const { diffs: workingDiffs } = useWorkingDiffs(projectId);
+
+  // path → line counts, for the +/- badges on each changed row.
+  const countsByPath = useMemo(() => {
+    const map = new Map<string, { additions: number; deletions: number }>();
+    for (const entry of workingDiffs) {
+      map.set(entry.path, {
+        additions: entry.diff.additions ?? 0,
+        deletions: entry.diff.deletions ?? 0,
+      });
+    }
+    return map;
+  }, [workingDiffs]);
 
   const [commitMessage, setCommitMessage] = useState(getDefaultCommitMessage);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -356,6 +396,13 @@ export const SourceControlPanel = () => {
     [openFileInEditor],
   );
 
+  // Open the combined working-changes diff (changed regions only, every file
+  // stacked). One tab per project; navigate between files via its file tree.
+  const handleOpenDiff = useCallback(() => {
+    if (!projectId) return;
+    openTab({ type: "project-diff", projectId });
+  }, [openTab, projectId]);
+
   const handleCommit = useCallback(async () => {
     if (!commitMessage.trim() || isCommitting) return;
 
@@ -406,6 +453,22 @@ export const SourceControlPanel = () => {
         <div className="flex items-center gap-2">
           <DockBackButton />
           <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={handleOpenDiff}
+                  disabled={isLoading || stagedCount + changesCount === 0}
+                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                  aria-label="View All Changes"
+                >
+                  <FileDiff className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="center">
+                View All Changes
+              </TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -643,9 +706,12 @@ export const SourceControlPanel = () => {
               key={file.path}
               path={file.path}
               status={file.status}
+              additions={countsByPath.get(file.path)?.additions}
+              deletions={countsByPath.get(file.path)?.deletions}
               isStaged
               onUnstage={() => handleUnstageFile(file.path)}
               onOpenFile={() => handleOpenFile(file.path)}
+              onOpenDiff={handleOpenDiff}
             />
           ))}
         </CollapsibleSection>
@@ -682,9 +748,12 @@ export const SourceControlPanel = () => {
               key={file.path}
               path={file.path}
               status={file.status}
+              additions={countsByPath.get(file.path)?.additions}
+              deletions={countsByPath.get(file.path)?.deletions}
               onStage={() => handleStageFile(file.path)}
               onDiscard={() => handleDiscardFile(file.path)}
               onOpenFile={() => handleOpenFile(file.path)}
+              onOpenDiff={handleOpenDiff}
             />
           ))}
           {status?.untracked.map((path) => (
@@ -692,8 +761,11 @@ export const SourceControlPanel = () => {
               key={path}
               path={path}
               isUntracked
+              additions={countsByPath.get(path)?.additions}
+              deletions={countsByPath.get(path)?.deletions}
               onStage={() => handleStageFile(path)}
               onOpenFile={() => handleOpenFile(path)}
+              onOpenDiff={handleOpenDiff}
             />
           ))}
         </CollapsibleSection>

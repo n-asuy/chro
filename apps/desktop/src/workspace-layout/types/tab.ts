@@ -22,6 +22,10 @@ export type TabKind =
       taskRunId?: string;
     }
   | { type: "diff"; runId: string; path?: string }
+  // Combined working-tree diff for the project: every uncommitted change
+  // stacked as a diff (changed regions only), navigated via its file tree.
+  // One tab per project — `projectId` is the identity.
+  | { type: "project-diff"; projectId: string }
   | { type: "terminal"; terminalId?: string }
   // In-app browser: the page renders directly in an iframe inside the pane.
   | { type: "browser"; browserId?: string; url?: string }
@@ -68,6 +72,8 @@ export function tabKey(kind: TabKind): TabKey {
         : `file:${kind.path}`;
     case "diff":
       return `diff:${kind.runId}:${kind.path ?? ""}`;
+    case "project-diff":
+      return `project-diff:${kind.projectId}`;
     case "terminal":
       return `terminal:${kind.terminalId ?? "new"}`;
     case "browser":

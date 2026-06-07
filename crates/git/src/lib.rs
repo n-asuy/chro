@@ -1473,4 +1473,50 @@ mod tests {
             .unwrap();
         assert!(commit_sha.is_none());
     }
+
+    #[test]
+    fn worktree_diffs_include_modified_and_untracked_content() {
+        let (tmp, _repo) = init_repo();
+        let service = GitService::new();
+
+        write_file(tmp.path(), "README.md", "hello world\n");
+        service.commit_all(tmp.path(), "add readme").unwrap();
+        let base = service.head_commit(tmp.path()).unwrap();
+
+        // Unstaged modification + a brand-new untracked file.
+        write_file(tmp.path(), "README.md", "hello chro\n");
+        write_file(tmp.path(), "notes.txt", "fresh\n");
+
+        let diffs = service
+            .get_diffs(
+                DiffTarget::Worktree {
+                    worktree_path: tmp.path(),
+                    base_commit: base,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(diffs.len(), 2);
+
+        let readme = diffs
+            .iter()
+            .find(|d| d.path_key() == Some("README.md"))
+            .expect("README.md diff present");
+        assert!(matches!(readme.change, DiffChangeKind::Modified));
+        assert_eq!(readme.old_content.as_deref(), Some("hello world\n"));
+        assert_eq!(readme.new_content.as_deref(), Some("hello chro\n"));
+        assert!(readme.additions.unwrap_or(0) >= 1);
+
+        // git2 surfaces untracked files in a workdir diff as `Untracked`, which
+        // `map_status` folds into `Modified` with no base content — the new file
+        // therefore reads as all-additions, matching the task-run diff path.
+        let notes = diffs
+            .iter()
+            .find(|d| d.path_key() == Some("notes.txt"))
+            .expect("notes.txt diff present");
+        assert!(matches!(notes.change, DiffChangeKind::Modified));
+        assert_eq!(notes.old_content, None);
+        assert_eq!(notes.new_content.as_deref(), Some("fresh\n"));
+        assert!(notes.additions.unwrap_or(0) >= 1);
+    }
 }

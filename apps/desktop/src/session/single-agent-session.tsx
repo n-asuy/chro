@@ -605,7 +605,7 @@ export function SingleAgentSessionView({
 
   // Full reset for new session
   const handleFullReset = useCallback(
-    (options?: { clearPending?: boolean }) => {
+    (options?: { clearPending?: boolean; clearPrompt?: boolean }) => {
       setCurrentTaskRunTargetBranch(null);
       setCurrentContainerRef(null);
       setUseWorktree(true);
@@ -618,7 +618,9 @@ export function SingleAgentSessionView({
       ) {
         clearPendingSubmission(pendingSubmission.requestId);
       }
-      editor.clear();
+      if (options?.clearPrompt !== false) {
+        editor.clear();
+      }
       // Clear active taskRunId ref
       activeTaskRunIdRef.current = null;
       // Note: activeTaskId and taskRunId are derived from URL, so navigation clears them
@@ -640,7 +642,10 @@ export function SingleAgentSessionView({
       previousWorkspaceRef.current !== undefined &&
       previousWorkspaceRef.current !== workspace
     ) {
-      handleFullReset({ clearPending: false });
+      // During a project switch, the previous tab can render once with the
+      // newly resolved project context before the layout store rebinds.
+      // Clearing the editor here would delete that tab's persisted draft.
+      handleFullReset({ clearPending: false, clearPrompt: false });
     }
 
     previousWorkspaceRef.current = workspace;
@@ -941,8 +946,11 @@ export function SingleAgentSessionView({
   const {
     entries,
     isLoading: isConversationLoading,
+    isLoadingMoreHistory,
+    hasMoreHistory,
     isStreaming: isConversationStreaming,
     error: conversationError,
+    loadMoreHistory,
   } = useConversationHistory({
     sessionScopeId: promptScopeId,
     taskId: activeStreamTaskId,
@@ -1645,6 +1653,9 @@ export function SingleAgentSessionView({
             scrollCacheKey={conversationScrollKey}
             isStreaming={isConversationStreaming}
             scrollToBottomSignal={scrollToBottomSignal}
+            hasMoreHistory={hasMoreHistory}
+            isLoadingMoreHistory={isLoadingMoreHistory}
+            onLoadMoreHistory={loadMoreHistory}
             onWikilinkClick={navigateToWikilink}
             onFilePathClick={(path) =>
               openFilePath(path, taskRunId ?? undefined)

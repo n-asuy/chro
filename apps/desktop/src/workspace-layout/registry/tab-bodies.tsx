@@ -1,6 +1,7 @@
 import { FilesEditor } from "@/files/components/editor/files-editor";
 import { useFileTreeStore } from "@/files/state/file-tree-store";
 import { useFilesStore } from "@/files/state/files-store";
+import { useWorkingDiffs } from "@/files/state/working-diffs-store";
 import { DiffViewerPanel } from "@/session/components/diff-viewer-panel";
 import { useDiffStream } from "@/session/hooks/use-diff-stream";
 import { SingleAgentSessionView } from "@/session/single-agent-session";
@@ -116,6 +117,28 @@ function DiffTabContent({
         diffs={diffEntries}
         taskRunId={runId}
       />
+    </div>
+  );
+}
+
+export function ProjectDiffTabBody({ tab, kind }: PaneItemRenderProps) {
+  if (kind.type !== "project-diff") return null;
+  return <ProjectDiffTabContent projectId={kind.projectId} tabId={tab.id} />;
+}
+
+function ProjectDiffTabContent({
+  projectId,
+  tabId,
+}: {
+  projectId: string;
+  tabId: string;
+}) {
+  const closeTab = useLayoutStore((s) => s.closeTab);
+  const { diffs } = useWorkingDiffs(projectId);
+
+  return (
+    <div className="h-full w-full">
+      <DiffViewerPanel onClose={() => closeTab(tabId)} diffs={diffs} />
     </div>
   );
 }

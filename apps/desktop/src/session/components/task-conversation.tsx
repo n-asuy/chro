@@ -57,6 +57,9 @@ interface TaskConversationProps {
   isStreaming?: boolean;
   /** Increment to force auto-scroll back to the bottom, e.g. on user submit. */
   scrollToBottomSignal?: number;
+  hasMoreHistory?: boolean;
+  isLoadingMoreHistory?: boolean;
+  onLoadMoreHistory?: () => Promise<void> | void;
 }
 
 export const TaskConversation = memo(function TaskConversation({
@@ -71,6 +74,9 @@ export const TaskConversation = memo(function TaskConversation({
   scrollCacheKey = "session",
   isStreaming = false,
   scrollToBottomSignal = 0,
+  hasMoreHistory = false,
+  isLoadingMoreHistory = false,
+  onLoadMoreHistory,
 }: TaskConversationProps) {
   const internalScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef =
@@ -340,6 +346,17 @@ export const TaskConversation = memo(function TaskConversation({
         onFilePathClick={onFilePathClick}
         scrollContainerRef={scrollContainerRef}
         searchActive={searchActive}
+        hasMoreHistory={hasMoreHistory}
+        isLoadingMoreHistory={isLoadingMoreHistory}
+        onLoadMoreHistory={onLoadMoreHistory}
+        onScrollAnchorWillAdjust={() => {
+          shouldAutoScrollRef.current = false;
+        }}
+        onScrollAnchorAdjusted={() => {
+          prevScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? 0;
+          observedScrollHeightRef.current =
+            scrollContainerRef.current?.scrollHeight ?? 0;
+        }}
       />
     );
 

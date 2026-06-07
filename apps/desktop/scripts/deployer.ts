@@ -542,6 +542,30 @@ function detectBuildContexts(runArgs: string[]): TauriBuildContext[] {
   ];
 }
 
+// The chro-server sidecar links libsqlite3-sys, which compiles SQLite's C code
+// against the dynamic VC++ runtime by default. That binds the binary to
+// VCRUNTIME140.dll, which is absent on clean Windows machines (it ships with the
+// VC++ Redistributable, not Windows itself), so the sidecar fails to launch with
+// "VCRUNTIME140.dll was not found". Statically linking the CRT embeds that
+// runtime into the binary and removes the dependency; the cc crate picks up the
+// matching /MT C runtime automatically once crt-static is set.
+//
+// This is scoped to the sidecar build only. The Tauri GUI binary is pure Rust
+// (its runtime needs are satisfied by the OS-provided UCRT) and is built by a
+// separate `tauri build` invocation, so it stays on the dynamic CRT — applying
+// crt-static to a WebView2 process risks two CRT instances in one process.
+// CARGO_TARGET_<triple>_RUSTFLAGS is target-gated, so macOS/Linux builds are
+// untouched.
+function rustServerBuildEnv(triple: string): NodeJS.ProcessEnv | undefined {
+  if (triple !== "x86_64-pc-windows-msvc") {
+    return undefined;
+  }
+  return {
+    CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS:
+      "-C target-feature=+crt-static",
+  };
+}
+
 function buildAndStageRustBinary(context: TauriBuildContext) {
   ensureRustTarget(context.triple);
   console.log(`Building Rust server (${context.label})…`);
@@ -557,7 +581,7 @@ function buildAndStageRustBinary(context: TauriBuildContext) {
       "--target",
       context.triple,
     ],
-    { cwd: repoRoot },
+    { cwd: repoRoot, env: rustServerBuildEnv(context.triple) },
   );
 
   const sourcePath = path.join(

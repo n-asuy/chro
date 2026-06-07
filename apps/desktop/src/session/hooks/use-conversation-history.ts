@@ -32,6 +32,8 @@ import { useTaskSessionsStream } from "./use-task-sessions-stream";
 export interface UseConversationHistoryResult {
   entries: DisplayEntry[];
   isLoading: boolean;
+  isLoadingMoreHistory: boolean;
+  hasMoreHistory: boolean;
   isStreaming: boolean;
   error: string | null;
   /** ID of the currently running TaskRun (if any) */
@@ -42,6 +44,8 @@ export interface UseConversationHistoryResult {
   approvals: Record<string, ApprovalRecord>;
   /** Clear all approval records (e.g. after merge). */
   resetApprovals: () => void;
+  /** Load the next page of older completed TaskRuns. */
+  loadMoreHistory: () => Promise<void>;
 }
 
 interface UseConversationHistoryParams {
@@ -98,16 +102,8 @@ const generateEntryId = (): string => {
   return `entry-${Date.now()}-${entryIdCounter}`;
 };
 
-const MIN_INITIAL_HISTORY_ENTRIES = 10;
-const REMAINING_HISTORY_BATCH_SIZE = 50;
-
-function countLoadedEntries(states: Iterable<TaskRunEntriesState>): number {
-  let total = 0;
-  for (const state of states) {
-    total += state.entries.length;
-  }
-  return total;
-}
+const INITIAL_HISTORY_RUN_COUNT = 3;
+const HISTORY_RUN_PAGE_SIZE = 3;
 
 function sortRunsByCreatedAtAscending(
   taskRuns: TaskRunRecord[],
@@ -116,6 +112,21 @@ function sortRunsByCreatedAtAscending(
     (a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
   );
+}
+
+function getUnloadedHistoricRunsNewestFirst(
+  taskRuns: TaskRunRecord[],
+  activeRunId: string | null,
+  loadedRunIds: ReadonlySet<string>,
+): TaskRunRecord[] {
+  return sortRunsByCreatedAtAscending(taskRuns)
+    .filter(
+      (run) =>
+        run.status !== "running" &&
+        run.id !== activeRunId &&
+        !loadedRunIds.has(run.id),
+    )
+    .reverse();
 }
 
 function createNormalizedDisplayEntry(
@@ -462,6 +473,7 @@ export function useConversationHistory({
   );
   const [entriesVersion, setEntriesVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -513,6 +525,8 @@ export function useConversationHistory({
 
   // Track which TaskRuns we've loaded and which is actively streaming
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const initialHistoryLoadedRef = useRef(false);
+  const historyLoadingRef = useRef(false);
   const activeStreamRef = useRef<{ runId: string; close: () => void } | null>(
     null,
   );
@@ -580,112 +594,108 @@ export function useConversationHistory({
   useEffect(() => {
     taskRunEntriesRef.current.clear();
     loadedRunIdsRef.current.clear();
+    initialHistoryLoadedRef.current = false;
+    historyLoadingRef.current = false;
     flattenCacheRef.current.clear();
     if (activeStreamRef.current) {
       activeStreamRef.current.close();
       activeStreamRef.current = null;
     }
     setIsLoading(Boolean(taskId));
+    setIsLoadingMoreHistory(false);
     setIsStreaming(false);
     setError(null);
     setEntriesVersion(0);
     resetApprovals();
   }, [taskId, taskScopeId, sessionScopeId, resetApprovals]);
 
-  // Effect 1: Load historic (finished) TaskRuns.
-  // Uses cancelled flag — safe because historic loads are short-lived async ops.
+  const loadHistoricRuns = useCallback(
+    async (
+      count: number,
+      options: { cancelled?: () => boolean; markInitialLoaded?: boolean } = {},
+    ) => {
+      if (!enabled || !taskId || runsLoading) return;
+      if (historyLoadingRef.current) return;
+
+      const historicRuns = getUnloadedHistoricRunsNewestFirst(
+        runs,
+        activeRunId,
+        loadedRunIdsRef.current,
+      ).slice(0, count);
+
+      if (historicRuns.length === 0) {
+        if (options.markInitialLoaded) setIsLoading(false);
+        return;
+      }
+
+      historyLoadingRef.current = true;
+      setIsLoadingMoreHistory(true);
+
+      try {
+        for (const run of historicRuns) {
+          if (options.cancelled?.()) break;
+          try {
+            await loadHistoricTaskRunEntries(run.id, (entries) => {
+              if (options.cancelled?.()) return;
+              taskRunEntriesRef.current.set(run.id, {
+                taskRunId: run.id,
+                createdAt: run.created_at,
+                entries,
+                finished: true,
+              });
+              loadedRunIdsRef.current.add(run.id);
+              updateEntriesVersion();
+            });
+          } catch (err) {
+            console.error(
+              `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
+              err,
+            );
+          }
+        }
+      } finally {
+        historyLoadingRef.current = false;
+        if (!options.cancelled?.()) {
+          setIsLoadingMoreHistory(false);
+          if (options.markInitialLoaded) setIsLoading(false);
+        }
+      }
+    },
+    [activeRunId, enabled, runs, runsLoading, taskId, updateEntriesVersion],
+  );
+
+  const loadMoreHistory = useCallback(
+    () => loadHistoricRuns(HISTORY_RUN_PAGE_SIZE),
+    [loadHistoricRuns],
+  );
+
+  // Effect 1: Load only the newest completed TaskRuns. Older history is loaded
+  // on demand from the top of the conversation, so long sessions do not keep
+  // prepending entries while the user is trying to read the latest content.
   useEffect(() => {
     if (!enabled || !taskId || runsLoading) {
       if (!runsLoading) setIsLoading(false);
       return;
     }
+    if (initialHistoryLoadedRef.current) return;
+    initialHistoryLoadedRef.current = true;
 
     let cancelled = false;
+    let completed = false;
+    void loadHistoricRuns(INITIAL_HISTORY_RUN_COUNT, {
+      cancelled: () => cancelled,
+      markInitialLoaded: true,
+    }).finally(() => {
+      completed = true;
+    });
 
-    const loadHistoric = async () => {
-      const sortedRuns = sortRunsByCreatedAtAscending(runs);
-      const historicRuns = sortedRuns
-        .filter(
-          (r) =>
-            r.status !== "running" &&
-            r.id !== activeRunId &&
-            !loadedRunIdsRef.current.has(r.id),
-        )
-        .reverse();
-
-      if (historicRuns.length === 0) {
-        setIsLoading(false);
-        return;
-      }
-
-      let loaded = countLoadedEntries(taskRunEntriesRef.current.values());
-
-      // Initial batch — newest first for fast render
-      for (const run of historicRuns) {
-        if (cancelled || loaded > MIN_INITIAL_HISTORY_ENTRIES) break;
-        try {
-          await loadHistoricTaskRunEntries(run.id, (entries) => {
-            if (cancelled) return;
-            taskRunEntriesRef.current.set(run.id, {
-              taskRunId: run.id,
-              createdAt: run.created_at,
-              entries,
-              finished: true,
-            });
-            loadedRunIdsRef.current.add(run.id);
-            updateEntriesVersion();
-          });
-          loaded = countLoadedEntries(taskRunEntriesRef.current.values());
-        } catch (err) {
-          console.error(
-            `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
-            err,
-          );
-        }
-      }
-
-      if (cancelled) return;
-      setIsLoading(false);
-
-      // Background batch — remaining runs
-      let batchLoaded = 0;
-      for (const run of historicRuns) {
-        if (cancelled || loadedRunIdsRef.current.has(run.id)) continue;
-        try {
-          const before = countLoadedEntries(taskRunEntriesRef.current.values());
-          await loadHistoricTaskRunEntries(run.id, (entries) => {
-            if (cancelled) return;
-            taskRunEntriesRef.current.set(run.id, {
-              taskRunId: run.id,
-              createdAt: run.created_at,
-              entries,
-              finished: true,
-            });
-            loadedRunIdsRef.current.add(run.id);
-            updateEntriesVersion();
-          });
-          batchLoaded += Math.max(
-            0,
-            countLoadedEntries(taskRunEntriesRef.current.values()) - before,
-          );
-          if (batchLoaded >= REMAINING_HISTORY_BATCH_SIZE) {
-            batchLoaded = 0;
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
-        } catch (err) {
-          console.error(
-            `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
-            err,
-          );
-        }
-      }
-    };
-
-    loadHistoric();
     return () => {
       cancelled = true;
+      if (!completed) {
+        initialHistoryLoadedRef.current = false;
+      }
     };
-  }, [enabled, taskId, runs, runsLoading, updateEntriesVersion]);
+  }, [enabled, loadHistoricRuns, runsLoading, taskId]);
 
   // Effect 2: Stream the running TaskRun — fire-and-forget.
   // No cancelled flag. The stream is autonomous and survives effect re-runs.
@@ -859,14 +869,28 @@ export function useConversationHistory({
     sessions,
   ]);
 
+  const hasMoreHistory = useMemo(() => {
+    if (!enabled || !taskId || runsLoading) return false;
+    return (
+      getUnloadedHistoricRunsNewestFirst(
+        runs,
+        activeRunId,
+        loadedRunIdsRef.current,
+      ).length > 0
+    );
+  }, [activeRunId, enabled, entriesVersion, runs, runsLoading, taskId]);
+
   return {
     entries,
     isLoading: isLoading || runsLoading || sessionsLoading,
+    isLoadingMoreHistory,
+    hasMoreHistory,
     isStreaming,
     error: error || runsError || sessionsError,
     activeRunId,
     latestRunId,
     approvals,
     resetApprovals,
+    loadMoreHistory,
   };
 }

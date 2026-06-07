@@ -154,6 +154,12 @@ pub async fn launch_runtime<R: TauriRuntime>(
     ];
 
     let mut env_vars: HashMap<String, String> = HashMap::new();
+    // Tie the sidecar's lifetime to this shell. If the desktop process dies
+    // without a clean exit (crash, force-quit, auto-update relaunch) the server
+    // self-terminates instead of orphaning onto launchd and holding its port,
+    // which would push the next launch onto a new port. Delivered via env (not a
+    // CLI flag) so an older bundled chro-server simply ignores it and still boots.
+    env_vars.insert("CHRO_PARENT_PID".into(), std::process::id().to_string());
     match std::env::var("RUST_LOG") {
         Ok(value) => {
             env_vars.insert("RUST_LOG".into(), value);
@@ -256,7 +262,26 @@ fn resolve_sidecar<R: TauriRuntime>(
     env_vars: &HashMap<String, String>,
 ) -> Result<tauri_plugin_shell::process::Command> {
     let shell = app.shell();
-    let mut cmd = if let Ok(sidecar) = shell.sidecar("chro-server") {
+
+    // `tauri dev` only rebuilds the Rust shell and the frontend — it never
+    // rebuilds the bundled `binaries/chro-server-*`, which is a frozen release
+    // artifact staged by `tauri build`. Running it in dev therefore executes a
+    // stale server (e.g. one missing newly added DB migrations, which then fails
+    // to open an already-upgraded database). In dev we prefer the freshly
+    // compiled `crates/server/target` binary; release builds keep the bundle.
+    let dev_local = if tauri::is_dev() {
+        dev_binary_path()
+    } else {
+        None
+    };
+
+    let mut cmd = if let Some(local) = dev_local {
+        debug!(
+            "[runtime] dev mode: using freshly built chro-server at {}",
+            local.display()
+        );
+        shell.command(local.to_string_lossy().into_owned())
+    } else if let Ok(sidecar) = shell.sidecar("chro-server") {
         debug!("[runtime] using bundled chro-server sidecar");
         sidecar
     } else if let Some(local) = sidecar_next_to_current_exe() {
