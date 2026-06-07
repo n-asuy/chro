@@ -382,6 +382,7 @@ const en = {
   backToFiles: "Back to files",
   searchFilesPlaceholder: "Search files...",
   noFilesFound: "No files found",
+  sessionNoChanges: "No changes yet",
   copyFullPath: "Copy Full Path",
   copyRelativePath: "Copy Relative Path",
   revealInFinder: "Reveal in Finder",

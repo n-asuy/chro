@@ -1,19 +1,23 @@
-
-import type React from "react";
-import type { CSSProperties } from "react";
-import { useEffect, useRef, useMemo } from "react";
-import { ChevronRight } from "lucide-react";
-import { cn } from "@chro/ui/utils";
+import { type TranslationFunction, useLanguage } from "@/i18n";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
+import { cn } from "@chro/ui/utils";
+import { ChevronRight } from "lucide-react";
+import type React from "react";
+import type { CSSProperties } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import {
+  type DecorationStatus,
+  STATUS_LABEL,
+  STATUS_TEXT_CLASS,
+} from "../../lib/git-status-decoration";
+import { useFilesStore } from "../../state/files-store";
 import type { TreeNodeProps } from "../../types/file-tree";
 import { FileNodeType } from "../../types/file-tree";
-import { useFilesStore } from "../../state/files-store";
-import { useLanguage, type TranslationFunction } from "@/i18n";
 
 const formatFileSize = (bytes: number | undefined): string => {
   if (bytes === undefined || bytes === null) return "";
@@ -55,6 +59,8 @@ interface TreeNodeExtraProps {
   isDragOver?: boolean;
   isDragging?: boolean;
   onMouseDown?: (e: React.MouseEvent) => void;
+  /** Git status decoration for this node (file status or folder rollup). */
+  gitStatus?: DecorationStatus | null;
 }
 
 export const TreeNode = ({
@@ -68,6 +74,7 @@ export const TreeNode = ({
   isDragOver,
   isDragging,
   onMouseDown,
+  gitStatus,
 }: TreeNodeProps & TreeNodeExtraProps) => {
   const { t } = useLanguage();
   const {
@@ -225,7 +232,8 @@ export const TreeNode = ({
       className={cn(
         "font-workspace text-[12px] leading-[1.35] group flex min-h-[28px] cursor-pointer items-center rounded-[3px] mx-1 pr-2 text-custom-sidebar-text-200 hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
         isSelected && "bg-[rgba(41,154,214,0.12)] text-custom-sidebar-text-100",
-        isDragOver && "ring-2 ring-custom-primary-100 ring-inset bg-custom-primary-100/10",
+        isDragOver &&
+          "ring-2 ring-custom-primary-100 ring-inset bg-custom-primary-100/10",
         isDragging && "opacity-50",
       )}
       style={indentStyle}
@@ -258,7 +266,27 @@ export const TreeNode = ({
           onClick={(e) => e.stopPropagation()}
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        <>
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate",
+              gitStatus && STATUS_TEXT_CLASS[gitStatus],
+            )}
+          >
+            {node.name}
+          </span>
+          {gitStatus && (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "ml-1.5 shrink-0 text-[11px] font-medium tabular-nums",
+                STATUS_TEXT_CLASS[gitStatus],
+              )}
+            >
+              {STATUS_LABEL[gitStatus]}
+            </span>
+          )}
+        </>
       )}
     </div>
   );

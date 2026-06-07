@@ -42,6 +42,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
 import { useFileTreeDnd } from "../../hooks/use-file-tree-dnd";
 import { useFileTreeExternalDrop } from "../../hooks/use-file-tree-external-drop";
+import { useGitStatus } from "../../hooks/use-git-status";
+import {
+  EMPTY_DECORATIONS,
+  buildGitDecorations,
+} from "../../lib/git-status-decoration";
 import { useFileTreeStore } from "../../state/file-tree-store";
 import { useFilesStore } from "../../state/files-store";
 import type { FileNode } from "../../types/file-tree";
@@ -108,6 +113,21 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   // A session sandbox (task-run worktree) is read-only here: it lists and
   // opens files, but project-scoped mutations are hidden/disabled.
   const isWorktreeScope = scopeTaskRunId != null;
+
+  // Git status decorations (Orca-style): tint + badge changed files and roll the
+  // status up to ancestor folders. Only in local/project mode — in a worktree
+  // session the tree stays plain (no diff colors); that change review lives in
+  // the branch-scoped Source Control panel. The right dock shows one panel at a
+  // time, so this poller does not overlap with the source-control panel's.
+  const { status: gitStatus } = useGitStatus({
+    projectId,
+    autoRefresh: !isWorktreeScope,
+  });
+  const decorations = useMemo(
+    () =>
+      isWorktreeScope ? EMPTY_DECORATIONS : buildGitDecorations(gitStatus),
+    [gitStatus, isWorktreeScope],
+  );
 
   const deriveAdHocRootName = useCallback((absolutePath: string): string => {
     const trimmed = absolutePath.replace(/[\\/]+$/, "");
@@ -738,7 +758,11 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             onScroll={handleTreeScroll}
             role="tree"
           >
-            {visibleRows.length > 0 ? (
+            {isWorktreeScope && fileTree.length === 0 ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-custom-sidebar-text-400">
+                {t("sessionNoChanges")}
+              </div>
+            ) : visibleRows.length > 0 ? (
               <div
                 className="relative w-full py-2"
                 style={{ height: rowVirtualizer.getTotalSize() }}
@@ -759,6 +783,16 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                   const matchedRoot = isWorkspaceRoot
                     ? roots.find((r) => r.path === node.path)
                     : null;
+                  // Decorate only primary-root nodes — their vault path is
+                  // exactly `/${relativePath}`, so a match excludes ad-hoc roots
+                  // whose git status we don't track.
+                  const relativePath = node.relativePath;
+                  const nodeGitStatus =
+                    relativePath && node.path === `/${relativePath}`
+                      ? (isDirectory
+                          ? decorations.folders.get(relativePath)
+                          : decorations.files.get(relativePath)) ?? null
+                      : null;
 
                   return (
                     <div
@@ -799,6 +833,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                           indentPx={indentPx}
                           isDragOver={isDragOver}
                           isDragging={isDragging}
+                          gitStatus={nodeGitStatus}
                           onToggle={() => {
                             if (isDirectory) {
                               void toggleFolderWithHydration(node.path);

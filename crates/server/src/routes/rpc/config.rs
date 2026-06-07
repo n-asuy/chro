@@ -369,17 +369,7 @@ async fn update_mcp_config_handler(
 }
 
 async fn detect_executor_handler() -> Json<ClaudeVersionResult> {
-    let result = spawn_blocking(detect_claude_version)
-        .await
-        .unwrap_or_else(|err| ClaudeVersionResult {
-            ok: false,
-            version: None,
-            command: None,
-            resolved_path: None,
-            error: Some("UNEXPECTED_ERROR".to_string()),
-            message: Some(err.to_string()),
-        });
-    Json(result)
+    Json(detect_claude_version().await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -391,15 +381,7 @@ async fn check_mcp_status_handler(
     Query(query): Query<CheckMcpStatusQuery>,
 ) -> Json<McpStatusResult> {
     let executor = query.executor.unwrap_or(BaseCodingAgent::ClaudeCode);
-    let result = spawn_blocking(move || check_mcp_status(executor))
-        .await
-        .unwrap_or_else(|err| McpStatusResult {
-            ok: false,
-            servers: Vec::new(),
-            error: Some("UNEXPECTED_ERROR".to_string()),
-            message: Some(err.to_string()),
-        });
-    Json(result)
+    Json(check_mcp_status(executor).await)
 }
 
 async fn get_auth_status_handler() -> Json<AuthStatusResult> {

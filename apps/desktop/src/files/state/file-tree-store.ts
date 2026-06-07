@@ -22,6 +22,8 @@ interface FileTreeActions {
   collapseAll: () => void;
   expandToPath: (targetPath: string) => void;
   setExpandedPaths: (paths: Set<string>) => void;
+  /** Replace expansion without persisting — for ephemeral session-scope trees. */
+  replaceExpandedPaths: (paths: Set<string>) => void;
   getExpandedPaths: () => Set<string>;
   isExpanded: (path: string) => boolean;
 }
@@ -140,6 +142,10 @@ export const useFileTreeStore = create<FileTreeStore>()((set, get) => ({
       }
       return { expandedPaths: paths };
     });
+  },
+
+  replaceExpandedPaths: (paths) => {
+    set({ expandedPaths: paths });
   },
 
   getExpandedPaths: () => {

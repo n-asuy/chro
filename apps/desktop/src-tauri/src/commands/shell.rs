@@ -52,6 +52,10 @@ pub fn open_path<R: TauriRuntime>(
 /// type), this routes through cmux's own CLI, so it behaves identically
 /// regardless of how cmux was launched and uses cmux's native workspace
 /// handling.
+///
+/// Note: `cmux open <dir>` always creates a *new* workspace for the directory —
+/// cmux's CLI has no "focus the existing workspace for this path" affordance —
+/// so repeated opens of the same project stack up workspaces.
 #[tauri::command]
 pub async fn open_in_cmux(path: String) -> DesktopResult<()> {
     let path = path.trim();
@@ -85,13 +89,27 @@ pub async fn open_in_cmux(path: String) -> DesktopResult<()> {
         )));
     }
 
+    // `cmux open <dir>` creates the workspace over the control socket but does
+    // not necessarily bring cmux to the foreground when it is already running,
+    // so the new workspace can otherwise appear only in the background.
+    // Activate the app explicitly. This is best-effort — a foreground failure
+    // must not turn a successful open into an error.
+    let _ = Command::new("open")
+        .arg("-a")
+        .arg("cmux")
+        .stdin(Stdio::null())
+        .status()
+        .await;
+
     Ok(())
 }
 
-/// Resolve the `cmux` CLI binary that `cmux.app` installs (the installer's
-/// default destination is `/usr/local/bin/cmux`). A desktop app launched from
-/// Finder does not inherit the user's shell `PATH`, so we probe the known
-/// install locations directly and fall back to a login-shell lookup for
+/// Resolve the `cmux` CLI binary. The CLI always ships *inside* the app bundle
+/// at `cmux.app/Contents/Resources/bin/cmux`; the `/usr/local/bin/cmux` symlink
+/// the app offers to create is optional (it needs admin rights), so the bundle
+/// path is the most reliable candidate and is probed first. A desktop app
+/// launched from Finder does not inherit the user's shell `PATH`, so we probe
+/// fixed locations directly and only then fall back to a login-shell lookup for
 /// non-standard installs. `CMUX_BIN` overrides discovery entirely.
 async fn resolve_cmux_binary() -> Option<PathBuf> {
     if let Ok(value) = std::env::var("CMUX_BIN") {
@@ -101,8 +119,16 @@ async fn resolve_cmux_binary() -> Option<PathBuf> {
         }
     }
 
-    for candidate in ["/usr/local/bin/cmux", "/opt/homebrew/bin/cmux"] {
-        let path = PathBuf::from(candidate);
+    const BUNDLE_CLI: &str = "Contents/Resources/bin/cmux";
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/Applications/cmux.app").join(BUNDLE_CLI),
+        PathBuf::from("/usr/local/bin/cmux"),
+        PathBuf::from("/opt/homebrew/bin/cmux"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Applications/cmux.app").join(BUNDLE_CLI));
+    }
+    for path in candidates {
         if path.is_file() {
             return Some(path);
         }

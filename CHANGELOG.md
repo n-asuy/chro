@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.35
+
+- Fixed Claude Code and Codex being detected as "not installed" on Windows when their CLI was installed under a Node version manager (fnm, nvm-windows, Volta) or an npm global prefix whose directory is only added to `PATH` by the PowerShell profile, by reading `PATH` from the user's dot-sourced PowerShell `$PROFILE` (pwsh and Windows PowerShell) during CLI discovery
+- Unified Claude/Codex discovery onto the single layered resolver so install detection, version probing, MCP status, and execution all resolve the binary the same way, removing the duplicated per-tool location lists
+
 ## 0.1.34
 
 - Fixed the Windows desktop app failing to start its `chro-server` sidecar with a "VCRUNTIME140.dll was not found" error on machines without the Visual C++ Redistributable, by statically linking the C runtime into the sidecar binary

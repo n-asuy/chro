@@ -389,6 +389,7 @@ const ja = {
   backToFiles: "ファイルに戻る",
   searchFilesPlaceholder: "ファイルを検索...",
   noFilesFound: "ファイルが見つかりません",
+  sessionNoChanges: "変更はまだありません",
   copyFullPath: "フルパスをコピー",
   copyRelativePath: "相対パスをコピー",
   revealInFinder: "Finderで表示",

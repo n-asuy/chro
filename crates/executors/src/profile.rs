@@ -6,7 +6,7 @@
 //! - `ExecutorConfig`: Per-executor configuration with multiple variants
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -426,7 +426,7 @@ pub struct McpStatusResult {
     pub message: Option<String>,
 }
 
-fn add_parent_dir_to_path_env(command: &mut std::process::Command, executable: &std::path::Path) {
+fn add_parent_dir_to_path_env(command: &mut tokio::process::Command, executable: &std::path::Path) {
     let Some(parent) = executable.parent() else {
         return;
     };
@@ -441,242 +441,33 @@ fn add_parent_dir_to_path_env(command: &mut std::process::Command, executable: &
     }
 }
 
-/// Find the Claude CLI executable path.
-/// On Windows, also checks %APPDATA%\npm where global npm packages are installed.
-fn find_claude_executable() -> Option<std::path::PathBuf> {
-    if let Ok(path) = which::which("claude") {
-        return Some(path);
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Some(path) = find_claude_in_known_locations() {
-            return Some(path);
-        }
-
-        if let Some(path) = find_claude_via_login_shell() {
-            return Some(path);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(path) = find_claude_in_known_locations_windows() {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn find_claude_in_known_locations_windows() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-
-    let mut candidates: Vec<std::path::PathBuf> = vec![
-        home.join(".local").join("bin").join("claude.exe"),
-        home.join(".local").join("bin").join("claude.cmd"),
-        home.join(".claude").join("bin").join("claude.exe"),
-    ];
-
-    // %APPDATA%\npm (global npm packages)
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let appdata = std::path::PathBuf::from(appdata);
-        candidates.push(appdata.join("npm").join("claude.cmd"));
-        candidates.push(appdata.join("npm").join("claude.exe"));
-    }
-
-    // %LOCALAPPDATA%\Volta (Volta tool manager)
-    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-        candidates.push(
-            std::path::PathBuf::from(local_appdata)
-                .join("Volta")
-                .join("bin")
-                .join("claude.exe"),
-        );
-    }
-
-    // %USERPROFILE%\.volta\bin (Volta alternative location)
-    candidates.push(home.join(".volta").join("bin").join("claude.exe"));
-
-    // fnm / nvm-windows: scan %APPDATA%\fnm\node-versions or %NVM_HOME%
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let fnm_dir = std::path::PathBuf::from(&appdata)
-            .join("fnm")
-            .join("node-versions");
-        if fnm_dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(&fnm_dir) {
-                let mut version_dirs: Vec<std::path::PathBuf> = entries
-                    .filter_map(Result::ok)
-                    .filter_map(|e| e.path().is_dir().then_some(e.path()))
-                    .collect();
-                version_dirs.sort_by(|a, b| {
-                    b.file_name()
-                        .unwrap_or_default()
-                        .cmp(a.file_name().unwrap_or_default())
-                });
-                candidates.extend(
-                    version_dirs
-                        .into_iter()
-                        .map(|d| d.join("installation").join("claude.cmd")),
-                );
-            }
-        }
-    }
-
-    if let Ok(nvm_home) = std::env::var("NVM_HOME") {
-        let nvm_dir = std::path::PathBuf::from(nvm_home);
-        if let Ok(entries) = fs::read_dir(&nvm_dir) {
-            let mut version_dirs: Vec<std::path::PathBuf> = entries
-                .filter_map(Result::ok)
-                .filter_map(|e| e.path().is_dir().then_some(e.path()))
-                .collect();
-            version_dirs.sort_by(|a, b| {
-                b.file_name()
-                    .unwrap_or_default()
-                    .cmp(a.file_name().unwrap_or_default())
-            });
-            candidates.extend(version_dirs.into_iter().map(|d| d.join("claude.cmd")));
-        }
-    }
-
-    // %ProgramFiles%\nodejs (system-wide Node.js installation)
-    if let Ok(program_files) = std::env::var("ProgramFiles") {
-        candidates.push(
-            std::path::PathBuf::from(program_files)
-                .join("nodejs")
-                .join("claude.cmd"),
-        );
-    }
-
-    candidates.into_iter().find(|path| path.exists())
-}
-
-#[cfg(not(windows))]
-fn find_claude_in_known_locations() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    let mut candidates = vec![
-        home.join(".local").join("bin").join("claude"),
-        home.join(".claude").join("bin").join("claude"),
-        home.join(".npm-global").join("bin").join("claude"),
-        home.join(".nodebrew")
-            .join("current")
-            .join("bin")
-            .join("claude"),
-        home.join(".volta").join("bin").join("claude"),
-        std::path::PathBuf::from("/opt/homebrew/bin/claude"),
-        std::path::PathBuf::from("/usr/local/bin/claude"),
-    ];
-
-    let nvm_dir = std::env::var("NVM_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join(".nvm"));
-    let nvm_versions_dir = nvm_dir.join("versions").join("node");
-
-    if let Ok(entries) = fs::read_dir(nvm_versions_dir) {
-        let mut version_dirs: Vec<std::path::PathBuf> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                path.is_dir().then_some(path)
-            })
-            .collect();
-        version_dirs.sort_by(|a, b| {
-            b.file_name()
-                .unwrap_or_default()
-                .cmp(a.file_name().unwrap_or_default())
-        });
-        candidates.extend(
-            version_dirs
-                .into_iter()
-                .map(|dir| dir.join("bin").join("claude")),
-        );
-    }
-
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-#[cfg(not(windows))]
-fn find_claude_via_login_shell() -> Option<std::path::PathBuf> {
-    use std::process::{Command, Stdio};
-
-    let mut seen = HashSet::new();
-    let mut shells = Vec::<std::path::PathBuf>::new();
-
-    if let Ok(shell) = std::env::var("SHELL") {
-        let path = std::path::PathBuf::from(shell);
-        if path.is_file() && seen.insert(path.clone()) {
-            shells.push(path);
-        }
-    }
-
-    for fallback in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
-        let path = std::path::PathBuf::from(fallback);
-        if path.is_file() && seen.insert(path.clone()) {
-            shells.push(path);
-        }
-    }
-
-    for shell in shells {
-        let shell_name = shell
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        let script = match shell_name {
-            "zsh" => {
-                "if [ -f \"$HOME/.zshrc\" ]; then source \"$HOME/.zshrc\"; fi; command -v claude"
-            }
-            "bash" => {
-                "if [ -f \"$HOME/.bashrc\" ]; then source \"$HOME/.bashrc\"; fi; command -v claude"
-            }
-            _ => "command -v claude",
-        };
-
-        let mut command = Command::new(&shell);
-        if matches!(shell_name, "zsh" | "bash") {
-            command.arg("-l");
-        }
-        command
-            .arg("-c")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .stdout(Stdio::piped());
-
-        let output = match command.output() {
-            Ok(value) if value.status.success() => value,
-            _ => continue,
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().map(str::trim) {
-            if line.is_empty() {
-                continue;
-            }
-            let path = std::path::PathBuf::from(line);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
 /// Detect Claude CLI version.
-pub fn detect_claude_version() -> ClaudeVersionResult {
-    use std::process::Command;
+///
+/// Resolves the binary through the shared layered resolver so detection matches
+/// the path used to actually run Claude (login-shell PATH refresh, candidate
+/// locations, and the `CLAUDE_BIN` override all apply).
+pub async fn detect_claude_version() -> ClaudeVersionResult {
+    let resolved = crate::cli_resolver::resolve_cli(&crate::cli_manifest::CLAUDE).await;
+    let claude_path = resolved.as_ref().map(|r| r.path.clone());
 
-    let claude_path = find_claude_executable();
-
-    let result = if let Some(path) = &claude_path {
-        let mut command = Command::new(path);
-        add_parent_dir_to_path_env(&mut command, path);
-        command.arg("--version").output()
-    } else {
-        Command::new("claude").arg("--version").output()
+    let mut command = match &claude_path {
+        Some(path) => {
+            let mut command = tokio::process::Command::new(path);
+            add_parent_dir_to_path_env(&mut command, path);
+            command
+        }
+        None => tokio::process::Command::new(crate::cli_manifest::CLAUDE.command),
     };
+
+    let result = command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    let resolved_path = claude_path.map(|p| p.to_string_lossy().into_owned());
 
     match result {
         Ok(output) => {
@@ -686,7 +477,7 @@ pub fn detect_claude_version() -> ClaudeVersionResult {
                     ok: true,
                     version: Some(version),
                     command: Some("claude".to_string()),
-                    resolved_path: claude_path.map(|p| p.to_string_lossy().into_owned()),
+                    resolved_path,
                     error: None,
                     message: None,
                 }
@@ -696,7 +487,7 @@ pub fn detect_claude_version() -> ClaudeVersionResult {
                     ok: false,
                     version: None,
                     command: Some("claude".to_string()),
-                    resolved_path: claude_path.map(|p| p.to_string_lossy().into_owned()),
+                    resolved_path,
                     error: Some("COMMAND_FAILED".to_string()),
                     message: Some(stderr),
                 }
@@ -706,7 +497,7 @@ pub fn detect_claude_version() -> ClaudeVersionResult {
             ok: false,
             version: None,
             command: Some("claude".to_string()),
-            resolved_path: claude_path.map(|p| p.to_string_lossy().into_owned()),
+            resolved_path,
             error: Some("NOT_FOUND".to_string()),
             message: Some(err.to_string()),
         },
@@ -714,24 +505,30 @@ pub fn detect_claude_version() -> ClaudeVersionResult {
 }
 
 /// Check MCP server status for the requested executor's CLI.
-pub fn check_mcp_status(executor: BaseCodingAgent) -> McpStatusResult {
+pub async fn check_mcp_status(executor: BaseCodingAgent) -> McpStatusResult {
     match executor {
-        BaseCodingAgent::ClaudeCode => check_claude_mcp_status(),
-        BaseCodingAgent::Codex => check_codex_mcp_status(),
+        BaseCodingAgent::ClaudeCode => check_claude_mcp_status().await,
+        BaseCodingAgent::Codex => check_codex_mcp_status().await,
     }
 }
 
-fn check_claude_mcp_status() -> McpStatusResult {
-    use std::process::Command;
+/// Resolve a manifest CLI and build a command for it, prepending the binary's
+/// directory to `PATH` so co-located runtimes (e.g. a Node shim's `node`) are
+/// reachable. Falls back to the bare command name when discovery fails.
+async fn mcp_command(manifest: &'static crate::cli_manifest::CliManifest) -> tokio::process::Command {
+    match crate::cli_resolver::resolve_cli(manifest).await {
+        Some(resolved) => {
+            let mut command = tokio::process::Command::new(&resolved.path);
+            add_parent_dir_to_path_env(&mut command, &resolved.path);
+            command
+        }
+        None => tokio::process::Command::new(manifest.command),
+    }
+}
 
-    let claude_path = find_claude_executable();
-    let result = if let Some(path) = &claude_path {
-        let mut command = Command::new(path);
-        add_parent_dir_to_path_env(&mut command, path);
-        command.args(["mcp", "list"]).output()
-    } else {
-        Command::new("claude").args(["mcp", "list"]).output()
-    };
+async fn check_claude_mcp_status() -> McpStatusResult {
+    let mut command = mcp_command(&crate::cli_manifest::CLAUDE).await;
+    let result = command.args(["mcp", "list"]).output().await;
 
     match result {
         Ok(output) => {
@@ -763,12 +560,9 @@ fn check_claude_mcp_status() -> McpStatusResult {
     }
 }
 
-fn check_codex_mcp_status() -> McpStatusResult {
-    use std::process::Command;
-
-    let result = Command::new("codex")
-        .args(["mcp", "list", "--json"])
-        .output();
+async fn check_codex_mcp_status() -> McpStatusResult {
+    let mut command = mcp_command(&crate::cli_manifest::CODEX).await;
+    let result = command.args(["mcp", "list", "--json"]).output().await;
 
     match result {
         Ok(output) => {

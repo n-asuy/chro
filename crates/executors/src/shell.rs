@@ -210,16 +210,55 @@ fn script_for_shell(shell: &Path) -> String {
     }
 }
 
+// Wrapper printed around the captured PATH so banners, MOTDs, or profile
+// `Write-Host` noise can be stripped before parsing.
+#[cfg(windows)]
+const WINDOWS_PATH_DELIMITER: &str = "__CHRO_PATH__";
+
+// Dot-source every existing PowerShell profile (suppressing all output), then
+// print the resulting `$env:Path` between delimiters. Node version managers
+// (fnm, nvm-windows, Volta) and similar tools prepend their bin dirs from the
+// user's profile, not the registry, so this captures dirs a bare `which` and
+// the registry-only `Path` miss. `-NoProfile` skips PowerShell's own auto-load;
+// we source the profiles explicitly so the set is deterministic.
+#[cfg(windows)]
+const WINDOWS_PATH_SCRIPT: &str = "$ErrorActionPreference='SilentlyContinue'; \
+foreach ($p in @($PROFILE.AllUsersAllHosts,$PROFILE.AllUsersCurrentHost,$PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost)) \
+{ if ($p -and (Test-Path $p)) { . $p *> $null } }; \
+[Console]::Out.Write('__CHRO_PATH__' + $env:Path + '__CHRO_PATH__')";
+
+/// Capture the user's interactive `PATH` on Windows.
+///
+/// A GUI-launched process only inherits the registry (Machine + User) `PATH`,
+/// so CLIs that a terminal resolves via the PowerShell profile are invisible to
+/// a bare `which`. We launch PowerShell, dot-source the profiles, and read the
+/// resulting `$env:Path` so discovery matches the user's real shell.
+///
+/// PowerShell 7 (`pwsh`) and Windows PowerShell (`powershell.exe`) use separate
+/// profile paths, so try `pwsh` first (where modern fnm/starship setups live)
+/// and fall back to the always-present `powershell.exe`.
 #[cfg(windows)]
 async fn get_login_shell_path() -> Option<OsString> {
-    let mut cmd = Command::new("powershell.exe");
-    cmd.arg("-NoProfile").arg("-Command").arg(
-        r#"$machine = [System.Environment]::GetEnvironmentVariable('Path','Machine');
-$user = [System.Environment]::GetEnvironmentVariable('Path','User');
-$all = @($machine, $user, $Env:Path) | Where-Object { $_ -and $_.Length -gt 0 };
-[Console]::Out.Write(($all -join ';'));"#,
-    );
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    for exe in ["pwsh.exe", "powershell.exe"] {
+        if let Some(path) = read_path_from_powershell(exe).await {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+async fn read_path_from_powershell(exe: &str) -> Option<OsString> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(WINDOWS_PATH_SCRIPT)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let output = match timeout(PATH_REFRESH_TIMEOUT, cmd.output()).await {
         Ok(Ok(output)) => output,
@@ -230,12 +269,21 @@ $all = @($machine, $user, $Env:Path) | Where-Object { $_ -and $_.Length -gt 0 };
         return None;
     }
 
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value = extract_between(&stdout, WINDOWS_PATH_DELIMITER)?;
     if value.is_empty() {
         None
     } else {
         Some(OsString::from(value))
     }
+}
+
+#[cfg(windows)]
+fn extract_between(text: &str, delimiter: &str) -> Option<String> {
+    let start = text.find(delimiter)? + delimiter.len();
+    let rest = &text[start..];
+    let end = rest.find(delimiter)?;
+    Some(rest[..end].trim().to_string())
 }
 
 /// Run a shell script using the host's preferred shell.

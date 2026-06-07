@@ -1,6 +1,10 @@
 import { FileTree } from "@/files/components/file-tree/file-tree";
 import { useProjectContext } from "@/files/context/project-context";
 import { useActiveWorkspaceScope } from "@/files/hooks/use-active-workspace-scope";
+import {
+  buildChangedFilesTree,
+  collectDirectoryPaths,
+} from "@/files/lib/changed-files-tree";
 import { entryToFileNode } from "@/files/lib/workspace-tree";
 import {
   type PersistedWorktree,
@@ -17,6 +21,7 @@ import {
   subscribeProjectFileEvents,
 } from "@/lib/project-client";
 import { isUiStateReady } from "@/lib/ui-state-client";
+import { useDiffStream } from "@/session/hooks";
 import { useCallback, useEffect, useMemo } from "react";
 import { useDockCloseHandler } from "../dock-store-context";
 
@@ -83,6 +88,7 @@ export function FileTreeDockPanel() {
     (s) => s.initializeExpandedPaths,
   );
   const expandPath = useFileTreeStore((s) => s.expandPath);
+  const replaceExpandedPaths = useFileTreeStore((s) => s.replaceExpandedPaths);
   const fileTree = useFilesStore((s) => s.fileTree);
   const expandedPaths = useFileTreeStore((s) => s.expandedPaths);
 
@@ -110,6 +116,44 @@ export function FileTreeDockPanel() {
     return () => setScopeTaskRunId(null);
   }, [setScopeTaskRunId]);
 
+  // In session scope the tree shows ONLY the files the agent changed (Orca
+  // style), sourced from the run's diff stream. stats_only keeps it light: we
+  // only need the changed paths, not file contents — the session tree is plain
+  // (no diff colors), so change kinds aren't needed either.
+  const { diffs: scopeDiffs } = useDiffStream({
+    taskRunId: scopeTaskRunId,
+    statsOnly: true,
+    enabled: !!scopeTaskRunId,
+  });
+  const changedPaths = useMemo(() => Object.keys(scopeDiffs), [scopeDiffs]);
+
+  // Build the changed-files-only tree and expand it (including the synthetic
+  // root) so every change is visible by default. Expansion is ephemeral
+  // (replaceExpandedPaths does not persist), so it never pollutes the project
+  // tree's saved state.
+  useEffect(() => {
+    if (!scopeTaskRunId) return;
+    const tree = buildChangedFilesTree(changedPaths);
+    setFileTree(tree);
+    const expanded = new Set(collectDirectoryPaths(tree));
+    if (primaryRoot) expanded.add(primaryRoot.path);
+    replaceExpandedPaths(expanded);
+  }, [
+    scopeTaskRunId,
+    changedPaths,
+    primaryRoot,
+    setFileTree,
+    replaceExpandedPaths,
+  ]);
+
+  // While in scope, detach expansion from the persisted project key so folder
+  // toggles inside the sandbox stay ephemeral. Leaving scope, the restore
+  // effect re-attaches the project's workspace and saved expansion.
+  useEffect(() => {
+    if (!scopeTaskRunId) return;
+    useFileTreeStore.setState({ workspacePath: null });
+  }, [scopeTaskRunId]);
+
   // Expanded-folder state lives in persisted UI state, which hydrates
   // asynchronously after first paint (loadUiState() in main.tsx). Until it
   // is ready, loadExpandedPaths() returns an empty set; initializing then
@@ -119,6 +163,10 @@ export function FileTreeDockPanel() {
   // then re-assert the always-expanded primary root so the freshly loaded
   // set keeps it open (covers a workspace's first-ever open).
   useEffect(() => {
+    // Session scope manages its own ephemeral expand-all; skip the persisted
+    // project expansion so it is not clobbered. Leaving scope re-runs this and
+    // restores the saved set.
+    if (scopeTaskRunId) return;
     let cancelled = false;
     const run = () => {
       if (cancelled) return;
@@ -139,7 +187,13 @@ export function FileTreeDockPanel() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [workspacePath, primaryRoot, initializeExpandedPaths, expandPath]);
+  }, [
+    workspacePath,
+    primaryRoot,
+    initializeExpandedPaths,
+    expandPath,
+    scopeTaskRunId,
+  ]);
 
   // Initialize roots when the bound project changes. The primary root is
   // always present; persisted ad-hoc worktrees (added previously via
@@ -210,22 +264,17 @@ export function FileTreeDockPanel() {
     saveProjectWorktrees(projectId, adHoc);
   }, [projectId, roots]);
 
-  // Load root entries when the project or active scope changes. In worktree
-  // scope the entries come from the run's sandbox; otherwise the project root.
+  // Load the full project root listing. In session scope the tree is driven by
+  // the changed-files effect above instead, so skip this.
   useEffect(() => {
+    if (scopeTaskRunId) return;
     let cancelled = false;
     void (async () => {
       try {
-        let entries: Awaited<ReturnType<typeof listProjectEntries>>;
-        if (scopeTaskRunId) {
-          entries = await listTaskRunEntries(scopeTaskRunId, {
-            detail: "basic",
-          });
-        } else if (projectId) {
-          entries = await listProjectEntries(projectId, { detail: "basic" });
-        } else {
-          return;
-        }
+        if (!projectId) return;
+        const entries = await listProjectEntries(projectId, {
+          detail: "basic",
+        });
         if (cancelled) return;
         setFileTree(entries.map((e) => entryToFileNode(e)));
       } catch (error) {
