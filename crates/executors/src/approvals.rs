@@ -32,10 +32,12 @@ pub trait ExecutorApprovalService: Send + Sync {
     async fn create_tool_approval(&self, tool_name: &str) -> Result<String, ExecutorApprovalError>;
 
     /// Creates a question approval request and returns its approval_id.
+    /// `tool_input` is the raw AskUserQuestion input (`{ questions: [...] }`)
+    /// so the frontend can render the question flow from the approval record.
     async fn create_question_approval(
         &self,
         tool_name: &str,
-        question_count: usize,
+        tool_input: serde_json::Value,
     ) -> Result<String, ExecutorApprovalError>;
 
     /// Waits for a tool approval resolution.
@@ -68,7 +70,7 @@ impl ExecutorApprovalService for NoopExecutorApprovalService {
     async fn create_question_approval(
         &self,
         _tool_name: &str,
-        _question_count: usize,
+        _tool_input: serde_json::Value,
     ) -> Result<String, ExecutorApprovalError> {
         Ok("noop".to_string())
     }

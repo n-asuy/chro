@@ -2,9 +2,10 @@ import { cn } from "@/lib/cn";
 import {
   type BranchInfo,
   type FileChangeStatus,
+  type GitScope,
   listGitBranches,
 } from "@/lib/git-client";
-import { DockBackButton } from "@/workspace-layout/components/dock-panels/dock-back-button";
+import type { DiffChangeKind } from "@/session/hooks";
 import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import {
   Tooltip,
@@ -33,6 +34,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
+import { useActiveWorkspaceScope } from "../../hooks/use-active-workspace-scope";
 import { useGitStatus } from "../../hooks/use-git-status";
 import { useFilesStore } from "../../state/files-store";
 import { useWorkingDiffs } from "../../state/working-diffs-store";
@@ -60,6 +62,15 @@ const getStatusIcon = (status: FileChangeStatus) => {
       return <File className="size-4 text-custom-text-300" />;
   }
 };
+
+/** Source Control scope: all branch changes (vs a base) or just uncommitted. */
+type SourceControlScope = "all" | "uncommitted";
+
+/** Default base ref to compare a branch against in "all" scope. */
+const DEFAULT_BASE_REF = "main";
+
+const changeKindToStatus = (change: DiffChangeKind): FileChangeStatus =>
+  change === "permission_change" ? "typechange" : change;
 
 const getStatusLabel = (status: FileChangeStatus): string => {
   switch (status) {
@@ -258,6 +269,19 @@ const CollapsibleSection = ({
 
 export const SourceControlPanel = () => {
   const { projectId } = useProjectContext();
+  // When a session worktree is in view, Source Control reflects that run's
+  // branch (per-branch changes); otherwise the project checkout.
+  const { taskRunId: scopeTaskRunId } = useActiveWorkspaceScope();
+  const gitScope = useMemo<GitScope | null>(
+    () =>
+      scopeTaskRunId
+        ? { taskRunId: scopeTaskRunId }
+        : projectId
+          ? { projectId }
+          : null,
+    [scopeTaskRunId, projectId],
+  );
+
   const {
     status,
     currentBranch,
@@ -272,23 +296,36 @@ export const SourceControlPanel = () => {
     pull,
     discard,
     discardFiles,
-  } = useGitStatus({ projectId });
+  } = useGitStatus({ projectId, taskRunId: scopeTaskRunId });
 
   const openFileInEditor = useFilesStore((state) => state.openFile);
   const openTab = useLayoutStore((state) => state.openTab);
-  const { diffs: workingDiffs } = useWorkingDiffs(projectId);
 
-  // path → line counts, for the +/- badges on each changed row.
+  // Scope: "all" = every change this branch introduced vs a base
+  // ref; "uncommitted" = working-tree changes only. Default to "all" in a
+  // session worktree (review what the agent did), "uncommitted" on the project.
+  const [scope, setScope] = useState<SourceControlScope>(
+    scopeTaskRunId ? "all" : "uncommitted",
+  );
+  const [baseRef, setBaseRef] = useState(DEFAULT_BASE_REF);
+  useEffect(() => {
+    setScope(scopeTaskRunId ? "all" : "uncommitted");
+  }, [scopeTaskRunId]);
+
+  const activeBase = scope === "all" ? baseRef : undefined;
+  const { diffs: scopedDiffs } = useWorkingDiffs(gitScope, activeBase);
+
+  // path → line counts, for the +/- badges on each changed row (uncommitted).
   const countsByPath = useMemo(() => {
     const map = new Map<string, { additions: number; deletions: number }>();
-    for (const entry of workingDiffs) {
+    for (const entry of scopedDiffs) {
       map.set(entry.path, {
         additions: entry.diff.additions ?? 0,
         deletions: entry.diff.deletions ?? 0,
       });
     }
     return map;
-  }, [workingDiffs]);
+  }, [scopedDiffs]);
 
   const [commitMessage, setCommitMessage] = useState(getDefaultCommitMessage);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -299,14 +336,14 @@ export const SourceControlPanel = () => {
 
   // Fetch branches when dropdown opens
   useEffect(() => {
-    if (branchDropdownOpen && projectId) {
-      listGitBranches(projectId)
+    if (branchDropdownOpen && gitScope) {
+      listGitBranches(gitScope)
         .then((result) => setBranches(result.branches))
         .catch((err) =>
           console.error("[source-control] Failed to fetch branches:", err),
         );
     }
-  }, [branchDropdownOpen, projectId]);
+  }, [branchDropdownOpen, gitScope]);
 
   // Focus search input when dropdown opens
   useEffect(() => {
@@ -391,17 +428,23 @@ export const SourceControlPanel = () => {
     (path: string) => {
       // Normalize path to vault path format (leading slash)
       const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-      openFileInEditor(normalizedPath);
+      // Pass the run scope explicitly so the file reads from the session
+      // worktree even though this panel does not publish the store scope.
+      openFileInEditor(normalizedPath, scopeTaskRunId ?? undefined);
     },
-    [openFileInEditor],
+    [openFileInEditor, scopeTaskRunId],
   );
 
-  // Open the combined working-changes diff (changed regions only, every file
-  // stacked). One tab per project; navigate between files via its file tree.
+  // Open the combined changes diff (changed regions only, every file stacked).
+  // In a session worktree this is the run's diff tab; otherwise the project's
+  // working-changes tab.
   const handleOpenDiff = useCallback(() => {
-    if (!projectId) return;
-    openTab({ type: "project-diff", projectId });
-  }, [openTab, projectId]);
+    if (scopeTaskRunId) {
+      openTab({ type: "diff", runId: scopeTaskRunId });
+      return;
+    }
+    if (projectId) openTab({ type: "project-diff", projectId });
+  }, [openTab, projectId, scopeTaskRunId]);
 
   const handleCommit = useCallback(async () => {
     if (!commitMessage.trim() || isCommitting) return;
@@ -451,15 +494,19 @@ export const SourceControlPanel = () => {
       {/* Header with toolbar */}
       <div className="flex h-11 min-w-0 items-center justify-between gap-1 overflow-x-auto px-2">
         <div className="flex items-center gap-2">
-          <DockBackButton />
           <TooltipProvider delayDuration={150}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
                   onClick={handleOpenDiff}
-                  disabled={isLoading || stagedCount + changesCount === 0}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                  disabled={
+                    isLoading ||
+                    (scope === "all"
+                      ? scopedDiffs.length === 0
+                      : stagedCount + changesCount === 0)
+                  }
+                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
                   aria-label="View All Changes"
                 >
                   <FileDiff className="size-4" />
@@ -469,61 +516,65 @@ export const SourceControlPanel = () => {
                 View All Changes
               </TooltipContent>
             </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={handleCommit}
-                  disabled={isLoading || isCommitting || !canCommit}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Commit"
-                >
-                  <Check className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                Commit
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={handleStageAll}
-                  disabled={isLoading || changesCount === 0}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Stage All"
-                >
-                  <Plus className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                Stage All
-              </TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={handleUnstageAll}
-                  disabled={isLoading || stagedCount === 0}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
-                  aria-label="Unstage All"
-                >
-                  <Minus className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                Unstage All
-              </TooltipContent>
-            </Tooltip>
+            {scope === "uncommitted" && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={handleCommit}
+                      disabled={isLoading || isCommitting || !canCommit}
+                      className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                      aria-label="Commit"
+                    >
+                      <Check className="size-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="center">
+                    Commit
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={handleStageAll}
+                      disabled={isLoading || changesCount === 0}
+                      className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                      aria-label="Stage All"
+                    >
+                      <Plus className="size-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="center">
+                    Stage All
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={handleUnstageAll}
+                      disabled={isLoading || stagedCount === 0}
+                      className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                      aria-label="Unstage All"
+                    >
+                      <Minus className="size-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="center">
+                    Unstage All
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
                   onClick={handlePush}
                   disabled={isLoading}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
                   aria-label="Push"
                 >
                   <Upload className="size-4" />
@@ -542,7 +593,7 @@ export const SourceControlPanel = () => {
                   type="button"
                   onClick={handlePull}
                   disabled={isLoading}
-                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
+                  className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40"
                   aria-label="Pull"
                 >
                   <Download className="size-4" />
@@ -562,7 +613,7 @@ export const SourceControlPanel = () => {
                   onClick={refresh}
                   disabled={isLoading}
                   className={cn(
-                    "inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40",
+                    "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100 disabled:pointer-events-none disabled:opacity-40",
                     isLoading && "animate-spin",
                   )}
                   aria-label="Refresh"
@@ -578,29 +629,59 @@ export const SourceControlPanel = () => {
         </div>
       </div>
 
-      {/* Branch selector dropdown */}
+      {/* Scope toggle: all branch changes (vs base) ⇄ uncommitted only */}
+      <div className="flex items-center gap-1 px-3 pt-1">
+        <div className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs">
+          {(["all", "uncommitted"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setScope(value)}
+              className={cn(
+                "rounded-[4px] px-2 py-0.5 transition",
+                scope === value
+                  ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
+                  : "text-custom-text-300 hover:text-custom-text-100",
+              )}
+            >
+              {value === "all" ? "All changes" : "Uncommitted"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Branch / base-ref row. In "all" scope the dropdown picks the base ref
+          to compare against (not a branch switch). */}
       <div className="relative px-3 py-2">
         <button
           type="button"
           onClick={() => setBranchDropdownOpen(!branchDropdownOpen)}
-          className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-sm hover:bg-custom-background-80"
+          disabled={scope !== "all"}
+          className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-sm hover:bg-custom-background-80 disabled:hover:bg-transparent"
         >
-          <div className="flex items-center gap-2">
-            <GitBranch className="size-3.5 text-custom-text-300" />
-            <span className="text-custom-text-200">
+          <div className="flex min-w-0 items-center gap-2">
+            <GitBranch className="size-3.5 shrink-0 text-custom-text-300" />
+            <span className="truncate text-custom-text-200">
               {currentBranch ?? "No branch"}
             </span>
-          </div>
-          <ChevronDown
-            className={cn(
-              "size-3.5 text-custom-text-300",
-              branchDropdownOpen && "rotate-180",
+            {scope === "all" && (
+              <span className="shrink-0 text-custom-text-300">
+                vs <span className="text-custom-text-200">{baseRef}</span>
+              </span>
             )}
-          />
+          </div>
+          {scope === "all" && (
+            <ChevronDown
+              className={cn(
+                "size-3.5 shrink-0 text-custom-text-300",
+                branchDropdownOpen && "rotate-180",
+              )}
+            />
+          )}
         </button>
 
         {branchDropdownOpen && (
-          <div className="absolute left-0 right-0 z-50 mt-1 mx-3 max-h-64 overflow-hidden rounded border border-custom-border-200 bg-custom-background-100 shadow-lg">
+          <div className="absolute left-0 right-0 z-50 mt-1 mx-3 max-h-64 overflow-hidden rounded-xl border border-custom-border-200 bg-custom-background-100 shadow-sm">
             {/* Search input */}
             <div className="border-b border-custom-border-200 p-2">
               <div className="relative">
@@ -633,26 +714,27 @@ export const SourceControlPanel = () => {
                     key={branch.name}
                     type="button"
                     onClick={() => {
-                      // Branch switching not yet implemented - just close for now
+                      // Pick the base ref to compare the branch against.
+                      setBaseRef(branch.name);
                       setBranchDropdownOpen(false);
                     }}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 px-3 py-1.5 text-sm hover:bg-custom-background-80",
-                      branch.is_current && "bg-custom-background-90",
+                      branch.name === baseRef && "bg-custom-background-90",
                     )}
                   >
                     <span
                       className={cn(
                         "truncate",
-                        branch.is_current && "font-medium",
+                        branch.name === baseRef && "font-medium",
                       )}
                     >
                       {branch.name}
                     </span>
                     <div className="flex gap-1 text-xs">
-                      {branch.is_current && (
+                      {branch.name === baseRef && (
                         <span className="rounded bg-custom-primary-100/20 px-1 text-custom-primary-100">
-                          current
+                          base
                         </span>
                       )}
                       {branch.is_remote && (
@@ -670,106 +752,134 @@ export const SourceControlPanel = () => {
       </div>
 
       {/* Commit message input */}
-      <div className="bg-custom-background-80 px-3 py-2">
-        <textarea
-          value={commitMessage}
-          onChange={(e) => setCommitMessage(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onFocus={handleCommitMessageFocus}
-          placeholder="Commit message (Ctrl+Enter to commit)"
-          className="w-full resize-none border-0 bg-transparent px-0 py-0 text-sm text-custom-text-100 placeholder:text-custom-text-300 focus:outline-none focus:ring-0"
-          rows={2}
-        />
-      </div>
+      {scope === "uncommitted" && (
+        <div className="bg-custom-background-80 px-3 py-2">
+          <textarea
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={handleCommitMessageFocus}
+            placeholder="Commit message (Ctrl+Enter to commit)"
+            className="w-full resize-none border-0 bg-transparent px-0 py-0 text-sm text-custom-text-100 placeholder:text-custom-text-300 focus:outline-none focus:ring-0"
+            rows={2}
+          />
+        </div>
+      )}
 
-      {/* File lists */}
-      <div className="flex-1 overflow-y-auto p-2">
-        {/* Staged changes */}
-        <CollapsibleSection
-          title="Staged Changes"
-          count={stagedCount}
-          actions={
-            stagedCount > 0 && (
-              <button
-                type="button"
-                onClick={handleUnstageAll}
-                className="rounded p-0.5 hover:bg-custom-background-90"
-                title="Unstage all"
-              >
-                <Minus className="size-3.5" />
-              </button>
-            )
-          }
-        >
-          {status?.staged.map((file) => (
-            <FileItem
-              key={file.path}
-              path={file.path}
-              status={file.status}
-              additions={countsByPath.get(file.path)?.additions}
-              deletions={countsByPath.get(file.path)?.deletions}
-              isStaged
-              onUnstage={() => handleUnstageFile(file.path)}
-              onOpenFile={() => handleOpenFile(file.path)}
-              onOpenDiff={handleOpenDiff}
-            />
-          ))}
-        </CollapsibleSection>
+      {/* All-changes (branch vs base): read-only review list */}
+      {scope === "all" && (
+        <div className="flex-1 overflow-y-auto p-2">
+          <CollapsibleSection title="Changes" count={scopedDiffs.length}>
+            {scopedDiffs.map((entry) => (
+              <FileItem
+                key={entry.path}
+                path={entry.path}
+                status={changeKindToStatus(entry.diff.change)}
+                additions={entry.diff.additions}
+                deletions={entry.diff.deletions}
+                onOpenFile={() => handleOpenFile(entry.path)}
+                onOpenDiff={handleOpenDiff}
+              />
+            ))}
+            {scopedDiffs.length === 0 && (
+              <div className="px-2 py-4 text-center text-xs text-custom-text-300">
+                No changes vs {baseRef}
+              </div>
+            )}
+          </CollapsibleSection>
+        </div>
+      )}
 
-        {/* Changes */}
-        <CollapsibleSection
-          title="Changes"
-          count={changesCount}
-          actions={
-            changesCount > 0 && (
-              <>
+      {/* Uncommitted working-tree changes (staged / unstaged / untracked) */}
+      {scope === "uncommitted" && (
+        <div className="flex-1 overflow-y-auto p-2">
+          {/* Staged changes */}
+          <CollapsibleSection
+            title="Staged Changes"
+            count={stagedCount}
+            actions={
+              stagedCount > 0 && (
                 <button
                   type="button"
-                  onClick={handleDiscardAll}
+                  onClick={handleUnstageAll}
                   className="rounded p-0.5 hover:bg-custom-background-90"
-                  title="Discard all"
+                  title="Unstage all"
                 >
-                  <Undo2 className="size-3.5" />
+                  <Minus className="size-3.5" />
                 </button>
-                <button
-                  type="button"
-                  onClick={handleStageAll}
-                  className="rounded p-0.5 hover:bg-custom-background-90"
-                  title="Stage all"
-                >
-                  <Plus className="size-3.5" />
-                </button>
-              </>
-            )
-          }
-        >
-          {status?.modified.map((file) => (
-            <FileItem
-              key={file.path}
-              path={file.path}
-              status={file.status}
-              additions={countsByPath.get(file.path)?.additions}
-              deletions={countsByPath.get(file.path)?.deletions}
-              onStage={() => handleStageFile(file.path)}
-              onDiscard={() => handleDiscardFile(file.path)}
-              onOpenFile={() => handleOpenFile(file.path)}
-              onOpenDiff={handleOpenDiff}
-            />
-          ))}
-          {status?.untracked.map((path) => (
-            <FileItem
-              key={path}
-              path={path}
-              isUntracked
-              additions={countsByPath.get(path)?.additions}
-              deletions={countsByPath.get(path)?.deletions}
-              onStage={() => handleStageFile(path)}
-              onOpenFile={() => handleOpenFile(path)}
-              onOpenDiff={handleOpenDiff}
-            />
-          ))}
-        </CollapsibleSection>
-      </div>
+              )
+            }
+          >
+            {status?.staged.map((file) => (
+              <FileItem
+                key={file.path}
+                path={file.path}
+                status={file.status}
+                additions={countsByPath.get(file.path)?.additions}
+                deletions={countsByPath.get(file.path)?.deletions}
+                isStaged
+                onUnstage={() => handleUnstageFile(file.path)}
+                onOpenFile={() => handleOpenFile(file.path)}
+                onOpenDiff={handleOpenDiff}
+              />
+            ))}
+          </CollapsibleSection>
+
+          {/* Changes */}
+          <CollapsibleSection
+            title="Changes"
+            count={changesCount}
+            actions={
+              changesCount > 0 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleDiscardAll}
+                    className="rounded p-0.5 hover:bg-custom-background-90"
+                    title="Discard all"
+                  >
+                    <Undo2 className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStageAll}
+                    className="rounded p-0.5 hover:bg-custom-background-90"
+                    title="Stage all"
+                  >
+                    <Plus className="size-3.5" />
+                  </button>
+                </>
+              )
+            }
+          >
+            {status?.modified.map((file) => (
+              <FileItem
+                key={file.path}
+                path={file.path}
+                status={file.status}
+                additions={countsByPath.get(file.path)?.additions}
+                deletions={countsByPath.get(file.path)?.deletions}
+                onStage={() => handleStageFile(file.path)}
+                onDiscard={() => handleDiscardFile(file.path)}
+                onOpenFile={() => handleOpenFile(file.path)}
+                onOpenDiff={handleOpenDiff}
+              />
+            ))}
+            {status?.untracked.map((path) => (
+              <FileItem
+                key={path}
+                path={path}
+                isUntracked
+                additions={countsByPath.get(path)?.additions}
+                deletions={countsByPath.get(path)?.deletions}
+                onStage={() => handleStageFile(path)}
+                onOpenFile={() => handleOpenFile(path)}
+                onOpenDiff={handleOpenDiff}
+              />
+            ))}
+          </CollapsibleSection>
+        </div>
+      )}
     </div>
   );
 };

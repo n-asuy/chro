@@ -1,11 +1,7 @@
 import { slugOrId } from "@/lib/slug";
 import { touchRecentWorkspace } from "@/lib/workspace-history";
 import { taskApi } from "@/tasks/task-api";
-import {
-  findFocusedTab,
-  pathFromKind,
-} from "@/workspace-layout/hooks/use-route-tab-sync";
-import { loadLayout } from "@/workspace-layout/lib/persistence";
+import { resolveProjectLandingPath } from "@/workspace-layout/lib/project-landing";
 import { useOpenProjectsStore } from "@/workspace-layout/state/open-projects-store";
 
 /**
@@ -34,14 +30,8 @@ export async function prepareWorkspace(path: string): Promise<string> {
     workspacePath: project.gitRepoPath ?? path,
   });
 
-  // Land on the project's persisted focused tab when available so we don't
-  // clobber the saved layout with a fresh "new session" tab on every reopen.
-  // Falls back to /session when the project has no saved layout yet.
-  const slug = slugOrId(project);
-  const persisted = loadLayout(project.id);
-  const focused = persisted ? findFocusedTab(persisted) : null;
-  return (
-    (focused ? pathFromKind(focused.kind, slug) : null) ??
-    `/projects/${encodeURIComponent(slug)}/session/`
-  );
+  // Land on the project overview (home) — a minimal surface listing recent
+  // sessions — rather than restoring the last open tab. Persisted tabs stay
+  // in the tab bar; the overview is focused on top.
+  return resolveProjectLandingPath(project.id, slugOrId(project));
 }

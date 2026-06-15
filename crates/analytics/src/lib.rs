@@ -6,6 +6,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tracing::{debug, trace};
 
+pub mod flags;
+
 const POSTHOG_HOST: &str = "https://eu.i.posthog.com";
 const POSTHOG_API_KEY: &str = "phc_ciDHQIDUgIxsl1Z5oqbhfHq6Hj2ktS4hdImRC649dZ9";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

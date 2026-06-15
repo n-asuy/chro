@@ -1,5 +1,5 @@
 import type { TranslationFunction } from "@/i18n";
-import { Archive, Loader2 } from "lucide-react";
+import { Archive } from "lucide-react";
 import { useCallback, useRef } from "react";
 import { useMarkViewedWhenActive, useTaskStatusDot } from "../hooks";
 import type { StoredTask } from "../types";
@@ -7,6 +7,7 @@ import {
   SESSION_DRAG_DATA_TYPE,
   serializeSessionDragPayload,
 } from "../utils/session-dnd";
+import { SessionActivityIndicator } from "./session-activity-indicator";
 import { TaskStatusDot } from "./task-status-dot";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
@@ -166,6 +167,7 @@ function SessionListRow({
   t,
 }: SessionListRowProps) {
   const isRunningTask = Boolean(task.active_session_id);
+  const isAwaitingInput = Boolean(task.awaiting_input);
   const dotKind = useTaskStatusDot(task);
   useMarkViewedWhenActive(task, isActiveTask);
 
@@ -178,7 +180,7 @@ function SessionListRow({
     >
       <div
         className={cn(
-          "group flex items-center justify-between gap-2.5 w-full cursor-pointer rounded-[3px] px-2.5 py-1.5",
+          "group flex items-center justify-between gap-2.5 w-full cursor-pointer rounded-md px-2.5 py-1.5",
           isActiveTask
             ? "bg-custom-sidebar-background-80"
             : "hover:bg-custom-sidebar-background-80",
@@ -229,15 +231,7 @@ function SessionListRow({
         </div>
         <div className="shrink-0 flex items-center gap-1.5">
           {isRunningTask ? (
-            <span
-              className="inline-flex items-center text-custom-primary-100"
-              aria-label={t("waitingMessage")}
-            >
-              <Loader2
-                className="h-3.5 w-3.5 animate-spin"
-                aria-hidden="true"
-              />
-            </span>
+            <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
           ) : (
             <>
               <span className="text-sm text-[#B3B3B3] dark:text-[#777777] group-hover:hidden">

@@ -6,6 +6,7 @@ import { DiffViewerPanel } from "@/session/components/diff-viewer-panel";
 import { useDiffStream } from "@/session/hooks/use-diff-stream";
 import { SingleAgentSessionView } from "@/session/single-agent-session";
 import { SettingsPanel } from "@/settings/settings-panel";
+import { SkillsPanel } from "@/skills/skills-panel";
 import { useEffect, useMemo } from "react";
 import { BrowserPane } from "../components/browser-pane";
 import { NativeBrowserPane } from "../components/native-browser-pane";
@@ -21,6 +22,13 @@ import type { PaneItemRenderProps } from "./registry";
  * Most kinds reuse the existing component verbatim; the kind payload feeds
  * through the TabKindContext provided by PaneContainer.
  */
+
+export function OverviewTabBody(_: PaneItemRenderProps) {
+  // Home is the start-a-session surface: the same composer a brand-new session
+  // shows, so a prompt can be typed immediately. Its empty body renders the
+  // project launcher (recent sessions) instead of a logo/tagline hero.
+  return <SingleAgentSessionView forceNewSession />;
+}
 
 export function SessionTabBody(_: PaneItemRenderProps) {
   return <SingleAgentSessionView />;
@@ -74,6 +82,10 @@ export function SettingsTabBody() {
       <SettingsPanel />
     </div>
   );
+}
+
+export function SkillsTabBody() {
+  return <SkillsPanel />;
 }
 
 export function TerminalTabBody({ tab }: PaneItemRenderProps) {
@@ -134,7 +146,7 @@ function ProjectDiffTabContent({
   tabId: string;
 }) {
   const closeTab = useLayoutStore((s) => s.closeTab);
-  const { diffs } = useWorkingDiffs(projectId);
+  const { diffs } = useWorkingDiffs({ projectId });
 
   return (
     <div className="h-full w-full">

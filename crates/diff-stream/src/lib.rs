@@ -12,13 +12,16 @@ use std::{
     },
 };
 
-use filesystem::{watch_directory, DebouncedEvent, FilesystemWatcherError};
+use filesystem::WorktreeEventBatch;
 use futures::StreamExt;
 use git::{CommitId, DiffTarget, GitService, GitServiceError};
 use log_types::LogEntry;
 use thiserror::Error;
-use tokio::{sync::mpsc, task::JoinHandle};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt as TokioStreamExt};
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::JoinHandle,
+};
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 const MAX_CUMULATIVE_DIFF_BYTES: usize = 200 * 1024 * 1024;
 const DIFF_STREAM_CHANNEL_CAPACITY: usize = 1024;
@@ -27,8 +30,6 @@ const DIFF_STREAM_CHANNEL_CAPACITY: usize = 1024;
 pub enum DiffStreamError {
     #[error(transparent)]
     Git(#[from] GitServiceError),
-    #[error(transparent)]
-    Watcher(#[from] FilesystemWatcherError),
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 }
@@ -80,17 +81,9 @@ struct DiffWatcherContext {
 }
 
 impl DiffWatcherContext {
-    async fn handle_events(
-        &self,
-        events: Vec<DebouncedEvent>,
-        canonical_worktree_path: &Path,
-    ) -> bool {
-        let changed_paths =
-            extract_changed_paths(&events, canonical_worktree_path, &self.worktree_path);
-        if changed_paths.is_empty() {
-            return true;
-        }
-
+    /// Recompute and stream diffs for the given changed paths. An empty list
+    /// forces a full recompute (used when the event stream lagged).
+    async fn handle_change(&self, changed_paths: Vec<String>) -> bool {
         let git_service = self.git_service.clone();
         let worktree_path = self.worktree_path.clone();
         let base_commit = self.base_commit;
@@ -132,14 +125,25 @@ pub async fn create(
     worktree_path: PathBuf,
     base_commit: CommitId,
     stats_only: bool,
+    events: broadcast::Receiver<WorktreeEventBatch>,
 ) -> Result<DiffStreamHandle, DiffStreamError> {
-    let initial_diffs = git_service.get_diffs(
-        DiffTarget::Worktree {
-            worktree_path: &worktree_path,
-            base_commit,
-        },
-        None,
-    )?;
+    // Computing the initial worktree diff is a synchronous git2 operation that
+    // can be slow on large changesets. Offload it so opening a diff stream never
+    // blocks an async worker thread.
+    let initial_diffs = {
+        let git_service = git_service.clone();
+        let worktree_path = worktree_path.clone();
+        tokio::task::spawn_blocking(move || {
+            git_service.get_diffs(
+                DiffTarget::Worktree {
+                    worktree_path: &worktree_path,
+                    base_commit,
+                },
+                None,
+            )
+        })
+        .await??
+    };
 
     let cumulative = Arc::new(AtomicUsize::new(0));
     let full_sent_paths = Arc::new(std::sync::RwLock::new(HashSet::new()));
@@ -170,36 +174,29 @@ pub async fn create(
     };
 
     let watcher_task = tokio::spawn(async move {
-        match tokio::task::spawn_blocking(move || watch_directory(worktree_path)).await {
-            Ok(Ok((debouncer, mut watcher_rx, canonical))) => {
-                let _guard = debouncer;
-                while let Some(res) = TokioStreamExt::next(&mut watcher_rx).await {
-                    match res {
-                        Ok(events) => {
-                            if !ctx.handle_events(events, &canonical).await {
-                                return;
-                            }
-                        }
-                        Err(errors) => {
-                            let message = errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            tracing::error!("filesystem watcher error: {message}");
-                            send_error(&ctx.tx, message).await;
-                            return;
-                        }
+        let mut stream = BroadcastStream::new(events);
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(batch) => {
+                    let changed_paths: Vec<String> = batch
+                        .iter()
+                        .map(|event| event.relative_path.clone())
+                        .filter(|path| !path.is_empty())
+                        .collect();
+                    if changed_paths.is_empty() {
+                        continue;
+                    }
+                    if !ctx.handle_change(changed_paths).await {
+                        return;
                     }
                 }
-            }
-            Ok(Err(err)) => {
-                tracing::error!("failed to build filesystem watcher: {err}");
-                send_error(&ctx.tx, err.to_string()).await;
-            }
-            Err(join_err) => {
-                tracing::error!("watcher spawn error: {join_err}");
-                send_error(&ctx.tx, join_err.to_string()).await;
+                Err(_lagged) => {
+                    // Fell behind the watcher; recompute the full diff so the
+                    // client never observes a stale tree.
+                    if !ctx.handle_change(Vec::new()).await {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -226,7 +223,7 @@ async fn send_messages(
 
 async fn send_error(tx: &mpsc::Sender<Result<LogEntry, io::Error>>, message: String) {
     let _ = tx
-        .send(Err(io::Error::new(io::ErrorKind::Other, message)))
+        .send(Err(io::Error::other(message)))
         .await;
 }
 
@@ -283,24 +280,6 @@ pub fn apply_stream_omit_policy(diff: &mut Diff, sent_bytes: &Arc<AtomicUsize>, 
     } else {
         let _ = sent_bytes.fetch_add(size, Ordering::Relaxed);
     }
-}
-
-fn extract_changed_paths(
-    events: &[DebouncedEvent],
-    canonical_worktree_path: &Path,
-    worktree_path: &Path,
-) -> Vec<String> {
-    events
-        .iter()
-        .flat_map(|event| &event.paths)
-        .filter_map(|path| {
-            path.strip_prefix(canonical_worktree_path)
-                .or_else(|_| path.strip_prefix(worktree_path))
-                .ok()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 fn process_file_changes(

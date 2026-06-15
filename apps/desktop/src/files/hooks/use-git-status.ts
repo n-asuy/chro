@@ -4,6 +4,7 @@ import {
   useLanguage,
 } from "@/i18n";
 import {
+  type GitScope,
   type GitStatus,
   type GitStatusResponse,
   commitChanges,
@@ -16,10 +17,15 @@ import {
   unstageFiles,
 } from "@/lib/git-client";
 import { toast } from "@chro/ui/hooks/use-toast";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface UseGitStatusOptions {
   projectId: string | null;
+  /**
+   * When set, all git operations target this run's worktree (session sandbox)
+   * instead of the project's main checkout. Falls back to the project otherwise.
+   */
+  taskRunId?: string | null;
   autoRefresh?: boolean;
   refreshInterval?: number;
 }
@@ -161,10 +167,18 @@ const resolveGitError = (
 
 export function useGitStatus({
   projectId,
+  taskRunId,
   autoRefresh = true,
   refreshInterval = 5000,
 }: UseGitStatusOptions): UseGitStatusReturn {
   const { t } = useLanguage();
+
+  // Resolve the target working tree: the run's worktree when scoped to a
+  // session, otherwise the project checkout.
+  const scope = useMemo<GitScope | null>(
+    () => (taskRunId ? { taskRunId } : projectId ? { projectId } : null),
+    [taskRunId, projectId],
+  );
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   const [commitsAhead, setCommitsAhead] = useState(0);
@@ -187,7 +201,7 @@ export function useGitStatus({
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!projectId) {
+    if (!scope) {
       setStatus(null);
       setCurrentBranch(null);
       setCommitsAhead(0);
@@ -198,7 +212,7 @@ export function useGitStatus({
     try {
       setIsLoading(true);
       setError(null);
-      const response = await getGitStatus(projectId);
+      const response = await getGitStatus(scope);
       applyStatusResponse(response);
     } catch (err) {
       const { message } = resolveGitError(err, t, "gitStatusFailed");
@@ -207,15 +221,15 @@ export function useGitStatus({
     } finally {
       setIsLoading(false);
     }
-  }, [applyStatusResponse, projectId, t]);
+  }, [applyStatusResponse, scope, t]);
 
   const stage = useCallback(
     async (paths: string[]) => {
-      if (!projectId || paths.length === 0) return;
+      if (!scope || paths.length === 0) return;
 
       try {
         setError(null);
-        const response = await stageFiles(projectId, paths);
+        const response = await stageFiles(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
         const { message } = resolveGitError(err, t, "gitStageFailed");
@@ -224,16 +238,16 @@ export function useGitStatus({
         return;
       }
     },
-    [applyStatusResponse, projectId, showGitErrorToast, t],
+    [applyStatusResponse, scope, showGitErrorToast, t],
   );
 
   const unstage = useCallback(
     async (paths: string[]) => {
-      if (!projectId || paths.length === 0) return;
+      if (!scope || paths.length === 0) return;
 
       try {
         setError(null);
-        const response = await unstageFiles(projectId, paths);
+        const response = await unstageFiles(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
         const { message } = resolveGitError(err, t, "gitUnstageFailed");
@@ -242,16 +256,16 @@ export function useGitStatus({
         return;
       }
     },
-    [applyStatusResponse, projectId, showGitErrorToast, t],
+    [applyStatusResponse, scope, showGitErrorToast, t],
   );
 
   const commit = useCallback(
     async (message: string): Promise<string | null> => {
-      if (!projectId || !message.trim()) return null;
+      if (!scope || !message.trim()) return null;
 
       try {
         setError(null);
-        const response = await commitChanges(projectId, message);
+        const response = await commitChanges(scope, message);
         // Refresh status after commit
         await refresh();
         return response.commitSha;
@@ -262,16 +276,16 @@ export function useGitStatus({
         return null;
       }
     },
-    [projectId, refresh, showGitErrorToast, t],
+    [scope, refresh, showGitErrorToast, t],
   );
 
   const push = useCallback(async () => {
-    if (!projectId) return;
+    if (!scope) return;
 
     try {
       setIsLoading(true);
       setError(null);
-      const response = await pushChanges(projectId);
+      const response = await pushChanges(scope);
       applyStatusResponse(response);
       toast({
         title: t("gitPushSuccessTitle"),
@@ -284,15 +298,15 @@ export function useGitStatus({
     } finally {
       setIsLoading(false);
     }
-  }, [applyStatusResponse, projectId, showGitErrorToast, t]);
+  }, [applyStatusResponse, scope, showGitErrorToast, t]);
 
   const pull = useCallback(async () => {
-    if (!projectId) return;
+    if (!scope) return;
 
     try {
       setIsLoading(true);
       setError(null);
-      const response = await pullChanges(projectId);
+      const response = await pullChanges(scope);
       applyStatusResponse(response);
       toast({
         title: t("gitPullSuccessTitle"),
@@ -305,15 +319,15 @@ export function useGitStatus({
     } finally {
       setIsLoading(false);
     }
-  }, [applyStatusResponse, projectId, showGitErrorToast, t]);
+  }, [applyStatusResponse, scope, showGitErrorToast, t]);
 
   const discard = useCallback(async () => {
-    if (!projectId) return;
+    if (!scope) return;
 
     try {
       setIsLoading(true);
       setError(null);
-      const response = await discardAllChanges(projectId);
+      const response = await discardAllChanges(scope);
       applyStatusResponse(response);
     } catch (err) {
       const { message } = resolveGitError(err, t, "gitDiscardFailed");
@@ -323,15 +337,15 @@ export function useGitStatus({
     } finally {
       setIsLoading(false);
     }
-  }, [applyStatusResponse, projectId, showGitErrorToast, t]);
+  }, [applyStatusResponse, scope, showGitErrorToast, t]);
 
   const discardFiles = useCallback(
     async (paths: string[]) => {
-      if (!projectId || paths.length === 0) return;
+      if (!scope || paths.length === 0) return;
 
       try {
         setError(null);
-        const response = await discardFilesApi(projectId, paths);
+        const response = await discardFilesApi(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
         const { message } = resolveGitError(err, t, "gitDiscardFilesFailed");
@@ -340,7 +354,7 @@ export function useGitStatus({
         return;
       }
     },
-    [applyStatusResponse, projectId, showGitErrorToast, t],
+    [applyStatusResponse, scope, showGitErrorToast, t],
   );
 
   // Initial fetch
@@ -350,7 +364,7 @@ export function useGitStatus({
 
   // Auto-refresh interval (paused when page is not visible)
   useEffect(() => {
-    if (!autoRefresh || !projectId) return;
+    if (!autoRefresh || !scope) return;
 
     const interval = setInterval(() => {
       if (document.visibilityState === "visible") {
@@ -369,7 +383,7 @@ export function useGitStatus({
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [autoRefresh, projectId, refresh, refreshInterval]);
+  }, [autoRefresh, scope, refresh, refreshInterval]);
 
   return {
     status,

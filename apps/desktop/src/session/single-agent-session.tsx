@@ -1,3 +1,4 @@
+import { AgentLogo } from "@/components/agent-logo";
 import { useProjectContext } from "@/files/context/project-context";
 import { useFilesStore } from "@/files/state/files-store";
 import { useBranchStatus } from "@/hooks/use-branch-status";
@@ -8,12 +9,21 @@ import {
 } from "@/hooks/use-global-file-drop";
 import { useRebase } from "@/hooks/use-rebase";
 import { useLanguage } from "@/i18n";
+import {
+  REASONING_OPTIONS,
+  RUNTIME_DEFAULT_LABEL,
+  getModelLabel,
+  getModelOptions,
+  getReasoningLabel,
+  runtimeSupportsReasoning,
+} from "@/lib/agent-runtime-options";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
 import {
   type BaseCodingAgent,
   type ExecutorConfigs,
   type ExecutorProfileId,
+  type ReasoningEffort,
   fetchExecutorProfile,
 } from "@/lib/executor-client";
 import { slugOrId } from "@/lib/slug";
@@ -21,18 +31,25 @@ import { isUuidIdentifier } from "@/lib/uuid";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
 import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
 import { updateTaskTitle } from "@/tasks/task-api";
+import { ProjectOverview } from "@/workspace-layout/components/project-overview";
 import {
   useOptionalTab,
   useOptionalTabKind,
   useResolvedRunId,
   useResolvedTaskId,
 } from "@/workspace-layout/hooks/use-tab-params";
+import {
+  getOpenInErrorDescription,
+  getSelectedOpenInOption,
+  openWorkspaceWithOption,
+} from "@/workspace-layout/lib/open-in";
 import { useLayoutStore } from "@/workspace-layout/state/layout-store";
-import { Button } from "@chro/ui/button";
+import { Button, buttonVariants } from "@chro/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
@@ -67,10 +84,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { AgentUserQuestionHandle } from "./components/agent-user-question";
+import { AgentUserQuestion } from "./components/agent-user-question";
 import type { GitBranch as GitBranchType } from "./components/branch-selector";
 import { ConflictBanner } from "./components/conflict-banner";
 import { ConversationFindBar } from "./components/conversation-find-bar";
+import { ConversationMessageNav } from "./components/conversation-message-nav";
 // DiffViewerPanel is no longer rendered inline; the "Open Diff" header
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
@@ -80,13 +98,12 @@ import {
   RebaseDialog,
   type RebaseDialogResult,
 } from "./components/rebase-dialog";
-import { SessionEmptyState } from "./components/session-empty-state";
 import { SessionHeader } from "./components/session-header";
 import {
-  AgentUserQuestionWithEditorState,
   PromptEditorWithPopover,
   SendButtonWithState,
 } from "./components/session-input-controls";
+import { SessionReferencesPopover } from "./components/session-references-popover";
 import { SessionSidebarContent } from "./components/session-sidebar-content";
 import { TaskConversation } from "./components/task-conversation";
 import { useOptionalProjectTasks } from "./context/project-tasks-context";
@@ -116,6 +133,7 @@ import { usePromptEditorStore } from "./state/prompt-editor-store";
 import { useTaskTitleOverridesStore } from "./state/task-title-overrides-store";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
+  type UserQuestion,
   useUserQuestionStore,
 } from "./state/user-question-store";
 import type { StoredTask, UiEventMessage } from "./types";
@@ -159,6 +177,8 @@ const parseExecutorProfileId = (
     return {
       executor: parsed.executor,
       variant: parsed.variant ?? null,
+      model: parsed.model ?? null,
+      reasoning_effort: parsed.reasoning_effort ?? null,
     };
   } catch (error) {
     console.warn("[session] Failed to parse executor profile", error);
@@ -169,11 +189,19 @@ const parseExecutorProfileId = (
 type SingleAgentSessionViewProps = {
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  /**
+   * Always render the "new session" composer, ignoring any task/run carried by
+   * the route or tab. Used to embed the start-a-session surface in the project
+   * Home (overview) tab and in empty panes, where the ambient URL may still
+   * point at another pane's focused session.
+   */
+  forceNewSession?: boolean;
 };
 
 export function SingleAgentSessionView({
   sidebarCollapsed: externalSidebarCollapsed,
   onToggleSidebar: externalToggleSidebar,
+  forceNewSession = false,
 }: SingleAgentSessionViewProps = {}) {
   const { open: openSettingsModal } = useSettingsModal();
   const { t } = useLanguage();
@@ -204,8 +232,8 @@ export function SingleAgentSessionView({
   const routeProjectId =
     resolvedProjectId ??
     (isUuidIdentifier(params.projectId) ? params.projectId : null);
-  const routeTaskSlug = resolvedTaskSlug;
-  const routeRunSlug = resolvedRunSlug;
+  const routeTaskSlug = forceNewSession ? null : resolvedTaskSlug;
+  const routeRunSlug = forceNewSession ? null : resolvedRunSlug;
   // Inside a tab, do not consume mounting URL state if the tab kind doesn't
   // describe a session; this prevents stale navigations from leaking in.
   void tabKind;
@@ -264,7 +292,6 @@ export function SingleAgentSessionView({
   const [sessionExecutorProfile, setSessionExecutorProfile] =
     useState<ExecutorProfileId | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const questionRef = useRef<AgentUserQuestionHandle>(null);
 
   useEffect(() => {
     latestRouteProjectIdRef.current = routeProjectId;
@@ -500,6 +527,14 @@ export function SingleAgentSessionView({
   const isSending = isTaskRunning || isPendingSubmissionRunning;
   const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
   const isExecutorLocked = Boolean(taskRunId) || isSending;
+  // The runtime (Claude↔Codex) can't change mid-session — that needs handoff,
+  // since resume ids are executor-specific. The model can change on a Claude
+  // Code follow-up though: the backend applies it to the next run. Codex resume
+  // doesn't honor a model override yet, so its model stays locked.
+  const isModelLocked =
+    isSending ||
+    (Boolean(taskRunId) &&
+      sessionExecutorSelection?.executor !== "CLAUDE_CODE");
 
   useEffect(() => {
     if (pendingSubmission && !pendingSubmission.runId) {
@@ -513,9 +548,6 @@ export function SingleAgentSessionView({
     if (!activeRunRecord) {
       setCurrentTaskRunTargetBranch(null);
       setCurrentContainerRef(null);
-      if (!activeTaskId) {
-        setSessionExecutorProfile(executorProfileId);
-      }
       return;
     }
 
@@ -524,19 +556,30 @@ export function SingleAgentSessionView({
       activeRunRecord.container_ref ?? activeRunRecord.workspace_path;
     setCurrentContainerRef(runExecutionPath ?? null);
     setUseWorktree(resolveUseWorktreeForRun(activeRunRecord, workspace));
+  }, [activeRunRecord, setUseWorktree, workspace]);
 
+  // Initialize the runtime/model selector from the active run's stored profile,
+  // keyed on the run's identity (id + label) rather than the run object. The
+  // task-runs stream re-emits a fresh object on every tick; depending on the
+  // object would re-run this effect constantly and clobber a model the user
+  // just picked for a follow-up. Re-syncing only when the run actually changes
+  // keeps the selection stable within a run while still reflecting the correct
+  // profile when switching sessions or starting a new run.
+  const activeRunId = activeRunRecord?.id ?? null;
+  const activeRunExecutorLabel = activeRunRecord?.executor_label ?? null;
+  useEffect(() => {
+    if (!activeRunId) {
+      if (!activeTaskId) {
+        setSessionExecutorProfile(executorProfileId);
+      }
+      return;
+    }
     const runExecutorProfile =
-      parseExecutorProfileId(activeRunRecord.executor_label) ??
+      parseExecutorProfileId(activeRunExecutorLabel) ??
       executorProfileId ??
       null;
     setSessionExecutorProfile(runExecutorProfile);
-  }, [
-    activeRunRecord,
-    activeTaskId,
-    executorProfileId,
-    setUseWorktree,
-    workspace,
-  ]);
+  }, [activeRunId, activeRunExecutorLabel, activeTaskId, executorProfileId]);
 
   useEffect(() => {
     if (!activeTaskId) {
@@ -728,14 +771,74 @@ export function SingleAgentSessionView({
   const handleExecutorSelect = useCallback(
     (executor: BaseCodingAgent) => {
       if (isExecutorLocked) return;
-      const variant =
-        executorProfileId?.executor === executor
-          ? executorProfileId.variant ?? null
-          : null;
-      setSessionExecutorProfile({ executor, variant });
+      setSessionExecutorProfile((prev) => {
+        const base = prev ?? executorProfileId;
+        // Re-selecting the active runtime keeps its variant + overrides.
+        if (base?.executor === executor) {
+          return base ?? { executor, variant: null };
+        }
+        const variant =
+          executorProfileId?.executor === executor
+            ? executorProfileId.variant ?? null
+            : null;
+        // Switching runtime invalidates the model / reasoning overrides.
+        return { executor, variant, model: null, reasoning_effort: null };
+      });
     },
     [executorProfileId, isExecutorLocked],
   );
+
+  const handleModelSelect = useCallback(
+    (model: string) => {
+      if (isModelLocked) return;
+      setSessionExecutorProfile((prev) => {
+        const base = prev ?? executorProfileId;
+        if (!base) return prev;
+        return { ...base, model };
+      });
+    },
+    [executorProfileId, isModelLocked],
+  );
+
+  const handleReasoningSelect = useCallback(
+    (reasoning: ReasoningEffort) => {
+      if (isExecutorLocked) return;
+      setSessionExecutorProfile((prev) => {
+        const base = prev ?? executorProfileId;
+        if (!base) return prev;
+        return { ...base, reasoning_effort: reasoning };
+      });
+    },
+    [executorProfileId, isExecutorLocked],
+  );
+
+  // Current Runtime / Model / Reasoning values + options for the @ palette.
+  const runtimeValue = sessionExecutorSelection?.executor ?? null;
+  const runtimeLabel = runtimeValue
+    ? executorLabels[runtimeValue] ?? runtimeValue
+    : null;
+  const runtimeOptions = useMemo(
+    () =>
+      availableExecutors.map((executor) => ({
+        value: executor,
+        label: executorLabels[executor] ?? executor.replace(/_/g, " "),
+      })),
+    [availableExecutors, executorLabels],
+  );
+  const modelValue = sessionExecutorSelection?.model ?? null;
+  const modelOptions = useMemo(
+    () => (runtimeValue ? getModelOptions(runtimeValue) : []),
+    [runtimeValue],
+  );
+  const modelLabel = runtimeValue
+    ? getModelLabel(runtimeValue, modelValue) ?? RUNTIME_DEFAULT_LABEL
+    : null;
+  const reasoningValue = sessionExecutorSelection?.reasoning_effort ?? null;
+  const reasoningLabel =
+    getReasoningLabel(reasoningValue) ?? RUNTIME_DEFAULT_LABEL;
+  const showReasoning = runtimeValue
+    ? runtimeSupportsReasoning(runtimeValue)
+    : false;
 
   const { submitPrompt, handleCancel } = useSingleSessionController({
     workspace,
@@ -950,6 +1053,7 @@ export function SingleAgentSessionView({
     hasMoreHistory,
     isStreaming: isConversationStreaming,
     error: conversationError,
+    approvals,
     loadMoreHistory,
   } = useConversationHistory({
     sessionScopeId: promptScopeId,
@@ -967,6 +1071,44 @@ export function SingleAgentSessionView({
     },
   });
 
+  // Surface pending AskUserQuestion approvals from the active stream as the
+  // interactive question panel, and drop the panel once the approval resolves
+  // (answered, denied, or timed out).
+  useEffect(() => {
+    if (!taskRunId) return;
+
+    const pendingApproval = Object.values(approvals).find(
+      (approval) =>
+        approval.task_run_id === taskRunId &&
+        approval.tool_name === "AskUserQuestion" &&
+        approval.status.status === "pending",
+    );
+    const questions = pendingApproval
+      ? (pendingApproval.tool_input as { questions?: UserQuestion[] } | null)
+          ?.questions ?? []
+      : [];
+
+    const store = useUserQuestionStore.getState();
+    // An approval with a locally recorded result was already answered or
+    // skipped — its stream record just hasn't flipped from "pending" yet.
+    if (
+      pendingApproval &&
+      questions.length > 0 &&
+      !store.results.has(pendingApproval.id)
+    ) {
+      const existing = store.pendingQuestions.get(taskRunId);
+      if (existing?.toolUseId !== pendingApproval.id) {
+        store.setPendingQuestions(taskRunId, {
+          taskRunId,
+          toolUseId: pendingApproval.id,
+          questions,
+        });
+      }
+    } else {
+      store.clearPendingQuestions(taskRunId);
+    }
+  }, [approvals, taskRunId]);
+
   // Find-in-conversation (Cmd/Ctrl+F), mirroring the file editor's find UX.
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
   const sessionRootRef = useRef<HTMLDivElement | null>(null);
@@ -977,6 +1119,17 @@ export function SingleAgentSessionView({
     recomputeKey: entries.length,
     resetKey: activeTaskId,
   });
+
+  // When the message-nav rail targets a turn that tail virtualization left
+  // unmounted, mount the whole conversation so the scroll can land. Reset on
+  // session switch so a fresh conversation starts virtualized again.
+  const [conversationExpandAll, setConversationExpandAll] = useState(false);
+  const ensureConversationMounted = useCallback(() => {
+    setConversationExpandAll(true);
+  }, []);
+  useEffect(() => {
+    setConversationExpandAll(false);
+  }, [activeTaskId]);
 
   useEffect(() => {
     if (!pendingSubmission?.runId) {
@@ -1116,9 +1269,41 @@ export function SingleAgentSessionView({
     }
   }, [taskRunId, isAbortingConflicts, refetchBranchStatus, addErrorMessage]);
 
-  const handleOpenInEditor = useCallback(() => {
-    // Editor integration is not implemented yet.
-  }, []);
+  const handleOpenInEditor = useCallback(async () => {
+    if (!workspace) {
+      toast({
+        variant: "destructive",
+        title: "Cannot open project",
+        description: "Workspace path is not available.",
+      });
+      return;
+    }
+
+    const option = getSelectedOpenInOption();
+    if (!option) {
+      toast({
+        variant: "destructive",
+        title: "Cannot open project",
+        description: "No Open in app is available.",
+      });
+      return;
+    }
+
+    try {
+      await openWorkspaceWithOption(workspace, option);
+    } catch (error) {
+      console.warn("[session] Failed to open conflict workspace", {
+        app: option.label,
+        with: option.with,
+        workspacePath: workspace,
+        error,
+      });
+      toast({
+        title: `Could not open in ${option.label}`,
+        description: getOpenInErrorDescription(option.label, error),
+      });
+    }
+  }, [workspace]);
 
   const handleTitleChange = useCallback(
     async (newTitle: string) => {
@@ -1193,6 +1378,9 @@ export function SingleAgentSessionView({
   const executorSelectorLabel = executorProfileLoading
     ? t("loadingMessage")
     : executorDisplayLabel;
+  // Model shown alongside the runtime on the selector button; hidden while the
+  // executor profile is still loading.
+  const executorModelLabel = executorProfileLoading ? null : modelLabel;
 
   const diffItems = useMemo(
     () =>
@@ -1305,6 +1493,21 @@ export function SingleAgentSessionView({
             onDrop={handleDropFiles}
             onPaste={handlePasteFiles}
             t={t}
+            runtimeValue={runtimeValue}
+            runtimeLabel={runtimeLabel}
+            runtimeOptions={runtimeOptions}
+            onSelectRuntime={handleExecutorSelect}
+            modelValue={modelValue}
+            modelLabel={modelLabel}
+            modelOptions={modelOptions}
+            onSelectModel={handleModelSelect}
+            reasoningValue={reasoningValue}
+            reasoningLabel={reasoningLabel}
+            reasoningOptions={REASONING_OPTIONS}
+            onSelectReasoning={handleReasoningSelect}
+            showReasoning={showReasoning}
+            runtimeLocked={isExecutorLocked}
+            modelLocked={isModelLocked}
           />
 
           <div className="flex items-center justify-between gap-2">
@@ -1313,20 +1516,17 @@ export function SingleAgentSessionView({
                 <TooltipProvider delayDuration={120}>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={t("addContextButtonAria")}
-                          disabled={isStopping}
-                          className={cn(
-                            "flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:!bg-muted hover:!text-foreground",
-                            "disabled:cursor-not-allowed disabled:opacity-40",
-                          )}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </Button>
+                      <DropdownMenuTrigger
+                        type="button"
+                        aria-label={t("addContextButtonAria")}
+                        disabled={isStopping}
+                        className={cn(
+                          buttonVariants({ variant: "ghost", size: "icon" }),
+                          "flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:!bg-muted hover:!text-foreground",
+                          "disabled:cursor-not-allowed disabled:opacity-40",
+                        )}
+                      >
+                        <Plus className="h-4 w-4" />
                       </DropdownMenuTrigger>
                     </TooltipTrigger>
                     <TooltipContent side="top" className="text-[11px]">
@@ -1379,40 +1579,101 @@ export function SingleAgentSessionView({
                     variant="ghost"
                     size="sm"
                     disabled={
-                      isExecutorLocked ||
                       executorProfileLoading ||
-                      availableExecutors.length === 0
+                      availableExecutors.length === 0 ||
+                      (isExecutorLocked && isModelLocked)
                     }
                     className={cn(
                       "flex h-9 items-center justify-center gap-1.5 rounded-[4px] px-2 text-xs font-medium text-muted-foreground transition hover:bg-muted/40 hover:text-primary",
-                      isExecutorLocked ? "bg-muted/40" : "",
+                      isExecutorLocked && isModelLocked ? "bg-muted/40" : "",
                       "disabled:cursor-not-allowed disabled:opacity-40",
                     )}
                   >
+                    <AgentLogo
+                      agent={sessionExecutorSelection?.executor ?? null}
+                      className="h-3.5 w-3.5 shrink-0"
+                    />
                     <span className="text-xs">{executorSelectorLabel}</span>
+                    {executorModelLabel ? (
+                      <>
+                        <span className="text-xs text-muted-foreground/30">
+                          ·
+                        </span>
+                        <span className="text-xs text-muted-foreground/70">
+                          {executorModelLabel}
+                        </span>
+                      </>
+                    ) : null}
                     <ChevronDown className="h-3 w-3 text-muted-foreground/60" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  {availableExecutors.map((executor) => {
-                    const isActive =
-                      sessionExecutorSelection?.executor === executor;
-                    return (
-                      <DropdownMenuItem
-                        key={executor}
-                        onClick={() => handleExecutorSelect(executor)}
-                        className="flex items-center justify-between gap-3 text-[11px]"
-                      >
-                        <span>
-                          {executorLabels[executor] ??
-                            executor.replace(/_/g, " ")}
-                        </span>
-                        {isActive ? <Check className="h-3.5 w-3.5" /> : null}
-                      </DropdownMenuItem>
-                    );
-                  })}
+                  {/* Runtime can't change mid-session; hide it once locked so
+                      only the model stays switchable on a follow-up. */}
+                  {!isExecutorLocked ? (
+                    <>
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                        Runtime
+                      </DropdownMenuLabel>
+                      {availableExecutors.map((executor) => {
+                        const isActive =
+                          sessionExecutorSelection?.executor === executor;
+                        return (
+                          <DropdownMenuItem
+                            key={executor}
+                            onClick={() => handleExecutorSelect(executor)}
+                            className="flex items-center justify-between gap-3 text-[11px]"
+                          >
+                            <span>
+                              {executorLabels[executor] ??
+                                executor.replace(/_/g, " ")}
+                            </span>
+                            {isActive ? (
+                              <Check className="h-3.5 w-3.5" />
+                            ) : null}
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </>
+                  ) : null}
+                  {modelOptions.length > 0 ? (
+                    <>
+                      {!isExecutorLocked ? <DropdownMenuSeparator /> : null}
+                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                        Model
+                      </DropdownMenuLabel>
+                      {modelOptions.map((model) => {
+                        const isActive = modelValue === model.value;
+                        return (
+                          <DropdownMenuItem
+                            key={model.value}
+                            onClick={() => handleModelSelect(model.value)}
+                            className="flex items-center justify-between gap-3 text-[11px]"
+                          >
+                            <span>{model.label}</span>
+                            {isActive ? (
+                              <Check className="h-3.5 w-3.5" />
+                            ) : null}
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </>
+                  ) : null}
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <SessionReferencesPopover
+                taskId={sidebarActiveTaskId}
+                tasksById={tasksById}
+                side="top"
+                align="start"
+                onOpenTask={(taskIdOrSlug) =>
+                  navigateToSession(taskIdOrSlug, null)
+                }
+                onOpenFile={(path) =>
+                  openFilePath(path, taskRunId ?? undefined)
+                }
+              />
             </div>
 
             <div className="flex items-center gap-2">
@@ -1440,18 +1701,13 @@ export function SingleAgentSessionView({
                     <DropdownMenu>
                       <TooltipTrigger asChild>
                         <DropdownMenuTrigger
+                          type="button"
                           disabled={isExecutorLocked}
-                          asChild
+                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
                         >
-                          <button
-                            type="button"
-                            disabled={isExecutorLocked}
-                            className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            <Laptop className="h-3 w-3" />
-                            <span>{useWorktree ? "Worktree" : "Local"}</span>
-                            <ChevronDown className="h-2.5 w-2.5" />
-                          </button>
+                          <Laptop className="h-3 w-3" />
+                          <span>{useWorktree ? "Worktree" : "Local"}</span>
+                          <ChevronDown className="h-2.5 w-2.5" />
                         </DropdownMenuTrigger>
                       </TooltipTrigger>
                       <TooltipContent side="bottom" className="text-[11px]">
@@ -1492,21 +1748,16 @@ export function SingleAgentSessionView({
                     >
                       <TooltipTrigger asChild>
                         <DropdownMenuTrigger
+                          type="button"
                           disabled={isExecutorLocked}
-                          asChild
+                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
                         >
-                          <button
-                            type="button"
-                            disabled={isExecutorLocked}
-                            className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            <GitBranch className="h-3 w-3" />
-                            <span>From</span>
-                            <span className="max-w-[120px] truncate">
-                              {baseBranch ?? "main"}
-                            </span>
-                            <ChevronDown className="h-2.5 w-2.5" />
-                          </button>
+                          <GitBranch className="h-3 w-3" />
+                          <span>From</span>
+                          <span className="max-w-[120px] truncate">
+                            {baseBranch ?? "main"}
+                          </span>
+                          <ChevronDown className="h-2.5 w-2.5" />
                         </DropdownMenuTrigger>
                       </TooltipTrigger>
                       <TooltipContent side="bottom" className="text-[11px]">
@@ -1614,9 +1865,7 @@ export function SingleAgentSessionView({
       )}
       <div className="mx-auto w-full max-w-2xl px-4">
         {pendingQuestions && (
-          <AgentUserQuestionWithEditorState
-            editorHandle={editor}
-            questionRef={questionRef}
+          <AgentUserQuestion
             pendingQuestions={pendingQuestions}
             onAnswer={handleQuestionAnswer}
             onSkip={handleQuestionSkip}
@@ -1631,7 +1880,7 @@ export function SingleAgentSessionView({
   );
 
   const sessionSidebarButtonClass =
-    "text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
+    "text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
   const conversationScrollKey =
     activeTaskId ?? pendingSubmission?.tempTaskId ?? "session";
 
@@ -1650,6 +1899,7 @@ export function SingleAgentSessionView({
             messagesEndRef={messagesEndRef}
             scrollContainerRef={conversationScrollRef}
             searchActive={find.searchActive}
+            expandAll={conversationExpandAll}
             scrollCacheKey={conversationScrollKey}
             isStreaming={isConversationStreaming}
             scrollToBottomSignal={scrollToBottomSignal}
@@ -1662,7 +1912,7 @@ export function SingleAgentSessionView({
             }
           />
         ) : (
-          <SessionEmptyState title={t("sessionEmptyHeroTitle")} />
+          <ProjectOverview />
         )}
       </div>
     </div>
@@ -1709,13 +1959,6 @@ export function SingleAgentSessionView({
               onRebase={() => setRebaseDialogOpen(true)}
               onMergeDiffs={handleMergeDiffs}
               onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
-              referenceTasksById={tasksById}
-              onOpenReferenceTask={(taskIdOrSlug) =>
-                navigateToSession(taskIdOrSlug, null)
-              }
-              onOpenReferenceFile={(path) =>
-                openFilePath(path, taskRunId ?? undefined)
-              }
               isSidebarCollapsed={sessionSidebarCollapsed}
               onOpenSidebar={() => toggleSessionSidebarCollapsed(false)}
               t={t}
@@ -1725,6 +1968,14 @@ export function SingleAgentSessionView({
                 <div className="relative flex-1 overflow-hidden">
                   {conversationContent}
                   <ConversationFindBar controller={find} />
+                  {(activeTaskId || pendingSubmission) && (
+                    <ConversationMessageNav
+                      entries={entries}
+                      scrollContainerRef={conversationScrollRef}
+                      onEnsureAllMounted={ensureConversationMounted}
+                      resetKey={conversationScrollKey}
+                    />
+                  )}
                 </div>
               </div>
             </main>

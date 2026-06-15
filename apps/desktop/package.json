@@ -1,11 +1,12 @@
 {
   "name": "@chro/desktop",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "bun run dev:server:build && tauri dev",
+    "dev:perf": "bun run dev:server:build && cross-env CHRO_PERF=1 CHRO_PERF_DIR=../../log/performance tauri dev",
     "dev:web": "concurrently -p \"[{name}]\" -n server,vite \"bun run dev:server\" \"bun run dev:vite\"",
     "dev:web:scan": "concurrently -p \"[{name}]\" -n server,vite,scan \"bun run dev:server\" \"bun run dev:vite\" \"wait-on http://localhost:3400 && npx react-scan@latest http://localhost:3400\"",
     "dev:web:perf": "concurrently -p \"[{name}]\" -n server,vite \"bun run dev:server:perf\" \"bun run dev:vite:perf\"",

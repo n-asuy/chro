@@ -102,7 +102,7 @@ pub enum AskForApproval {
 }
 
 /// Reasoning effort for the underlying model
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema, AsRefStr)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, TS, JsonSchema, AsRefStr)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum ReasoningEffort {
@@ -373,7 +373,7 @@ impl Codex {
         });
 
         Ok(SpawnedChild {
-            child,
+            child: child.into(),
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
         })

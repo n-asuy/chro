@@ -1,10 +1,10 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
-import { RouterProvider, createRouter } from "@tanstack/react-router";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { routeTree } from "./routeTree.gen";
-import { initAnalytics, identify, capture } from "./lib/analytics";
+import { capture, identify, initAnalytics } from "./lib/analytics";
 import { loadUiState } from "./lib/ui-state-client";
+import { routeTree } from "./routeTree.gen";
 import "./app/globals.css";
 
 const router = createRouter({
@@ -22,6 +22,11 @@ declare module "@tanstack/react-router" {
 
 // Load persisted UI state and analytics config from backend
 loadUiState().catch(() => {});
+
+// Resolve feature flags once at startup so `useFlag` reads real values.
+import("./lib/feature-flags-store").then(({ useFeatureFlagStore }) =>
+  useFeatureFlagStore.getState().load(),
+);
 
 import("./lib/preferences-client").then(({ fetchPreferences }) =>
   fetchPreferences()
@@ -52,6 +57,6 @@ if (rootElement && !rootElement.innerHTML) {
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
       </QueryClientProvider>
-    </StrictMode>
+    </StrictMode>,
   );
 }

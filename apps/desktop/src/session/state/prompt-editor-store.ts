@@ -326,6 +326,38 @@ function insertPill(
   store.setPrompt(scopeId, parsed);
 }
 
+/**
+ * Delete the active "@…" trigger text at the cursor without inserting a pill.
+ * Used by settings selections (runtime / model / reasoning) which mutate
+ * session state rather than adding an attachment. When `keepPopoverOpen` is
+ * set the popover stays mounted so the menu can return to its top-level view.
+ */
+function removeActiveAtTrigger(
+  scopeId: string,
+  editor: HTMLElement | null,
+  options: { keepPopoverOpen?: boolean } = {},
+) {
+  if (!editor) return;
+  editor.focus({ preventScroll: true });
+
+  let selectionState = getSelectionInEditor(editor);
+  if (!selectionState) {
+    if (!moveCaretToEnd(editor)) return;
+    selectionState = getSelectionInEditor(editor);
+  }
+  if (!selectionState) return;
+
+  const { selection: sel } = selectionState;
+  deleteTriggerBeforeCursor(sel.getRangeAt(0), ["@"]);
+
+  const store = usePromptEditorStore.getState();
+  store.setAtQuery(scopeId, "");
+  if (!options.keepPopoverOpen) {
+    store.setPopover(scopeId, null);
+  }
+  store.setPrompt(scopeId, parseFromDOM(editor));
+}
+
 // --- Zustand store ---
 
 interface PromptEditorScopeState {
@@ -525,6 +557,8 @@ export interface PromptEditorHandle {
   addFilePart: (path: string, isFile: boolean, branch?: string | null) => void;
   addSessionPart: (taskId: string, branch?: string | null) => void;
   addSkillPart: (id: string, name: string) => void;
+  /** Remove the active "@…" trigger text without inserting a pill. */
+  removeActiveTrigger: (options?: { keepPopoverOpen?: boolean }) => void;
 }
 
 const handlesByScope = new Map<string, PromptEditorHandle>();
@@ -739,6 +773,10 @@ export function getPromptEditorHandle(
         { trigger: "skill", prefix: "#" },
       );
     },
+
+    removeActiveTrigger: (options) => {
+      removeActiveAtTrigger(scopeId, editorRef.current, options);
+    },
   };
 
   handlesByScope.set(scopeId, handle);
@@ -792,6 +830,8 @@ export function getActivePromptEditorHandle(): PromptEditorHandle {
     addSessionPart: (taskId, branch) =>
       activeHandle().addSessionPart(taskId, branch),
     addSkillPart: (id, name) => activeHandle().addSkillPart(id, name),
+    removeActiveTrigger: (options) =>
+      activeHandle().removeActiveTrigger(options),
   };
 
   activeProxyHandle = proxy;

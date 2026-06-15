@@ -3,10 +3,16 @@ import { desktopFetch } from "./backend-client";
 // Base coding agent types (matches BaseCodingAgent enum in Rust)
 export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX";
 
+// Reasoning effort (Codex only; matches ReasoningEffort enum in Rust, kebab-case)
+export type ReasoningEffort = "low" | "medium" | "high" | "x-high";
+
 // Current executor profile selection
 export type ExecutorProfileId = {
   executor: BaseCodingAgent;
   variant?: string | null;
+  // Optional per-request overrides applied on top of the resolved variant.
+  model?: string | null;
+  reasoning_effort?: ReasoningEffort | null;
 };
 
 // All executor configurations

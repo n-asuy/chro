@@ -21,6 +21,9 @@ export type { UseDiffStreamResult } from "./use-diff-stream";
 export { useProjectTasksStream } from "./use-project-tasks-stream";
 export type { UseProjectTasksStreamResult } from "./use-project-tasks-stream";
 
+export { useInboxTasksStream } from "./use-inbox-tasks-stream";
+export type { UseInboxTasksStreamResult } from "./use-inbox-tasks-stream";
+
 export { useTaskRunsStream } from "./use-task-runs-stream";
 export type { UseTaskRunsStreamResult } from "./use-task-runs-stream";
 

@@ -1,4 +1,3 @@
-
 import { motion } from "framer-motion";
 import type React from "react";
 import { type JSX, useMemo } from "react";
@@ -19,7 +18,15 @@ export function TextShimmer({
   duration = 2,
   spread = 2,
 }: TextShimmerProps) {
-  const MotionComponent = motion(Component as keyof JSX.IntrinsicElements);
+  // `motion(Component)` must be memoized: creating it during render returns a
+  // new component type every render, which remounts the motion element and, via
+  // framer-motion's internal state updates, drives an infinite re-render loop
+  // (surfaces as "Maximum update depth exceeded" when this shimmer is mounted,
+  // e.g. the streaming "loading" entry while a task run is being cancelled).
+  const MotionComponent = useMemo(
+    () => motion(Component as keyof JSX.IntrinsicElements),
+    [Component],
+  );
 
   const dynamicSpread = useMemo(() => {
     return children.length * spread;

@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::Utc;
@@ -27,6 +28,11 @@ use worktree::{generate_attempt_branch_name, EnsureOptions};
 use config::{render_merge_commit_template, DEFAULT_MERGE_COMMIT_TEMPLATE};
 
 use crate::{execution::ExecutionStartParams, Runtime, RuntimeError};
+
+const FOLLOW_UP_MISSING_SESSION_ID_ERROR: &str =
+    "cannot follow up because the previous executor session id is not available yet";
+const FOLLOW_UP_RESUME_SESSION_RETRY_ATTEMPTS: usize = 10;
+const FOLLOW_UP_RESUME_SESSION_RETRY_DELAY_MS: u64 = 200;
 
 #[derive(Debug, Clone)]
 pub struct MergeOutcome {
@@ -449,7 +455,15 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             return Err(RuntimeError::BadRequest("workspace path is invalid"));
         }
 
-        let is_git_repository = self.runtime().git().is_repository(&workspace_path);
+        let is_git_repository = {
+            let git = self.runtime().git().clone();
+            let path = workspace_path.clone();
+            tokio::task::spawn_blocking(move || git.is_repository(&path))
+                .await
+                .map_err(|e| {
+                    RuntimeError::Other(anyhow::anyhow!("git is-repository task failed: {e}"))
+                })?
+        };
         let use_worktree = resolve_use_worktree_mode(is_git_repository, use_worktree);
 
         let repo_path = workspace_path.clone();
@@ -516,6 +530,15 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             (task, run, false)
         };
 
+        // Cache the agent this task ran with so the session tab can show its
+        // logo. Stored as the bare agent kind ("CLAUDE_CODE" / "CODEX").
+        TaskRecord::set_last_executor(
+            self.pool(),
+            task.id,
+            &executor_profile.executor.to_string(),
+        )
+        .await?;
+
         if reused_existing_run {
             let execution_prompt = provided_prompt.clone().unwrap_or_else(|| task.to_prompt());
             if execution_prompt.trim().is_empty() {
@@ -529,6 +552,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                     None,
                     selected_skill_ids,
                     context_refs,
+                    Some(executor_profile.clone()),
                 )
                 .await;
         }
@@ -708,7 +732,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         sqlx::query(
-            "UPDATE task_records SET active_session_id = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(session.id)
         .bind(task.id)
@@ -756,8 +780,15 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         prompt: String,
         selected_skill_ids: Vec<String>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
-        self.follow_up_execution_with_options(run_id, prompt, None, selected_skill_ids, Vec::new())
-            .await
+        self.follow_up_execution_with_options(
+            run_id,
+            prompt,
+            None,
+            selected_skill_ids,
+            Vec::new(),
+            None,
+        )
+        .await
     }
 
     pub async fn follow_up_execution_with_context_refs(
@@ -773,6 +804,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             None,
             selected_skill_ids,
             context_refs,
+            None,
         )
         .await
     }
@@ -784,6 +816,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         image_ids: Option<Vec<Uuid>>,
         selected_skill_ids: Vec<String>,
         context_refs: Vec<TaskContextRefInput>,
+        requested_profile: Option<ExecutorProfileId>,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
         if prompt.trim().is_empty() {
             return Err(RuntimeError::BadRequest("prompt is required"));
@@ -795,9 +828,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         self.validate_context_refs_for_project(project.id, &context_refs)
             .await?;
 
-        let resume_session_id = self
-            .resolve_resume_session_id_for_follow_up(&previous_run)
-            .await?;
+        let resume_session_id = Some(
+            self.resolve_required_resume_session_id_for_follow_up(&previous_run)
+                .await?,
+        );
 
         let workspace_path =
             previous_run
@@ -854,7 +888,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         let mut new_run = TaskRun::new_local(task.id, Some("follow-up".to_string()));
-        new_run.executor_label = previous_run.executor_label.clone();
+        new_run.executor_label = follow_up_executor_label(
+            previous_run.executor_label.as_deref(),
+            requested_profile.as_ref(),
+        );
         new_run.executor_action = previous_run.executor_action.clone();
         new_run.branch_name = previous_run.branch_name.clone();
         new_run.target_branch = previous_run.target_branch.clone();
@@ -915,7 +952,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         sqlx::query(
-            "UPDATE task_records SET active_session_id = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(session.id)
         .bind(task.id)
@@ -995,6 +1032,34 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         Ok(None)
     }
 
+    async fn resolve_required_resume_session_id_for_follow_up(
+        &self,
+        previous_run: &TaskRun,
+    ) -> Result<String, RuntimeError> {
+        for attempt in 0..=FOLLOW_UP_RESUME_SESSION_RETRY_ATTEMPTS {
+            let resume_session_id = self
+                .resolve_resume_session_id_for_follow_up(previous_run)
+                .await?;
+            if let Ok(session_id) = require_follow_up_resume_session_id(resume_session_id) {
+                return Ok(session_id);
+            }
+
+            if attempt < FOLLOW_UP_RESUME_SESSION_RETRY_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(
+                    FOLLOW_UP_RESUME_SESSION_RETRY_DELAY_MS,
+                ))
+                .await;
+            }
+        }
+
+        warn!(
+            previous_task_run_id = %previous_run.id,
+            task_id = %previous_run.task_id,
+            "cannot start follow-up because the previous executor session id is unavailable"
+        );
+        Err(RuntimeError::BadRequest(FOLLOW_UP_MISSING_SESSION_ID_ERROR))
+    }
+
     async fn workspace_path_for_task(&self, task_id: Uuid) -> Result<PathBuf, RuntimeError> {
         let task = TaskRecord::get(self.pool(), task_id).await?;
         let project = ProjectRecord::get(self.pool(), task.project_id).await?;
@@ -1051,6 +1116,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                             image_ids,
                             selected_skill_ids,
                             context_refs,
+                            executor_profile_id,
                         )
                         .await?;
                     return Ok(TaskMessageStart {
@@ -1169,22 +1235,29 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let short = short_id_from_uuid(&task.id);
         let snapshot_message = format!("chore: finalize task {short}");
-        let _ = self
-            .runtime()
-            .git()
-            .commit_all(&worktree_path, &snapshot_message);
-
-        let merge_commit = self
-            .runtime()
-            .git()
-            .merge_changes(
-                Path::new(&project.git_repo_path),
-                &worktree_path,
-                &branch_name,
-                &target_branch,
-                &merge_message,
-            )
-            .map_err(RuntimeError::from)?;
+        // commit_all + merge_changes are blocking git operations (the merge runs
+        // a full squash with conflict detection). Offload both to the blocking
+        // pool so the merge never stalls the async runtime's worker threads.
+        let merge_commit = {
+            let git = self.runtime().git().clone();
+            let worktree = worktree_path.clone();
+            let repo_path = project.git_repo_path.clone();
+            let branch = branch_name.clone();
+            let target = target_branch.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = git.commit_all(&worktree, &snapshot_message);
+                git.merge_changes(
+                    Path::new(&repo_path),
+                    &worktree,
+                    &branch,
+                    &target,
+                    &merge_message,
+                )
+            })
+            .await
+            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git merge task failed: {e}")))?
+            .map_err(RuntimeError::from)?
+        };
 
         TaskMerge::create_direct(
             self.pool(),
@@ -1264,10 +1337,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let run = TaskRun::get(self.pool(), run_id).await?;
         let task = TaskRecord::get(self.pool(), run.task_id).await?;
         let project = ProjectRecord::get(self.pool(), task.project_id).await?;
-        let branches = self
-            .runtime()
-            .git()
-            .list_branches(&project.git_repo_path)
+        // Listing branches walks refs via git2; offload it so this frequently
+        // polled endpoint never blocks an async worker thread.
+        let git = self.runtime().git().clone();
+        let repo_path = project.git_repo_path.clone();
+        let branches =
+            crate::perf::spawn_blocking_instrumented("git.list_branches", move || {
+                git.list_branches(&repo_path)
+            })
+            .await
+            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git list-branches task failed: {e}")))?
             .map_err(RuntimeError::from)?;
         Ok(branches)
     }
@@ -1318,36 +1397,37 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let worktree_path = run.container_ref.as_ref().map(PathBuf::from);
 
-        let (is_rebase_in_progress, conflicted_files, conflict_op) =
-            if let Some(ref path) = worktree_path {
-                let in_rebase = self
-                    .runtime()
-                    .git()
-                    .is_rebase_in_progress(path)
-                    .unwrap_or(false);
-                let conflicts = self
-                    .runtime()
-                    .git()
-                    .get_conflicted_files(path)
-                    .unwrap_or_default();
-                let op = if conflicts.is_empty() {
-                    None
-                } else {
-                    self.runtime()
-                        .git()
-                        .detect_conflict_op(path)
-                        .unwrap_or(None)
+        // git2 work here (conflict scans plus a graph_ahead_behind revwalk) is
+        // synchronous and can take a long time on large repositories. This
+        // endpoint is polled frequently for every visible run, so offload the
+        // whole block to the blocking pool in a single hop. Running it inline
+        // on an async worker thread starves the runtime: enough concurrent
+        // polls block every worker and the whole server stops making progress.
+        let git = self.runtime().git().clone();
+        let repo_path = project.git_repo_path.clone();
+        let branch_for_status = branch_name.clone();
+        let target_for_status = target_branch.clone();
+        let (is_rebase_in_progress, conflicted_files, conflict_op, status) =
+            crate::perf::spawn_blocking_instrumented("git.branch_status", move || {
+                let (in_rebase, conflicts, op) = match worktree_path.as_deref() {
+                    Some(path) => {
+                        let in_rebase = git.is_rebase_in_progress(path).unwrap_or(false);
+                        let conflicts = git.get_conflicted_files(path).unwrap_or_default();
+                        let op = if conflicts.is_empty() {
+                            None
+                        } else {
+                            git.detect_conflict_op(path).unwrap_or(None)
+                        };
+                        (in_rebase, conflicts, op)
+                    }
+                    None => (false, Vec::new(), None),
                 };
-                (in_rebase, conflicts, op)
-            } else {
-                (false, Vec::new(), None)
-            };
-
-        let status = self.runtime().git().get_branch_status(
-            &project.git_repo_path,
-            &branch_name,
-            &target_branch,
-        );
+                let status =
+                    git.get_branch_status(&repo_path, &branch_for_status, &target_for_status);
+                (in_rebase, conflicts, op, status)
+            })
+            .await
+            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git branch-status task failed: {e}")))?;
 
         match status {
             Ok((ahead, behind)) => Ok(TaskRunBranchStatus {
@@ -1456,6 +1536,34 @@ impl<'a> TaskLifecycle<'a> {
         }
         Ok(())
     }
+}
+
+/// Resolve the executor label for a follow-up run.
+///
+/// The runtime (executor) and variant are fixed by the prior run; a follow-up
+/// only lets the user pick a different model / reasoning for the next turn, and
+/// only when the request still targets the same runtime. Switching runtimes
+/// mid-session is impossible here on purpose (that path is handoff, since resume
+/// ids are executor-specific). A `None`/legacy label is carried over verbatim,
+/// and a missing model/reasoning in the request keeps the prior value rather
+/// than clobbering it with a default.
+fn follow_up_executor_label(
+    previous_label: Option<&str>,
+    requested: Option<&ExecutorProfileId>,
+) -> Option<String> {
+    let previous_label = previous_label?;
+    let Ok(mut profile) = serde_json::from_str::<ExecutorProfileId>(previous_label) else {
+        return Some(previous_label.to_string());
+    };
+    if let Some(req) = requested.filter(|r| r.executor == profile.executor) {
+        if req.model.is_some() {
+            profile.model = req.model.clone();
+        }
+        if req.reasoning_effort.is_some() {
+            profile.reasoning_effort = req.reasoning_effort.clone();
+        }
+    }
+    Some(serde_json::to_string(&profile).unwrap_or_else(|_| previous_label.to_string()))
 }
 
 fn infer_task_title(prompt: &str) -> String {
@@ -1608,6 +1716,13 @@ fn extract_session_id_from_entries(entries: &[LogEntry]) -> Option<String> {
     })
 }
 
+fn require_follow_up_resume_session_id(session_id: Option<String>) -> Result<String, RuntimeError> {
+    match session_id {
+        Some(session_id) if !session_id.trim().is_empty() => Ok(session_id),
+        _ => Err(RuntimeError::BadRequest(FOLLOW_UP_MISSING_SESSION_ID_ERROR)),
+    }
+}
+
 fn build_merge_commit_message(
     task: &TaskRecord,
     override_message: Option<String>,
@@ -1745,6 +1860,32 @@ mod tests {
             LogEntry::Finished,
         ];
         assert_eq!(extract_session_id_from_entries(&entries), None);
+    }
+
+    #[test]
+    fn require_follow_up_resume_session_id_accepts_present_id() {
+        assert_eq!(
+            require_follow_up_resume_session_id(Some("session-1".to_string())).unwrap(),
+            "session-1"
+        );
+    }
+
+    #[test]
+    fn require_follow_up_resume_session_id_rejects_missing_id() {
+        assert!(matches!(
+            require_follow_up_resume_session_id(None),
+            Err(RuntimeError::BadRequest(message))
+                if message == FOLLOW_UP_MISSING_SESSION_ID_ERROR
+        ));
+    }
+
+    #[test]
+    fn require_follow_up_resume_session_id_rejects_blank_id() {
+        assert!(matches!(
+            require_follow_up_resume_session_id(Some("   ".to_string())),
+            Err(RuntimeError::BadRequest(message))
+                if message == FOLLOW_UP_MISSING_SESSION_ID_ERROR
+        ));
     }
 
     #[test]

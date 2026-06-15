@@ -4,9 +4,6 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
-
 use anyhow::{anyhow, Context};
 use approvals::Approvals;
 use async_trait::async_trait;
@@ -19,9 +16,9 @@ use db::{
 use diff_stream;
 use events::MsgStore;
 use executors::{
-    BaseCodingAgent, CodingAgent, ExecutionEnv, ExecutorApprovalService, ExecutorConfigs,
-    ExecutorExitResult, ExecutorProfileId, NoopExecutorApprovalService, PermissionMode,
-    PermissionRuntimeConfig, RepoContext, StandardCodingAgentExecutor,
+    BaseCodingAgent, CodingAgent, ExecutionEnv, ExecutionProcess, ExecutorApprovalService,
+    ExecutorConfigs, ExecutorExitResult, ExecutorProfileId, NoopExecutorApprovalService,
+    RepoContext, StandardCodingAgentExecutor,
 };
 use futures::{
     stream::{self, BoxStream},
@@ -40,19 +37,14 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::log_writer::{self, ExecutionLogWriter};
 use crate::MsgStoreMap;
 
-mod claude_agent;
-mod command;
 mod executor_approval_bridge;
 
-use claude_agent::{ClaudeAgentClient, ClaudeLogEmitter, ClaudeProtocolPeer};
-use command_group::AsyncGroupChild;
 use executor_approval_bridge::ExecutorApprovalBridge;
 
 #[derive(Clone)]
@@ -60,12 +52,13 @@ pub struct LocalContainerService {
     db: DBService,
     git: GitService,
     msg_stores: MsgStoreMap,
-    child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>,
+    child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<ExecutionProcess>>>>>,
     executions: Arc<RwLock<HashMap<Uuid, ExecutionHandle>>>,
     event_channels: Arc<RwLock<HashMap<Uuid, broadcast::Sender<ExecutionEvent>>>>,
     config: Arc<RwLock<Config>>,
     approvals: Approvals<MsgStore>,
     logs_dir: PathBuf,
+    worktree_watchers: filesystem::WorktreeWatcherService,
 }
 
 struct ExecutionHandle {
@@ -89,6 +82,7 @@ impl LocalContainerService {
         config: Arc<RwLock<Config>>,
         approvals: Approvals<MsgStore>,
         logs_dir: PathBuf,
+        worktree_watchers: filesystem::WorktreeWatcherService,
     ) -> Self {
         Self {
             db,
@@ -100,6 +94,7 @@ impl LocalContainerService {
             config,
             approvals,
             logs_dir,
+            worktree_watchers,
         }
     }
 
@@ -126,11 +121,11 @@ impl LocalContainerService {
         Ok(fallback)
     }
 
-    /// Create a CodingAgent and get permission config from the task run's executor profile.
+    /// Create a CodingAgent from the task run's executor profile.
     async fn create_agent_for_run(
         &self,
         run_id: Uuid,
-    ) -> Result<(CodingAgent, BaseCodingAgent, PermissionRuntimeConfig), ContainerError> {
+    ) -> Result<(CodingAgent, BaseCodingAgent), ContainerError> {
         let profile_id = self.resolve_executor_profile_for_run(run_id).await?;
         let configs = ExecutorConfigs::get_cached();
         let coding_agent = configs.get_coding_agent_or_default(&profile_id);
@@ -140,12 +135,7 @@ impl LocalContainerService {
             resolved_agent = ?base_agent,
             "[create_agent_for_run] resolved executor profile"
         );
-        let permission_mode = match &coding_agent {
-            CodingAgent::ClaudeCode(claude) => claude.permission_mode(),
-            _ => PermissionMode::BypassPermissions,
-        };
-        let permission = PermissionRuntimeConfig::new(permission_mode);
-        Ok((coding_agent, base_agent, permission))
+        Ok((coding_agent, base_agent))
     }
 
     fn collect_workspace_repo_names(workspace_path: &PathBuf) -> Vec<String> {
@@ -220,25 +210,41 @@ impl LocalContainerService {
     async fn try_commit_changes(&self, run_id: Uuid, workspace_path: &PathBuf) {
         let message = format!("Auto-commit changes from task run {}", run_id);
 
-        match self.git.commit_all(workspace_path, &message) {
-            Ok(Some(oid)) => {
+        // commit_all runs a blocking git status scan + commit; offload it so it
+        // never ties up an async worker thread on large worktrees.
+        let git = self.git.clone();
+        let workspace = workspace_path.clone();
+        let result = runtime::perf::spawn_blocking_instrumented("git.auto_commit", move || {
+            git.commit_all(&workspace, &message)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(Some(oid))) => {
                 tracing::info!(
                     %run_id,
                     %oid,
                     "[try_commit_changes] committed changes"
                 );
             }
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 tracing::debug!(
                     %run_id,
                     "[try_commit_changes] no changes to commit"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    %run_id,
+                    error = %e,
+                    "[try_commit_changes] failed to commit changes"
                 );
             }
             Err(e) => {
                 tracing::warn!(
                     %run_id,
                     error = %e,
-                    "[try_commit_changes] failed to commit changes"
+                    "[try_commit_changes] commit task failed to join"
                 );
             }
         }
@@ -339,7 +345,7 @@ impl LocalContainerService {
 
         let result = sqlx::query(
             "UPDATE task_records
-             SET status = ?, active_session_id = NULL, updated_at = datetime('now')
+             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
              WHERE id = ?",
         )
         .bind(task_status)
@@ -375,7 +381,7 @@ impl LocalContainerService {
             "[run_execution_process] starting execution"
         );
 
-        let (mut agent, agent_kind, permission) = self.create_agent_for_run(run_id).await?;
+        let (mut agent, agent_kind) = self.create_agent_for_run(run_id).await?;
         tracing::debug!(
             agent_kind = ?agent_kind,
             "[run_execution_process] using coding agent"
@@ -385,7 +391,15 @@ impl LocalContainerService {
             agent_kind,
             BaseCodingAgent::Codex | BaseCodingAgent::ClaudeCode
         ) {
-            ExecutorApprovalBridge::new(self.approvals.clone(), params.task_run_id)
+            let task_id = TaskRun::find_by_id(self.db.pool(), params.task_run_id)
+                .await?
+                .map(|run| run.task_id);
+            ExecutorApprovalBridge::new(
+                self.approvals.clone(),
+                params.task_run_id,
+                task_id,
+                self.db.clone(),
+            )
         } else {
             Arc::new(NoopExecutorApprovalService)
         };
@@ -417,9 +431,8 @@ impl LocalContainerService {
         let exit_signal = spawned.exit_signal;
         let executor_cancel = spawned.cancel;
 
-        let stdout = child.inner().stdout.take();
-        let stderr = child.inner().stderr.take();
-        let stdin = child.inner().stdin.take();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
 
         runtime::perf::record_event(
             "execution_spawned",
@@ -450,32 +463,7 @@ impl LocalContainerService {
             executor_session_id,
         );
 
-        let control_peer = if matches!(agent_kind, BaseCodingAgent::ClaudeCode) {
-            match stdin {
-                Some(stdin) => {
-                    let approval_cancel = executor_cancel
-                        .clone()
-                        .unwrap_or_else(CancellationToken::new);
-                    let client = ClaudeAgentClient::new(
-                        approvals_service.clone(),
-                        permission.enabled,
-                        approval_cancel,
-                    );
-                    let logger = ClaudeLogEmitter::new(self.clone(), params.task_run_id);
-                    let peer = ClaudeProtocolPeer::new(stdin, client, logger, permission.clone());
-                    peer.initialize().await?;
-                    msg_store.push(LogEntry::UserPrompt(params.prompt.clone()));
-                    peer.send_user_message(&params.prompt).await?;
-                    Some(peer)
-                }
-                None => {
-                    return Err(ContainerError::Other(anyhow!("Claude CLI stdin missing")));
-                }
-            }
-        } else {
-            msg_store.push(LogEntry::UserPrompt(params.prompt.clone()));
-            None
-        };
+        msg_store.push(LogEntry::UserPrompt(params.prompt.clone()));
 
         let workspace_path = params.workspace_path.clone();
         agent.normalize_logs(msg_store.clone(), &workspace_path);
@@ -491,7 +479,6 @@ impl LocalContainerService {
         let result_summary: Arc<std::sync::Mutex<Option<Value>>> =
             Arc::new(std::sync::Mutex::new(None));
 
-        let control_peer_stdout = control_peer.clone();
         let events_stdout = events_tx.clone();
         let msg_store_stdout = msg_store.clone();
         let stdout_lines_counter = stdout_lines.clone();
@@ -505,17 +492,6 @@ impl LocalContainerService {
                         continue;
                     }
                     stdout_lines_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    if let Some(peer) = control_peer_stdout.as_ref() {
-                        match peer.try_consume_line(&line).await {
-                            Ok(true) => continue,
-                            Ok(false) => {}
-                            Err(err) => {
-                                warn!(error = %err, "failed to process control message");
-                                continue;
-                            }
-                        }
-                    }
 
                     msg_store_stdout.push(LogEntry::Stdout(line.clone()));
 
@@ -647,9 +623,9 @@ impl LocalContainerService {
                     cancel.cancel();
                 }
                 let mut child_guard = child_arc.write().await;
-                let _ = command::kill_process_group(&mut child_guard).await;
+                let _ = child_guard.terminate().await;
                 let wait_result = child_guard.wait().await;
-                (ExitReason::Cancelled, wait_result.map_err(std::io::Error::from))
+                (ExitReason::Cancelled, wait_result)
             }
             exit_result = &mut exit_signal_future => {
                 let reason = match exit_result {
@@ -667,9 +643,9 @@ impl LocalContainerService {
                     }
                 };
                 let mut child_guard = child_arc.write().await;
-                let _ = command::kill_process_group(&mut child_guard).await;
+                let _ = child_guard.terminate().await;
                 let wait_result = child_guard.wait().await;
-                (reason, wait_result.map_err(std::io::Error::from))
+                (reason, wait_result)
             }
             _result = async {
                 loop {
@@ -686,26 +662,26 @@ impl LocalContainerService {
                     cancel.cancel();
                 }
                 let mut child_guard = child_arc.write().await;
-                if let Err(e) = command::kill_process_group(&mut child_guard).await {
+                if let Err(e) = child_guard.terminate().await {
                     tracing::warn!(%run_id, error = %e, "[run_execution_process] kill failed (process may have already exited)");
                 }
                 let wait_result = child_guard.wait().await;
                 tracing::debug!(%run_id, success = wait_result.is_ok(), "[run_execution_process] wait after kill");
-                (ExitReason::CompletionSignaled, wait_result.map_err(std::io::Error::from))
+                (ExitReason::CompletionSignaled, wait_result)
             }
             status = async {
                 let mut child_guard = child_arc.write().await;
                 child_guard.wait().await
             } => {
                 tracing::debug!(%run_id, success = status.is_ok(), "[run_execution_process] child.wait() completed");
-                (ExitReason::ProcessExited, status.map_err(std::io::Error::from))
+                (ExitReason::ProcessExited, status)
             },
         };
 
         tracing::debug!(%run_id, success = wait_result.is_ok(), "[run_execution_process] select! completed");
 
-        let process_status = match wait_result {
-            Ok(s) => s,
+        let process_exit = match wait_result {
+            Ok(exit) => exit,
             Err(e) => {
                 tracing::error!(%run_id, error = %e, "[run_execution_process] select! returned error");
                 return Err(ContainerError::Other(anyhow!("process wait failed: {}", e)));
@@ -726,16 +702,13 @@ impl LocalContainerService {
                 None // Will be marked as Cancelled
             }
             ExitReason::ProcessExited => {
-                let code = process_status.code();
+                let code = process_exit.code;
                 tracing::debug!(%run_id, ?code, "[run_execution_process] using process exit code");
                 code
             }
         };
 
-        #[cfg(unix)]
-        let signal = process_status.signal().map(|sig| sig.to_string());
-        #[cfg(not(unix))]
-        let signal: Option<String> = None;
+        let signal = process_exit.signal.clone();
 
         tracing::debug!(%run_id, ?exit_code, ?signal, "[run_execution_process] waiting for stdout/stderr tasks");
 
@@ -1018,7 +991,7 @@ impl ContainerService for LocalContainerService {
         if let Ok(Some(run)) = TaskRun::find_by_id(self.db.pool(), task_run_id).await {
             let result = sqlx::query(
                 "UPDATE task_records
-                 SET status = ?, active_session_id = NULL, updated_at = datetime('now')
+                 SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
                  WHERE id = ?",
             )
             .bind(TaskStatus::Completed)
@@ -1071,9 +1044,9 @@ impl ContainerService for LocalContainerService {
 
         if let Some(child_arc) = child {
             let mut child_guard = child_arc.write().await;
-            if let Err(e) = command::kill_process_group(&mut child_guard).await {
+            if let Err(e) = child_guard.terminate().await {
                 tracing::error!(
-                    "Failed to kill process group for task_run_id {}: {}",
+                    "Failed to terminate process for task_run_id {}: {}",
                     task_run_id,
                     e
                 );
@@ -1160,11 +1133,18 @@ impl ContainerService for LocalContainerService {
         let latest_merge = TaskMerge::find_latest_by_task(self.db.pool(), run.task_id).await?;
 
         let is_ahead = match (run.branch_name.as_deref(), run.target_branch.as_deref()) {
-            (Some(branch), Some(target_branch)) => self
-                .git
-                .get_branch_status(&project_repo_path, branch, target_branch)
-                .map(|(ahead, _)| ahead > 0)
-                .unwrap_or(false),
+            (Some(branch), Some(target_branch)) => {
+                let git = self.git.clone();
+                let repo_path = project_repo_path.clone();
+                let branch = branch.to_string();
+                let target_branch = target_branch.to_string();
+                tokio::task::spawn_blocking(move || {
+                    git.get_branch_status(&repo_path, &branch, &target_branch)
+                        .map(|(ahead, _)| ahead > 0)
+                        .unwrap_or(false)
+                })
+                .await?
+            }
             _ => false,
         };
 
@@ -1175,7 +1155,9 @@ impl ContainerService for LocalContainerService {
         if let Some(merge) = latest_merge {
             if let Some(commit) = merge.merge_commit() {
                 if is_clean && !is_ahead {
-                    return self.create_merged_diff_stream(&project_repo_path, commit, stats_only);
+                    return self
+                        .create_merged_diff_stream(&project_repo_path, commit, stats_only)
+                        .await;
                 }
             }
         }
@@ -1190,13 +1172,30 @@ impl ContainerService for LocalContainerService {
         }
         let base_commit = match (run.branch_name.as_deref(), run.target_branch.as_deref()) {
             (Some(branch), Some(target_branch)) => {
-                self.git
-                    .get_base_commit(&project_repo_path, branch, target_branch)?
+                let git = self.git.clone();
+                let repo_path = project_repo_path.clone();
+                let branch = branch.to_string();
+                let target_branch = target_branch.to_string();
+                tokio::task::spawn_blocking(move || {
+                    git.get_base_commit(&repo_path, &branch, &target_branch)
+                })
+                .await??
             }
-            _ => self.git.head_commit(&workspace_path)?,
+            _ => {
+                let git = self.git.clone();
+                let wp = workspace_path.clone();
+                tokio::task::spawn_blocking(move || git.head_commit(&wp)).await??
+            }
         };
-        let handle =
-            diff_stream::create(self.git.clone(), workspace_path, base_commit, stats_only).await?;
+        let events = self.worktree_watchers.subscribe(workspace_path.clone());
+        let handle = diff_stream::create(
+            self.git.clone(),
+            workspace_path,
+            base_commit,
+            stats_only,
+            events,
+        )
+        .await?;
 
         let msg_store_stream: BoxStream<'static, Result<LogEntry, std::io::Error>> = {
             let store = {
@@ -1240,25 +1239,36 @@ impl LocalContainerService {
         if let Some(path) = workspace_path {
             let path = PathBuf::from(path);
             if path.exists() {
-                return Ok(self.git.is_worktree_clean(&path)?);
+                let git = self.git.clone();
+                return Ok(
+                    tokio::task::spawn_blocking(move || git.is_worktree_clean(&path)).await??,
+                );
             }
         }
         Ok(true)
     }
 
-    fn create_merged_diff_stream(
+    async fn create_merged_diff_stream(
         &self,
         project_repo_path: &PathBuf,
         merge_commit_id: &str,
         stats_only: bool,
     ) -> Result<BoxStream<'static, Result<LogEntry, std::io::Error>>, ContainerError> {
-        let diffs = self.git.get_diffs(
-            DiffTarget::Commit {
-                repo_path: project_repo_path,
-                commit_sha: merge_commit_id,
-            },
-            None,
-        )?;
+        // get_diffs walks the commit tree via git2; offload so building a merged
+        // diff stream never blocks an async worker thread.
+        let git = self.git.clone();
+        let repo_path = project_repo_path.clone();
+        let commit_sha = merge_commit_id.to_string();
+        let diffs = tokio::task::spawn_blocking(move || {
+            git.get_diffs(
+                DiffTarget::Commit {
+                    repo_path: &repo_path,
+                    commit_sha: &commit_sha,
+                },
+                None,
+            )
+        })
+        .await??;
 
         let cumulative = Arc::new(AtomicUsize::new(0));
         let entries = diffs

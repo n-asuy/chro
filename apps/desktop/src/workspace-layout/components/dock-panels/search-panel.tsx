@@ -16,7 +16,6 @@ import {
 } from "react";
 import { useLayoutStore } from "../../state/layout-store";
 import { useDockSearchFocusToken } from "../dock-store-context";
-import { DockBackButton } from "./dock-back-button";
 
 const SEARCH_DEBOUNCE_MS = 200;
 const MAX_RESULTS = 50;
@@ -98,10 +97,7 @@ export function SearchDockPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-11 items-center px-2">
-        <DockBackButton />
-      </div>
-      <div className="px-2">
+      <div className="px-2 pt-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input

@@ -1,13 +1,20 @@
+import { FolderOpenSolidIcon, FolderSolidIcon } from "@/components/folder-icon";
 import { useProjectContext } from "@/files/context/project-context";
 import { type TranslationFunction, useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { revealInFinder } from "@/lib/project-client";
 import { getUiValue, isUiStateReady, setUiValue } from "@/lib/ui-state-client";
 import { ArchivePopover } from "@/session/components/archive-popover";
+import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
+import {
+  SessionPreviewProvider,
+  useSessionPreviewTrigger,
+} from "@/session/components/session-preview";
 import { TaskStatusDot } from "@/session/components/task-status-dot";
 import { applyPendingSubmissionsToTasks } from "@/session/domain/session-task-state";
 import {
   useArchivedSessions,
+  useInboxTasksStream,
   useMarkViewedWhenActive,
   useProjectTasksStream,
   useTaskStatusDot,
@@ -28,9 +35,8 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
 import { LoadingDot } from "@chro/ui/icons";
@@ -43,12 +49,12 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import {
   Archive,
+  ArrowDownUp,
+  Check,
   ChevronRight,
   ExternalLink,
-  Folder,
-  FolderOpen,
-  Loader2,
-  MoreHorizontal,
+  Folders,
+  Inbox,
   Plus,
   X,
 } from "lucide-react";
@@ -61,6 +67,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useAllProjects } from "../../hooks/use-all-projects";
 import {
   type ProjectNavigation,
   useProjectNavigation,
@@ -73,9 +80,45 @@ import {
 } from "../../state/open-projects-store";
 import { useProjectTreeStore } from "../../state/project-tree-store";
 import { ProjectSwitcherDropdown } from "../project-switcher-dropdown";
+import { SegmentedControl, type SegmentedItem } from "../segmented-control";
+import { ViewFade } from "../view-fade";
 
 const ICON_BUTTON_CLASS =
-  "inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-1.5 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
+
+/**
+ * Tree-guide geometry for a project's expanded chats. The vertical trunk drops
+ * from under the project row's chevron; each chat gets a horizontal tick, and
+ * the final chat's trunk stops at its tick to form the `└` corner.
+ */
+const TREE_GUIDE_LEFT_PX = 15;
+const TREE_GUIDE_TICK_PX = 8;
+
+/**
+ * Connector lines drawn behind a chat row: a vertical trunk under the project
+ * chevron plus a horizontal tick into the row. The last chat's trunk stops at
+ * the tick, drawing the `└` corner that closes the branch.
+ */
+function TreeGuide({ isLast }: { isLast: boolean }) {
+  return (
+    <span aria-hidden="true" className="pointer-events-none absolute inset-0">
+      <span
+        className="absolute top-0 w-px bg-custom-border-300"
+        style={{
+          left: `${TREE_GUIDE_LEFT_PX}px`,
+          height: isLast ? "50%" : "100%",
+        }}
+      />
+      <span
+        className="absolute top-1/2 h-px bg-custom-border-300"
+        style={{
+          left: `${TREE_GUIDE_LEFT_PX}px`,
+          width: `${TREE_GUIDE_TICK_PX}px`,
+        }}
+      />
+    </span>
+  );
+}
 
 /**
  * Projects-panel sort modes, picked from the header overflow menu.
@@ -134,8 +177,19 @@ const formatRelativeTime = (input: Date | string): string => {
  * project tabs — switching projects now happens by clicking a project (or one
  * of its chats) in this tree.
  */
+/**
+ * Left-dock view mode. `projects` is the per-project tree; `inbox` is a flat,
+ * cross-project list of every session ordered by recency.
+ */
+type PanelView = "projects" | "inbox";
+
 export function ProjectsDockPanel() {
   const { t } = useLanguage();
+  const [view, setView] = useState<PanelView>("projects");
+  const viewSegments: SegmentedItem<PanelView>[] = [
+    { value: "projects", icon: Folders, label: t("projects") },
+    { value: "inbox", icon: Inbox, label: t("inbox") },
+  ];
   const projects = useOpenProjectsStore((s) => s.projects);
   const hydrateProjectTree = useProjectTreeStore((s) => s.hydrate);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -189,70 +243,93 @@ export function ProjectsDockPanel() {
   });
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex h-11 shrink-0 items-center justify-between px-3">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label={t("sortProjects")}
-              className={ICON_BUTTON_CLASS}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side="bottom">
-            <DropdownMenuLabel>{t("sortProjects")}</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={sortMode}
-              onValueChange={(value) => {
-                if (isSortMode(value)) setSortMode(value);
-              }}
-            >
-              {SORT_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem key={option.mode} value={option.mode}>
-                  {t(option.labelKey)}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <div className="flex items-center gap-0.5">
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div>
-                  <ProjectSwitcherDropdown
-                    open={switcherOpen}
-                    onOpenChange={setSwitcherOpen}
-                    align="end"
-                    side="bottom"
-                    trigger={
-                      <button
-                        type="button"
-                        aria-label={t("openAnotherProject")}
-                        onClick={() => setSwitcherOpen(true)}
-                        className={ICON_BUTTON_CLASS}
-                      >
-                        <Plus className="h-4 w-4" />
-                      </button>
-                    }
-                  />
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                {t("openAnotherProject")}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+    <SessionPreviewProvider>
+      <div className="flex h-full flex-col">
+        <div className="flex h-11 shrink-0 items-center justify-between px-3">
+          <div className="flex items-center gap-1">
+            <SegmentedControl
+              items={viewSegments}
+              value={view}
+              onValueChange={setView}
+            />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={t("sortProjects")}
+                  className={ICON_BUTTON_CLASS}
+                >
+                  <ArrowDownUp className="h-4 w-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="bottom" className="w-48">
+                <DropdownMenuLabel className="-mx-1 -mt-1 mb-1 border-border/40 border-b px-3 py-1.5 font-normal text-[11px] text-muted-foreground">
+                  {t("sortProjects")}
+                </DropdownMenuLabel>
+                {SORT_OPTIONS.map((option) => {
+                  const isActive = option.mode === sortMode;
+                  return (
+                    <DropdownMenuItem
+                      key={option.mode}
+                      onSelect={() => setSortMode(option.mode)}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-md px-2 py-1 text-[13px]",
+                        isActive && "bg-muted text-foreground",
+                      )}
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        {t(option.labelKey)}
+                      </span>
+                      {isActive ? (
+                        <Check className="h-3.5 w-3.5 shrink-0" />
+                      ) : null}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <TooltipProvider delayDuration={120}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div>
+                    <ProjectSwitcherDropdown
+                      open={switcherOpen}
+                      onOpenChange={setSwitcherOpen}
+                      align="start"
+                      side="bottom"
+                      trigger={
+                        <button
+                          type="button"
+                          aria-label={t("openAnotherProject")}
+                          onClick={() => setSwitcherOpen(true)}
+                          className={ICON_BUTTON_CLASS}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </button>
+                      }
+                    />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" align="center">
+                  {t("openAnotherProject")}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
         </div>
+        <ViewFade viewKey={view} className="flex min-h-0 flex-1 flex-col">
+          {view === "inbox" ? (
+            <InboxRows t={t} />
+          ) : (
+            <ProjectRows
+              projects={sortedProjects}
+              sortByRecent={sortMode === "recent"}
+              t={t}
+            />
+          )}
+        </ViewFade>
       </div>
-      <ProjectRows
-        projects={sortedProjects}
-        sortByRecent={sortMode === "recent"}
-        t={t}
-      />
-    </div>
+    </SessionPreviewProvider>
   );
 }
 
@@ -309,6 +386,143 @@ const ProjectRows = memo(function ProjectRows({
     </div>
   );
 });
+
+interface InboxRowsProps {
+  t: TranslationFunction;
+}
+
+/**
+ * Flat, cross-project session list ordered by most-recent activity. Streams
+ * every project's tasks at once (no per-project grouping) and resolves each
+ * task's owning project name for a subtle secondary label. Archived sessions
+ * are hidden, matching the project tree's main list.
+ */
+const InboxRows = memo(function InboxRows({ t }: InboxRowsProps) {
+  const { tasks, isLoading } = useInboxTasksStream(true);
+  const projectsById = useAllProjects(true);
+  const { isArchived } = useArchivedSessions();
+  const activeTaskKey = useFocusedSessionTaskKey();
+  const navigate = useNavigate();
+
+  const visibleTasks = useMemo(
+    () => tasks.filter((task) => !isArchived(task)),
+    [tasks, isArchived],
+  );
+
+  const openInboxSession = useCallback(
+    (task: StoredTask) => {
+      const projectId = projectsById[task.project_id]?.slug ?? task.project_id;
+      navigate({
+        to: "/projects/$projectId/session/$taskId",
+        params: { projectId, taskId: task.slug ?? task.id },
+      });
+    },
+    [navigate, projectsById],
+  );
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      {isLoading && visibleTasks.length === 0 ? (
+        <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
+          <LoadingDot isLoading className="h-3 w-3" />
+        </div>
+      ) : visibleTasks.length === 0 ? (
+        <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+          {t("inboxEmpty")}
+        </div>
+      ) : (
+        visibleTasks.map((task) => (
+          <InboxRow
+            key={task.id}
+            task={task}
+            projectName={projectsById[task.project_id]?.name ?? null}
+            isActive={activeTaskKey === task.id || activeTaskKey === task.slug}
+            onOpen={() => openInboxSession(task)}
+            t={t}
+          />
+        ))
+      )}
+    </div>
+  );
+});
+
+interface InboxRowProps {
+  task: StoredTask;
+  projectName: string | null;
+  isActive: boolean;
+  onOpen: () => void;
+  t: TranslationFunction;
+}
+
+function InboxRow({ task, projectName, isActive, onOpen, t }: InboxRowProps) {
+  const isRunning = Boolean(task.active_session_id);
+  const isAwaitingInput = Boolean(task.awaiting_input);
+  const dotKind = useTaskStatusDot(task);
+  useMarkViewedWhenActive(task, isActive);
+  const preview = useSessionPreviewTrigger(task);
+  return (
+    <div
+      ref={preview.setAnchor}
+      role="option"
+      aria-selected={isActive}
+      tabIndex={0}
+      onClick={onOpen}
+      onPointerEnter={preview.hoverProps.onPointerEnter}
+      onPointerLeave={preview.hoverProps.onPointerLeave}
+      onPointerDown={preview.hoverProps.onPointerDown}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      className={cn(
+        "flex cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5",
+        isActive
+          ? "bg-custom-sidebar-background-80"
+          : "hover:bg-custom-sidebar-background-80",
+      )}
+    >
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="flex w-2 shrink-0 items-center justify-center">
+          <TaskStatusDot
+            kind={dotKind}
+            label={
+              dotKind === "failed"
+                ? t("sessionFailedUnread")
+                : t("sessionCompletedUnread")
+            }
+          />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          {task.title ? (
+            <span className="truncate text-sm text-custom-sidebar-text-100">
+              {task.title}
+            </span>
+          ) : (
+            <span className="truncate text-sm text-custom-sidebar-text-400">
+              {t("sessionUnresolved")}
+            </span>
+          )}
+          {projectName ? (
+            <span className="truncate text-xs text-custom-sidebar-text-400">
+              {projectName}
+            </span>
+          ) : null}
+        </span>
+      </div>
+      <span className="flex shrink-0 items-center">
+        {isRunning ? (
+          <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
+        ) : (
+          <span className="text-sm text-custom-sidebar-text-400">
+            {formatRelativeTime(task.updated_at)}
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
 
 interface ProjectTreeNodeProps {
   project: OpenProjectTab;
@@ -388,13 +602,13 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
       archivedAt: task.updated_at,
     }));
 
+  // Clicking the project name always lands on the project Home (overview),
+  // for the current project as well as a different one. Expand/collapse of the
+  // chat tree is reserved for the chevron button so a single click has one
+  // predictable outcome.
   const handleRowClick = () => {
-    if (isCurrent) {
-      toggle(project.id);
-    } else {
-      activateProject(project);
-      expand(project.id);
-    }
+    activateProject(project);
+    expand(project.id);
   };
 
   // Keep clicks on row-level action buttons from also triggering the row's
@@ -439,7 +653,7 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
             }}
             title={project.workspacePath ?? project.name}
             className={cn(
-              "group flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-[3px] px-1.5",
+              "group flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5",
               "text-custom-sidebar-text-200 hover:bg-custom-sidebar-background-80",
             )}
           >
@@ -460,9 +674,9 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
               />
             </button>
             {expanded ? (
-              <FolderOpen className="h-4 w-4 shrink-0 text-custom-sidebar-text-300" />
+              <FolderOpenSolidIcon className="h-4 w-4 shrink-0 text-custom-sidebar-text-300" />
             ) : (
-              <Folder className="h-4 w-4 shrink-0 text-custom-sidebar-text-300" />
+              <FolderSolidIcon className="h-4 w-4 shrink-0 text-custom-sidebar-text-300" />
             )}
             <span
               className={cn(
@@ -505,7 +719,7 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
             </span>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="z-20 w-52 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+        <ContextMenuContent className="z-20 w-52 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
           <ContextMenuItem
             onSelect={handleRevealInFinder}
             disabled={!project.workspacePath}
@@ -536,13 +750,14 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
               {t("noChats")}
             </div>
           ) : (
-            chats.map((task) => (
+            chats.map((task, index) => (
               <ChatRow
                 key={task.id}
                 task={task}
                 isActive={
                   activeTaskKey === task.id || activeTaskKey === task.slug
                 }
+                isLast={index === chats.length - 1}
                 onOpen={() => openSession(project, task)}
                 onArchive={() => archiveSession(task)}
                 t={t}
@@ -558,22 +773,36 @@ const ProjectTreeNode = memo(function ProjectTreeNode({
 interface ChatRowProps {
   task: StoredTask;
   isActive: boolean;
+  isLast: boolean;
   onOpen: () => void;
   onArchive: () => void;
   t: TranslationFunction;
 }
 
-function ChatRow({ task, isActive, onOpen, onArchive, t }: ChatRowProps) {
+function ChatRow({
+  task,
+  isActive,
+  isLast,
+  onOpen,
+  onArchive,
+  t,
+}: ChatRowProps) {
   const isRunning = Boolean(task.active_session_id);
+  const isAwaitingInput = Boolean(task.awaiting_input);
   const dotKind = useTaskStatusDot(task);
   useMarkViewedWhenActive(task, isActive);
+  const preview = useSessionPreviewTrigger(task);
   return (
     <div
+      ref={preview.setAnchor}
       role="option"
       aria-selected={isActive}
       tabIndex={0}
       draggable
       onClick={onOpen}
+      onPointerEnter={preview.hoverProps.onPointerEnter}
+      onPointerLeave={preview.hoverProps.onPointerLeave}
+      onPointerDown={preview.hoverProps.onPointerDown}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -595,12 +824,13 @@ function ChatRow({ task, isActive, onOpen, onArchive, t }: ChatRowProps) {
         );
       }}
       className={cn(
-        "group/chat flex cursor-pointer items-center justify-between gap-2 rounded-[3px] py-1.5 pl-9 pr-2.5",
+        "group/chat relative flex cursor-pointer items-center justify-between gap-2 rounded-md py-1.5 pl-9 pr-2.5",
         isActive
           ? "bg-custom-sidebar-background-80"
           : "hover:bg-custom-sidebar-background-80",
       )}
     >
+      <TreeGuide isLast={isLast} />
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="flex w-2 shrink-0 items-center justify-center">
           <TaskStatusDot
@@ -624,10 +854,7 @@ function ChatRow({ task, isActive, onOpen, onArchive, t }: ChatRowProps) {
       </div>
       <span className="flex shrink-0 items-center">
         {isRunning ? (
-          <Loader2
-            className="h-3.5 w-3.5 animate-spin text-custom-primary-100"
-            aria-label={t("waitingMessage")}
-          />
+          <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
         ) : (
           <>
             <span className="text-sm text-custom-sidebar-text-400 group-hover/chat:hidden">

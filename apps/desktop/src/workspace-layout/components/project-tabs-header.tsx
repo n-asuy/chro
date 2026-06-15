@@ -3,6 +3,7 @@ import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
+import { UpdateButton } from "@/system/update-button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,146 +22,29 @@ import {
   Settings,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import {
+  type OpenInAppId,
+  type OpenInOption,
+  canOpenWorkspaceWithOption,
+  getOpenInErrorDescription,
+  getOpenInOptions,
+  openWorkspaceWithOption,
+  readStoredOpenInAppId,
+  runtimePlatform,
+  writeStoredOpenInAppId,
+} from "../lib/open-in";
 import { useDockStore } from "../state/dock-store";
 import { useRightDockStore } from "../state/right-dock-store";
-import { OpenInAppIcon, type OpenInIconId } from "./open-in-app-icon";
+import { OpenInAppIcon } from "./open-in-app-icon";
 
-const isDarwin = (): boolean =>
-  typeof window !== "undefined" &&
-  (window.__CHRO_RUNTIME__?.platform === "darwin" ||
-    navigator.platform.toLowerCase().includes("mac"));
-
-const OPEN_IN_APP_IDS = [
-  "file-manager",
-  "cursor",
-  "zed",
-  "cmux",
-  "terminal",
-  "iterm2",
-  "powershell",
-] as const;
-
-type OpenInAppId = (typeof OPEN_IN_APP_IDS)[number];
-
-type OpenInOption = {
-  id: OpenInAppId;
-  label: string;
-  with?: string;
-  icon: OpenInIconId;
-};
-
-const OPEN_IN_APP_STORAGE_KEY = "workspace-layout:open-in-app:v1";
-
-const isOpenInAppId = (value: string | null): value is OpenInAppId =>
-  OPEN_IN_APP_IDS.includes(value as OpenInAppId);
-
-const readStoredOpenInAppId = (): OpenInAppId => {
-  if (typeof window === "undefined") return "file-manager";
-  try {
-    const value = window.localStorage.getItem(OPEN_IN_APP_STORAGE_KEY);
-    return isOpenInAppId(value) ? value : "file-manager";
-  } catch {
-    return "file-manager";
-  }
-};
-
-const writeStoredOpenInAppId = (id: OpenInAppId) => {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(OPEN_IN_APP_STORAGE_KEY, id);
-  } catch {
-    // localStorage can be unavailable in restricted webviews.
-  }
-};
-
-const runtimePlatform = (): "darwin" | "win32" | "linux" | "unknown" => {
-  if (typeof window === "undefined") return "unknown";
-  const runtime = window.__CHRO_RUNTIME__?.platform;
-  if (runtime === "darwin" || runtime === "win32" || runtime === "linux") {
-    return runtime;
-  }
-
-  const value = navigator.platform.toLowerCase();
-  if (value.includes("mac")) return "darwin";
-  if (value.includes("win")) return "win32";
-  if (value.includes("linux")) return "linux";
-  return "unknown";
-};
-
-const openInOptions = (): OpenInOption[] => {
-  const platform = runtimePlatform();
-  const fileManager =
-    platform === "darwin"
-      ? "Finder"
-      : platform === "win32"
-        ? "File Explorer"
-        : "File Manager";
-  const fileManagerIcon = platform === "darwin" ? "finder" : "file-explorer";
-  const editorOptions: OpenInOption[] = [
-    {
-      id: "cursor",
-      label: "Cursor",
-      with: platform === "darwin" ? "Cursor" : "cursor",
-      icon: "cursor",
-    },
-    {
-      id: "zed",
-      label: "Zed",
-      with: platform === "darwin" ? "Zed" : "zed",
-      icon: "zed",
-    },
-  ];
-
-  if (platform === "darwin") {
-    return [
-      { id: "file-manager", label: fileManager, icon: fileManagerIcon },
-      ...editorOptions,
-      // cmux is a macOS-only native app. We hand the workspace to its own
-      // `cmux open <path>` CLI (see the open_in_cmux Tauri command) instead of
-      // LaunchServices, so it works regardless of how cmux was launched.
-      { id: "cmux", label: "cmux", icon: "cmux" },
-      { id: "terminal", label: "Terminal", with: "Terminal", icon: "terminal" },
-      { id: "iterm2", label: "iTerm2", with: "iTerm", icon: "iterm2" },
-    ];
-  }
-
-  if (platform === "win32") {
-    return [
-      { id: "file-manager", label: fileManager, icon: fileManagerIcon },
-      ...editorOptions,
-      {
-        id: "powershell",
-        label: "PowerShell",
-        with: "powershell",
-        icon: "powershell",
-      },
-    ];
-  }
-
-  return [
-    { id: "file-manager", label: fileManager, icon: fileManagerIcon },
-    ...editorOptions,
-  ];
-};
-
-const getOpenInErrorDescription = (
-  appLabel: string,
-  error: unknown,
-): string => {
-  const message = error instanceof Error ? error.message : String(error);
-  const systemLabel = runtimePlatform() === "darwin" ? "macOS" : "The system";
-  if (message.includes("ExitStatus") || message.includes("failed with")) {
-    return `${systemLabel} could not hand this project folder to ${appLabel}. Open it from ${appLabel} directly.`;
-  }
-
-  return message.length > 180 ? `${message.slice(0, 177)}...` : message;
-};
+const isDarwin = (): boolean => runtimePlatform() === "darwin";
 
 /**
  * Slim window chrome bar. Project switching lives in the left-dock project tree
  * (see ProjectsDockPanel), so this bar carries the left-dock toggle (just past
- * the traffic lights), the global Settings entry, and the right-dock toggle. It
- * reserves the macOS traffic-light inset and serves as the window drag region.
+ * the traffic lights), the update affordance (visible only when an update is
+ * available), the global Settings entry, and the right-dock toggle. It reserves
+ * the macOS traffic-light inset and serves as the window drag region.
  *
  * Dragging is driven by Tauri's `data-tauri-drag-region` attribute: Tauri only
  * starts a window drag when the moused-down element *itself* carries the
@@ -182,6 +66,7 @@ export function ProjectTabsHeader() {
     >
       <LeftSidebarToggle />
       <div data-tauri-drag-region className="min-w-0 flex-1" />
+      <UpdateButton />
       <OpenInMenu />
       <SettingsToggle />
       <RightSidebarToggle />
@@ -198,12 +83,10 @@ function OpenInMenu() {
   const [selectedAppId, setSelectedAppId] = useState<OpenInAppId>(
     readStoredOpenInAppId,
   );
-  const canOpen =
-    typeof window !== "undefined" &&
-    Boolean(workspacePath && window.desktop?.openPath);
-  const options = openInOptions();
+  const options = getOpenInOptions();
   const selectedOption =
     options.find((option) => option.id === selectedAppId) ?? options[0];
+  const canOpen = canOpenWorkspaceWithOption(workspacePath, selectedOption);
 
   useEffect(() => {
     if (!selectedOption || selectedOption.id === selectedAppId) return;
@@ -237,41 +120,8 @@ function OpenInMenu() {
   const openIn = useCallback(
     async (option: OpenInOption) => {
       if (!workspacePath) return;
-
-      if (option.id === "cmux") {
-        const openInCmux = window.desktop?.openInCmux;
-        if (!openInCmux) {
-          toast({
-            variant: "destructive",
-            title: "Cannot open project",
-            description: "Open in is available in the desktop app.",
-          });
-          return;
-        }
-        try {
-          await openInCmux(workspacePath);
-        } catch (error) {
-          console.warn("[open-in] cmux failed", { workspacePath, error });
-          toast({
-            title: `Could not open in ${option.label}`,
-            description: getOpenInErrorDescription(option.label, error),
-          });
-        }
-        return;
-      }
-
-      const openPath = window.desktop?.openPath;
-      if (!openPath) {
-        toast({
-          variant: "destructive",
-          title: "Cannot open project",
-          description: "Open in is available in the desktop app.",
-        });
-        return;
-      }
-
       try {
-        await openPath(workspacePath, option.with);
+        await openWorkspaceWithOption(workspacePath, option);
       } catch (error) {
         console.warn("[open-in] failed", {
           app: option.label,
@@ -333,7 +183,9 @@ function OpenInMenu() {
                 key={option.id}
                 onSelect={() => {
                   selectOption(option);
-                  if (canOpen) void openIn(option);
+                  if (canOpenWorkspaceWithOption(workspacePath, option)) {
+                    void openIn(option);
+                  }
                 }}
                 className="gap-2 text-[12px]"
               >

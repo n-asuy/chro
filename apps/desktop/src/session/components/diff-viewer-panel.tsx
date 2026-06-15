@@ -3,7 +3,7 @@ import { Button } from "@chro/ui/button";
 import { cn } from "@/lib/cn";
 import { generateDiffFile } from "@git-diff-view/file";
 import { DiffModeEnum, DiffView } from "@git-diff-view/react";
-import { useEditorConfigStore } from "@/settings/state/editor-config-store";
+import { useTheme } from "@/settings/hooks/use-theme";
 import {
   ChevronDown,
   ChevronRight,
@@ -299,7 +299,7 @@ function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardPro
   const path = item.path;
   const lang = getLanguageFromPath(path);
   const diff = item.diff;
-  const theme = useEditorConfigStore((s) => s.config.theme);
+  const { dataTheme: theme } = useTheme();
   const isImage = isImagePath(path);
 
   const oldContent = diff.old_content ?? "";

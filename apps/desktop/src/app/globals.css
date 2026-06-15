@@ -6,6 +6,55 @@
 @tailwind utilities;
 
 @layer components {
+  /*
+   * Active workspace tab: browser-style shape whose rounded top and
+   * outward-flaring "feet" merge the tab into the content card below.
+   * A gray border traces the top and sides, then continues around the
+   * feet via the 1px arc baked into each radial-gradient pseudo-element,
+   * so the outline stays continuous from the tab body into the baseline.
+   * Inside the feet the gradient is filled with the card background
+   * (`--background`), so the seam between the tab and the content
+   * disappears while the baseline keeps showing on either side. Radius
+   * matches the content card's `rounded-lg` (0.5rem) so the curve that
+   * used to wrap the whole pane now reads as one continuous surface.
+   * The blue active indicator is a child span in tab-bar.tsx.
+   */
+  .workspace-tab-active {
+    border: 1px solid hsl(var(--border));
+    border-bottom: 0;
+    border-top-left-radius: 0.5rem;
+    border-top-right-radius: 0.5rem;
+  }
+  .workspace-tab-active::before,
+  .workspace-tab-active::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    width: 0.5rem;
+    height: 0.5rem;
+    pointer-events: none;
+  }
+  .workspace-tab-active::before {
+    left: -0.5rem;
+    background: radial-gradient(
+      circle at top left,
+      transparent 7px,
+      hsl(var(--border)) 7px,
+      hsl(var(--border)) 8px,
+      hsl(var(--background)) 8px
+    );
+  }
+  .workspace-tab-active::after {
+    right: -0.5rem;
+    background: radial-gradient(
+      circle at top right,
+      transparent 7px,
+      hsl(var(--border)) 7px,
+      hsl(var(--border)) 8px,
+      hsl(var(--background)) 8px
+    );
+  }
+
   .text-1\.5xl {
     font-size: 1.375rem;
     line-height: 1.875rem;
@@ -2422,6 +2471,18 @@ body {
   overflow-x: auto;
 }
 
+/* Scrolls horizontally when the table is wider than the editor pane so that
+   narrow widths reveal a scrollbar instead of collapsing the columns.
+   `contain: inline-size` is essential: it stops the (nowrap) table's intrinsic
+   width from propagating up into `.cm-content` — a flex item whose
+   `min-width: auto` would otherwise grow to the table's width and scroll the
+   whole document instead of just the table. */
+.cm-editor-container .cm-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  contain: inline-size;
+}
+
 .cm-editor-container .cm-table {
   width: 100%;
   border-collapse: collapse;
@@ -2437,6 +2498,13 @@ body {
   border: 1px solid #e1e4e8;
   cursor: text;
   transition: background-color 0.1s ease;
+  /* Keep cells on a single line so the table holds its natural width and the
+     scroll wrapper scrolls horizontally when the pane is narrow, instead of
+     crushing the columns. (The editor's `overflow-wrap: anywhere`, from
+     EditorView.lineWrapping, would otherwise stack text character-by-character.)
+     With `width: 100%` the table still fills the pane when there is room, and
+     only overflows-to-scroll once its single-line width exceeds the pane. */
+  white-space: nowrap;
 }
 
 .cm-editor-container .cm-table th {

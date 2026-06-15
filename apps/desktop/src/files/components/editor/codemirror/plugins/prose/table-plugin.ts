@@ -15,6 +15,7 @@ import {
   type Range as EditorRange,
   type EditorState,
   RangeSet,
+  StateEffect,
   StateField,
 } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
@@ -607,7 +608,14 @@ class EditableTableWidget extends WidgetType {
       tableEl.appendChild(tbody);
     }
 
-    container.appendChild(tableEl);
+    // Horizontal scroll wrapper: when the editor pane is narrower than the
+    // table's natural width, this scrolls instead of squeezing columns.
+    // It lives inside the container so the edge +buttons (which need
+    // `overflow: visible`) stay clickable on the outer element.
+    const scroll = document.createElement("div");
+    scroll.className = "cm-table-scroll";
+    scroll.appendChild(tableEl);
+    container.appendChild(scroll);
 
     // ── Edge +buttons ──────────────────────────────────────────
     this.appendEdgeButtons(container);
@@ -802,6 +810,14 @@ class EditableTableWidget extends WidgetType {
     const isHeader = rowIdx < headerRowCount;
 
     const items: ContextMenuItem[] = [
+      {
+        type: "item",
+        label: "Edit as raw text",
+        action: () => {
+          this.enterRawEdit();
+        },
+      },
+      { type: "separator" },
       {
         type: "item",
         label: "Insert row above",
@@ -1145,6 +1161,28 @@ class EditableTableWidget extends WidgetType {
     }
   }
 
+  // ── Raw editing ─────────────────────────────────────────────────
+
+  /**
+   * Drop the rendered widget for this table and place the cursor in its
+   * Markdown source so it can be edited as raw text. The table re-renders
+   * automatically once the selection leaves the source (see `rawEditField`).
+   */
+  private enterRawEdit() {
+    if (!this.view) return;
+    this.commitAndDeactivate();
+
+    const docLength = this.view.state.doc.length;
+    const from = Math.min(this.table.from, docLength);
+    const to = Math.min(this.table.to, docLength);
+
+    this.view.dispatch({
+      effects: enterRawEditEffect.of({ from, to }),
+      selection: { anchor: from },
+    });
+    this.view.focus();
+  }
+
   // ── Widget protocol ─────────────────────────────────────────────
 
   eq(other: EditableTableWidget): boolean {
@@ -1170,6 +1208,51 @@ class EditableTableWidget extends WidgetType {
   }
 }
 
+// ─── Raw edit state ──────────────────────────────────────────────────
+
+/**
+ * When a table is in "raw edit" mode the block widget is suppressed for that
+ * range so the user can edit the underlying Markdown source directly, with no
+ * rendering. The range is mapped through edits and cleared automatically once
+ * the selection leaves it, at which point the table re-renders.
+ */
+interface RawEditRange {
+  from: number;
+  to: number;
+}
+
+const enterRawEditEffect = StateEffect.define<RawEditRange>();
+
+const rawEditField = StateField.define<RawEditRange | null>({
+  create() {
+    return null;
+  },
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(enterRawEditEffect)) {
+        return effect.value;
+      }
+    }
+    if (!value) {
+      return value;
+    }
+    // Map the tracked range through the edit and keep it only while the
+    // selection stays inside; clicking/typing outside exits raw mode.
+    const from = tr.changes.mapPos(value.from, -1);
+    const to = tr.changes.mapPos(value.to, 1);
+    if (tr.selection) {
+      const head = tr.selection.main.head;
+      if (head < from || head > to) {
+        return null;
+      }
+    }
+    if (from === value.from && to === value.to) {
+      return value;
+    }
+    return { from, to };
+  },
+});
+
 // ─── Decoration field ────────────────────────────────────────────────
 
 function buildTableDecorations(
@@ -1178,8 +1261,14 @@ function buildTableDecorations(
 ): EditorRange<Decoration>[] {
   const decorations: EditorRange<Decoration>[] = [];
   const tables = findTables(state);
+  const rawEdit = state.field(rawEditField, false) ?? null;
 
   for (const table of tables) {
+    // Skip the table currently being edited as raw Markdown so its source
+    // stays visible and editable instead of being replaced by the widget.
+    if (rawEdit && table.from <= rawEdit.to && table.to >= rawEdit.from) {
+      continue;
+    }
     decorations.push(
       Decoration.replace({
         widget: new EditableTableWidget(table, table.from, config),
@@ -1197,18 +1286,24 @@ export function createTablePlugin(config: TablePluginConfig = {}): Extension {
       return RangeSet.of(buildTableDecorations(state, config), true);
     },
     update(value, tr) {
+      // Entering/leaving raw-edit mode adds or removes a table's widget, so we
+      // must rebuild whenever that state changes, even on a bare selection
+      // move (no doc change, no effect) that causes raw mode to auto-exit.
+      const rawChanged =
+        tr.startState.field(rawEditField, false) !==
+        tr.state.field(rawEditField, false);
       // When a cell is being edited inside the widget, doc changes come from
       // the widget's commit. We must rebuild decorations so table positions
       // stay correct, but only if no cell is actively being edited (to avoid
       // destroying the widget mid-edit).
-      if (activeTableWidget) {
+      if (activeTableWidget && !rawChanged) {
         // If the document changed (our own commit), remap positions
         if (tr.docChanged) {
           return value.map(tr.changes);
         }
         return value;
       }
-      if (tr.docChanged || tr.effects.length > 0) {
+      if (tr.docChanged || tr.effects.length > 0 || rawChanged) {
         return RangeSet.of(buildTableDecorations(tr.state, config), true);
       }
       return value;
@@ -1216,7 +1311,7 @@ export function createTablePlugin(config: TablePluginConfig = {}): Extension {
     provide: (f) => EditorView.decorations.from(f),
   });
 
-  return [tableDecorationField];
+  return [rawEditField, tableDecorationField];
 }
 
 // ─── Export ──────────────────────────────────────────────────────────

@@ -76,12 +76,38 @@ export const taskApi = {
     return response.tasks;
   },
 
+  listProjects: async (): Promise<ProjectResponse[]> => {
+    const response = await desktopFetch<{ projects: RawProjectPayload[] }>(
+      "/rpc/projects",
+    );
+    return response.projects.map(toProjectResponse);
+  },
+
   updateStatus: async (taskId: string, status: string): Promise<void> => {
     await desktopFetch(`/rpc/tasks/${taskId}/status`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
+  },
+
+  /**
+   * Fetch the most recent user prompt and assistant reply for a task. Either
+   * field is `null` when that message type has not been produced yet. Used for
+   * the sidebar hover preview, so it stays a single cheap request instead of
+   * opening the full conversation stream.
+   */
+  lastExchange: async (
+    taskId: string,
+  ): Promise<{ user: string | null; assistant: string | null }> => {
+    const response = await desktopFetch<{
+      user: string | null;
+      assistant: string | null;
+    }>(`/rpc/tasks/${encodeURIComponent(taskId)}/last-message`);
+    return {
+      user: response.user ?? null,
+      assistant: response.assistant ?? null,
+    };
   },
 
   ensureProject: async (gitRepoPath: string): Promise<ProjectResponse> => {

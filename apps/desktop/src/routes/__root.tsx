@@ -1,10 +1,11 @@
 import { LanguageProvider } from "@/i18n";
 import { SetupModal } from "@/onboarding/setup-modal";
 import { SettingsModalProvider } from "@/settings/components/settings-modal-provider";
+import { useNotificationActivation } from "@/settings/hooks/use-notification-activation";
+import { useTaskCompletionNotifications } from "@/settings/hooks/use-task-completion-notifications";
 import { useTheme } from "@/settings/hooks/use-theme";
 import { ExternalLinkHandler } from "@/system/external-link-handler";
 import { NavigationHandler } from "@/system/navigation-handler";
-import { UpdateInstallPopup } from "@/system/update-install-popup";
 import { useSelectAllMenuShortcut } from "@/system/use-select-all-menu-shortcut";
 import { Toaster } from "@chro/ui/toaster";
 import { Outlet, createRootRoute } from "@tanstack/react-router";
@@ -13,16 +14,26 @@ export const Route = createRootRoute({
   component: RootLayout,
 });
 
+/**
+ * Side-effect-only component: drives desktop notifications for background task
+ * completions. Rendered inside LanguageProvider so notification copy localizes.
+ */
+function TaskCompletionNotifier(): null {
+  useTaskCompletionNotifications();
+  return null;
+}
+
 function RootLayout() {
   const { dataTheme } = useTheme();
   useSelectAllMenuShortcut();
+  useNotificationActivation();
 
   return (
     <div className="font-sans antialiased" data-theme={dataTheme}>
       <ExternalLinkHandler />
       <NavigationHandler />
       <LanguageProvider>
-        <UpdateInstallPopup />
+        <TaskCompletionNotifier />
         <SettingsModalProvider>
           <Outlet />
         </SettingsModalProvider>

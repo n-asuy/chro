@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const SYNTHETIC_MODEL_ID: &str = "<synthetic>";
+pub const SYNTHETIC_NO_RESPONSE_TEXT: &str = "No response requested.";
+
 /// Approval status for tool use requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +126,12 @@ impl ClaudeJson {
             ClaudeJson::Unknown { .. } => None,
         }
     }
+
+    /// Claude writes client-generated assistant sentinels into transcripts in
+    /// some stop/abort paths. They are bookkeeping, not model output.
+    pub fn is_synthetic_no_response(&self) -> bool {
+        matches!(self, ClaudeJson::Assistant { message, .. } if message.is_synthetic_no_response())
+    }
 }
 
 /// Rate limit information emitted by Claude as an out-of-band event.
@@ -153,6 +162,34 @@ pub struct ClaudeMessage {
     pub model: Option<String>,
     pub content: Vec<ClaudeContentItem>,
     pub stop_reason: Option<String>,
+}
+
+impl ClaudeMessage {
+    pub fn is_synthetic_no_response(&self) -> bool {
+        if self.model.as_deref() != Some(SYNTHETIC_MODEL_ID) {
+            return false;
+        }
+
+        let mut saw_sentinel = false;
+        for item in &self.content {
+            match item {
+                ClaudeContentItem::Text { text } => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == SYNTHETIC_NO_RESPONSE_TEXT {
+                        saw_sentinel = true;
+                    } else {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+
+        saw_sentinel
+    }
 }
 
 /// Content items within a Claude message.
@@ -502,7 +539,8 @@ mod tests {
 
     #[test]
     fn parse_unknown_content_block_type() {
-        let json = r#"{"type":"server_tool_use","id":"st_1","name":"web_search","input":{"q":"x"}}"#;
+        let json =
+            r#"{"type":"server_tool_use","id":"st_1","name":"web_search","input":{"q":"x"}}"#;
         let parsed: ClaudeContentItem = serde_json::from_str(json).unwrap();
         assert!(matches!(parsed, ClaudeContentItem::Unknown { .. }));
     }
@@ -514,7 +552,10 @@ mod tests {
         match parsed {
             ClaudeJson::Assistant { message, .. } => {
                 assert_eq!(message.content.len(), 1);
-                assert!(matches!(message.content[0], ClaudeContentItem::Unknown { .. }));
+                assert!(matches!(
+                    message.content[0],
+                    ClaudeContentItem::Unknown { .. }
+                ));
             }
             _ => panic!("expected Assistant variant"),
         }

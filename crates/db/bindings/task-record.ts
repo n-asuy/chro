@@ -15,8 +15,21 @@ worktree_path: string | null, worktree_deleted: boolean,
 /**
  * FK to current active session
  */
-active_session_id: string | null, created_at: string, updated_at: string, 
+active_session_id: string | null, 
+/**
+ * Runtime flag: the agent is blocked on an AskUserQuestion approval and is
+ * waiting for the user to answer. Cleared when the question resolves or the
+ * active session ends. Denormalized runtime state mirroring
+ * `active_session_id`; never true while there is no active session.
+ */
+awaiting_input: boolean, created_at: string, updated_at: string, 
 /**
  * Position within a kanban column (lower = higher). 0 means unordered.
  */
-sort_order: number, };
+sort_order: number, 
+/**
+ * Bare agent kind the task last ran with (e.g. "CLAUDE_CODE", "CODEX").
+ * Denormalized from the latest run's executor so UIs can show the agent
+ * logo without a per-task run lookup. `None` until the first run.
+ */
+last_executor: string | null, };

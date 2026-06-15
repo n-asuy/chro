@@ -67,7 +67,7 @@ export function useSessionExecutionOptions({
     let cancelled = false;
     setIsLoadingBaseBranches(true);
 
-    listGitBranches(routeProjectId)
+    listGitBranches({ projectId: routeProjectId })
       .then(({ branches, isRepository }) => {
         if (cancelled) return;
         setIsGitRepository(isRepository);
@@ -112,7 +112,9 @@ export function useSessionExecutionOptions({
     setIsInitializingGit(true);
     try {
       await initGitRepository(routeProjectId);
-      const { branches, isRepository } = await listGitBranches(routeProjectId);
+      const { branches, isRepository } = await listGitBranches({
+        projectId: routeProjectId,
+      });
       setIsGitRepository(isRepository);
       const localBranches = toLocalBranches(branches);
       setBaseBranchCandidates(localBranches);

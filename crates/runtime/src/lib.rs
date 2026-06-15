@@ -93,6 +93,15 @@ pub enum RuntimeError {
 
 pub type MsgStoreMap = Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>;
 
+/// The most recent user prompt and assistant reply for a task, used by the
+/// sidebar hover preview to show the last conversation turn. Either side is
+/// `None` when that message type has not been produced yet.
+#[derive(Debug, Default, Clone)]
+pub struct LastExchange {
+    pub user: Option<String>,
+    pub assistant: Option<String>,
+}
+
 #[async_trait]
 pub trait Runtime: Clone + Send + Sync + 'static {
     /// Bootstrap a runtime using provided options
@@ -212,6 +221,14 @@ pub trait Runtime: Clone + Send + Sync + 'static {
     /// chronological order) and return the content. Used by the executor to
     /// inline past sessions into prompts and by the CLI to print transcripts.
     async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError>;
+
+    /// Return the most recent user prompt and assistant reply for a task, used
+    /// by the sidebar to preview the last conversation turn on hover without
+    /// opening the full conversation stream.
+    async fn task_last_exchange(
+        &self,
+        task_id: Uuid,
+    ) -> Result<LastExchange, RuntimeError>;
 
     fn touch_session(&self, session_id: &str) {
         let _ = session_id;

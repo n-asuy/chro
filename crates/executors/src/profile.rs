@@ -19,6 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 use thiserror::Error;
 use ts_rs::TS;
 
+use crate::executors::codex::ReasoningEffort;
 use crate::executors::{
     AvailabilityInfo, BaseCodingAgent, CodingAgent, ExecutorError, StandardCodingAgentExecutor,
 };
@@ -98,6 +99,12 @@ pub struct ExecutorProfileId {
     /// Optional variant name (e.g., "PLAN", "APPROVALS")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// Optional per-request model override applied on top of the resolved variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional reasoning effort override (Codex only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 fn de_base_coding_agent_kebab<'de, D>(de: D) -> Result<BaseCodingAgent, D::Error>
@@ -116,6 +123,28 @@ impl ExecutorProfileId {
         Self {
             executor,
             variant: None,
+            model: None,
+            reasoning_effort: None,
+        }
+    }
+
+    /// Apply the optional model / reasoning overrides onto a resolved agent.
+    /// Reasoning effort only applies to Codex; Claude Code has no such concept.
+    fn apply_overrides(&self, agent: &mut CodingAgent) {
+        match agent {
+            CodingAgent::ClaudeCode(claude) => {
+                if let Some(model) = &self.model {
+                    claude.model = Some(model.clone());
+                }
+            }
+            CodingAgent::Codex(codex) => {
+                if let Some(model) = &self.model {
+                    codex.model = Some(model.clone());
+                }
+                if let Some(effort) = &self.reasoning_effort {
+                    codex.model_reasoning_effort = Some(effort.clone());
+                }
+            }
         }
     }
 }
@@ -245,6 +274,10 @@ impl ExecutorConfigs {
                 )
             })
             .cloned()
+            .map(|mut agent| {
+                executor_profile_id.apply_overrides(&mut agent);
+                agent
+            })
     }
 
     pub fn get_coding_agent_or_default(
@@ -317,8 +350,8 @@ impl ExecutorConfigs {
 
 pub fn to_default_variant(id: &ExecutorProfileId) -> ExecutorProfileId {
     ExecutorProfileId {
-        executor: id.executor,
         variant: None,
+        ..id.clone()
     }
 }
 
@@ -336,39 +369,6 @@ impl PermissionMode {
             PermissionMode::Default => "default",
             PermissionMode::Plan => "plan",
             PermissionMode::BypassPermissions => "bypassPermissions",
-        }
-    }
-}
-
-/// Runtime configuration for permissions, used by the container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionRuntimeConfig {
-    pub mode: PermissionMode,
-    /// Whether manual approval is enabled (i.e., not bypassing permissions).
-    #[serde(default)]
-    pub enabled: bool,
-    /// Optional hooks configuration for the control protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<serde_json::Value>,
-}
-
-impl Default for PermissionRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            mode: PermissionMode::BypassPermissions,
-            enabled: false,
-            hooks: None,
-        }
-    }
-}
-
-impl PermissionRuntimeConfig {
-    pub fn new(mode: PermissionMode) -> Self {
-        let enabled = !matches!(mode, PermissionMode::BypassPermissions);
-        Self {
-            mode,
-            enabled,
-            hooks: None,
         }
     }
 }

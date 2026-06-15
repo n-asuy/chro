@@ -1,6 +1,26 @@
 //! Claude Code agent implementation.
+//!
+//! Claude runs as a regular interactive TUI inside a PTY (the headless
+//! `--print` stream-json mode is deprecated upstream). The run is observed
+//! out-of-band instead of through stdio:
+//!
+//! - Claude Code hooks (registered via a per-run `--settings` file) POST to a
+//!   per-run HTTP endpoint: `UserPromptSubmit` discovers the session
+//!   transcript, `Stop` signals turn completion, `PreToolUse` carries the
+//!   permission/question flow.
+//! - The session transcript JSONL is tailed and mapped back to stream-json,
+//!   so the existing log normalization, persistence and replay pipelines are
+//!   unchanged.
+//! - The PTY's own byte stream (TUI rendering) is drained and discarded; the
+//!   container reads a synthetic stdout pipe carrying the mapped lines plus a
+//!   synthesized final `result` line.
 
+mod hook_server;
+mod hooks;
+mod log_sink;
 mod processor;
+mod supervisor;
+mod transcript;
 pub mod types;
 
 pub use processor::{ClaudeLogProcessor, HistoryStrategy};
@@ -9,18 +29,24 @@ pub use types::{
     ClaudeStreamEvent, ClaudeToolData,
 };
 
-use std::{path::Path, process::Stdio, sync::Arc};
+use std::{io::Read, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use events::MsgStore;
 use log_types::LogEntry;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
+use self::{
+    hook_server::{ClaudeHookServer, PermissionBroker},
+    hooks::{build_hook_settings, write_hook_settings_file},
+    log_sink::LogLineSink,
+    supervisor::RunSupervisor,
+};
 use crate::{
     apply_overrides,
     approvals::ExecutorApprovalService,
@@ -30,8 +56,15 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
     },
+    process::{ExecutionProcess, PtyProcess},
     profile::PermissionMode,
+    stdout_dup::create_log_line_pipe,
 };
+
+/// Terminal size for the hosted TUI. Nothing renders to a screen, but the
+/// CLI lays text out against this grid; keep it wide so content is not
+/// wrapped into the scrollback needlessly.
+const PTY_SIZE: (u16, u16) = (200, 50);
 
 /// Claude Code agent configuration.
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -112,27 +145,18 @@ impl ClaudeCode {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::for_manifest(&cli_manifest::CLAUDE).params([
-            "--print",
-            "--verbose",
-            "--output-format=stream-json",
-            "--input-format=stream-json",
-            "--include-partial-messages",
-        ]);
+        let mut builder = CommandBuilder::for_manifest(&cli_manifest::CLAUDE);
 
-        let plan = self.plan.unwrap_or(false);
-        let approvals = self.approvals.unwrap_or(false);
-
-        if plan || approvals {
-            builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
-            builder = builder.extend_params([format!(
-                "--permission-mode={}",
-                PermissionMode::BypassPermissions.as_cli_flag()
-            )]);
-        }
-
-        if self.dangerously_skip_permissions.unwrap_or(false) && !plan && !approvals {
-            builder = builder.extend_params(["--dangerously-skip-permissions"]);
+        match self.permission_mode() {
+            PermissionMode::Plan => {
+                builder = builder.extend_params(["--permission-mode", "plan"]);
+            }
+            PermissionMode::Default => {}
+            PermissionMode::BypassPermissions => {
+                if self.dangerously_skip_permissions.unwrap_or(false) {
+                    builder = builder.extend_params(["--dangerously-skip-permissions"]);
+                }
+            }
         }
 
         if let Some(model) = &self.model {
@@ -156,50 +180,78 @@ impl ClaudeCode {
             builder.build_initial()?
         };
 
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let (program_path, mut args) = command_parts.into_resolved().await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
+        let permission_mode = self.permission_mode();
+        let run_key = uuid::Uuid::new_v4();
+
+        // Synthetic stdout: the container reads stream-json lines from here.
+        let (log_stdout, log_writer) = create_log_line_pipe()?;
+        let sink = LogLineSink::new(log_writer);
+        let cancel = CancellationToken::new();
+
+        let broker = PermissionBroker::new(
+            permission_mode,
+            self.approvals_service.clone(),
+            sink.clone(),
+            cancel.clone(),
+        );
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let server = ClaudeHookServer::start(events_tx, broker).await?;
+        let settings = build_hook_settings(&server.endpoint, permission_mode);
+        let settings_path = write_hook_settings_file(&settings, run_key)
+            .await
+            .map_err(ExecutorError::Io)?;
+
+        args.push("--settings".to_string());
+        args.push(settings_path.to_string_lossy().to_string());
+        args.push(combined_prompt);
 
         tracing::info!(
             program = %program_path.display(),
             args = ?args,
             current_dir = %current_dir.display(),
             is_follow_up = follow_up_args.is_some(),
-            "[ClaudeCode::spawn_internal] spawning CLI"
+            hook_port = server.endpoint.port,
+            "[ClaudeCode::spawn_internal] spawning interactive CLI in PTY"
         );
 
-        let mut command = Command::new(&program_path);
-        command
-            .kill_on_drop(true)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(current_dir)
-            .args(&args);
-
-        // Bound MCP tool-call execution time. Claude Code's MCP client leaves
-        // MCP_TOOL_TIMEOUT unset by default, which it treats as effectively
-        // infinite, so a hanging MCP stdio tool (a slow SQL query, a web scrape
-        // that never returns) blocks the run forever with no tool result and no
-        // `result` message for the runtime to complete on. A finite default turns
-        // such a stall into a tool error the agent can recover from. The timer is
-        // progress-aware in the SDK, so long-but-live tools are not killed. Set
-        // before apply_to_command so a user-provided value in the execution env
-        // (e.g. a profile override) wins.
-        command.env("MCP_TOOL_TIMEOUT", "60000");
-        env.apply_to_command(&mut command);
-
+        let mut cmd = portable_pty::CommandBuilder::new(&program_path);
+        cmd.args(&args);
+        cmd.cwd(current_dir);
+        cmd.env_clear();
+        for (key, value) in pty_environment() {
+            cmd.env(key, value);
+        }
+        // Bound MCP tool-call execution time; an unset MCP_TOOL_TIMEOUT is
+        // treated as infinite by the CLI, so a hanging MCP tool would stall
+        // the run forever. Set before profile env so a user override wins.
+        cmd.env("MCP_TOOL_TIMEOUT", "60000");
+        for (key, value) in &env.vars {
+            cmd.env(key, value);
+        }
         if let Some(path) = build_claude_path_env() {
-            command.env("PATH", path);
+            cmd.env("PATH", path);
         }
 
-        let child = command.group_spawn()?;
+        let (pty, raw_output) = PtyProcess::spawn(cmd, PTY_SIZE, log_stdout)?;
+        drain_pty_output(raw_output);
 
-        let _ = combined_prompt; // Will be used by container
+        RunSupervisor {
+            events: events_rx,
+            sink,
+            cancel: cancel.clone(),
+            is_resume: follow_up_args.is_some(),
+            settings_path,
+            server,
+            child_exit: pty.exit_watch(),
+        }
+        .spawn();
 
         Ok(SpawnedChild {
-            child,
+            child: ExecutionProcess::Pty(pty),
             exit_signal: None,
-            cancel: None,
+            cancel: Some(cancel),
         })
     }
 }
@@ -291,6 +343,46 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     }
 }
 
+/// Parent environment for the PTY, minus Claude Code's own nesting markers.
+///
+/// When chro itself runs inside a Claude session (dev flows), the inherited
+/// `CLAUDECODE`/`CLAUDE_CODE_*` variables make the spawned CLI treat itself
+/// as nested and it stops persisting the session transcript — which is this
+/// executor's entire data plane. Verified against claude 2.1.173.
+fn pty_environment() -> impl Iterator<Item = (String, String)> {
+    std::env::vars().filter(|(key, _)| key != "CLAUDECODE" && !key.starts_with("CLAUDE_CODE_"))
+}
+
+/// Keep the PTY master drained so the TUI never blocks on a full terminal
+/// buffer. The bytes are rendering noise; retain a small tail for debugging.
+fn drain_pty_output(mut reader: Box<dyn Read + Send>) {
+    const TAIL_CAPACITY: usize = 8 * 1024;
+    let _ = std::thread::Builder::new()
+        .name("claude-pty-drain".to_string())
+        .spawn(move || {
+            let mut tail: Vec<u8> = Vec::with_capacity(TAIL_CAPACITY);
+            let mut buf = [0u8; 8 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        if tail.len() > TAIL_CAPACITY {
+                            let excess = tail.len() - TAIL_CAPACITY;
+                            tail.drain(..excess);
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            tracing::debug!(
+                tail = %String::from_utf8_lossy(&tail),
+                "claude PTY closed"
+            );
+        });
+}
+
 /// Run `claude auth status` with a timeout and return the `loggedIn` value.
 /// Returns `Some(true)` if logged in, `Some(false)` if not, `None` on error/timeout.
 fn check_claude_auth_status() -> Option<bool> {
@@ -374,5 +466,46 @@ mod tests {
     fn test_approvals_mode() {
         let claude = ClaudeCode::new().with_approvals(true);
         assert_eq!(claude.permission_mode(), PermissionMode::Default);
+    }
+
+    #[test]
+    fn pty_environment_strips_nesting_markers() {
+        // SAFETY: test-only env mutation; tests in this module do not race
+        // on these specific keys.
+        unsafe {
+            std::env::set_var("CLAUDECODE", "1");
+            std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
+            std::env::set_var("CHRO_PTY_ENV_PROBE", "keep");
+        }
+        let env: std::collections::HashMap<String, String> = pty_environment().collect();
+        assert!(!env.contains_key("CLAUDECODE"));
+        assert!(!env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
+        assert_eq!(env.get("CHRO_PTY_ENV_PROBE").map(String::as_str), Some("keep"));
+        unsafe {
+            std::env::remove_var("CHRO_PTY_ENV_PROBE");
+        }
+    }
+
+    #[test]
+    fn command_builder_uses_interactive_flags() {
+        let claude = ClaudeCode::default();
+        let params = claude
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(params.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!params.iter().any(|p| p.contains("--print")));
+        assert!(!params.iter().any(|p| p.contains("stream-json")));
+
+        let plan = ClaudeCode::new().with_plan_mode(true);
+        let params = plan
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(params.contains(&"--permission-mode".to_string()));
+        assert!(params.contains(&"plan".to_string()));
+        assert!(!params.contains(&"--dangerously-skip-permissions".to_string()));
     }
 }

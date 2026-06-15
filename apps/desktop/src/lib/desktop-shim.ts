@@ -97,8 +97,13 @@ function installDesktopBridge() {
       ),
     setWindowMode: (mode: WindowMode) =>
       invoke<void>("set_window_mode", { mode }),
-    showNotification: (payload: { title: string; body?: string }) =>
-      invoke<void>("show_notification", { payload }),
+    showNotification: (payload: {
+      title: string;
+      body?: string;
+      // When set, clicking the notification focuses the window and navigates to
+      // this session. The Rust shell echoes it back via `notification:activate`.
+      target?: { projectId: string; taskId: string };
+    }) => invoke<void>("show_notification", { payload }),
     openExternalUrl: (url: string) =>
       invoke<void>("open_external_url", { url }),
     openPath: (path: string, app?: string) =>

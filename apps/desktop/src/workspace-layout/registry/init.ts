@@ -4,9 +4,11 @@ import {
   DiffTabBody,
   FileTabBody,
   InBrowserTabBody,
+  OverviewTabBody,
   ProjectDiffTabBody,
   SessionTabBody,
   SettingsTabBody,
+  SkillsTabBody,
   TerminalTabBody,
 } from "./tab-bodies";
 
@@ -19,6 +21,13 @@ let initialized = false;
 export function ensurePaneItemsRegistered(): void {
   if (initialized) return;
   initialized = true;
+
+  registerPaneItem({
+    type: "overview",
+    iconName: "house",
+    Content: OverviewTabBody,
+    resolveTitle: () => "Home",
+  });
 
   registerPaneItem({
     type: "session",
@@ -87,5 +96,12 @@ export function ensurePaneItemsRegistered(): void {
     iconName: "settings",
     Content: SettingsTabBody,
     resolveTitle: () => "Settings",
+  });
+
+  registerPaneItem({
+    type: "skills",
+    iconName: "book-open",
+    Content: SkillsTabBody,
+    resolveTitle: () => "Skills",
   });
 }

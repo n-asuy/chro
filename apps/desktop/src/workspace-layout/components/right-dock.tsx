@@ -1,3 +1,5 @@
+import { useLanguage } from "@/i18n";
+import { FolderTree, GitBranch, Search } from "lucide-react";
 import {
   type ComponentType,
   memo,
@@ -6,8 +8,14 @@ import {
   useRef,
 } from "react";
 import { useRightDockStore } from "../state/right-dock-store";
-import { MAX_DOCK_WIDTH, MIN_DOCK_WIDTH } from "../types";
+import {
+  MAX_DOCK_WIDTH,
+  MIN_DOCK_WIDTH,
+  type RightDockPanelKind,
+} from "../types";
 import { DockSideProvider } from "./dock-store-context";
+import { SegmentedControl, type SegmentedItem } from "./segmented-control";
+import { ViewFade } from "./view-fade";
 
 interface RightDockProps {
   filetree: ComponentType;
@@ -29,6 +37,28 @@ export const RightDock = memo(function RightDock({
   const collapsed = useRightDockStore((s) => s.collapsed);
   const width = useRightDockStore((s) => s.width);
   const setWidth = useRightDockStore((s) => s.setWidth);
+  const setActivePanel = useRightDockStore((s) => s.setActivePanel);
+  const focusSearchPanel = useRightDockStore((s) => s.focusSearchPanel);
+  const { t } = useLanguage();
+
+  // Selecting "search" routes through focusSearchPanel so the input autofocuses,
+  // matching the old magnifying-glass button; the other panels switch directly.
+  const onSelectPanel = useCallback(
+    (panel: RightDockPanelKind) => {
+      if (panel === "search") {
+        focusSearchPanel();
+      } else {
+        setActivePanel(panel);
+      }
+    },
+    [focusSearchPanel, setActivePanel],
+  );
+
+  const segments: SegmentedItem<RightDockPanelKind>[] = [
+    { value: "filetree", icon: FolderTree, label: t("navFiles") },
+    { value: "search", icon: Search, label: t("searchFiles") },
+    { value: "source-control", icon: GitBranch, label: t("sourceControl") },
+  ];
 
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
@@ -90,7 +120,7 @@ export const RightDock = memo(function RightDock({
   return (
     <DockSideProvider side="right">
       <div
-        className="relative flex h-full shrink-0 flex-col overflow-hidden rounded-lg border border-border/60 bg-background"
+        className="relative flex h-full shrink-0 flex-col bg-transparent"
         style={{ width: clampedWidth }}
       >
         <div
@@ -105,8 +135,17 @@ export const RightDock = memo(function RightDock({
           onPointerCancel={onResizeEnd}
           className="absolute -left-px top-0 z-10 h-full w-1 cursor-col-resize hover:bg-primary/40"
         />
+        <div className="flex h-11 shrink-0 items-center px-2">
+          <SegmentedControl
+            items={segments}
+            value={activePanel}
+            onValueChange={onSelectPanel}
+          />
+        </div>
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          {renderPanel()}
+          <ViewFade viewKey={activePanel} className="h-full">
+            {renderPanel()}
+          </ViewFade>
         </div>
       </div>
     </DockSideProvider>

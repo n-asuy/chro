@@ -36,7 +36,7 @@ export const FilesPathHeader = ({
                   size="icon"
                   variant="ghost"
                   onClick={onOpenSidebar}
-                  className="text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
+                  className="text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
                 >
                   <PanelLeft className="h-4 w-4" />
                 </Button>
@@ -63,7 +63,7 @@ export const FilesPathHeader = ({
                   size="icon"
                   variant="ghost"
                   onClick={onOpenRightPanel}
-                  className="text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
+                  className="text-[12px] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
                 >
                   <PanelRight className="h-4 w-4" />
                 </Button>

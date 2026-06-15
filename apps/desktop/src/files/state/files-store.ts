@@ -110,6 +110,12 @@ interface FilesState {
   rootPath: string | null;
   selectedPaths: string[];
 
+  // A pending "reveal this path in the tree" request. The bumped token lets the
+  // file-tree panel (expand + hydrate the ancestors) and the FileTree view
+  // (scroll the row into view) react even when the same path is revealed twice
+  // in a row. Set by `revealPath`, e.g. from the Skills panel.
+  revealRequest: { path: string; token: number } | null;
+
   // File system data
   fileTree: FileNode[];
 
@@ -123,10 +129,10 @@ interface FilesState {
   // Incremented to trigger current-file reload when external modification is detected.
   fileContentVersion: number;
 
-  // Navigate callback registered by useFileUrlSync when the files route is active.
-  // openFile/closeFile call this to update the URL in addition to the store.
-  // The optional `taskRunId` lets callers route file reads through a specific
-  // task run's worktree (e.g. when opening a file from a session view).
+  // Bridge invoked by openFile/closeFile to surface the file in the UI.
+  // Registered by LayoutShell, which opens the path as a tab in the focused
+  // pane. The optional `taskRunId` lets callers route file reads through a
+  // specific task run's worktree (e.g. when opening a file from a session view).
   _onFilePathChange: ((path: string | null, taskRunId?: string) => void) | null;
 }
 
@@ -148,6 +154,10 @@ interface FilesActions {
   // Selection
   selectNode: (path: string, multiSelect?: boolean) => void;
   clearSelection: () => void;
+
+  // Select a path and ask the file tree to expand to and scroll it into view.
+  // Used to focus a directory (e.g. a skill package) without opening a file.
+  revealPath: (path: string) => void;
 
   // File tree data
   setFileTree: (tree: FileNode[]) => void;
@@ -208,6 +218,7 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   roots: [],
   rootPath: null,
   selectedPaths: [],
+  revealRequest: null,
   fileTree: [],
   currentFilePath: null,
   _onFilePathChange: null,
@@ -267,6 +278,12 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     }),
 
   clearSelection: () => set({ selectedPaths: [] }),
+
+  revealPath: (path) =>
+    set((state) => ({
+      selectedPaths: [path],
+      revealRequest: { path, token: (state.revealRequest?.token ?? 0) + 1 },
+    })),
 
   // File tree data
   setFileTree: (tree) => set({ fileTree: tree }),

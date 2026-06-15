@@ -14,6 +14,15 @@ export interface ActiveWorkspaceScope {
    * focused center tab — see {@link resolveScopeTaskRunId}.
    */
   taskRunId: string | null;
+  /**
+   * True while a focused session's run scope is still being resolved: its
+   * task-runs stream is (re)connecting, so `runs` is transiently empty and
+   * `taskRunId` reads as null even though the session will resolve to a
+   * worktree run. The stream reconnects on every session switch, so consumers
+   * must hold their last scope during this window instead of committing to the
+   * project root — otherwise the full project tree flashes mid-switch.
+   */
+  isResolving: boolean;
 }
 
 /**
@@ -44,10 +53,23 @@ export function useActiveWorkspaceScope(): ActiveWorkspaceScope {
 
   // Streamed unconditionally (enabled-gated) to satisfy the rules of hooks;
   // only consumed when the focused tab is a concrete session.
-  const { runs } = useTaskRunsStream({
+  const { runs, isLoading: runsLoading } = useTaskRunsStream({
     taskId: sessionTaskId,
     enabled: Boolean(sessionTaskId),
   });
 
-  return { taskRunId: resolveScopeTaskRunId(focusedKind, runs, workspacePath) };
+  // A concrete session tab scopes to one of its runs, but the run id is only
+  // known once the runs stream delivers its first snapshot. Until then — most
+  // notably the WebSocket reconnect that fires on every session switch — the
+  // scope reads as null. Flag that window so the file tree holds its last
+  // scope rather than falling back to (and flashing) the project root. Gated on
+  // the resolved `sessionTaskId` (not the route key) so the stream is actually
+  // enabled and loading: this keeps the window bounded by the stream's
+  // first-message watchdog and never strands the tree if the key is unmappable.
+  const isResolving = Boolean(sessionTaskId) && runsLoading;
+
+  return {
+    taskRunId: resolveScopeTaskRunId(focusedKind, runs, workspacePath),
+    isResolving,
+  };
 }

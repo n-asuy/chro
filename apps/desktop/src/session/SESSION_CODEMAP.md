@@ -13,7 +13,11 @@ Generated at: 2026-04-04T09:30:10.610Z
 | File | Exports | RPC refs |
 | --- | --- | --- |
 | `apps/desktop/src/session/components/agent-ask-user-question-tool.tsx` | AgentAskUserQuestionTool | - |
-| `apps/desktop/src/session/components/agent-user-question.tsx` | AgentUserQuestion, AgentUserQuestionHandle | - |
+| `apps/desktop/src/session/components/agent-user-question.tsx` | AgentUserQuestion | - |
+| `apps/desktop/src/session/components/ask-user-questions.tsx` | AskUserQuestions, AskUserQuestionItem, AskUserOption, AskUserAnswer | - |
+| `apps/desktop/src/session/utils/ask-user-question-mapping.ts` | questionId, toAskUserQuestionItems, formatQuestionAnswers | - |
+| `apps/desktop/src/session/hooks/use-proximity-hover.ts` | useProximityHover, ItemRect | - |
+| `apps/desktop/src/session/hooks/use-merge-split.tsx` | useMergeSplitBlocks, SelectionBackgrounds, SelBlock, Run | - |
 | `apps/desktop/src/session/components/approval-panel.tsx` | ApprovalPanel | - |
 | `apps/desktop/src/session/components/archive-popover.tsx` | ArchivePopover | - |
 | `apps/desktop/src/session/components/braille-spinner.tsx` | BrailleSpinner | - |
@@ -29,7 +33,7 @@ Generated at: 2026-04-04T09:30:10.610Z
 | `apps/desktop/src/session/components/remark-wikilink.ts` | remarkWikilink | - |
 | `apps/desktop/src/session/components/session-empty-state.tsx` | SessionEmptyState | - |
 | `apps/desktop/src/session/components/session-header.tsx` | SessionHeader | - |
-| `apps/desktop/src/session/components/session-input-controls.tsx` | AgentUserQuestionWithEditorState, PromptEditorWithPopover, SendButtonWithState | - |
+| `apps/desktop/src/session/components/session-input-controls.tsx` | PromptEditorWithPopover, SendButtonWithState | - |
 | `apps/desktop/src/session/components/session-list.tsx` | SessionList | - |
 | `apps/desktop/src/session/components/session-sidebar-content.tsx` | SessionSidebarContent | - |
 | `apps/desktop/src/session/components/task-conversation.tsx` | TaskConversation | - |

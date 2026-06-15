@@ -13,7 +13,10 @@ use thiserror::Error;
 pub mod watcher;
 pub mod workspace;
 
-pub use watcher::{watch_directory, DebouncedEvent, FilesystemWatcherError, WatcherComponents};
+pub use watcher::{
+    FilesystemWatcherError, WorktreeEvent, WorktreeEventBatch, WorktreeEventKind,
+    WorktreeWatcherService,
+};
 pub use workspace::{
     WorkspaceBinaryFile, WorkspaceEntry, WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile,
 };
@@ -164,7 +167,7 @@ impl FilesystemService {
         limit: usize,
         timeout: Duration,
     ) -> Result<Vec<RepoCandidate>, FilesystemError> {
-        let max = limit.max(1).min(256);
+        let max = limit.clamp(1, 256);
         let deadline = Instant::now() + timeout;
         let mut repos = Vec::new();
 
@@ -216,7 +219,7 @@ impl FilesystemService {
         limit: usize,
     ) -> Result<Vec<FileMatch>, FilesystemError> {
         let root = root.as_ref().to_path_buf();
-        let max = limit.max(1).min(200);
+        let max = limit.clamp(1, 200);
         let walker = WalkBuilder::new(&root)
             .standard_filters(true)
             .max_depth(Some(10))

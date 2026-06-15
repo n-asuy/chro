@@ -22,7 +22,13 @@ import {
 } from "@/lib/project-client";
 import { isUiStateReady } from "@/lib/ui-state-client";
 import { useDiffStream } from "@/session/hooks";
-import { useCallback, useEffect, useMemo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { useDockCloseHandler } from "../dock-store-context";
 
 const deriveRootName = (
@@ -83,14 +89,43 @@ export function FileTreeDockPanel() {
   // When a session sandbox is in view, the tree roots at that run's worktree
   // instead of the project checkout. Null falls back to the project root
   // (new sessions, local runs, project-level surfaces).
-  const { taskRunId: scopeTaskRunId } = useActiveWorkspaceScope();
+  const { taskRunId: resolvedScopeTaskRunId, isResolving: isScopeResolving } =
+    useActiveWorkspaceScope();
+
+  // While a focused session's runs stream is (re)connecting, the resolved scope
+  // transiently reads as null (= project root). Acting on that null loads the
+  // full project tree, which flashes for a frame when switching between
+  // sessions. Hold the last authoritative scope until the stream resolves so
+  // the tree never falls back to the project root mid-switch (keepPreviousData
+  // semantics). The ref is updated only on settled (non-resolving) commits, so
+  // it always reflects the last known-good scope while resolving.
+  const lastResolvedScopeRef = useRef<string | null>(resolvedScopeTaskRunId);
+  useEffect(() => {
+    if (!isScopeResolving) {
+      lastResolvedScopeRef.current = resolvedScopeTaskRunId;
+    }
+  }, [isScopeResolving, resolvedScopeTaskRunId]);
+  const scopeTaskRunId = isScopeResolving
+    ? lastResolvedScopeRef.current
+    : resolvedScopeTaskRunId;
+  // `scopeTaskRunId === null` is overloaded: it means both "settled on the
+  // project root" and "scope not yet resolved". While a focused session's runs
+  // stream is still resolving and no prior authoritative scope is held (a fresh
+  // panel mount, or a project→session switch), the scope is genuinely *unknown*
+  // — committing to the project root here loads and flashes the full project
+  // tree for a frame before the run's worktree resolves. Treat that window as a
+  // distinct third state so project-scoped loads wait for the stream's first
+  // snapshot instead of momentarily rendering the whole project.
+  const isScopeUnknown = isScopeResolving && scopeTaskRunId === null;
   const initializeExpandedPaths = useFileTreeStore(
     (s) => s.initializeExpandedPaths,
   );
   const expandPath = useFileTreeStore((s) => s.expandPath);
   const replaceExpandedPaths = useFileTreeStore((s) => s.replaceExpandedPaths);
   const fileTree = useFilesStore((s) => s.fileTree);
+  const revealRequest = useFilesStore((s) => s.revealRequest);
   const expandedPaths = useFileTreeStore((s) => s.expandedPaths);
+  const handledRevealTokenRef = useRef(0);
 
   const primaryRoot = useMemo<WorkspaceRoot | null>(() => {
     if (!projectId) return null;
@@ -116,8 +151,8 @@ export function FileTreeDockPanel() {
     return () => setScopeTaskRunId(null);
   }, [setScopeTaskRunId]);
 
-  // In session scope the tree shows ONLY the files the agent changed (Orca
-  // style), sourced from the run's diff stream. stats_only keeps it light: we
+  // In session scope the tree shows ONLY the files the agent changed,
+  // sourced from the run's diff stream. stats_only keeps it light: we
   // only need the changed paths, not file contents — the session tree is plain
   // (no diff colors), so change kinds aren't needed either.
   const { diffs: scopeDiffs } = useDiffStream({
@@ -154,6 +189,17 @@ export function FileTreeDockPanel() {
     useFileTreeStore.setState({ workspacePath: null });
   }, [scopeTaskRunId]);
 
+  // Before the focused session's scope resolves, neither tree can load: the
+  // worktree's changed-files list is not yet known, and loading the project
+  // root would flash the full tree — the very content the worktree replaces.
+  // Clear any tree left over from a prior project-scoped view so the resolving
+  // window renders just the workspace root, not the whole project. Layout
+  // effect so a stale tree never paints for a frame before it is cleared.
+  useLayoutEffect(() => {
+    if (!isScopeUnknown) return;
+    setFileTree([]);
+  }, [isScopeUnknown, setFileTree]);
+
   // Expanded-folder state lives in persisted UI state, which hydrates
   // asynchronously after first paint (loadUiState() in main.tsx). Until it
   // is ready, loadExpandedPaths() returns an empty set; initializing then
@@ -163,10 +209,11 @@ export function FileTreeDockPanel() {
   // then re-assert the always-expanded primary root so the freshly loaded
   // set keeps it open (covers a workspace's first-ever open).
   useEffect(() => {
-    // Session scope manages its own ephemeral expand-all; skip the persisted
-    // project expansion so it is not clobbered. Leaving scope re-runs this and
-    // restores the saved set.
-    if (scopeTaskRunId) return;
+    // Session scope manages its own ephemeral expand-all, and an unresolved
+    // scope must not commit to the project either; in both cases skip the
+    // persisted project expansion so it is not clobbered or flashed. Settling
+    // on the project root re-runs this and restores the saved set.
+    if (scopeTaskRunId || isScopeUnknown) return;
     let cancelled = false;
     const run = () => {
       if (cancelled) return;
@@ -193,6 +240,7 @@ export function FileTreeDockPanel() {
     initializeExpandedPaths,
     expandPath,
     scopeTaskRunId,
+    isScopeUnknown,
   ]);
 
   // Initialize roots when the bound project changes. The primary root is
@@ -265,9 +313,11 @@ export function FileTreeDockPanel() {
   }, [projectId, roots]);
 
   // Load the full project root listing. In session scope the tree is driven by
-  // the changed-files effect above instead, so skip this.
+  // the changed-files effect above instead; while the scope is still resolving
+  // we also wait, so the project tree never flashes before the worktree
+  // resolves. Both cases skip this load.
   useEffect(() => {
-    if (scopeTaskRunId) return;
+    if (scopeTaskRunId || isScopeUnknown) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -288,7 +338,7 @@ export function FileTreeDockPanel() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, scopeTaskRunId, setFileTree]);
+  }, [projectId, scopeTaskRunId, isScopeUnknown, setFileTree]);
 
   // Fetch and attach a directory's children when they have not been loaded
   // yet. Pure hydration: it never touches expansion state, so the same
@@ -393,6 +443,35 @@ export function FileTreeDockPanel() {
       void hydrateDirectory(path);
     }
   }, [projectId, expandedPaths, fileTree, roots, hydrateDirectory]);
+
+  // Expand + hydrate every ancestor of a reveal target (e.g. a skill folder
+  // opened from the Skills panel) so its row exists in the tree; the leaf is
+  // expanded too, surfacing the package's files. hydrateDirectory awaits each
+  // level before descending, so the next-deeper node is present before it is
+  // hydrated. The FileTree view handles scrolling the row into view.
+  const revealInTree = useCallback(
+    async (targetPath: string) => {
+      if (!targetPath || targetPath === "/") return;
+      const treeState = useFileTreeStore.getState();
+      treeState.expandPath("/");
+      const parts = targetPath.split("/").filter(Boolean);
+      let cur = "";
+      for (const part of parts) {
+        cur += `/${part}`;
+        await hydrateDirectory(cur);
+        useFileTreeStore.getState().expandPath(cur);
+      }
+    },
+    [hydrateDirectory],
+  );
+
+  useEffect(() => {
+    if (!projectId || scopeTaskRunId) return;
+    if (!revealRequest) return;
+    if (revealRequest.token === handledRevealTokenRef.current) return;
+    handledRevealTokenRef.current = revealRequest.token;
+    void revealInTree(revealRequest.path);
+  }, [projectId, scopeTaskRunId, revealRequest, revealInTree]);
 
   // openTab bridge moved to LayoutShell so file path clicks work even when
   // this dock panel is not the active panel (e.g. session-only views).

@@ -16,7 +16,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-const CURRENT_VERSION: u32 = 15;
+const CURRENT_VERSION: u32 = 18;
 
 pub const DEFAULT_MERGE_COMMIT_TEMPLATE: &str =
     "{{title}} (chro {{task_short_id}}){{description_block}}";
@@ -39,11 +39,62 @@ impl Default for LanguagePreference {
 pub enum AppTheme {
     Light,
     Dark,
+    /// Follow the operating system's light/dark preference. Resolved to a
+    /// concrete light/dark value by the renderer.
+    System,
 }
 
 impl Default for AppTheme {
     fn default() -> Self {
-        AppTheme::Light
+        AppTheme::System
+    }
+}
+
+/// Application-wide appearance settings. Distinct from `EditorConfig`: the
+/// theme here drives the whole app chrome, not just the code editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppearanceConfig {
+    #[serde(default)]
+    pub theme: AppTheme,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            theme: AppTheme::default(),
+        }
+    }
+}
+
+/// Integrated-terminal typography. The renderer (canvas) owns colors and the
+/// cell grid; these control how glyphs are drawn and, indirectly, the grid size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalConfig {
+    /// Font family stack. `None` falls back to the renderer's default mono stack.
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default = "TerminalConfig::default_font_size")]
+    pub font_size: u8,
+    #[serde(default = "TerminalConfig::default_line_height")]
+    pub line_height: f32,
+}
+
+impl TerminalConfig {
+    fn default_font_size() -> u8 {
+        13
+    }
+    fn default_line_height() -> f32 {
+        1.2
+    }
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            font_size: Self::default_font_size(),
+            line_height: Self::default_line_height(),
+        }
     }
 }
 
@@ -65,8 +116,6 @@ pub struct EditorConfig {
     pub indent_with_spaces: bool,
     #[serde(default)]
     pub vim_mode: bool,
-    #[serde(default)]
-    pub theme: AppTheme,
 }
 
 impl EditorConfig {
@@ -98,7 +147,36 @@ impl Default for EditorConfig {
             tab_size: Self::default_tab_size(),
             indent_with_spaces: Self::default_indent_with_spaces(),
             vim_mode: false,
-            theme: AppTheme::default(),
+        }
+    }
+}
+
+/// Desktop notification preferences. Notifications fire from the renderer via
+/// the Tauri notification plugin; these gate whether and when.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default = "NotificationConfig::default_true")]
+    pub enabled: bool,
+    /// Notify when an agent task run finishes (completed or failed).
+    #[serde(default = "NotificationConfig::default_true")]
+    pub on_task_complete: bool,
+    /// Notify when an agent blocks on an AskUserQuestion and needs an answer.
+    #[serde(default = "NotificationConfig::default_true")]
+    pub on_input_needed: bool,
+}
+
+impl NotificationConfig {
+    fn default_true() -> bool {
+        true
+    }
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            on_task_complete: true,
+            on_input_needed: true,
         }
     }
 }
@@ -118,6 +196,12 @@ pub struct Config {
     pub show_hidden_entries: bool,
     #[serde(default)]
     pub editor: EditorConfig,
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub notifications: NotificationConfig,
     #[serde(default)]
     pub merge_commit_template: Option<String>,
     /// Opaque JSON blob for frontend UI state (panel widths, sidebar collapsed, etc.).
@@ -143,6 +227,9 @@ impl Default for Config {
             language: LanguagePreference::default(),
             show_hidden_entries: false,
             editor: EditorConfig::default(),
+            appearance: AppearanceConfig::default(),
+            terminal: TerminalConfig::default(),
+            notifications: NotificationConfig::default(),
             merge_commit_template: None,
             ui_state: serde_json::Map::new(),
         }
@@ -439,6 +526,58 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
     {
         // merge_commit_template defaults to None via serde; no data migration needed
         json["version"] = Value::from(15);
+    }
+
+    if json
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(15)
+        < 16
+    {
+        // Move the app theme out of the editor config into its own
+        // appearance domain. Preserve any explicit user choice.
+        if json.get("appearance").is_none() {
+            let theme = json
+                .get("editor")
+                .and_then(|editor| editor.get("theme"))
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or_else(|| "light".to_string());
+            json["appearance"] = serde_json::json!({ "theme": theme });
+        }
+        if let Some(editor) = json.get_mut("editor").and_then(Value::as_object_mut) {
+            editor.remove("theme");
+        }
+        json["version"] = Value::from(16);
+    }
+
+    if json
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(16)
+        < 17
+    {
+        if json.get("terminal").is_none() {
+            json["terminal"] = serde_json::to_value(TerminalConfig::default())
+                .unwrap_or_else(|_| serde_json::json!({}));
+        }
+        json["version"] = Value::from(17);
+    }
+
+    if json
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(17)
+        < 18
+    {
+        if json.get("notifications").is_none() {
+            json["notifications"] = serde_json::to_value(NotificationConfig::default())
+                .unwrap_or_else(|_| serde_json::json!({}));
+        }
+        json["version"] = Value::from(18);
     }
 
     if json.get("language").is_none() {

@@ -20,6 +20,7 @@ use crate::{format_system_time, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
+        .route("/projects", get(list_projects))
         .route("/projects/ensure", post(ensure_project))
         .route("/projects/:project_id", get(get_project))
         .route("/projects/:project_id/entries", get(list_project_entries))
@@ -53,6 +54,20 @@ pub(super) fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 struct ProjectEnvelope {
     project: ProjectRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectsEnvelope {
+    projects: Vec<ProjectRecord>,
+}
+
+/// List every known project. Used by the cross-project inbox to resolve task
+/// `project_id`s to names without each project being open in the sidebar.
+async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectsEnvelope>, ApiError> {
+    let projects = ProjectRecord::list_all(state.pool()).await?;
+    Ok(Json(ProjectsEnvelope { projects }))
 }
 
 #[derive(Debug, Deserialize)]

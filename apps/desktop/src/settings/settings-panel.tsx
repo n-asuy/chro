@@ -15,7 +15,6 @@ import {
   triggerAuthLogin,
 } from "@/lib/executor-client";
 import { installTool } from "@/lib/executor-install";
-import type { AppTheme } from "@/lib/preferences-client";
 import { setUiValue } from "@/lib/ui-state-client";
 import { Alert, AlertDescription, AlertTitle } from "@chro/ui/alert";
 import { Badge } from "@chro/ui/badge";
@@ -57,6 +56,10 @@ import {
   useMemo,
   useState,
 } from "react";
+import { FeatureFlagsSection } from "./components/feature-flags-section";
+import { AppearancePane } from "./panes/appearance-pane";
+import { NotificationsPane } from "./panes/notifications-pane";
+import { TerminalPane } from "./panes/terminal-pane";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
@@ -77,16 +80,6 @@ const LANGUAGE_OPTIONS: Array<{
   { value: "ja", label: "日本語", flag: "🇯🇵" },
 ];
 
-const THEME_OPTIONS: Array<{ value: AppTheme; labelKey: TranslationKey }> = [
-  { value: "light", labelKey: "editorThemeLight" },
-  { value: "dark", labelKey: "editorThemeDark" },
-];
-
-const THEME_LABEL_KEYS: Record<AppTheme, TranslationKey> = {
-  light: "editorThemeLight",
-  dark: "editorThemeDark",
-};
-
 const DEFAULT_MCP_EXECUTORS: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX"];
 const MCP_STATUS_SUPPORTED_EXECUTORS: BaseCodingAgent[] = [
   ...DEFAULT_MCP_EXECUTORS,
@@ -97,8 +90,19 @@ const MCP_EXECUTOR_LABEL_KEYS: Record<BaseCodingAgent, TranslationKey> = {
   CODEX: "mcpExecutorOptionCodex",
 };
 
+type SettingsTabKey =
+  | "general"
+  | "appearance"
+  | "workspace"
+  | "editor"
+  | "terminal"
+  | "notifications"
+  | "mcp"
+  | "agents"
+  | "developer";
+
 type SettingsNavItem = {
-  key: "general" | "workspace" | "editor" | "mcp" | "agents" | "developer";
+  key: SettingsTabKey;
   label: string;
 };
 
@@ -221,9 +225,7 @@ export function SettingsPanel({
     setLanguage: setAppLanguage,
     t,
   } = useLanguage();
-  const [activeTab, setActiveTab] = useState<
-    "general" | "workspace" | "editor" | "mcp" | "agents" | "developer"
-  >("general");
+  const [activeTab, setActiveTab] = useState<SettingsTabKey>("general");
   const [appVersionStatus, setAppVersionStatus] =
     useState<AppVersionStatus>("loading");
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -532,12 +534,24 @@ export function SettingsPanel({
         label: t("settingsTabsGeneral"),
       },
       {
+        key: "appearance" as const,
+        label: t("settingsTabsAppearance"),
+      },
+      {
         key: "workspace" as const,
         label: t("settingsTabsWorkspace"),
       },
       {
         key: "editor" as const,
         label: t("settingsTabsEditor"),
+      },
+      {
+        key: "terminal" as const,
+        label: t("settingsTabsTerminal"),
+      },
+      {
+        key: "notifications" as const,
+        label: t("settingsTabsNotifications"),
       },
       {
         key: "mcp" as const,
@@ -1258,56 +1272,6 @@ export function SettingsPanel({
 
       <SettingsSection>
         <SettingsRow
-          title={t("editorThemeTitle")}
-          description={t("editorThemeDescription")}
-          control={
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="font-workspace text-[13px] flex h-9 min-w-[180px] items-center justify-between rounded-lg border border-border/40 bg-custom-background-90 px-3 text-foreground transition hover:border-border/60 hover:bg-custom-background-80 focus-visible:ring-1 focus-visible:ring-primary data-[state=open]:border-primary/60"
-                >
-                  <span className="truncate">
-                    {t(THEME_LABEL_KEYS[editorConfig.theme])}
-                  </span>
-                  <ChevronDown className="h-4 w-4 text-current" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                className="w-[220px] rounded-lg border border-border/50 bg-custom-background-100 p-1"
-              >
-                <DropdownMenuLabel className="font-workspace px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {t("editorThemeTitle")}
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator className="mx-1 my-0.5 bg-border/60" />
-                {THEME_OPTIONS.map((option) => {
-                  const isActive = option.value === editorConfig.theme;
-                  return (
-                    <DropdownMenuItem
-                      key={option.value}
-                      onClick={() =>
-                        void updateEditorConfig({ theme: option.value })
-                      }
-                      className="font-workspace cursor-pointer rounded px-2 py-1.5 text-[13px] text-foreground"
-                    >
-                      <div className="flex w-full items-center justify-between">
-                        <span>{t(option.labelKey)}</span>
-                        {isActive ? <Check className="h-4 w-4" /> : null}
-                      </div>
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          }
-        />
-      </SettingsSection>
-
-      <SettingsSection>
-        <SettingsRow
           title={t("editorFontSizeTitle")}
           description={t("editorFontSizeDescription")}
           control={
@@ -1606,6 +1570,8 @@ export function SettingsPanel({
           </>
         ) : null}
       </SettingsSection>
+
+      <FeatureFlagsSection />
     </section>
   );
 
@@ -1674,8 +1640,11 @@ export function SettingsPanel({
           </div>
           <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
             {activeTab === "general" ? generalSection : null}
+            {activeTab === "appearance" ? <AppearancePane /> : null}
             {activeTab === "workspace" ? workspaceSection : null}
             {activeTab === "editor" ? editorSection : null}
+            {activeTab === "terminal" ? <TerminalPane /> : null}
+            {activeTab === "notifications" ? <NotificationsPane /> : null}
             {activeTab === "mcp" ? mcpSection : null}
             {activeTab === "agents" ? agentsSection : null}
             {activeTab === "developer" ? developerSection : null}

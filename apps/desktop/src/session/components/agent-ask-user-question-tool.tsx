@@ -1,12 +1,11 @@
-
-import { memo } from "react";
 import { HelpCircle } from "lucide-react";
-import { TextShimmer } from "./text-shimmer";
+import { memo } from "react";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
   QUESTIONS_TIMED_OUT_MESSAGE,
   useUserQuestionStore,
 } from "../state/user-question-store";
+import { TextShimmer } from "./text-shimmer";
 
 interface UserQuestionOption {
   label: string;
@@ -115,7 +114,10 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
   // Show loading state if:
   // 1. No questions yet (still streaming input)
   // 2. Streaming but dialog not yet shown (waiting for ask-user-question chunk)
-  if (state === "call" && (questionCount === 0 || (isStreaming && !isDialogShown))) {
+  if (
+    state === "call" &&
+    (questionCount === 0 || (isStreaming && !isDialogShown))
+  ) {
     return (
       <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
         <TextShimmer className="text-xs" duration={1.5}>
@@ -137,13 +139,19 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
     );
   }
 
-  // Show error state
+  // Show error state — keep it quiet (muted, no alarm color) and strip the
+  // transport-level <tool_use_error> wrapper from the message.
   if (state === "result" && isError) {
+    const errorMessage = effectiveErrorText
+      ?.replace(/<\/?tool_use_error>/g, "")
+      .trim();
     return (
       <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
         <span>Question</span>
         <span className="text-muted-foreground/50">&bull;</span>
-        <span className="text-red-500">{effectiveErrorText || "Error"}</span>
+        <span className="min-w-0 truncate" title={errorMessage}>
+          {errorMessage || "Error"}
+        </span>
       </div>
     );
   }
@@ -170,8 +178,8 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
         </div>
         {/* Content */}
         <div className="flex flex-col gap-2 p-2.5 text-xs">
-          {entries.map(([question, answer], idx) => (
-            <div key={idx} className="flex flex-col gap-0.5">
+          {entries.map(([question, answer]) => (
+            <div key={question} className="flex flex-col gap-0.5">
               <span className="font-medium text-foreground">{question}</span>
               <span className="text-muted-foreground">{answer}</span>
             </div>

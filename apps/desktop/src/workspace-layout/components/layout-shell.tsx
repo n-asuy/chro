@@ -92,7 +92,14 @@ function LayoutShellInner() {
       <PaneDndContext>
         <div className="flex min-h-0 flex-1 gap-1.5 px-1.5 pt-1.5 pb-1.5">
           <LeftDock panel={ProjectsDockPanel} />
-          <div className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-background">
+          {/*
+           * No chrome here: the rounded border/background that used to wrap
+           * the whole pane (tab bar included) moved down onto each pane's
+           * content card (see PaneContainer). That lets the browser-style
+           * tabs sit on the bare muted backdrop and flare into the card
+           * below without being clipped by an outer radius.
+           */}
+          <div className="min-h-0 min-w-0 flex-1">
             <PaneTreeView />
           </div>
           <RightDock

@@ -1,6 +1,6 @@
 [package]
 name = "chro-desktop"
-version = "0.1.35"
+version = "0.1.36"
 description = "Chro desktop application"
 authors = ["Chro"]
 license = "Apache-2.0"
@@ -51,6 +51,15 @@ usvg = "0.43"
 tiny-skia = "0.11"
 fontdb = "0.21"
 base64 = "0.22"
+
+# macOS notifications: the bundled toast backend (notify-rust) drops click
+# responses and cannot set a custom icon, so we drive the lowest layer directly
+# to support `app_icon` + click-to-open. objc2 is used only to keep the click
+# wait loop off a CPU busy-spin. All already in the lock graph transitively.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSPort"] }
 
 [features]
 default = ["custom-protocol"]

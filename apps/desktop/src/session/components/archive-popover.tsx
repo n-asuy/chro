@@ -79,7 +79,7 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
     <div
       ref={handleRef}
       className={cn(
-        "w-[calc(100%-8px)] mx-1 text-left min-h-[32px] py-[5px] px-1.5 rounded-[3px] transition-colors duration-150 cursor-pointer group relative",
+        "w-[calc(100%-8px)] mx-1 text-left min-h-[32px] py-[5px] px-1.5 rounded-md transition-colors duration-150 cursor-pointer group relative",
         "outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70",
         isSelected
           ? "bg-custom-sidebar-background-80 text-foreground"
@@ -252,7 +252,7 @@ export const ArchivePopover = memo(function ArchivePopover({
       >
         {/* Search */}
         <div className="px-1 pt-1 pb-1 border-b">
-          <div className="relative flex items-center gap-1.5 h-7 px-1.5 mx-1 rounded-[3px] bg-muted/50">
+          <div className="relative flex items-center gap-1.5 h-7 px-1.5 mx-1 rounded-md bg-muted/50">
             <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             <Input
               ref={searchInputRef}

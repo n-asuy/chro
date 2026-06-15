@@ -7,6 +7,9 @@
  */
 
 export type TabKind =
+  // Project home: a minimal landing surface listing the project's recent
+  // sessions. Shown when switching to / opening a project. One per project.
+  | { type: "overview" }
   | { type: "session"; taskId?: string; runId?: string }
   | {
       type: "file";
@@ -32,7 +35,10 @@ export type TabKind =
   // CDP browser: a real Chrome driven over CDP, streamed in as screencast
   // frames. Handles frame-busting sites the iframe browser cannot embed.
   | { type: "cdp-browser"; browserId?: string; url?: string }
-  | { type: "settings" };
+  | { type: "settings" }
+  // Skill browser: lists the project's workspace skills plus the user's
+  // global skills (~/.claude, ~/.agents, ~/.codex). One per project.
+  | { type: "skills" };
 
 export type TabKindType = TabKind["type"];
 
@@ -59,6 +65,8 @@ export type TabKey = string;
 
 export function tabKey(kind: TabKind): TabKey {
   switch (kind.type) {
+    case "overview":
+      return "overview";
     case "session":
       // Per docs/20260419 §1: same taskId → focus existing tab.
       // runId is internal navigation within the session, not a new tab.
@@ -82,6 +90,8 @@ export function tabKey(kind: TabKind): TabKey {
       return `cdp-browser:${kind.browserId ?? "new"}`;
     case "settings":
       return "settings";
+    case "skills":
+      return "skills";
   }
 }
 

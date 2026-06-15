@@ -1,3 +1,4 @@
+import type { BaseCodingAgent, ReasoningEffort } from "@/lib/executor-client";
 import {
   type ProjectSearchResult,
   listProjectEntries,
@@ -13,10 +14,15 @@ import { cn } from "@chro/ui/utils";
 import {
   ArrowLeft,
   BookOpen,
+  Box,
+  Brain,
+  Check,
   ChevronRight,
+  Cpu,
   FileText,
   Folder,
   FolderOpen,
+  type LucideIcon,
   MessageSquare,
 } from "lucide-react";
 import {
@@ -35,6 +41,14 @@ export type AtPopoverSelection =
   | { kind: "session"; taskId: string; branch?: string | null }
   | { kind: "skill"; id: string; name: string };
 
+export type RuntimeOption = { value: BaseCodingAgent; label: string };
+export type ModelOption = {
+  value: string;
+  label: string;
+  description?: string;
+};
+export type ReasoningOption = { value: ReasoningEffort; label: string };
+
 export interface AtPopoverHandle {
   handleKeyDown: (e: React.KeyboardEvent) => boolean;
   /** Open the popover directly into a category sub-view (used by the "+" menu). */
@@ -51,23 +65,76 @@ interface AtPopoverProps {
   onClose: () => void;
   activeIndex: number;
   onActiveIndexChange: (index: number) => void;
+  // --- Agent settings (Runtime / Model / Reasoning) ---
+  runtimeValue: BaseCodingAgent | null;
+  runtimeLabel: string | null;
+  runtimeOptions: RuntimeOption[];
+  onSelectRuntime: (value: BaseCodingAgent) => void;
+  modelValue: string | null;
+  modelLabel: string | null;
+  modelOptions: ModelOption[];
+  onSelectModel: (value: string) => void;
+  reasoningValue: ReasoningEffort | null;
+  reasoningLabel: string | null;
+  reasoningOptions: ReasoningOption[];
+  onSelectReasoning: (value: ReasoningEffort) => void;
+  /** Reasoning is a Codex-only concept; hidden for Claude Code. */
+  showReasoning: boolean;
+  /** Runtime can't change mid-session (Claude↔Codex needs handoff); hide it. */
+  runtimeLocked: boolean;
+  /** Model can't change (locked while sending and for non-Claude follow-ups). */
+  modelLocked: boolean;
 }
+
+type ContextCategory = "skills" | "files" | "sessions";
+type SettingCategory = "runtime" | "model" | "reasoning";
+type CategoryView = ContextCategory | SettingCategory;
 
 type PopoverItem =
   | { kind: "file"; path: string; is_file: boolean }
   | { kind: "task"; task: StoredTask }
   | { kind: "skill"; skill: SkillSummary }
-  | { kind: "category"; category: CategoryView };
-
-type CategoryView = "skills" | "files" | "sessions";
+  | { kind: "category"; category: ContextCategory }
+  | {
+      kind: "settingCategory";
+      category: SettingCategory;
+      label: string;
+      value: string | null;
+      icon: LucideIcon;
+    }
+  | {
+      kind: "runtimeOption";
+      value: BaseCodingAgent;
+      label: string;
+      selected: boolean;
+    }
+  | {
+      kind: "modelOption";
+      value: string;
+      label: string;
+      description?: string;
+      selected: boolean;
+    }
+  | {
+      kind: "reasoningOption";
+      value: ReasoningEffort;
+      label: string;
+      selected: boolean;
+    };
 
 const CATEGORY_META: Record<
-  CategoryView,
+  ContextCategory,
   { label: string; icon: typeof FolderOpen }
 > = {
   skills: { label: "Skills", icon: BookOpen },
   files: { label: "Files & Folders", icon: FolderOpen },
   sessions: { label: "Sessions", icon: MessageSquare },
+};
+
+const SETTING_ICONS: Record<SettingCategory, LucideIcon> = {
+  runtime: Cpu,
+  model: Box,
+  reasoning: Brain,
 };
 
 const DEBOUNCE_MS = 150;
@@ -84,6 +151,21 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       onClose,
       activeIndex,
       onActiveIndexChange,
+      runtimeValue,
+      runtimeLabel,
+      runtimeOptions,
+      onSelectRuntime,
+      modelValue,
+      modelLabel,
+      modelOptions,
+      onSelectModel,
+      reasoningValue,
+      reasoningLabel,
+      reasoningOptions,
+      onSelectReasoning,
+      showReasoning,
+      runtimeLocked,
+      modelLocked,
     },
     ref,
   ) => {
@@ -173,17 +255,59 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         });
     }, [open, workspacePath]);
 
+    // Top-level agent setting rows (Runtime / Model / Reasoning). Each row is
+    // shown only while its value can still change: the runtime is fixed once a
+    // session is running, but the model stays editable on a Claude Code
+    // follow-up (the backend applies it to the next run).
+    const buildSettingItems = (): PopoverItem[] => {
+      const settings: PopoverItem[] = [];
+      if (!runtimeLocked) {
+        settings.push({
+          kind: "settingCategory",
+          category: "runtime",
+          label: "Runtime",
+          value: runtimeLabel,
+          icon: SETTING_ICONS.runtime,
+        });
+      }
+      if (!modelLocked) {
+        settings.push({
+          kind: "settingCategory",
+          category: "model",
+          label: "Model",
+          value: modelLabel,
+          icon: SETTING_ICONS.model,
+        });
+      }
+      if (showReasoning && !runtimeLocked) {
+        settings.push({
+          kind: "settingCategory",
+          category: "reasoning",
+          label: "Reasoning",
+          value: reasoningLabel,
+          icon: SETTING_ICONS.reasoning,
+        });
+      }
+      return settings;
+    };
+
     // Build combined items list
     const items: PopoverItem[] = [];
 
-    if (view === "categories" && !debouncedQuery) {
-      // Top-level category menu
+    if (view === "categories" && !query) {
+      // Top-level menu: agent settings first, then context categories.
+      items.push(...buildSettingItems());
       items.push({ kind: "category", category: "skills" });
       items.push({ kind: "category", category: "files" });
       items.push({ kind: "category", category: "sessions" });
-    } else if (view === "categories" && debouncedQuery) {
-      // Flat search across all categories
-      const q = debouncedQuery.toLowerCase();
+    } else if (view === "categories") {
+      // Flat search across settings + all context categories.
+      const q = query.toLowerCase();
+      for (const s of buildSettingItems()) {
+        if (s.kind === "settingCategory" && s.label.toLowerCase().includes(q)) {
+          items.push(s);
+        }
+      }
       for (const s of skills) {
         if (
           s.name.toLowerCase().includes(q) ||
@@ -201,6 +325,40 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       }
       for (const r of fileResults) {
         items.push({ kind: "file", path: r.path, is_file: r.is_file });
+      }
+    } else if (view === "runtime") {
+      const q = query.toLowerCase();
+      for (const opt of runtimeOptions) {
+        if (q && !opt.label.toLowerCase().includes(q)) continue;
+        items.push({
+          kind: "runtimeOption",
+          value: opt.value,
+          label: opt.label,
+          selected: opt.value === runtimeValue,
+        });
+      }
+    } else if (view === "model") {
+      const q = query.toLowerCase();
+      for (const opt of modelOptions) {
+        if (q && !opt.label.toLowerCase().includes(q)) continue;
+        items.push({
+          kind: "modelOption",
+          value: opt.value,
+          label: opt.label,
+          description: opt.description,
+          selected: opt.value === modelValue,
+        });
+      }
+    } else if (view === "reasoning") {
+      const q = query.toLowerCase();
+      for (const opt of reasoningOptions) {
+        if (q && !opt.label.toLowerCase().includes(q)) continue;
+        items.push({
+          kind: "reasoningOption",
+          value: opt.value,
+          label: opt.label,
+          selected: opt.value === reasoningValue,
+        });
       }
     } else if (view === "skills") {
       // Show skills, optionally filtered
@@ -234,12 +392,20 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
       }
     }
 
+    // Keep the active index within bounds when the item list shrinks
+    // (e.g. Reasoning disappears after switching to Claude Code).
+    useEffect(() => {
+      if (activeIndex > items.length - 1) {
+        onActiveIndexChange(Math.max(0, items.length - 1));
+      }
+    }, [items.length, activeIndex, onActiveIndexChange]);
+
     // Scroll active item into view
     useEffect(() => {
       if (!listRef.current) return;
-      const active = listRef.current.children[activeIndex] as
-        | HTMLElement
-        | undefined;
+      const active = listRef.current.querySelector(
+        `[data-item-index="${activeIndex}"]`,
+      ) as HTMLElement | undefined;
       active?.scrollIntoView({ block: "nearest" });
     }, [activeIndex]);
 
@@ -258,23 +424,50 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
 
     const handleSelectItem = useCallback(
       (item: PopoverItem) => {
-        if (item.kind === "category") {
-          navigateToCategory(item.category);
-          return;
-        }
-        if (item.kind === "file") {
-          onSelect({ kind: "file", path: item.path, isFile: item.is_file });
-        } else if (item.kind === "task") {
-          onSelect({
-            kind: "session",
-            taskId: item.task.id,
-            branch: item.task.branch,
-          });
-        } else if (item.kind === "skill") {
-          onSelect({ kind: "skill", id: item.skill.id, name: item.skill.name });
+        switch (item.kind) {
+          case "category":
+          case "settingCategory":
+            navigateToCategory(item.category);
+            return;
+          case "runtimeOption":
+            onSelectRuntime(item.value);
+            navigateBack();
+            return;
+          case "modelOption":
+            onSelectModel(item.value);
+            navigateBack();
+            return;
+          case "reasoningOption":
+            onSelectReasoning(item.value);
+            navigateBack();
+            return;
+          case "file":
+            onSelect({ kind: "file", path: item.path, isFile: item.is_file });
+            return;
+          case "task":
+            onSelect({
+              kind: "session",
+              taskId: item.task.id,
+              branch: item.task.branch,
+            });
+            return;
+          case "skill":
+            onSelect({
+              kind: "skill",
+              id: item.skill.id,
+              name: item.skill.name,
+            });
+            return;
         }
       },
-      [onSelect, navigateToCategory],
+      [
+        onSelect,
+        onSelectRuntime,
+        onSelectModel,
+        onSelectReasoning,
+        navigateToCategory,
+        navigateBack,
+      ],
     );
 
     const handleKeyDownInternal = useCallback(
@@ -336,18 +529,26 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
 
     if (!open) return null;
 
-    const showBackButton = view !== "categories";
+    const isSettingView =
+      view === "runtime" || view === "model" || view === "reasoning";
+    const showBackButton = view !== "categories" && !isSettingView;
+
+    const rowClass = (index: number) =>
+      cn(
+        "flex w-full items-center gap-2.5 rounded-md px-2 py-1 text-left text-[13px] transition-colors",
+        index === activeIndex ? "bg-muted text-foreground" : "hover:bg-muted",
+      );
 
     return (
       <div
-        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-lg border border-border/60 bg-popover shadow-custom-shadow-sm"
+        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-xl border border-border bg-popover shadow-sm"
         onMouseDown={(e) => e.preventDefault()}
       >
         <div ref={listRef} className="max-h-[320px] overflow-y-auto p-1">
           {showBackButton && (
             <button
               type="button"
-              className="flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent/40"
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-1 text-left text-[13px] text-muted-foreground transition-colors hover:bg-muted"
               onMouseDown={(e) => {
                 e.preventDefault();
                 navigateBack();
@@ -358,36 +559,143 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
             </button>
           )}
 
+          {isSettingView && (
+            <div className="mb-1 border-b border-border/40 px-2 py-1.5 text-[13px]">
+              {query ? (
+                <span>{query}</span>
+              ) : (
+                <span className="text-muted-foreground">Search</span>
+              )}
+            </div>
+          )}
+
           {items.length === 0 ? (
             <div className="px-2 py-1.5 text-[13px] text-muted-foreground">
-              {view === "files"
-                ? debouncedQuery
-                  ? "No results found"
-                  : "Type to search files"
-                : view === "sessions"
-                  ? "No sessions found"
-                  : view === "skills"
-                    ? debouncedQuery
-                      ? "No matching skills"
-                      : "No skills found"
-                    : debouncedQuery
-                      ? "No results found"
-                      : "Type to search"}
+              {isSettingView
+                ? "No results found"
+                : view === "files"
+                  ? debouncedQuery
+                    ? "No results found"
+                    : "Type to search files"
+                  : view === "sessions"
+                    ? "No sessions found"
+                    : view === "skills"
+                      ? debouncedQuery
+                        ? "No matching skills"
+                        : "No skills found"
+                      : debouncedQuery
+                        ? "No results found"
+                        : "Type to search"}
             </div>
           ) : (
             items.map((item, index) => {
+              if (item.kind === "settingCategory") {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={`setting-${item.category}`}
+                    type="button"
+                    data-item-index={index}
+                    className={rowClass(index)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      navigateToCategory(item.category);
+                    }}
+                    onMouseEnter={() => onActiveIndexChange(index)}
+                  >
+                    <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="font-medium">{item.label}</span>
+                    {item.value ? (
+                      <span className="ml-2 truncate text-muted-foreground">
+                        {item.value}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              }
+
+              if (item.kind === "runtimeOption") {
+                return (
+                  <button
+                    key={`runtime-${item.value}`}
+                    type="button"
+                    data-item-index={index}
+                    className={rowClass(index)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onSelectRuntime(item.value);
+                      navigateBack();
+                    }}
+                    onMouseEnter={() => onActiveIndexChange(index)}
+                  >
+                    <span className="flex-1 truncate">{item.label}</span>
+                    {item.selected ? (
+                      <Check className="h-3.5 w-3.5 shrink-0" />
+                    ) : null}
+                  </button>
+                );
+              }
+
+              if (item.kind === "modelOption") {
+                return (
+                  <button
+                    key={`model-${item.value}`}
+                    type="button"
+                    data-item-index={index}
+                    className={rowClass(index)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onSelectModel(item.value);
+                      navigateBack();
+                    }}
+                    onMouseEnter={() => onActiveIndexChange(index)}
+                  >
+                    <span className="shrink-0 truncate">{item.label}</span>
+                    {item.description ? (
+                      <span className="ml-auto truncate pl-3 text-[11px] text-muted-foreground">
+                        {item.description}
+                      </span>
+                    ) : (
+                      <span className="ml-auto" />
+                    )}
+                    {item.selected ? (
+                      <Check className="ml-1 h-3.5 w-3.5 shrink-0" />
+                    ) : null}
+                  </button>
+                );
+              }
+
+              if (item.kind === "reasoningOption") {
+                return (
+                  <button
+                    key={`reasoning-${item.value}`}
+                    type="button"
+                    data-item-index={index}
+                    className={rowClass(index)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onSelectReasoning(item.value);
+                      navigateBack();
+                    }}
+                    onMouseEnter={() => onActiveIndexChange(index)}
+                  >
+                    <Brain className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="flex-1 truncate">{item.label}</span>
+                    {item.selected ? (
+                      <Check className="h-3.5 w-3.5 shrink-0" />
+                    ) : null}
+                  </button>
+                );
+              }
+
               if (item.kind === "category") {
                 const { label, icon: Icon } = CATEGORY_META[item.category];
                 return (
                   <button
                     key={item.category}
                     type="button"
-                    className={cn(
-                      "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
-                      index === activeIndex
-                        ? "bg-accent/60 text-accent-foreground"
-                        : "hover:bg-accent/30",
-                    )}
+                    data-item-index={index}
+                    className={rowClass(index)}
                     onMouseDown={(e) => {
                       e.preventDefault();
                       navigateToCategory(item.category);
@@ -407,11 +715,12 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
                   <button
                     key={`skill-${s.id}`}
                     type="button"
+                    data-item-index={index}
                     className={cn(
-                      "flex w-full items-start gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
+                      "flex w-full items-start gap-2.5 rounded-md px-2 py-1 text-left text-[13px] transition-colors",
                       index === activeIndex
-                        ? "bg-accent/60 text-accent-foreground"
-                        : "hover:bg-accent/30",
+                        ? "bg-muted text-foreground"
+                        : "hover:bg-muted",
                     )}
                     onMouseDown={(e) => {
                       e.preventDefault();
@@ -442,12 +751,8 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
                   <button
                     key={`task-${t.id}`}
                     type="button"
-                    className={cn(
-                      "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
-                      index === activeIndex
-                        ? "bg-accent/60 text-accent-foreground"
-                        : "hover:bg-accent/30",
-                    )}
+                    data-item-index={index}
+                    className={rowClass(index)}
                     onMouseDown={(e) => {
                       e.preventDefault();
                       handleSelectItem(item);
@@ -473,12 +778,8 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
                 <button
                   key={item.path}
                   type="button"
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
-                    index === activeIndex
-                      ? "bg-accent/60 text-accent-foreground"
-                      : "hover:bg-accent/30",
-                  )}
+                  data-item-index={index}
+                  className={rowClass(index)}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     onSelect({

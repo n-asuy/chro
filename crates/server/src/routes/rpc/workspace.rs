@@ -34,21 +34,20 @@ async fn stream_project_file_events(
     let project_id = resolve_project_id(state.pool(), &identifier).await?;
     let project = ProjectRecord::get(state.pool(), project_id).await?;
     let project_path = PathBuf::from(&project.git_repo_path);
-    let rx = state
+    let events = state
         .runtime()
-        .subscribe_workspace_file_events(project_path)?;
-    Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, rx)))
+        .subscribe_workspace_file_events(project_path);
+    Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, events)))
 }
 
 async fn handle_file_events_ws(
     socket: WebSocket,
-    rx: tokio::sync::broadcast::Receiver<local_runtime::WorkspaceFileEvent>,
+    events: futures::stream::BoxStream<'static, local_runtime::WorkspaceFileEvent>,
 ) {
     use local_runtime::WorkspaceFileEventType;
-    use tokio_stream::wrappers::BroadcastStream;
 
     let (mut sender, mut ws_receiver) = socket.split();
-    let mut stream = BroadcastStream::new(rx);
+    let mut events = events;
 
     loop {
         tokio::select! {
@@ -58,9 +57,9 @@ async fn handle_file_events_ws(
                     Some(Ok(_)) => {}
                 }
             }
-            result = stream.next() => {
-                match result {
-                    Some(Ok(event)) => {
+            event = events.next() => {
+                match event {
+                    Some(event) => {
                         let event_type_str = match event.event_type {
                             WorkspaceFileEventType::Created => "created",
                             WorkspaceFileEventType::Modified => "modified",
@@ -77,7 +76,6 @@ async fn handle_file_events_ws(
                             break;
                         }
                     }
-                    Some(Err(_)) => continue,
                     None => break,
                 }
             }

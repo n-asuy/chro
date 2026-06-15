@@ -1,16 +1,14 @@
 import { cn } from "@/lib/cn";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 const BRAILLE_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"] as const;
 
 interface BrailleSpinnerProps {
-  children?: ReactNode;
   className?: string;
   intervalMs?: number;
 }
 
 export function BrailleSpinner({
-  children,
   className,
   intervalMs = 90,
 }: BrailleSpinnerProps) {
@@ -25,14 +23,11 @@ export function BrailleSpinner({
   }, [intervalMs]);
 
   return (
-    <span className={cn("inline-flex items-center gap-1.5", className)}>
-      <span
-        aria-hidden="true"
-        className="inline-flex w-[1ch] justify-center font-mono"
-      >
-        {BRAILLE_FRAMES[frameIndex]}
-      </span>
-      {children}
+    <span
+      aria-hidden="true"
+      className={cn("inline-flex w-[1ch] justify-center font-mono", className)}
+    >
+      {BRAILLE_FRAMES[frameIndex]}
     </span>
   );
 }

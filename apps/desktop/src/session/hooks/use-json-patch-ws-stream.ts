@@ -1,59 +1,45 @@
 /**
- * Generic WebSocket JSON Patch streaming hook.
+ * Generic hook for consuming WebSocket streams that send JSON Patch messages.
  *
- * - Uses dataRef + structuredClone for immutable patch application
- * - Uses rfc6902 library for RFC 6902 JSON Patch application
- * - Batches patches via setTimeout(0) so updates fire even when the
- *   window is in the background (requestAnimationFrame is completely
- *   paused by Chromium/Electron when the window loses visibility)
- * - Exponential backoff for reconnection (1s, 2s, 4s, 8s max)
- * - Handles finished signal to prevent reconnection
+ * This is a thin, render-friendly view over the shared
+ * {@link ./json-patch-stream-registry}: the actual socket, reconnect backoff,
+ * first-message watchdog and patch application are owned by the registry and
+ * shared per endpoint, so any number of components subscribing to the same URL
+ * share ONE connection. Two consumers of the same stream see the same data
+ * (the second one immediately, from the shared cache), and a consumer
+ * unmounting never resets the shared state.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { applyPatch } from "rfc6902";
-import type { Operation } from "rfc6902";
-import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
+import { useCallback, useRef, useSyncExternalStore } from "react";
+import {
+  DISABLED_SNAPSHOT,
+  type JsonPatchStreamSnapshot,
+  type UseJsonPatchWsStreamOptions,
+  acquireStream,
+  forceCloseStream,
+  getStreamSnapshot,
+} from "./json-patch-stream-registry";
 
-/**
- * LogEntry message types from Chro server
- */
-export type LogEntryMessage =
-  | { type: "json_patch"; payload: Operation[] }
-  | { type: "stdout"; payload: string }
-  | { type: "stderr"; payload: string }
-  | { type: "session_id"; payload: string }
-  | { type: "ui_event"; payload: { kind: string; data?: unknown } }
-  | { type: "user_prompt"; payload: string }
-  | { type: "finished" };
-
-export interface UseJsonPatchWsStreamOptions<T> {
-  /** Called with each non-patch message (stdout, stderr, session_id, etc.) */
-  onMessage?: (msg: LogEntryMessage) => void;
-  /** Called once when finished event is received */
-  onFinished?: () => void;
-  /** Called on connection error */
-  onError?: (error: string) => void;
-  /** Called on successful connection */
-  onConnect?: () => void;
-}
+export type {
+  LogEntryMessage,
+  UseJsonPatchWsStreamOptions,
+} from "./json-patch-stream-registry";
 
 export interface UseJsonPatchWsStreamResult<T> {
   data: T | undefined;
   isConnected: boolean;
   error: string | null;
+  /**
+   * Force the underlying shared stream to close. Affects every consumer of the
+   * same endpoint; normal teardown is ref-counted and automatic.
+   */
   close: () => void;
 }
 
-const httpToWs = (url: string): string =>
-  url.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
-
 /**
- * Generic hook for consuming WebSocket streams that send JSON Patch messages.
- *
- * @param endpoint - WebSocket endpoint URL (can be http/https, will be converted)
- * @param enabled - Whether the connection should be active
- * @param initialData - Factory function to create initial data state
- * @param options - Optional callbacks for message handling
+ * @param endpoint - WebSocket endpoint URL (http/https is converted to ws/wss)
+ * @param enabled - Whether the subscription should be active
+ * @param initialData - Factory for the initial document patches are applied to
+ * @param options - Optional per-consumer callbacks for non-patch messages
  */
 export function useJsonPatchWsStream<T extends object>(
   endpoint: string | undefined,
@@ -61,180 +47,43 @@ export function useJsonPatchWsStream<T extends object>(
   initialData: () => T,
   options?: UseJsonPatchWsStreamOptions<T>,
 ): UseJsonPatchWsStreamResult<T> {
-  const [data, setData] = useState<T | undefined>(undefined);
-  const [isConnected, setIsConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const key = enabled && endpoint ? endpoint : undefined;
 
-  const dataRef = useRef<T | undefined>(undefined);
-  const wsRef = useRef<WebSocket | null>(null);
-  const retryTimerRef = useRef<number | null>(null);
-  const retryCountRef = useRef<number>(0);
-  const finishedRef = useRef<boolean>(false);
-  const pendingOpsRef = useRef<Operation[]>([]);
-  const flushTimerRef = useRef<number | null>(null);
-  const [retryNonce, setRetryNonce] = useState(0);
-
+  const initialDataRef = useRef(initialData);
+  initialDataRef.current = initialData;
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const scheduleReconnect = useCallback(() => {
-    if (retryTimerRef.current) return;
-    const attempt = retryCountRef.current;
-    const delay = Math.min(8000, 1000 * 2 ** attempt);
-    retryTimerRef.current = window.setTimeout(() => {
-      retryTimerRef.current = null;
-      setRetryNonce((n) => n + 1);
-    }, delay);
-  }, []);
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      if (!key) return () => {};
+      return acquireStream(key, () => initialDataRef.current(), {
+        notify,
+        getOptions: () =>
+          optionsRef.current as UseJsonPatchWsStreamOptions | undefined,
+      });
+    },
+    [key],
+  );
 
-  const closeWebSocket = useCallback(() => {
-    if (flushTimerRef.current !== null) {
-      window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-    pendingOpsRef.current = [];
-    if (wsRef.current) {
-      const ws = wsRef.current;
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      ws.close();
-      wsRef.current = null;
-    }
-    if (retryTimerRef.current) {
-      window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    setIsConnected(false);
-  }, []);
+  const getSnapshot = useCallback(
+    (): JsonPatchStreamSnapshot<T> =>
+      key
+        ? getStreamSnapshot<T>(key)
+        : (DISABLED_SNAPSHOT as JsonPatchStreamSnapshot<T>),
+    [key],
+  );
 
-  useEffect(() => {
-    if (!enabled || !endpoint) {
-      closeWebSocket();
-      retryCountRef.current = 0;
-      finishedRef.current = false;
-      setData(undefined);
-      setError(null);
-      dataRef.current = undefined;
-      return;
-    }
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-    if (!dataRef.current) {
-      dataRef.current = initialData();
-    }
-
-    if (!wsRef.current) {
-      finishedRef.current = false;
-
-      const wsEndpoint = httpToWs(endpoint);
-      const ws = new WebSocket(wsEndpoint);
-
-      ws.onopen = () => {
-        setError(null);
-        setIsConnected(true);
-        retryCountRef.current = 0;
-        if (retryTimerRef.current) {
-          window.clearTimeout(retryTimerRef.current);
-          retryTimerRef.current = null;
-        }
-        optionsRef.current?.onConnect?.();
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data) as LogEntryMessage;
-
-          if (msg.type === "json_patch") {
-            pendingOpsRef.current.push(...msg.payload);
-            if (flushTimerRef.current === null) {
-              flushTimerRef.current = window.setTimeout(() => {
-                flushTimerRef.current = null;
-                const current = dataRef.current;
-                const patches = dedupeJsonPatchOperations(
-                  pendingOpsRef.current,
-                );
-                pendingOpsRef.current = [];
-                if (!patches.length || !current) return;
-
-                const next = structuredClone(current);
-                applyPatch(next, patches);
-
-                dataRef.current = next;
-                setData(next);
-              }, 0);
-            }
-          } else if (msg.type === "finished") {
-            if (flushTimerRef.current !== null) {
-              window.clearTimeout(flushTimerRef.current);
-              flushTimerRef.current = null;
-            }
-            const current = dataRef.current;
-            const patches = dedupeJsonPatchOperations(pendingOpsRef.current);
-            pendingOpsRef.current = [];
-            if (patches.length && current) {
-              const next = structuredClone(current);
-              applyPatch(next, patches);
-              dataRef.current = next;
-              setData(next);
-            }
-            finishedRef.current = true;
-            optionsRef.current?.onFinished?.();
-            ws.close(1000, "finished");
-            wsRef.current = null;
-            setIsConnected(false);
-          } else {
-            optionsRef.current?.onMessage?.(msg);
-          }
-        } catch (err) {
-          console.error(
-            "[useJsonPatchWsStream] Failed to process message:",
-            err,
-          );
-          setError("Failed to process stream update");
-        }
-      };
-
-      ws.onerror = () => {
-        const errorMsg = "Connection failed";
-        setError(errorMsg);
-        optionsRef.current?.onError?.(errorMsg);
-      };
-
-      ws.onclose = (evt) => {
-        setIsConnected(false);
-        wsRef.current = null;
-
-        if (finishedRef.current || (evt?.code === 1000 && evt?.wasClean)) {
-          return;
-        }
-
-        retryCountRef.current += 1;
-        scheduleReconnect();
-      };
-
-      wsRef.current = ws;
-    }
-
-    return () => {
-      closeWebSocket();
-      finishedRef.current = false;
-      dataRef.current = undefined;
-      setData(undefined);
-    };
-  }, [
-    endpoint,
-    enabled,
-    initialData,
-    scheduleReconnect,
-    closeWebSocket,
-    retryNonce,
-  ]);
+  const close = useCallback(() => {
+    if (key) forceCloseStream(key);
+  }, [key]);
 
   return {
-    data,
-    isConnected,
-    error,
-    close: closeWebSocket,
+    data: snapshot.data,
+    isConnected: snapshot.isConnected,
+    error: snapshot.error,
+    close,
   };
 }

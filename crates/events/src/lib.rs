@@ -745,6 +745,57 @@ impl EventService {
         Ok(initial_stream.chain(filtered_stream).boxed())
     }
 
+    /// Stream tasks across all projects with initial snapshot + live updates.
+    ///
+    /// Unlike [`EventService::stream_tasks_raw`], no project filter is applied:
+    /// every task patch (add/replace/remove) is forwarded. Each task value
+    /// already carries its `project_id`, so the cross-project inbox can render
+    /// and route without a per-project subscription.
+    pub async fn stream_all_tasks_raw(
+        &self,
+    ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
+    {
+        use futures::StreamExt;
+        use tokio_stream::wrappers::BroadcastStream;
+
+        let pool = self.db.pool();
+
+        let tasks = TaskRecord::list_all(pool).await?;
+        let mut tasks_map = serde_json::Map::new();
+        for task in &tasks {
+            tasks_map.insert(task.id.to_string(), serde_json::to_value(task)?);
+        }
+
+        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: "/tasks".to_string(),
+            value: Value::Object(tasks_map),
+        })]);
+        let initial_msg: LogEntry = initial_patch.into();
+
+        let msg_store = self.resources.msg_store.clone();
+
+        let filtered_stream =
+            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| async move {
+                match msg_result {
+                    Ok(LogEntry::JsonPatch(patch_value)) => {
+                        if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone()) {
+                            if let Some(op) = patch.0.first() {
+                                if get_patch_path(op).starts_with("/tasks/") {
+                                    return Some(Ok(LogEntry::JsonPatch(patch_value)));
+                                }
+                            }
+                        }
+                        None
+                    }
+                    Ok(other) => Some(Ok(other)),
+                    Err(_) => None,
+                }
+            });
+
+        let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
+        Ok(initial_stream.chain(filtered_stream).boxed())
+    }
+
     /// Stream task runs for a specific task with initial snapshot + live updates
     pub async fn stream_task_runs_raw(
         &self,

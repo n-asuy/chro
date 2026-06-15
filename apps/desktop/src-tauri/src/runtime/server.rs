@@ -143,7 +143,7 @@ pub async fn launch_runtime<R: TauriRuntime>(
         warn!("[runtime] failed to write port file: {err:#}");
     }
 
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "--db-path".into(),
         db_path.to_string_lossy().into_owned(),
         "--host".into(),
@@ -181,6 +181,18 @@ pub async fn launch_runtime<R: TauriRuntime>(
                 .to_string_lossy()
                 .into_owned(),
         );
+    }
+    // Forward perf recording to the sidecar. The `dev:perf` script starts the
+    // desktop process with CHRO_PERF=1, but the sidecar does not inherit our
+    // environment (see RUST_LOG above), so perf must be passed explicitly. We
+    // resolve an absolute log dir under the repo root so the backend's events
+    // land in the same `log/performance/` as the Vite-recorded frontend events,
+    // regardless of the sidecar's working directory.
+    if perf_enabled_from_env() {
+        args.push("--perf".into());
+        if let Some(dir) = perf_log_dir() {
+            env_vars.insert("CHRO_PERF_DIR".into(), dir);
+        }
     }
 
     let command = resolve_sidecar(&app, &args, &env_vars)?;
@@ -357,6 +369,26 @@ fn repo_root() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Whether the desktop process was launched with perf recording on. Matches the
+/// `CHRO_PERF === "1"` truthiness the Vite perf plugin uses, so the single
+/// `dev:perf` switch drives both the frontend recorder and the sidecar.
+fn perf_enabled_from_env() -> bool {
+    matches!(std::env::var("CHRO_PERF"), Ok(value) if value == "1")
+}
+
+/// Absolute `log/performance` dir under the repo root, so sidecar perf output
+/// colocates with the Vite frontend output. `None` outside a source checkout
+/// (release bundles never set CHRO_PERF, so this is dev-only anyway).
+fn perf_log_dir() -> Option<String> {
+    Some(
+        repo_root()?
+            .join("log")
+            .join("performance")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Poll `host:port` over plain TCP until something accepts. Matches the

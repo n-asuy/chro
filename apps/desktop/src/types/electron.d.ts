@@ -70,6 +70,7 @@ declare global {
       showNotification?: (payload: {
         title: string;
         body?: string;
+        target?: { projectId: string; taskId: string };
       }) => Promise<void>;
       openExternalUrl?: (url: string) => Promise<void>;
       openPath?: (path: string, app?: string) => Promise<void>;

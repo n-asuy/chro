@@ -9,13 +9,12 @@ type PreferencesResponse = {
   };
 };
 
-export type AppTheme = "light" | "dark";
+export type AppTheme = "light" | "dark" | "system";
 
 export type EditorConfig = {
   font_size: number;
   line_height: number;
   vim_mode: boolean;
-  theme: AppTheme;
 };
 
 type EditorConfigResponse = {
@@ -26,7 +25,50 @@ export const DEFAULT_EDITOR_CONFIG: EditorConfig = {
   font_size: 15,
   line_height: 1.6,
   vim_mode: false,
-  theme: "light",
+};
+
+export type AppearanceConfig = {
+  theme: AppTheme;
+};
+
+type AppearanceConfigResponse = {
+  appearance: AppearanceConfig;
+};
+
+export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
+  theme: "system",
+};
+
+export type TerminalConfig = {
+  font_family: string | null;
+  font_size: number;
+  line_height: number;
+};
+
+type TerminalConfigResponse = {
+  terminal: TerminalConfig;
+};
+
+export const DEFAULT_TERMINAL_CONFIG: TerminalConfig = {
+  font_family: null,
+  font_size: 13,
+  line_height: 1.2,
+};
+
+export type NotificationConfig = {
+  enabled: boolean;
+  on_task_complete: boolean;
+  on_input_needed: boolean;
+};
+
+type NotificationConfigResponse = {
+  notifications: NotificationConfig;
+};
+
+export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
+  enabled: true,
+  on_task_complete: true,
+  on_input_needed: true,
 };
 
 export const fetchPreferences = async (): Promise<PreferencesResponse> => {
@@ -51,10 +93,9 @@ export type MergeSettingsResponse = {
   merge_commit_template: string;
 };
 
-export const fetchMergeSettings =
-  async (): Promise<MergeSettingsResponse> => {
-    return desktopFetch<MergeSettingsResponse>("/rpc/preferences/merge");
-  };
+export const fetchMergeSettings = async (): Promise<MergeSettingsResponse> => {
+  return desktopFetch<MergeSettingsResponse>("/rpc/preferences/merge");
+};
 
 export const saveMergeSettings = async (payload: {
   merge_commit_template: string | null;
@@ -80,4 +121,62 @@ export const saveEditorConfig = async (
     },
     body: JSON.stringify(payload),
   });
+};
+
+export const fetchAppearanceConfig =
+  async (): Promise<AppearanceConfigResponse> => {
+    return desktopFetch<AppearanceConfigResponse>(
+      "/rpc/preferences/appearance",
+    );
+  };
+
+export const saveAppearanceConfig = async (
+  payload: Partial<AppearanceConfig>,
+): Promise<AppearanceConfigResponse> => {
+  return desktopFetch<AppearanceConfigResponse>("/rpc/preferences/appearance", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+};
+
+export const fetchTerminalConfig =
+  async (): Promise<TerminalConfigResponse> => {
+    return desktopFetch<TerminalConfigResponse>("/rpc/preferences/terminal");
+  };
+
+export const saveTerminalConfig = async (
+  payload: Partial<TerminalConfig>,
+): Promise<TerminalConfigResponse> => {
+  return desktopFetch<TerminalConfigResponse>("/rpc/preferences/terminal", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+};
+
+export const fetchNotificationConfig =
+  async (): Promise<NotificationConfigResponse> => {
+    return desktopFetch<NotificationConfigResponse>(
+      "/rpc/preferences/notifications",
+    );
+  };
+
+export const saveNotificationConfig = async (
+  payload: Partial<NotificationConfig>,
+): Promise<NotificationConfigResponse> => {
+  return desktopFetch<NotificationConfigResponse>(
+    "/rpc/preferences/notifications",
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
 };

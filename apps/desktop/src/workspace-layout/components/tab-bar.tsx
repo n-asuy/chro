@@ -1,3 +1,4 @@
+import { AgentLogo } from "@/components/agent-logo";
 import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import {
@@ -11,15 +12,12 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import {
-  Globe,
   Loader2,
   MessagesSquare,
-  MonitorPlay,
   PinIcon,
   Plus,
   Terminal,
@@ -31,7 +29,6 @@ import {
   type MouseEvent as ReactMouseEvent,
   useMemo,
 } from "react";
-import { WORKSPACE_LEADER_SHORTCUTS } from "../lib/keyboard-shortcuts";
 import { useLayoutStore } from "../state/layout-store";
 import type { PaneLeaf, PaneNode, Tab, TabKind } from "../types";
 import { iconForKind, titleForTab } from "./tab-meta";
@@ -50,7 +47,12 @@ export function TabBar({ leaf, isFocused }: TabBarProps) {
     <div
       data-tab-bar-leaf-id={leaf.id}
       className={cn(
-        "flex h-9 shrink-0 items-stretch gap-px overflow-x-auto bg-muted/30",
+        // Transparent strip sitting on the muted backdrop. `z-10` keeps the
+        // active tab (and its flared feet) above the content card so it can
+        // paint over the card's top border and merge into it. `pl-4` (16px)
+        // keeps the first tab's 8px left foot clear of the card's 8px
+        // rounded corner, so it always lands on the card's flat top edge.
+        "relative z-10 flex h-9 shrink-0 items-stretch gap-1.5 overflow-x-auto pl-4",
         "scrollbar-thin",
       )}
       onMouseDown={() => setFocusedPane(leaf.id)}
@@ -66,6 +68,7 @@ export function TabBar({ leaf, isFocused }: TabBarProps) {
           onClose={() => closeTab(tab.id)}
         />
       ))}
+      <NewTabButton leafId={leaf.id} />
       <TabBarTrailingDropZone leafId={leaf.id} />
     </div>
   );
@@ -98,6 +101,8 @@ function TabBarItem({
   });
   const Icon = useMemo(() => iconForKind(tab), [tab]);
   const title = useMemo(() => titleForTab(tab), [tab]);
+  const isSessionTab = tab.kind.type === "session";
+  const sessionAgent = useSessionTabAgent(tab);
   const isSessionRunning = useIsSessionTabRunning(tab);
   // For file tabs, the tooltip shows the worktree/project-relative path so
   // duplicates with the same basename can be told apart on hover. We do not
@@ -159,12 +164,30 @@ function TabBarItem({
               "group relative flex min-w-[120px] max-w-[220px] items-center gap-1.5 px-2.5 text-xs",
               "select-none",
               isActive
-                ? "bg-background text-foreground after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-primary"
-                : "bg-transparent text-muted-foreground hover:bg-background/60",
+                ? "workspace-tab-active bg-background text-foreground"
+                : "rounded-t-lg bg-transparent text-muted-foreground hover:bg-background/50",
             )}
             title={tabTooltip}
           >
-            {Icon ? <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" /> : null}
+            {/*
+             * Blue active indicator along the tab's bottom edge. Sits inside
+             * the side borders (inset-x-0 is relative to the padding box) and
+             * over the seam where the tab merges into the content card.
+             */}
+            {isActive ? (
+              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-primary" />
+            ) : null}
+            {isSessionTab ? (
+              // Session tabs show the logo of the agent that actually ran the
+              // session. Fresh sessions that have not run yet have no agent,
+              // so they render no leading glyph (no generic chat icon).
+              <AgentLogo
+                agent={sessionAgent}
+                className="h-3.5 w-3.5 shrink-0 opacity-90"
+              />
+            ) : Icon ? (
+              <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            ) : null}
             <span className="flex-1 truncate text-left">{title}</span>
             {tab.dirty ? (
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70" />
@@ -271,28 +294,27 @@ function TabBarTrailingDropZone({ leafId }: { leafId: string }) {
   });
 
   const handleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    // Only react to double-clicks on the empty space itself, not the
-    // "+" button (or any other child) sitting inside it.
+    // Only react to double-clicks on the empty space itself.
     if (event.target !== event.currentTarget) return;
     setFocusedPane(leafId);
     openTab({ type: "session" }, { targetLeafId: leafId, activate: true });
   };
 
+  // Remaining space after the tabs + "+" button: a drop target for moving a
+  // tab to the end and a double-click shortcut for opening a new session.
   return (
     <div
       ref={droppable.setNodeRef}
       className={cn(
-        "flex flex-1 items-center pl-1 pr-1",
+        "flex flex-1 items-center",
         droppable.isOver && "bg-primary/10",
       )}
       onDoubleClick={handleDoubleClick}
-    >
-      <NewTabMenu leafId={leafId} />
-    </div>
+    />
   );
 }
 
-function NewTabMenu({ leafId }: { leafId: string }) {
+function NewTabButton({ leafId }: { leafId: string }) {
   const openTab = useLayoutStore((s) => s.openTab);
   const setFocusedPane = useLayoutStore((s) => s.setFocusedPane);
 
@@ -302,77 +324,30 @@ function NewTabMenu({ leafId }: { leafId: string }) {
   };
 
   return (
-    <DropdownMenu modal={false}>
+    <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
           title="New tab"
           className={cn(
-            "ml-auto inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
-            "hover:text-foreground",
+            "ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground",
+            "hover:text-foreground data-[state=open]:text-foreground",
           )}
         >
           <Plus className="h-4 w-4" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        sideOffset={6}
-        className="w-72 rounded-lg p-1.5"
-      >
-        <NewTabMenuItem
-          icon={MessagesSquare}
-          label="New chat"
-          shortcut={WORKSPACE_LEADER_SHORTCUTS.sessions.label}
-          onSelect={() => open({ type: "session" })}
-        />
-        <NewTabMenuItem
-          icon={Terminal}
-          label="Terminal"
-          onSelect={() => open({ type: "terminal" })}
-        />
-        <NewTabMenuItem
-          icon={Globe}
-          label="Browser"
-          onSelect={() => open({ type: "browser" })}
-        />
-        <NewTabMenuItem
-          icon={MonitorPlay}
-          label="CDP Browser"
-          onSelect={() => open({ type: "cdp-browser" })}
-        />
+      <DropdownMenuContent align="end" className="w-44 text-xs">
+        <DropdownMenuItem onSelect={() => open({ type: "session" })}>
+          <MessagesSquare className="mr-2 h-3.5 w-3.5 opacity-70" />
+          New session
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => open({ type: "terminal" })}>
+          <Terminal className="mr-2 h-3.5 w-3.5 opacity-70" />
+          Terminal
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-function NewTabMenuItem({
-  disabled,
-  icon: Icon,
-  label,
-  onSelect,
-  shortcut,
-}: {
-  disabled?: boolean;
-  icon: typeof Plus;
-  label: string;
-  onSelect: () => void;
-  shortcut?: string;
-}) {
-  return (
-    <DropdownMenuItem
-      disabled={disabled}
-      onSelect={onSelect}
-      className="gap-3 rounded-md px-3 py-2 text-[13px]"
-    >
-      <Icon className="h-4 w-4 text-muted-foreground" />
-      <span className="flex-1">{label}</span>
-      {shortcut ? (
-        <DropdownMenuShortcut className="ml-4 text-[12px]">
-          {shortcut}
-        </DropdownMenuShortcut>
-      ) : null}
-    </DropdownMenuItem>
   );
 }
 
@@ -382,4 +357,16 @@ function useIsSessionTabRunning(tab: Tab): boolean {
   const taskId = tab.kind.taskId;
   if (!taskId || !tasks) return false;
   return Boolean(tasks.taskByKey.get(taskId)?.active_session_id);
+}
+
+/**
+ * Bare agent kind ("CLAUDE_CODE" / "CODEX") the session tab's task last ran
+ * with, or null for non-session tabs and sessions that have not run yet.
+ */
+function useSessionTabAgent(tab: Tab): string | null {
+  const tasks = useOptionalProjectTasks();
+  if (tab.kind.type !== "session") return null;
+  const taskId = tab.kind.taskId;
+  if (!taskId || !tasks) return null;
+  return tasks.taskByKey.get(taskId)?.last_executor ?? null;
 }

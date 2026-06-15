@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from "react";
 
 import { useOptionalProjectContext } from "@/files/context/project-context";
 import { getBackendBaseUrl } from "@/lib/backend-client";
+import { useTerminalConfigStore } from "@/settings/state/terminal-config-store";
 import { useLayoutStore } from "../state/layout-store";
 import type { PaneLayout, PaneNode } from "../types";
-import { CanvasTerminal, type TerminalSnapshot } from "./canvas-terminal";
+import {
+  CanvasTerminal,
+  DEFAULT_FONT_FAMILY,
+  type TerminalSnapshot,
+  type TerminalTypography,
+} from "./canvas-terminal";
 
 interface TerminalPaneProps {
   /** Tab id; the underlying terminal session is keyed by this id. */
@@ -109,6 +115,33 @@ interface TerminalSession {
 }
 
 const sessions = new Map<string, TerminalSession>();
+
+/** Resolve the persisted terminal config into renderer typography, falling back
+ * to the default mono stack when the user hasn't picked a font. */
+const resolveTypography = (): TerminalTypography => {
+  const config = useTerminalConfigStore.getState().config;
+  const family = config.font_family?.trim();
+  return {
+    fontFamily: family ? family : DEFAULT_FONT_FAMILY,
+    fontSize: config.font_size,
+    lineHeight: config.line_height,
+  };
+};
+
+// Load terminal typography once and push later changes to every live session so
+// font edits in Settings reflow open terminals immediately.
+let terminalConfigSubscribed = false;
+const ensureTerminalConfigSubscription = () => {
+  if (terminalConfigSubscribed) return;
+  terminalConfigSubscribed = true;
+  void useTerminalConfigStore.getState().load();
+  useTerminalConfigStore.subscribe(() => {
+    const typography = resolveTypography();
+    for (const session of sessions.values()) {
+      session.term.setTypography(typography);
+    }
+  });
+};
 
 const setStatus = (
   session: TerminalSession,

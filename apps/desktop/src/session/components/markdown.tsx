@@ -612,7 +612,11 @@ const createComponents = (
     pre: preRenderer,
     hr: () => <hr className="my-6 border-muted" />,
     table: ({ children }) => (
-      <div className="my-4 overflow-x-auto rounded-lg border border-border">
+      // `contain: inline-size` stops the table's intrinsic width from
+      // propagating up through the flex ancestors (whose `min-width: auto`
+      // would otherwise grow to the table width and scroll the whole message
+      // instead of just the table). Mirrors the CodeMirror table handling.
+      <div className="my-4 max-w-full overflow-x-auto rounded-lg border border-border [contain:inline-size]">
         <table className="min-w-full divide-y divide-border text-sm">
           {children}
         </table>
@@ -625,14 +629,17 @@ const createComponents = (
     tr: ({ children }) => <tr className="hover:bg-muted/50">{children}</tr>,
     th: ({ children, style }) => (
       <th
-        className="break-words px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        className="min-w-[10rem] break-words px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
         style={style}
       >
         {children}
       </th>
     ),
     td: ({ children, style }) => (
-      <td className="break-words px-4 py-2.5 text-foreground" style={style}>
+      <td
+        className="min-w-[10rem] break-words px-4 py-2.5 text-foreground"
+        style={style}
+      >
         {children}
       </td>
     ),

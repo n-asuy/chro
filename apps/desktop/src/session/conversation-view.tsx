@@ -1,4 +1,4 @@
-import { type TranslationFunction, useLanguage } from "@/i18n";
+import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import {
   Tooltip,
@@ -10,7 +10,6 @@ import {
   Check,
   CheckSquare,
   ChevronDown,
-  ChevronRight,
   Copy,
   Edit,
   Eye,
@@ -19,7 +18,6 @@ import {
   Globe,
   Hammer,
   ImageIcon,
-  MessageCircle,
   MessageSquare,
   Search,
   Terminal,
@@ -36,6 +34,7 @@ import { BrailleSpinner } from "./components/braille-spinner";
 import { Markdown } from "./components/markdown";
 import RawLogText from "./components/raw-log-text";
 import { TextShimmer } from "./components/text-shimmer";
+import { ThinkingStep, ThinkingSteps } from "./components/thinking-steps";
 import { useImageMetadata } from "./hooks/use-image-metadata";
 import type {
   CommandRunResult,
@@ -49,6 +48,11 @@ import {
   parseContextFromContent,
   shortSessionId,
 } from "./types/context";
+import {
+  type ConversationSegment,
+  type ThinkingStepsSegment,
+  segmentConversationEntries,
+} from "./utils/agent-step-segments";
 import { SESSION_SELECT_TEXT_ATTR } from "./utils/session-select-all";
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -447,271 +451,96 @@ const CollapsibleEntry = ({
   );
 };
 
-type ThinkingBlockProps = {
-  content: string;
-};
-
-const ThinkingBlock = ({ content }: ThinkingBlockProps) => {
-  return (
-    <div className="flex items-start gap-2 text-sm text-muted-foreground">
-      <MessageCircle className="mt-0.5 h-4 w-4 shrink-0" />
-      <div className="min-w-0 flex-1">
-        <Markdown tone="muted">{content}</Markdown>
-      </div>
-    </div>
-  );
-};
-
-type NormalizedDisplayEntry = Extract<
-  DisplayEntry,
-  { type: "NORMALIZED_ENTRY" }
->;
-
-type AggregatedThinkingGroup = {
-  type: "AGGREGATED_THINKING_GROUP";
-  entries: NormalizedDisplayEntry[];
-  key: string;
-};
-
-type ConversationDisplayEntry = DisplayEntry | AggregatedThinkingGroup;
-
-const isUserMessageEntry = (
-  entry: ConversationDisplayEntry,
-): entry is NormalizedDisplayEntry =>
-  entry.type === "NORMALIZED_ENTRY" &&
-  entry.content.entry_type.type === "user_message";
-
-const isThinkingEntry = (
-  entry: ConversationDisplayEntry,
-): entry is NormalizedDisplayEntry =>
-  entry.type === "NORMALIZED_ENTRY" &&
-  entry.content.entry_type.type === "thinking";
-
-const isEmptyThinkingEntry = (entry: ConversationDisplayEntry) =>
-  isThinkingEntry(entry) && entry.content.content.trim().length === 0;
-
-const isLoadingDisplayEntry = (
-  entry: DisplayEntry | ConversationDisplayEntry,
-): boolean =>
-  entry.type === "NORMALIZED_ENTRY" &&
-  entry.content.entry_type.type === "loading";
-
-const aggregateThinkingInPreviousTurns = (
-  entries: DisplayEntry[],
-): ConversationDisplayEntry[] => {
-  if (entries.length === 0) return [];
-
-  const userMessageIndices: number[] = [];
-  entries.forEach((entry, index) => {
-    if (isUserMessageEntry(entry)) {
-      userMessageIndices.push(index);
-    }
-  });
-
-  if (userMessageIndices.length <= 1) {
-    return entries;
-  }
-
-  const lastUserMessageIndex =
-    userMessageIndices[userMessageIndices.length - 1] ?? -1;
-  const result: ConversationDisplayEntry[] = [];
-  let currentThinkingGroup: NormalizedDisplayEntry[] = [];
-
-  const flushThinkingGroup = () => {
-    if (currentThinkingGroup.length === 0) return;
-    const firstEntry = currentThinkingGroup[0];
-    result.push({
-      type: "AGGREGATED_THINKING_GROUP",
-      entries: [...currentThinkingGroup],
-      key: `agg-thinking:${firstEntry.key}`,
-    });
-    currentThinkingGroup = [];
-  };
-
-  entries.forEach((entry, index) => {
-    if (isEmptyThinkingEntry(entry)) {
-      return;
-    }
-
-    const isInPreviousTurn = index < lastUserMessageIndex;
-
-    if (isUserMessageEntry(entry)) {
-      flushThinkingGroup();
-      result.push(entry);
-      return;
-    }
-
-    if (isInPreviousTurn && isThinkingEntry(entry)) {
-      currentThinkingGroup.push(entry);
-      return;
-    }
-
-    flushThinkingGroup();
-    result.push(entry);
-  });
-
-  flushThinkingGroup();
-  return result;
+type AgentThinkingStepsProps = {
+  segment: ThinkingStepsSegment;
+  onFilePathClick?: (path: string) => void;
 };
 
 /**
- * Incremental wrapper around `aggregateThinkingInPreviousTurns`.
- *
- * During a streaming turn no new user messages appear (a follow-up creates a
- * new TaskRun → arrives as a new entry, which is the moment we recompute).
- * That means the "last user message index" is stable, and any newly-appended
- * entries are in the current turn — they pass through with empty-thinking
- * filtering, no re-aggregation of earlier turns.
- *
- * Streaming typically appends entries before a trailing loading sentinel.
- * The cache strips that sentinel when comparing prefixes so a single
- * "insert before loading" patch still hits the fast path.
+ * Renders one run of agent working entries (thinking, tool calls, loading)
+ * as a thinking-steps timeline. The header shows what the agent is doing
+ * (latest step summary) and shimmers while the run is live. The timeline
+ * stays collapsed until the user opens it; the one exception is a tool
+ * waiting for approval, which forces it open so the prompt is reachable.
  */
-type ThinkingAggregator = (
-  entries: DisplayEntry[],
-) => ConversationDisplayEntry[];
-
-function createThinkingAggregator(): ThinkingAggregator {
-  let cachedInput: DisplayEntry[] | null = null;
-  let cachedOutput: ConversationDisplayEntry[] | null = null;
-  let cachedUserMessageCount = 0;
-  let cachedInputBodyLength = 0;
-
-  const bodyEndOf = (entries: DisplayEntry[]): number => {
-    let end = entries.length;
-    while (end > 0 && isLoadingDisplayEntry(entries[end - 1])) end--;
-    return end;
-  };
-
-  const outputBodyEndOf = (output: ConversationDisplayEntry[]): number => {
-    let end = output.length;
-    while (end > 0 && isLoadingDisplayEntry(output[end - 1])) end--;
-    return end;
-  };
-
-  return (entries: DisplayEntry[]): ConversationDisplayEntry[] => {
-    if (cachedInput === entries && cachedOutput !== null) {
-      return cachedOutput;
-    }
-
-    const newBodyEnd = bodyEndOf(entries);
-
-    if (
-      cachedInput !== null &&
-      cachedOutput !== null &&
-      cachedUserMessageCount >= 2 &&
-      newBodyEnd >= cachedInputBodyLength
-    ) {
-      let prefixEqual = true;
-      for (let i = 0; i < cachedInputBodyLength; i++) {
-        if (entries[i] !== cachedInput[i]) {
-          prefixEqual = false;
-          break;
-        }
-      }
-
-      if (prefixEqual) {
-        let tailUserMessages = 0;
-        for (let i = cachedInputBodyLength; i < newBodyEnd; i++) {
-          if (isUserMessageEntry(entries[i])) {
-            tailUserMessages++;
-            break;
-          }
-        }
-
-        if (tailUserMessages === 0) {
-          const cachedBodyOutputEnd = outputBodyEndOf(cachedOutput);
-          const next: ConversationDisplayEntry[] = cachedOutput.slice(
-            0,
-            cachedBodyOutputEnd,
-          );
-          for (let i = cachedInputBodyLength; i < newBodyEnd; i++) {
-            const entry = entries[i];
-            if (isEmptyThinkingEntry(entry)) continue;
-            next.push(entry);
-          }
-          for (let i = newBodyEnd; i < entries.length; i++) {
-            next.push(entries[i]);
-          }
-          cachedInput = entries;
-          cachedOutput = next;
-          cachedInputBodyLength = newBodyEnd;
-          return next;
-        }
-      }
-    }
-
-    const output = aggregateThinkingInPreviousTurns(entries);
-    let count = 0;
-    for (const entry of entries) {
-      if (isUserMessageEntry(entry)) count++;
-    }
-    cachedInput = entries;
-    cachedOutput = output;
-    cachedUserMessageCount = count;
-    cachedInputBodyLength = newBodyEnd;
-    return output;
-  };
-}
-
-const CollapsedThinkingGroup = ({
-  group,
-}: {
-  group: AggregatedThinkingGroup;
-}) => {
-  const [expanded, setExpanded] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
+const AgentThinkingSteps = ({
+  segment,
+  onFilePathClick,
+}: AgentThinkingStepsProps) => {
   const { t } = useLanguage();
-  const entries = group.entries.filter(
-    (entry) => entry.content.content.trim().length > 0,
-  );
+  const { entries, live, awaitingApproval } = segment;
+  const [open, setOpen] = useState(awaitingApproval);
+  const userToggledRef = useRef(false);
 
-  if (entries.length === 0) {
-    return null;
-  }
+  useEffect(() => {
+    if (awaitingApproval && !userToggledRef.current) {
+      setOpen(true);
+    }
+  }, [awaitingApproval]);
+
+  const handleOpenChange = (next: boolean) => {
+    userToggledRef.current = true;
+    setOpen(next);
+  };
 
   return (
-    <div className="flex flex-col px-4 py-3 text-sm text-muted-foreground">
-      <div
-        className="group flex cursor-pointer items-center gap-2"
-        onClick={() => setExpanded((prev) => !prev)}
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-        role="button"
-        aria-expanded={expanded}
-        tabIndex={0}
-        onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setExpanded((prev) => !prev);
-          }
-        }}
-      >
-        <span className="shrink-0">
-          {isHovered ? (
-            <ChevronRight
-              className={cn(
-                "h-4 w-4 transition-transform duration-150",
-                expanded && "rotate-90",
-              )}
-            />
-          ) : (
-            <MessageCircle className="h-4 w-4" />
-          )}
-        </span>
-        <span className="truncate">{t("thinkingLabel")}</span>
-      </div>
+    <ThinkingSteps
+      label={segment.label ?? t("thinkingLabel")}
+      active={live}
+      open={open}
+      onOpenChange={handleOpenChange}
+      className="px-2"
+    >
+      {entries.map((displayEntry, index) => {
+        const entry = displayEntry.content;
+        const isLast = index === entries.length - 1;
+        const entryType = entry.entry_type.type;
 
-      {expanded && (
-        <div className="ml-6 flex flex-col gap-3 pt-2">
-          {entries.map((entry) => (
-            <div key={entry.key} className="pl-2 text-sm text-muted-foreground">
-              <Markdown tone="muted">{entry.content.content}</Markdown>
+        if (entryType === "tool_use") {
+          return (
+            <ThinkingStep
+              key={displayEntry.key}
+              icon={toolIcon(entry)}
+              animateIn={live}
+              isLast={isLast}
+            >
+              <ToolCallEntryContent
+                entry={entry as ToolUseEntry}
+                onFilePathClick={onFilePathClick}
+              />
+            </ThinkingStep>
+          );
+        }
+
+        if (entryType === "loading") {
+          return (
+            <ThinkingStep
+              key={displayEntry.key}
+              icon={
+                // Braille spinner frames use only the upper 6 dots, leaving the
+                // glyph's bottom cell row empty, so the ink rides high in its
+                // line box. Nudge down 2px to optically center it on the text.
+                <BrailleSpinner className="translate-y-[2px] text-[13px] text-muted-foreground/90" />
+              }
+              animateIn={live}
+              isLast={isLast}
+            >
+              <TextShimmer className="text-[13px] font-medium text-muted-foreground/90">
+                {entry.content || t("processingPlaceholder")}
+              </TextShimmer>
+            </ThinkingStep>
+          );
+        }
+
+        return (
+          <ThinkingStep key={displayEntry.key} animateIn={live} isLast={isLast}>
+            <div className="text-[13px] text-muted-foreground">
+              <Markdown tone="muted">{entry.content}</Markdown>
             </div>
-          ))}
-        </div>
-      )}
-    </div>
+          </ThinkingStep>
+        );
+      })}
+    </ThinkingSteps>
   );
 };
 
@@ -939,10 +768,6 @@ const getEntryWrapperClasses = (entry: NormalizedEntry) => {
     }
     case "error_message":
       return `${base} rounded border border-destructive/40 bg-destructive/10 text-destructive`;
-    case "thinking":
-      return `${base} text-muted-foreground`;
-    case "tool_use":
-      return `${base}`;
     default:
       return `${base}`;
   }
@@ -1376,7 +1201,6 @@ const ToolCallEntryContent = ({
           !canExpand && "cursor-default",
         )}
       >
-        <span className="shrink-0">{toolIcon(entry)}</span>
         <span className="min-w-0 shrink font-medium">{label}</span>
         {summaryText &&
           (isClickablePathSummary ? (
@@ -1432,23 +1256,6 @@ const ToolCallEntryContent = ({
   );
 };
 
-type ToolCallEntryProps = {
-  entry: NormalizedEntry;
-  onFilePathClick?: (path: string) => void;
-};
-
-const ToolCallEntry = ({ entry, onFilePathClick }: ToolCallEntryProps) => {
-  if (entry.entry_type.type !== "tool_use") {
-    return null;
-  }
-  return (
-    <ToolCallEntryContent
-      entry={entry as ToolUseEntry}
-      onFilePathClick={onFilePathClick}
-    />
-  );
-};
-
 const ImagePill = ({ name, path }: ImageEntry) => {
   const { data: metadata } = useImageMetadata(path);
   const displayName = name || path.split("/").pop() || "image";
@@ -1458,7 +1265,7 @@ const ImagePill = ({ name, path }: ImageEntry) => {
       <ImageIcon className="h-3 w-3 shrink-0" />
       {displayName}
       {metadata?.exists && metadata.proxy_url && (
-        <span className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 hidden rounded-lg border border-border bg-popover p-1 shadow-lg group-hover/img:block">
+        <span className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 hidden rounded-xl border border-border bg-popover p-1 shadow-sm group-hover/img:block">
           <img
             src={metadata.proxy_url}
             alt={displayName}
@@ -1471,7 +1278,7 @@ const ImagePill = ({ name, path }: ImageEntry) => {
   );
 };
 
-const UserMessageContent = ({ content }: { content: string }) => {
+export const UserMessageContent = ({ content }: { content: string }) => {
   const { contextEntries, skillEntries, imageEntries, text } =
     parseContextFromContent(content);
 
@@ -1542,7 +1349,6 @@ const UserMessageContent = ({ content }: { content: string }) => {
 
 const renderEntryBody = (
   entry: NormalizedEntry,
-  translate: ReturnType<typeof useLanguage>["t"],
   onWikilinkClick?: (path: string, subpath?: string) => void,
   onFilePathClick?: (path: string) => void,
 ) => {
@@ -1592,20 +1398,6 @@ const renderEntryBody = (
       return (
         <CollapsibleEntry content={entry.content} markdown variant="system" />
       );
-    case "thinking":
-      return <ThinkingBlock content={entry.content} />;
-    case "tool_use":
-      return <ToolCallEntry entry={entry} />;
-    case "loading":
-      return (
-        <div className="flex items-center py-2">
-          <BrailleSpinner className="text-sm font-medium text-muted-foreground/90">
-            <TextShimmer className="text-sm font-medium text-muted-foreground/90">
-              {entry.content || translate("processingPlaceholder")}
-            </TextShimmer>
-          </BrailleSpinner>
-        </div>
-      );
     default:
       return (
         <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
@@ -1631,6 +1423,12 @@ type ConversationEntriesProps = {
    * virtualization and mount every entry so off-screen matches are searchable.
    */
   searchActive?: boolean;
+  /**
+   * Like {@link searchActive}, bypass tail virtualization and mount every entry.
+   * Set when the message-navigation rail needs to reach a turn that scrolled out
+   * of the rendered window.
+   */
+  expandAll?: boolean;
 };
 
 const INITIAL_RENDER_COUNT = 120;
@@ -1650,16 +1448,9 @@ export const ConversationEntries = memo(
     isLoadingMoreHistory = false,
     onLoadMoreHistory,
     searchActive,
+    expandAll,
   }: ConversationEntriesProps) => {
     const { t } = useLanguage();
-    const aggregatorRef = useRef<ThinkingAggregator | null>(null);
-    if (aggregatorRef.current === null) {
-      aggregatorRef.current = createThinkingAggregator();
-    }
-    const conversationEntries = useMemo(
-      () => aggregatorRef.current!(entries),
-      [entries],
-    );
 
     // Stabilize callback identities so the per-group memo can hit even when
     // callers pass freshly-created closures on every render (e.g. inline
@@ -1687,16 +1478,14 @@ export const ConversationEntries = memo(
       [hasFilePathClick],
     );
     const internalScrollRef = useRef<HTMLDivElement>(null);
-    const prevVisibleEntriesLengthRef = useRef(conversationEntries.length);
-    const prevFirstEntryKeyRef = useRef<string | null>(
-      conversationEntries[0]?.key ?? null,
-    );
+    const prevVisibleEntriesLengthRef = useRef(entries.length);
+    const prevFirstEntryKeyRef = useRef<string | null>(entries[0]?.key ?? null);
     const scrollAdjustRef = useRef<{
       prevScrollHeight: number;
       prevScrollTop: number;
     } | null>(null);
     const [visibleCount, setVisibleCount] = useState(() =>
-      Math.min(conversationEntries.length, INITIAL_RENDER_COUNT),
+      Math.min(entries.length, INITIAL_RENDER_COUNT),
     );
 
     const getScrollElement = useCallback(
@@ -1716,13 +1505,13 @@ export const ConversationEntries = memo(
     }, [getScrollElement, onScrollAnchorWillAdjust]);
 
     const handleLoadMoreHistory = useCallback(() => {
-      if (visibleCount < conversationEntries.length) return;
+      if (visibleCount < entries.length) return;
       if (!hasMoreHistory || isLoadingMoreHistory || !onLoadMoreHistory) return;
       captureScrollAnchor();
       void onLoadMoreHistory();
     }, [
       captureScrollAnchor,
-      conversationEntries.length,
+      entries.length,
       hasMoreHistory,
       isLoadingMoreHistory,
       onLoadMoreHistory,
@@ -1735,63 +1524,57 @@ export const ConversationEntries = memo(
     // existing scroll-adjust effect consumes scrollAdjustRef on visibleCount
     // changes).
     useEffect(() => {
-      if (!searchActive) return;
-      if (visibleCount >= conversationEntries.length) return;
+      if (!searchActive && !expandAll) return;
+      if (visibleCount >= entries.length) return;
       captureScrollAnchor();
-      setVisibleCount(conversationEntries.length);
+      setVisibleCount(entries.length);
     }, [
       captureScrollAnchor,
       searchActive,
-      conversationEntries.length,
+      expandAll,
+      entries.length,
       visibleCount,
     ]);
 
     useEffect(() => {
-      const firstKey = conversationEntries[0]?.key ?? null;
+      const firstKey = entries[0]?.key ?? null;
       const prevLength = prevVisibleEntriesLengthRef.current;
       const prevFirstKey = prevFirstEntryKeyRef.current;
       const prevFirstKeyIndex =
         prevFirstKey === null
           ? -1
-          : conversationEntries.findIndex(
-              (entry) => entry.key === prevFirstKey,
-            );
+          : entries.findIndex((entry) => entry.key === prevFirstKey);
       const hasPrependedEntries =
-        prevFirstKeyIndex > 0 && conversationEntries.length > prevLength;
+        prevFirstKeyIndex > 0 && entries.length > prevLength;
       const hasReset =
         !hasPrependedEntries &&
         ((prevFirstKey && firstKey && prevFirstKey !== firstKey) ||
-          conversationEntries.length < prevLength);
+          entries.length < prevLength);
 
       if (hasPrependedEntries) {
         setVisibleCount((prev) =>
-          Math.min(conversationEntries.length, prev + LOAD_MORE_COUNT),
+          Math.min(entries.length, prev + LOAD_MORE_COUNT),
         );
       } else if (hasReset) {
-        setVisibleCount(
-          Math.min(conversationEntries.length, INITIAL_RENDER_COUNT),
-        );
-      } else if (conversationEntries.length > prevLength) {
-        const delta = conversationEntries.length - prevLength;
+        setVisibleCount(Math.min(entries.length, INITIAL_RENDER_COUNT));
+      } else if (entries.length > prevLength) {
+        const delta = entries.length - prevLength;
         const isBulkLoad = delta > LOAD_MORE_COUNT;
         setVisibleCount((prev) => {
           // Streaming: small increments while user is already seeing all → follow tail
           if (prev >= prevLength && !isBulkLoad) {
-            return conversationEntries.length;
+            return entries.length;
           }
           // Bulk load (historic run): cap to avoid rendering thousands of DOM nodes
-          return Math.min(
-            conversationEntries.length,
-            Math.max(prev, INITIAL_RENDER_COUNT),
-          );
+          return Math.min(entries.length, Math.max(prev, INITIAL_RENDER_COUNT));
         });
-      } else if (conversationEntries.length === 0) {
+      } else if (entries.length === 0) {
         setVisibleCount(0);
       }
 
-      prevVisibleEntriesLengthRef.current = conversationEntries.length;
+      prevVisibleEntriesLengthRef.current = entries.length;
       prevFirstEntryKeyRef.current = firstKey;
-    }, [conversationEntries]);
+    }, [entries]);
 
     useEffect(() => {
       const scrollElement = getScrollElement();
@@ -1799,14 +1582,14 @@ export const ConversationEntries = memo(
 
       const handleScroll = () => {
         if (scrollElement.scrollTop > LOAD_MORE_THRESHOLD) return;
-        if (visibleCount >= conversationEntries.length) {
+        if (visibleCount >= entries.length) {
           handleLoadMoreHistory();
           return;
         }
 
         captureScrollAnchor();
         setVisibleCount((prev) =>
-          Math.min(conversationEntries.length, prev + LOAD_MORE_COUNT),
+          Math.min(entries.length, prev + LOAD_MORE_COUNT),
         );
       };
 
@@ -1815,7 +1598,7 @@ export const ConversationEntries = memo(
         scrollElement.removeEventListener("scroll", handleScroll);
       };
     }, [
-      conversationEntries.length,
+      entries.length,
       captureScrollAnchor,
       getScrollElement,
       handleLoadMoreHistory,
@@ -1845,10 +1628,9 @@ export const ConversationEntries = memo(
       }
     }, [getScrollElement, onScrollAnchorAdjusted, visibleCount]);
 
-    const startIndex = Math.max(conversationEntries.length - visibleCount, 0);
-    const visibleEntries = conversationEntries.slice(startIndex);
-    const canLoadMoreHistory =
-      hasMoreHistory && visibleCount >= conversationEntries.length;
+    const startIndex = Math.max(entries.length - visibleCount, 0);
+    const visibleEntries = entries.slice(startIndex);
+    const canLoadMoreHistory = hasMoreHistory && visibleCount >= entries.length;
     const historyLoader = canLoadMoreHistory ? (
       <div className="flex w-full justify-center pb-4">
         <button
@@ -1877,7 +1659,6 @@ export const ConversationEntries = memo(
           {historyLoader}
           <EntryList
             entries={visibleEntries}
-            t={t}
             onWikilinkClick={stableOnWikilinkClick}
             onFilePathClick={stableOnFilePathClick}
             endRef={endRef}
@@ -1891,7 +1672,6 @@ export const ConversationEntries = memo(
         {historyLoader}
         <EntryList
           entries={visibleEntries}
-          t={t}
           onWikilinkClick={stableOnWikilinkClick}
           onFilePathClick={stableOnFilePathClick}
           endRef={endRef}
@@ -1902,8 +1682,7 @@ export const ConversationEntries = memo(
 );
 
 interface EntryListProps {
-  entries: ConversationDisplayEntry[];
-  t: TranslationFunction;
+  entries: DisplayEntry[];
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
@@ -1912,8 +1691,8 @@ interface EntryListProps {
 // Group entries by user message: each group starts with a user_message and includes
 // all subsequent entries until the next user_message
 type EntryGroup = {
-  userEntry: ConversationDisplayEntry | null;
-  followingEntries: ConversationDisplayEntry[];
+  userEntry: DisplayEntry | null;
+  followingEntries: DisplayEntry[];
   key: string;
 };
 
@@ -1923,12 +1702,12 @@ type EntryGroup = {
  * This lets the memoized `<Group>` component skip rendering for every
  * conversation turn except the one currently streaming.
  */
-type GroupingCache = (entries: ConversationDisplayEntry[]) => EntryGroup[];
+type GroupingCache = (entries: DisplayEntry[]) => EntryGroup[];
 
 function createGroupingCache(): GroupingCache {
   type CacheEntry = {
     group: EntryGroup;
-    followingSnapshot: ConversationDisplayEntry[];
+    followingSnapshot: DisplayEntry[];
   };
   const cache = new Map<string, CacheEntry>();
 
@@ -1955,7 +1734,7 @@ function createGroupingCache(): GroupingCache {
     return candidate;
   };
 
-  return (entries: ConversationDisplayEntry[]): EntryGroup[] => {
+  return (entries: DisplayEntry[]): EntryGroup[] => {
     const groups: EntryGroup[] = [];
     let currentGroup: EntryGroup | null = null;
 
@@ -1998,18 +1777,21 @@ function createGroupingCache(): GroupingCache {
 
 interface GroupProps {
   group: EntryGroup;
-  t: TranslationFunction;
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
 }
 
 const Group = memo(
-  ({ group, t, onWikilinkClick, onFilePathClick }: GroupProps) => {
+  ({ group, onWikilinkClick, onFilePathClick }: GroupProps) => {
     const userMessage =
       group.userEntry?.type === "NORMALIZED_ENTRY"
         ? group.userEntry.content
         : null;
     const turnTimestamp = userMessage?.timestamp ?? null;
+    const segments = useMemo(
+      () => segmentConversationEntries(group.followingEntries),
+      [group],
+    );
     // Only the final assistant message of a turn carries the actions row, so
     // intermediate replies (between tool calls) stay clean.
     let lastAssistantKey: string | null = null;
@@ -2040,46 +1822,42 @@ const Group = memo(
           >
             <EntryRenderer
               displayEntry={group.userEntry}
-              t={t}
               onWikilinkClick={onWikilinkClick}
               onFilePathClick={onFilePathClick}
             />
           </ExpandableUserMessage>
         )}
-        {group.followingEntries.map((displayEntry) =>
-          displayEntry ? (
-            <div key={displayEntry.key} className="mx-auto w-full max-w-2xl">
-              <div className="pb-2">
+        {segments.map((segment) => (
+          <div key={segment.key} className="mx-auto w-full max-w-2xl">
+            <div className="pb-2">
+              {segment.type === "THINKING_STEPS" ? (
+                <AgentThinkingSteps
+                  segment={segment}
+                  onFilePathClick={onFilePathClick}
+                />
+              ) : (
                 <EntryRenderer
-                  displayEntry={displayEntry}
-                  t={t}
+                  displayEntry={segment.entry}
                   onWikilinkClick={onWikilinkClick}
                   onFilePathClick={onFilePathClick}
                   messageTimestamp={turnTimestamp}
-                  showActions={displayEntry.key === lastAssistantKey}
+                  showActions={segment.key === lastAssistantKey}
                 />
-              </div>
+              )}
             </div>
-          ) : null,
-        )}
+          </div>
+        ))}
       </div>
     );
   },
   (prev, next) =>
     prev.group === next.group &&
-    prev.t === next.t &&
     prev.onWikilinkClick === next.onWikilinkClick &&
     prev.onFilePathClick === next.onFilePathClick,
 );
 
 const EntryList = memo(
-  ({
-    entries,
-    t,
-    onWikilinkClick,
-    onFilePathClick,
-    endRef,
-  }: EntryListProps) => {
+  ({ entries, onWikilinkClick, onFilePathClick, endRef }: EntryListProps) => {
     const groupingCacheRef = useRef<GroupingCache | null>(null);
     if (groupingCacheRef.current === null) {
       groupingCacheRef.current = createGroupingCache();
@@ -2092,7 +1870,6 @@ const EntryList = memo(
           <Group
             key={group.key}
             group={group}
-            t={t}
             onWikilinkClick={onWikilinkClick}
             onFilePathClick={onFilePathClick}
           />
@@ -2111,8 +1888,7 @@ const EntryList = memo(
 );
 
 interface EntryRendererProps {
-  displayEntry: ConversationDisplayEntry;
-  t: TranslationFunction;
+  displayEntry: DisplayEntry;
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
   /**
@@ -2131,16 +1907,11 @@ interface EntryRendererProps {
 const EntryRenderer = memo(
   ({
     displayEntry,
-    t,
     onWikilinkClick,
     onFilePathClick,
     messageTimestamp,
     showActions,
   }: EntryRendererProps) => {
-    if (displayEntry.type === "AGGREGATED_THINKING_GROUP") {
-      return <CollapsedThinkingGroup group={displayEntry} />;
-    }
-
     if (displayEntry.type === "STDOUT") {
       return (
         <RawLogText
@@ -2168,13 +1939,6 @@ const EntryRenderer = memo(
       console.warn("[ConversationEntries] Skipping malformed entry:", entry);
       return null;
     }
-    if (
-      entry.entry_type.type === "thinking" &&
-      entry.content.trim().length === 0
-    ) {
-      return null;
-    }
-    const isTool = entry.entry_type.type === "tool_use";
     const isAssistant = entry.entry_type.type === "assistant_message";
     const showAssistantActions = isAssistant && Boolean(showActions);
 
@@ -2185,22 +1949,18 @@ const EntryRenderer = memo(
           showAssistantActions && "group/message",
         )}
       >
-        {isTool ? (
-          <ToolCallEntry entry={entry} onFilePathClick={onFilePathClick} />
-        ) : (
-          <div className="flex items-start gap-3">
-            <div className="flex-1 space-y-2">
-              {renderEntryBody(entry, t, onWikilinkClick, onFilePathClick)}
-              {showAssistantActions && (
-                <MessageActions
-                  copyText={entry.content}
-                  timestamp={entry.timestamp ?? messageTimestamp}
-                  align="start"
-                />
-              )}
-            </div>
+        <div className="flex items-start gap-3">
+          <div className="flex-1 space-y-2">
+            {renderEntryBody(entry, onWikilinkClick, onFilePathClick)}
+            {showAssistantActions && (
+              <MessageActions
+                copyText={entry.content}
+                timestamp={entry.timestamp ?? messageTimestamp}
+                align="start"
+              />
+            )}
           </div>
-        )}
+        </div>
       </div>
     );
   },

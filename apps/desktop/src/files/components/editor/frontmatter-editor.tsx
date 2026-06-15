@@ -771,7 +771,7 @@ function PropertyTypeMenu({
   return (
     <div
       ref={menuRef}
-      className="absolute left-0 top-full z-50 mt-1 min-w-[120px] rounded-md border bg-popover py-1 shadow-lg"
+      className="absolute left-0 top-full z-50 mt-1 min-w-[120px] rounded-xl border bg-popover py-1 shadow-sm"
     >
       {types.map((type) => {
         const Icon = PROPERTY_TYPE_ICONS[type];
@@ -782,7 +782,7 @@ function PropertyTypeMenu({
             type="button"
             onClick={() => onSelect(type)}
             className={cn(
-              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-muted/50",
+              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-muted",
               isSelected && "bg-custom-primary-100/10 text-custom-primary-100",
             )}
           >

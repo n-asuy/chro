@@ -170,9 +170,9 @@ function getIconForCommand(label: string): string {
 export const slashCommandStyles = `
   .cm-tooltip-autocomplete {
     border: 1px solid var(--border-color, #e0e0e0);
-    border-radius: 8px;
+    border-radius: 12px;
     background: var(--bg-primary, #ffffff);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
     overflow: hidden;
     min-width: 280px;
   }

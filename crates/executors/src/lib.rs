@@ -6,6 +6,7 @@ pub mod env;
 pub mod executors;
 pub mod logs;
 pub mod mcp_config;
+pub mod process;
 pub mod profile;
 pub mod shell;
 pub mod stdout_dup;
@@ -18,6 +19,7 @@ pub use executors::{
 
 pub use command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides};
 pub use env::{ExecutionEnv, RepoContext};
+pub use process::{ExecutionProcess, ProcessExit, PtyProcess};
 pub use executors::claude::ClaudeCode;
 pub use executors::claude::ClaudeLogProcessor;
 pub use executors::claude::{ApprovalStatus, ClaudeContentItem, ClaudeJson};
@@ -31,7 +33,7 @@ pub use mcp_config::{
 pub use profile::{
     AuthLoginResult, AuthStatusResult, ClaudeVersionResult, ExecutorConfig, ExecutorConfigs,
     ExecutorInstallInfo, ExecutorInstallStatusResult, ExecutorProfileId, InstallableTool,
-    McpServerStatus, McpStatusResult, ModelPreset, PermissionMode, PermissionRuntimeConfig,
+    McpServerStatus, McpStatusResult, ModelPreset, PermissionMode,
     ProfileError, ToolInstallResult, anthropic_model_presets, canonical_variant_key,
     check_mcp_status, detect_claude_version, get_auth_status_all, get_install_status_all,
     install_tool, to_default_variant, trigger_auth_login,

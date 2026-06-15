@@ -35,6 +35,83 @@ impl LocalRuntime {
 
         Ok(render_raw_transcript(&all_entries, &task_id.to_string()))
     }
+
+    /// Return the most recent user prompt and assistant reply for a task.
+    ///
+    /// The assistant reply is the latest assistant text across all runs (runs
+    /// scanned newest-first, entries within a run newest-first). The user prompt
+    /// is the most recent session prompt, matching what the session view shows
+    /// as the user message (it sources prompts from session metadata, not the
+    /// raw expanded prompt logged at execution time).
+    pub async fn task_last_exchange(
+        &self,
+        task_id: Uuid,
+    ) -> Result<runtime::LastExchange, RuntimeError> {
+        // list_by_task_id returns DESC (newest first) — exactly the order we
+        // want when looking for the most recent reply.
+        let runs = db::models::TaskRun::list_by_task_id(self.db.pool(), task_id).await?;
+        let mut assistant = None;
+        for run in &runs {
+            let entries = self.container.fetch_logs(run.id).await?;
+            if let Some(text) = last_assistant_text(&entries) {
+                assistant = Some(text);
+                break;
+            }
+        }
+
+        // list_by_task_id (sessions) returns created_at ASC, so the last
+        // non-empty prompt is the most recent user message.
+        let sessions = db::models::TaskSession::list_by_task_id(self.db.pool(), task_id).await?;
+        let user = sessions.iter().rev().find_map(|session| {
+            session
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|prompt| !prompt.is_empty())
+                .map(str::to_owned)
+        });
+
+        Ok(runtime::LastExchange { user, assistant })
+    }
+}
+
+/// Find the last assistant text message within a single run's log entries.
+///
+/// Mirrors [`render_raw_transcript`]'s interpretation of the raw Claude
+/// stream-json `Stdout` lines, but walks backwards and stops at the first
+/// assistant message that carries non-empty text.
+fn last_assistant_text(entries: &[LogEntry]) -> Option<String> {
+    for entry in entries.iter().rev() {
+        let LogEntry::Stdout(chunk) = entry else {
+            continue;
+        };
+        for line in chunk.split('\n').rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(ClaudeJson::Assistant { message, .. }) =
+                serde_json::from_str::<ClaudeJson>(trimmed)
+            else {
+                continue;
+            };
+            let text = message
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ClaudeContentItem::Text { text } if !text.trim().is_empty() => {
+                        Some(text.trim())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
 
 /// Render raw `LogEntry` values into a chronological Markdown transcript.
@@ -393,6 +470,68 @@ mod tests {
         assert!(md.contains("---"));
         assert!(md.contains("### User"));
         assert!(md.contains("### Assistant"));
+    }
+
+    #[test]
+    fn last_assistant_text_returns_latest_reply() {
+        let entries = vec![
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"First reply"}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Do more"}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Second reply"}]}}"#
+                    .to_string(),
+            ),
+        ];
+        assert_eq!(
+            last_assistant_text(&entries),
+            Some("Second reply".to_string())
+        );
+    }
+
+    #[test]
+    fn last_assistant_text_skips_tool_only_and_empty_messages() {
+        let entries = vec![
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The real answer"}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.rs"}}]}}"#
+                    .to_string(),
+            ),
+            LogEntry::Stdout(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#
+                    .to_string(),
+            ),
+        ];
+        assert_eq!(
+            last_assistant_text(&entries),
+            Some("The real answer".to_string())
+        );
+    }
+
+    #[test]
+    fn last_assistant_text_none_without_assistant_text() {
+        let entries = vec![LogEntry::UserPrompt("Just a prompt".to_string())];
+        assert_eq!(last_assistant_text(&entries), None);
+    }
+
+    #[test]
+    fn last_assistant_text_joins_multiple_text_blocks() {
+        let entries = vec![LogEntry::Stdout(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Part one"},{"type":"text","text":"Part two"}]}}"#
+                .to_string(),
+        )];
+        assert_eq!(
+            last_assistant_text(&entries),
+            Some("Part one\n\nPart two".to_string())
+        );
     }
 
     #[test]

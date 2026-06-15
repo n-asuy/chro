@@ -168,7 +168,7 @@ export const SkillPopover = forwardRef<SkillPopoverHandle, SkillPopoverProps>(
 
     return (
       <div
-        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-lg border border-border/60 bg-popover shadow-custom-shadow-sm"
+        className="absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-xl border border-border bg-popover shadow-sm"
         onMouseDown={(e) => e.preventDefault()}
       >
         <div className="border-border/40 border-b px-2 py-1.5 text-[11px] text-muted-foreground">
@@ -194,10 +194,10 @@ export const SkillPopover = forwardRef<SkillPopoverHandle, SkillPopoverProps>(
                 key={skill.id}
                 type="button"
                 className={cn(
-                  "flex w-full items-start gap-2.5 rounded px-2 py-1 text-left text-[13px] transition-colors",
+                  "flex w-full items-start gap-2.5 rounded-md px-2 py-1 text-left text-[13px] transition-colors",
                   index === activeIndex
-                    ? "bg-accent/60 text-accent-foreground"
-                    : "hover:bg-accent/30",
+                    ? "bg-muted text-foreground"
+                    : "hover:bg-muted",
                 )}
                 onMouseDown={(e) => {
                   e.preventDefault();

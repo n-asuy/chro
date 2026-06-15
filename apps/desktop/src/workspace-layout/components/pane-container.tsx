@@ -38,16 +38,24 @@ export const PaneContainer = memo(function PaneContainer({
     <div
       data-pane-leaf-id={leaf.id}
       className={cn(
-        "relative flex h-full w-full min-h-0 min-w-0 flex-col bg-background",
+        "relative flex h-full w-full min-h-0 min-w-0 flex-col",
       )}
       onMouseDown={() => {
         if (!isFocused) setFocusedPane(leaf.id);
       }}
     >
       <TabBar leaf={leaf} isFocused={isFocused} />
+      {/*
+       * The pane's content card carries the rounded border/background that
+       * used to live on the outer wrapper. It is pulled up 1px and sits
+       * below the tab bar in the stacking order (TabBar is `z-10`), so the
+       * active tab's background + flared feet paint over the card's top
+       * border and merge seamlessly, while the border keeps reading as the
+       * tab baseline everywhere else.
+       */}
       <div
         ref={droppable.setNodeRef}
-        className="relative min-h-0 flex-1 overflow-hidden"
+        className="relative z-0 -mt-px min-h-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-background"
       >
         {activeTab ? (
           <PaneItemBody
@@ -56,7 +64,7 @@ export const PaneContainer = memo(function PaneContainer({
             isActiveLeaf={isFocused}
           />
         ) : (
-          <EmptyPaneState leafId={leaf.id} />
+          <EmptyPaneState />
         )}
         {previewEdge ? (
           <SplitDropOverlay

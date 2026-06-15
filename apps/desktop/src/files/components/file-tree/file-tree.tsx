@@ -2,7 +2,6 @@ import { FolderPickerDialog } from "@/components/dialogs/folder-picker-dialog";
 import { useLanguage } from "@/i18n";
 import { revealInFinder } from "@/lib/project-client";
 import { usePromptEditorHandle } from "@/session/hooks/use-prompt-editor";
-import { useRightDockStore } from "@/workspace-layout/state/right-dock-store";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -32,7 +31,6 @@ import {
   FileText,
   FolderInput,
   FolderPlus,
-  GitBranch,
   Minimize2,
   PanelLeftClose,
   PenLine,
@@ -57,7 +55,6 @@ import {
   getActualFileName,
   getInitialContent,
 } from "../../types/file-tree";
-import { FileSearch } from "./file-search";
 import { TreeContextMenu } from "./tree-context-menu";
 import { TreeNode } from "./tree-node";
 
@@ -87,13 +84,13 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   > | null>(null);
   const [showScrollBar, setShowScrollBar] = useState(false);
   const { projectId, workspacePath } = useProjectContext();
-  const setRightDockActivePanel = useRightDockStore((s) => s.setActivePanel);
 
   const {
     fileTree,
     rootPath,
     roots,
     selectedPaths,
+    revealRequest,
     scopeTaskRunId,
     selectNode,
     clearSelection,
@@ -114,7 +111,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   // opens files, but project-scoped mutations are hidden/disabled.
   const isWorktreeScope = scopeTaskRunId != null;
 
-  // Git status decorations (Orca-style): tint + badge changed files and roll the
+  // Git status decorations: tint + badge changed files and roll the
   // status up to ancestor folders. Only in local/project mode — in a worktree
   // session the tree stays plain (no diff colors); that change review lives in
   // the branch-scoped Source Control panel. The right dock shows one panel at a
@@ -416,6 +413,23 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     }
   }, [editingPath, visibleRows, rowVirtualizer]);
 
+  // Scroll a reveal target (e.g. a skill folder focused from the Skills panel)
+  // into view. The panel expands + hydrates ancestors asynchronously, so this
+  // re-runs as visibleRows grows and fires once the row appears. The token
+  // guard scrolls a given request exactly once so manual scrolling afterward is
+  // not yanked back.
+  const handledRevealTokenRef = useRef(0);
+  useEffect(() => {
+    if (!revealRequest) return;
+    if (revealRequest.token === handledRevealTokenRef.current) return;
+    const index = visibleRows.findIndex(
+      (r) => r.node.path === revealRequest.path,
+    );
+    if (index < 0) return;
+    handledRevealTokenRef.current = revealRequest.token;
+    rowVirtualizer.scrollToIndex(index, { align: "center" });
+  }, [revealRequest, visibleRows, rowVirtualizer]);
+
   useEffect(() => {
     return () => {
       if (scrollVisibilityTimeoutRef.current) {
@@ -469,7 +483,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             selectNode(nextRow.node.path);
             rowVirtualizer.scrollToIndex(next);
             if (nextRow.node.type === FileNodeType.File) {
-              openFile(nextRow.node.path);
+              openFile(nextRow.node.path, scopeTaskRunId ?? undefined);
             }
           }
           break;
@@ -482,7 +496,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             selectNode(prevRow.node.path);
             rowVirtualizer.scrollToIndex(prev);
             if (prevRow.node.type === FileNodeType.File) {
-              openFile(prevRow.node.path);
+              openFile(prevRow.node.path, scopeTaskRunId ?? undefined);
             }
           }
           break;
@@ -549,7 +563,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           if (isDir) {
             void toggleFolderWithHydration(current.path);
           } else {
-            openFile(current.path);
+            openFile(current.path, scopeTaskRunId ?? undefined);
           }
           break;
         }
@@ -602,16 +616,15 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   );
 
   return (
-    <div className="font-workspace text-[12px] leading-[1.35] flex h-full w-full flex-col bg-custom-sidebar-background-90 text-custom-sidebar-text-100">
-      <div className="font-workspace text-[12px] leading-[1.35] flex h-11 items-center justify-between bg-custom-sidebar-background-90 px-2 text-custom-sidebar-text-300">
+    <div className="font-workspace text-[12px] leading-[1.35] flex h-full w-full flex-col bg-transparent text-custom-sidebar-text-100">
+      <div className="font-workspace text-[12px] leading-[1.35] flex h-11 items-center justify-between bg-transparent px-2 text-custom-sidebar-text-300">
         <div className="flex items-center gap-2">
           <TooltipProvider delayDuration={150}>
-            <FileSearch />
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
+                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
                   aria-label="Collapse all"
                   onClick={collapseAll}
                   disabled={!hasTree}
@@ -631,7 +644,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                       <DropdownMenuTrigger asChild>
                         <button
                           type="button"
-                          className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
+                          className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
                           aria-label={t("newFile")}
                         >
                           <Plus className="size-4" />
@@ -645,7 +658,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                   <DropdownMenuContent
                     align="start"
                     sideOffset={4}
-                    className="z-20 min-w-[160px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg"
+                    className="z-20 min-w-[160px] rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm"
                   >
                     <DropdownMenuItem
                       onSelect={() =>
@@ -684,7 +697,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                   <TooltipTrigger asChild>
                     <button
                       type="button"
-                      className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
+                      className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40"
                       aria-label="Create folder"
                       onClick={() => void quickCreate(FileNodeType.Directory)}
                     >
@@ -697,21 +710,6 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                 </Tooltip>
               </>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
-                  aria-label={t("sourceControl")}
-                  onClick={() => setRightDockActivePanel("source-control")}
-                >
-                  <GitBranch className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                {t("sourceControl")}
-              </TooltipContent>
-            </Tooltip>
           </TooltipProvider>
         </div>
         {onClose && (
@@ -720,7 +718,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-[3px] px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
+                  className="font-workspace text-[12px] leading-[1.35] inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
                   aria-label={t("closeSidebar")}
                   onClick={onClose}
                 >
@@ -840,7 +838,9 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                             }
                           }}
                           onSelect={() => selectNode(node.path)}
-                          onOpen={() => openFile(node.path)}
+                          onOpen={() =>
+                            openFile(node.path, scopeTaskRunId ?? undefined)
+                          }
                           onMouseDown={(e) => dndHandlers.onMouseDown(e, node)}
                         />
                       </TreeContextMenu>
@@ -852,13 +852,13 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           </div>
         </ContextMenuTrigger>
         {!isWorktreeScope && (
-          <ContextMenuContent className="z-20 w-48 rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+          <ContextMenuContent className="z-20 w-48 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
             <ContextMenuSub>
               <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
                 <FilePlus className="h-3.5 w-3.5 shrink-0" />
                 <span>{t("newFile")}</span>
               </ContextMenuSubTrigger>
-              <ContextMenuSubContent className="z-20 min-w-[140px] rounded border border-custom-border-200 bg-custom-background-100 p-1 shadow-lg">
+              <ContextMenuSubContent className="z-20 min-w-[140px] rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
                 <ContextMenuItem
                   onSelect={() =>
                     void quickCreate(FileNodeType.File, rootTargetPath, "md")

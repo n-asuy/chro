@@ -51,6 +51,8 @@ interface TaskConversationProps {
   scrollContainerRef?: MutableRefObject<HTMLDivElement | null>;
   /** When true, render the whole conversation so search can reach every entry. */
   searchActive?: boolean;
+  /** When true, render the whole conversation so the message rail can reach every turn. */
+  expandAll?: boolean;
   /** Stable key used to restore scroll position across session switches. */
   scrollCacheKey?: string;
   /** True while the active run is streaming content into the conversation. */
@@ -71,6 +73,7 @@ export const TaskConversation = memo(function TaskConversation({
   onFilePathClick,
   scrollContainerRef: externalScrollContainerRef,
   searchActive,
+  expandAll,
   scrollCacheKey = "session",
   isStreaming = false,
   scrollToBottomSignal = 0,
@@ -346,6 +349,7 @@ export const TaskConversation = memo(function TaskConversation({
         onFilePathClick={onFilePathClick}
         scrollContainerRef={scrollContainerRef}
         searchActive={searchActive}
+        expandAll={expandAll}
         hasMoreHistory={hasMoreHistory}
         isLoadingMoreHistory={isLoadingMoreHistory}
         onLoadMoreHistory={onLoadMoreHistory}

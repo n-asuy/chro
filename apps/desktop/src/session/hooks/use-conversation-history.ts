@@ -104,6 +104,12 @@ const generateEntryId = (): string => {
 
 const INITIAL_HISTORY_RUN_COUNT = 3;
 const HISTORY_RUN_PAGE_SIZE = 3;
+/**
+ * Upper bound on a single historic-run log replay. A completed run's stream
+ * finishes almost instantly; if it does not (wedged run, half-open socket) we
+ * stop waiting so the conversation pane's `isLoading` always resolves.
+ */
+const HISTORIC_LOAD_TIMEOUT_MS = 12_000;
 
 function sortRunsByCreatedAtAscending(
   taskRuns: TaskRunRecord[],
@@ -271,13 +277,36 @@ function loadHistoricTaskRunEntries(
     const ws = new WebSocket(endpoint);
     let entries: DisplayEntry[] = [];
     let settled = false;
+    let timer: number | null = null;
+
+    const cleanup = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
 
     const resolveWithEntries = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       onEntries(entries);
       resolve();
     };
+
+    // Safety net: a historic replay must terminate. If the stream neither
+    // finishes nor closes within this window — e.g. the run is wedged in a
+    // non-terminal state, or the socket is half-open — resolve with whatever we
+    // replayed so the conversation pane never sits in `isLoading` forever (the
+    // gate that left a session showing a spinner with only post-send content).
+    timer = window.setTimeout(() => {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      resolveWithEntries();
+    }, HISTORIC_LOAD_TIMEOUT_MS);
 
     ws.onmessage = (event) => {
       try {
@@ -302,6 +331,7 @@ function loadHistoricTaskRunEntries(
     ws.onerror = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(new Error(`Failed to load entries for TaskRun ${taskRunId}`));
     };
 
@@ -550,6 +580,23 @@ export function useConversationHistory({
     return sorted[sorted.length - 1].id;
   }, [runs]);
 
+  // Diagnostic: surface why the conversation pane can sit in `isLoading`. Fires
+  // on any change to the gating inputs so a stuck-loading reproduction reveals
+  // which gate failed to resolve — the runs stream (`runs_loading`) or the
+  // historic replay loop (`history_loading` true with `is_loading` still true).
+  useEffect(() => {
+    recordPerfEvent("conv_history_loading_state", {
+      task_id: taskId,
+      is_loading: isLoading,
+      runs_loading: runsLoading,
+      runs_count: runs.length,
+      loaded_runs: loadedRunIdsRef.current.size,
+      history_loading: historyLoadingRef.current,
+      active_run_id: activeRunId,
+      initial_history_loaded: initialHistoryLoadedRef.current,
+    });
+  }, [isLoading, runsLoading, runs.length, activeRunId, taskId]);
+
   // Helper to update entries state (batched via setTimeout to avoid per-patch
   // re-renders while still firing when the window is in the background)
   const pendingVersionUpdateRef = useRef(false);
@@ -669,33 +716,42 @@ export function useConversationHistory({
     [loadHistoricRuns],
   );
 
-  // Effect 1: Load only the newest completed TaskRuns. Older history is loaded
-  // on demand from the top of the conversation, so long sessions do not keep
-  // prepending entries while the user is trying to read the latest content.
+  // Always-latest handle to the historic loader. Effect 1 calls through this ref
+  // so it does NOT have to depend on `loadHistoricRuns`, whose identity changes
+  // on every runs-stream patch.
+  const loadHistoricRunsRef = useRef(loadHistoricRuns);
+  loadHistoricRunsRef.current = loadHistoricRuns;
+
+  // Effect 1: Load the newest completed TaskRuns once the runs stream is ready.
+  //
+  // Keyed only on stable inputs (`enabled`, `taskId`, `runsLoading`) — NOT on
+  // `loadHistoricRuns`. Depending on the callback made this effect re-run on
+  // every runs-stream patch (each patch yields a new `runs` reference → new
+  // callback identity). Its cleanup then cancelled the in-flight historic load
+  // and reset `initialHistoryLoadedRef`, so for any task with churning runs the
+  // load never completed and `markInitialLoaded` never fired `setIsLoading(false)`
+  // — leaving the conversation pane stuck on its loading spinner. The
+  // taskId-reset effect already clears `initialHistoryLoadedRef`, so the cleanup
+  // here must not.
   useEffect(() => {
-    if (!enabled || !taskId || runsLoading) {
-      if (!runsLoading) setIsLoading(false);
+    if (!enabled || !taskId) {
+      setIsLoading(false);
       return;
     }
+    if (runsLoading) return; // re-runs when runsLoading settles false
     if (initialHistoryLoadedRef.current) return;
     initialHistoryLoadedRef.current = true;
 
     let cancelled = false;
-    let completed = false;
-    void loadHistoricRuns(INITIAL_HISTORY_RUN_COUNT, {
+    void loadHistoricRunsRef.current(INITIAL_HISTORY_RUN_COUNT, {
       cancelled: () => cancelled,
       markInitialLoaded: true,
-    }).finally(() => {
-      completed = true;
     });
 
     return () => {
       cancelled = true;
-      if (!completed) {
-        initialHistoryLoadedRef.current = false;
-      }
     };
-  }, [enabled, loadHistoricRuns, runsLoading, taskId]);
+  }, [enabled, runsLoading, taskId]);
 
   // Effect 2: Stream the running TaskRun — fire-and-forget.
   // No cancelled flag. The stream is autonomous and survives effect re-runs.

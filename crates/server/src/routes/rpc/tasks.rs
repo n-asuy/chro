@@ -26,6 +26,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/tasks/:id", delete(delete_task))
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
+        .route("/tasks/:id/last-message", get(get_task_last_message))
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +115,27 @@ async fn update_task_status(
         .update_task_status(task_id, payload.status)
         .await?;
     Ok(Json(TaskEnvelope { task }))
+}
+
+#[derive(Debug, Serialize)]
+struct TaskLastMessageResponse {
+    user: Option<String>,
+    assistant: Option<String>,
+}
+
+/// Return the most recent user prompt and assistant reply for a task, used by
+/// the sidebar to preview the last conversation turn on hover. Either field is
+/// `null` when that message type has not been produced yet.
+async fn get_task_last_message(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<TaskLastMessageResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let exchange = state.runtime().task_last_exchange(task_id).await?;
+    Ok(Json(TaskLastMessageResponse {
+        user: exchange.user,
+        assistant: exchange.assistant,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,5 +1,5 @@
 /**
- * Git status decorations for the file tree, ported from Orca's Explorer.
+ * Git status decorations for the file tree Explorer.
  *
  * Changed files are tinted and badged with a one-letter status (M/A/D/R/C/U),
  * and the status rolls up to every ancestor folder using a dominant-status

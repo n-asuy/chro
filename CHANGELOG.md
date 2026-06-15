@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.36
+
+- Reworked the Claude executor to run the agent as a real interactive terminal session, observed through Claude Code hooks plus session-transcript tailing instead of the deprecated non-interactive print mode, so the agent can pause mid-run and route permission requests, plan-mode approvals, and clarifying questions to the app while conversation streaming, persistence, and replay keep working
+- Added a structured question UI for agent clarifying questions: a stepped intake that shows one question at a time with single/multi-select option rows, descriptions, a free-form "Other" answer, and Back/Skip/Continue navigation, surfaced automatically whenever a run is blocked waiting for your answer
+- Added an "awaiting input" state so a blocked session shows a paused indicator instead of the running spinner across the conversation, project tree, and inbox, clearing once you answer, the wait times out, or the next turn starts
+- Reworked how agent working steps render: consecutive thinking, tool calls, and progress now collapse into a single timeline whose header shows the latest reasoning line or the command/file/search being run and shimmers while live, kept collapsed by default but auto-expanded when a tool is waiting for your approval
+- Added per-turn model and reasoning-effort overrides so a follow-up can switch the Claude model (and Codex reasoning effort) for the next turn while keeping the runtime fixed for the session, with pickers in the agent selector and the "@" composer menu
+- Showed the logo of the agent that actually ran each session (Claude or Codex) and its current model on session tabs and recent-session rows, with brand-new sessions showing no icon until they run
+- Added a right-edge message navigation rail with one tick per message that expands on hover into clickable previews so you can jump back to any earlier turn, plus a hover preview that shows a session's last exchange from its row in the list
+- Restructured Settings into dedicated panes that each load their data only when opened, adding Appearance, Terminal, and Notifications sections
+- Added an app-wide theme selector (System/Light/Dark) in Appearance, moved out of Editor settings, with System following the OS appearance live and becoming the default for fresh installs
+- Added a Terminal settings pane to configure the integrated terminal's font family, size, and line height, applied to open terminals immediately
+- Added desktop notifications when a background agent run finishes (completed or failed) or is waiting for your input, with per-event toggles and suppression while the app is focused; on macOS they show the app icon and reopen the originating session when clicked
+- Added a developer-only Feature Flags section in Settings that lists each flag with its key, status, description, owner, and retire-by date and supports per-installation on/off overrides with reset actions; flag resolution honors telemetry opt-out by falling back to built-in defaults with no network request, and initial flags gate the structured question UI, a canvas terminal renderer, and inline editor-gutter diffs
+- Reworked the right-side dock navigation into a single animated segmented control for Files, Search, and Git, replacing the per-panel back buttons and the magnifying-glass shortcut
+- Added a project Home overview shown when opening or switching to a project, with quick actions (New session, Search files, Skills) and a list of recent sessions, so switching projects now lands here instead of restoring the last open tab
+- Added a Projects/Inbox switcher in the left dock, with a cross-project Inbox that lists every session across all projects by recency over a single connection, each tagged with its project and activity status
+- Added a Skills browser listing the project's workspace skills alongside your global skills, searchable and filterable by scope and provider, where clicking a skill reveals or opens its folder
+- Reworked the tab bar into browser-style rounded tabs that merge into the pane content, with a New tab (+) button offering New session or Terminal, and made empty panes and project Home open directly into a ready prompt composer
+- Made the "Open in" header action open the workspace in your configured external app (Cursor, Zed, VS Code, cmux, a terminal, or the file manager), and made opening in cmux focus its existing workspace for the folder instead of stacking duplicates
+- Replaced the bottom-corner update popup with an update pill in the top bar that stays hidden until an update is available and then offers download, restart-to-install, or retry, with auto-update on by default in release builds
+- Refined the projects tree so clicking a project name opens its Home (the chevron handles expand/collapse), added connector guide lines under expanded chats, switched to filled folder icons, and moved sort selection into a checkmarked menu
+- Fixed occasional load-induced UI freezes ("all sessions locked") during git status by running git as a killable subprocess with a hard timeout instead of an uncancellable in-process call that could crawl huge untracked trees for minutes, and moved every git operation off the async runtime onto a blocking pool so slow scans and push/pull no longer stall the app
+- Fixed push on a freshly-created branch failing with "no upstream branch" by always publishing with `--set-upstream`, and made push and pull honor a branch's configured remote and effective upstream so forked or unpublished branches sync to the right place
+- Fixed Source Control ahead/behind badges showing an error or a swapped count for never-published branches by reporting zero until the branch is published and counting against the effective upstream
+- Added a Source Control panel for individual task-run sessions (status, branches, diff, stage/unstage, commit, push, pull, and discard against that session's worktree), plus an "all changes" diff view that shows everything a branch introduced against its merge-base
+- Reduced server CPU usage by sharing one recursive file watcher per worktree across all subscriptions and dropping ignored paths (`.git`, `node_modules`, `target`, and gitignored files) before the debounce buffer, so heavy build and dependency churn no longer drives CPU
+- Fixed sessions getting stuck on a loading spinner (and the session list flashing to "loading" on remount) by deduplicating WebSocket subscriptions behind a ref-counted, endpoint-keyed shared connection registry that reuses the live socket and keeps cached data across consumer churn
+- Capped how many git operations run at once so bursts of status, diff, and branch-status polling across many sessions queue briefly instead of flooding the blocking pool
+- Fixed long Markdown tables so they scroll within their own box instead of widening the whole message, with a sensible minimum cell width
+- Fixed the conversation pane sometimes getting stuck on a loading spinner by ensuring history replay always resolves, with a safety timeout for wedged or half-open streams
+- Fixed a crash ("Maximum update depth exceeded") from the loading shimmer, notably while a run was being cancelled, and a brief flash of the full project file tree when switching between sessions
+- Refined menus, popovers, and dropdowns with softer rounded corners and lighter shadows, and added subtle fade transitions when switching dock panels and views (respecting reduced-motion preferences)
+
 ## 0.1.35
 
 - Fixed Claude Code and Codex being detected as "not installed" on Windows when their CLI was installed under a Node version manager (fnm, nvm-windows, Volta) or an npm global prefix whose directory is only added to `PATH` by the PowerShell profile, by reading `PATH` from the user's dot-sourced PowerShell `$PROFILE` (pwsh and Windows PowerShell) during CLI discovery

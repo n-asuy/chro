@@ -1,13 +1,18 @@
 /**
- * Shared working-tree diff cache, keyed by project.
+ * Shared working-tree diff cache, keyed by scope (project checkout or a task
+ * run's worktree).
  *
  * Both the source-control panel (for per-file +/- counts) and the
  * working-changes diff tab read from here. A single ref-counted poll loop per
- * project backs all subscribers, so opening the diff tab while the panel is
+ * scope backs all subscribers, so opening the diff tab while the panel is
  * visible does not double the network traffic. Polling pauses while the
  * document is hidden, mirroring `use-git-status`.
  */
-import { type WorkingDiffEntry, getWorkingDiffs } from "@/lib/git-client";
+import {
+  type GitScope,
+  type WorkingDiffEntry,
+  getWorkingDiffs,
+} from "@/lib/git-client";
 import { useEffect } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
@@ -27,57 +32,58 @@ const EMPTY_STATE: WorkingDiffsState = {
 };
 
 interface WorkingDiffsStore {
-  byProject: Record<string, WorkingDiffsState>;
+  byScope: Record<string, WorkingDiffsState>;
 }
 
-const useStore = create<WorkingDiffsStore>(() => ({ byProject: {} }));
+const useStore = create<WorkingDiffsStore>(() => ({ byScope: {} }));
+
+const scopeKey = (scope: GitScope, base?: string): string => {
+  const root =
+    "taskRunId" in scope
+      ? `run:${scope.taskRunId}`
+      : `project:${scope.projectId}`;
+  return base ? `${root}@${base}` : root;
+};
 
 // Subscription bookkeeping — intentionally outside reactive state.
 const refCounts = new Map<string, number>();
 const timers = new Map<string, ReturnType<typeof setInterval>>();
 const inFlight = new Set<string>();
 
-function patch(projectId: string, next: Partial<WorkingDiffsState>): void {
+function patch(key: string, next: Partial<WorkingDiffsState>): void {
   useStore.setState((s) => ({
-    byProject: {
-      ...s.byProject,
-      [projectId]: { ...(s.byProject[projectId] ?? EMPTY_STATE), ...next },
+    byScope: {
+      ...s.byScope,
+      [key]: { ...(s.byScope[key] ?? EMPTY_STATE), ...next },
     },
   }));
 }
 
-async function fetchOnce(projectId: string): Promise<void> {
-  if (inFlight.has(projectId)) return;
-  inFlight.add(projectId);
-  const hasData =
-    (useStore.getState().byProject[projectId]?.diffs.length ?? 0) > 0;
-  if (!hasData) patch(projectId, { isLoading: true });
+async function fetchOnce(scope: GitScope, base?: string): Promise<void> {
+  const key = scopeKey(scope, base);
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
+  const hasData = (useStore.getState().byScope[key]?.diffs.length ?? 0) > 0;
+  if (!hasData) patch(key, { isLoading: true });
   try {
-    const diffs = await getWorkingDiffs(projectId);
-    patch(projectId, { diffs, isLoading: false, error: null });
+    const diffs = await getWorkingDiffs(scope, base);
+    patch(key, { diffs, isLoading: false, error: null });
   } catch (err) {
-    patch(projectId, {
+    patch(key, {
       isLoading: false,
       error: err instanceof Error ? err.message : String(err),
     });
   } finally {
-    inFlight.delete(projectId);
+    inFlight.delete(key);
   }
 }
 
-/**
- * Force an immediate refresh — call after a git mutation (commit, discard) so
- * counts and the diff tab update without waiting for the next poll tick.
- */
-export function refreshWorkingDiffs(projectId: string): Promise<void> {
-  return fetchOnce(projectId);
-}
-
-function subscribeWorkingDiffs(projectId: string): () => void {
-  const next = (refCounts.get(projectId) ?? 0) + 1;
-  refCounts.set(projectId, next);
+function subscribeWorkingDiffs(scope: GitScope, base?: string): () => void {
+  const key = scopeKey(scope, base);
+  const next = (refCounts.get(key) ?? 0) + 1;
+  refCounts.set(key, next);
   if (next === 1) {
-    void fetchOnce(projectId);
+    void fetchOnce(scope, base);
     const timer = setInterval(() => {
       if (
         typeof document !== "undefined" &&
@@ -85,38 +91,41 @@ function subscribeWorkingDiffs(projectId: string): () => void {
       ) {
         return;
       }
-      void fetchOnce(projectId);
+      void fetchOnce(scope, base);
     }, POLL_INTERVAL_MS);
-    timers.set(projectId, timer);
+    timers.set(key, timer);
   }
   return () => {
-    const count = (refCounts.get(projectId) ?? 1) - 1;
+    const count = (refCounts.get(key) ?? 1) - 1;
     if (count <= 0) {
-      refCounts.delete(projectId);
-      const timer = timers.get(projectId);
+      refCounts.delete(key);
+      const timer = timers.get(key);
       if (timer) clearInterval(timer);
-      timers.delete(projectId);
+      timers.delete(key);
     } else {
-      refCounts.set(projectId, count);
+      refCounts.set(key, count);
     }
   };
 }
 
 /**
- * Subscribe to the shared working-tree diffs for a project. Returns the cached
- * slice and keeps the project's poll loop alive while mounted.
+ * Subscribe to the shared working-tree diffs for a scope (project or run).
+ * With `base`, diffs against that branch ref (all branch changes) instead of
+ * HEAD. Returns the cached slice and keeps the poll loop alive while mounted.
  */
 export function useWorkingDiffs(
-  projectId: string | null | undefined,
+  scope: GitScope | null | undefined,
+  base?: string,
 ): WorkingDiffsState {
+  const key = scope ? scopeKey(scope, base) : null;
   useEffect(() => {
-    if (!projectId) return;
-    return subscribeWorkingDiffs(projectId);
-  }, [projectId]);
+    if (!scope) return;
+    return subscribeWorkingDiffs(scope, base);
+    // Re-subscribe only when the resolved scope key changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
   return useStore(
-    useShallow((s) =>
-      projectId ? s.byProject[projectId] ?? EMPTY_STATE : EMPTY_STATE,
-    ),
+    useShallow((s) => (key ? s.byScope[key] ?? EMPTY_STATE : EMPTY_STATE)),
   );
 }

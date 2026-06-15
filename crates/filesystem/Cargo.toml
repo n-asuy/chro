@@ -10,8 +10,8 @@ rayon = "1.10"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 dunce = "1.0"
-notify-debouncer-full = "0.4"
-futures = "0.3"
+notify = "6"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 dirs = "5.0"
 
@@ -20,3 +20,4 @@ default = []
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

@@ -33,10 +33,19 @@ pub struct TaskRecord {
     pub worktree_deleted: bool,
     /// FK to current active session
     pub active_session_id: Option<Uuid>,
+    /// Runtime flag: the agent is blocked on an AskUserQuestion approval and is
+    /// waiting for the user to answer. Cleared when the question resolves or the
+    /// active session ends. Denormalized runtime state mirroring
+    /// `active_session_id`; never true while there is no active session.
+    pub awaiting_input: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Position within a kanban column (lower = higher). 0 means unordered.
     pub sort_order: i32,
+    /// Bare agent kind the task last ran with (e.g. "CLAUDE_CODE", "CODEX").
+    /// Denormalized from the latest run's executor so UIs can show the agent
+    /// logo without a per-task run lookup. `None` until the first run.
+    pub last_executor: Option<String>,
 }
 
 impl TaskRecord {
@@ -69,9 +78,11 @@ impl TaskRecord {
             worktree_path: None,
             worktree_deleted: false,
             active_session_id: None,
+            awaiting_input: false,
             created_at: now,
             updated_at: now,
             sort_order: 0,
+            last_executor: None,
         }
     }
 
@@ -98,8 +109,8 @@ impl TaskRecord {
     /// Persist the task record.
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.id)
         .bind(&self.slug)
@@ -117,6 +128,7 @@ impl TaskRecord {
         .bind(self.created_at)
         .bind(self.updated_at)
         .bind(self.sort_order)
+        .bind(&self.last_executor)
         .execute(pool)
         .await?;
         Ok(())
@@ -265,6 +277,44 @@ impl TaskRecord {
         .bind(task_id)
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    /// Record the bare agent kind the task last ran with (e.g. "CLAUDE_CODE").
+    /// Does not touch `updated_at`: this is run-derived metadata and must not
+    /// re-order the task list on its own. The row write still fans out through
+    /// the SQLite update hook so the tasks stream reflects it live.
+    pub async fn set_last_executor(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        executor: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET last_executor = ? WHERE id = ?")
+            .bind(executor)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Toggle the `awaiting_input` flag for a task.
+    ///
+    /// Set when an AskUserQuestion approval becomes pending and cleared when it
+    /// resolves, so the task list / inbox can show a "waiting" indicator instead
+    /// of the running spinner. Like `set_last_executor`, this deliberately does
+    /// not touch `updated_at`: a question appearing must not re-order the task
+    /// list. The row write still fans out through the SQLite update hook so the
+    /// tasks stream reflects it live.
+    pub async fn set_awaiting_input(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        awaiting: bool,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET awaiting_input = ? WHERE id = ?")
+            .bind(awaiting)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -1097,5 +1147,71 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn set_awaiting_input_toggles_without_reordering() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("awaiting.db");
+        let service = crate::DBService::new_with_path(&db_path).await.unwrap();
+
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path, created_at, updated_at)
+             VALUES (?, 'proj', '/tmp', datetime('now'), datetime('now'))",
+        )
+        .bind(project_id)
+        .execute(service.pool())
+        .await
+        .unwrap();
+
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO task_records (id, project_id, title, status, created_at, updated_at)
+             VALUES (?, ?, 'task', 'pending', datetime('now'), datetime('now'))",
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .execute(service.pool())
+        .await
+        .unwrap();
+
+        // A freshly inserted task defaults to not waiting (column default).
+        let fresh = TaskRecord::find_by_id(service.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!fresh.awaiting_input);
+        let baseline_updated_at = fresh.updated_at;
+
+        // Marking the task as waiting on a user answer persists...
+        TaskRecord::set_awaiting_input(service.pool(), task_id, true)
+            .await
+            .unwrap();
+        let waiting = TaskRecord::find_by_id(service.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(waiting.awaiting_input);
+        // ...but must not touch updated_at, or a question would reorder the
+        // task list / inbox (which is sorted by recency).
+        assert_eq!(
+            waiting.updated_at, baseline_updated_at,
+            "set_awaiting_input must not bump updated_at"
+        );
+
+        // Resolving the question clears the flag again.
+        TaskRecord::set_awaiting_input(service.pool(), task_id, false)
+            .await
+            .unwrap();
+        let cleared = TaskRecord::find_by_id(service.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cleared.awaiting_input);
+        assert_eq!(
+            cleared.updated_at, baseline_updated_at,
+            "set_awaiting_input must not bump updated_at"
+        );
     }
 }

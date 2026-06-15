@@ -123,6 +123,16 @@ impl ProjectRecord {
             .await
     }
 
+    /// Return every project, ordered by name ascending.
+    ///
+    /// Backs the cross-project inbox, which resolves task `project_id`s to
+    /// human-friendly project names without requiring each project to be open.
+    pub async fn list_all(pool: &Pool<Sqlite>) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT * FROM project_records ORDER BY name ASC")
+            .fetch_all(pool)
+            .await
+    }
+
     /// Fetch a project by either UUID string or slug.
     /// Tries UUID parse first, falls back to slug lookup.
     pub async fn get_by_identifier(

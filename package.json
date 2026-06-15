@@ -8,6 +8,7 @@
     "clean": "git clean -xdf node_modules",
     "clean:workspaces": "turbo clean",
     "dev": "turbo dev --parallel",
+    "dev:perf": "bun run --filter=@chro/desktop dev:perf",
     "dev:web:perf": "bun run --filter=@chro/desktop dev:web:perf",
     "dev:api": "turbo dev --filter=@chro/api",
     "dev:cli": "turbo dev --filter=@chro/cli",
@@ -57,7 +58,9 @@
   "packageManager": "bun@1.1.26",
   "overrides": {
     "get-stream": "5.2.0",
-    "@excalidraw/mermaid-to-excalidraw": "2.2.2"
+    "@excalidraw/mermaid-to-excalidraw": "2.2.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
   },
   "dependencies": {
     "posthog-js": "^1.360.0",

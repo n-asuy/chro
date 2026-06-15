@@ -2,11 +2,7 @@ import { desktopFetch } from "@/lib/backend-client";
 import { slugOrId } from "@/lib/slug";
 import type { StoredTask } from "@/session/types";
 import { Button } from "@chro/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@chro/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowDownLeft,
@@ -55,6 +51,10 @@ type SessionReferencesPopoverProps = {
   tasksById: Record<string, StoredTask>;
   onOpenTask?: (taskIdOrSlug: string) => void;
   onOpenFile?: (path: string) => void;
+  /** Side the popover opens toward. Use "top" when anchored at the bottom of
+   * the viewport, such as the prompt composer toolbar. */
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "center" | "end";
 };
 
 type ReferenceDirection = "outgoing" | "incoming";
@@ -70,9 +70,7 @@ const fetchTaskContextRefs = async (
 ): Promise<TaskContextRefsResult> => {
   const encoded = encodeURIComponent(taskId);
   const [outgoing, incoming] = await Promise.all([
-    desktopFetch<TaskContextRefsResponse>(
-      `/rpc/tasks/${encoded}/context-refs`,
-    ),
+    desktopFetch<TaskContextRefsResponse>(`/rpc/tasks/${encoded}/context-refs`),
     desktopFetch<TaskContextRefsResponse>(
       `/rpc/tasks/${encoded}/referenced-by`,
     ),
@@ -115,6 +113,8 @@ export function SessionReferencesPopover({
   tasksById,
   onOpenTask,
   onOpenFile,
+  side = "bottom",
+  align = "end",
 }: SessionReferencesPopoverProps) {
   const [open, setOpen] = useState(false);
   const refsQuery = useQuery({
@@ -132,7 +132,8 @@ export function SessionReferencesPopover({
   }, [open, refetch, taskId]);
 
   const refs = refsQuery.data;
-  const totalCount = (refs?.outgoing.length ?? 0) + (refs?.incoming.length ?? 0);
+  const totalCount =
+    (refs?.outgoing.length ?? 0) + (refs?.incoming.length ?? 0);
   const isLoading = refsQuery.isLoading || refsQuery.isFetching;
   const openTask = onOpenTask
     ? (taskIdOrSlug: string) => {
@@ -155,11 +156,11 @@ export function SessionReferencesPopover({
         <Button
           type="button"
           size="sm"
-          variant="outline"
+          variant="ghost"
           aria-label="Open task references"
-          className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
+          className="inline-flex h-9 items-center gap-1.5 rounded-[4px] px-2 text-xs font-medium text-muted-foreground transition hover:!bg-muted/40 hover:!text-primary"
         >
-          <Link2 className="h-3.5 w-3.5" />
+          <Link2 className="h-4 w-4" />
           <span>Refs</span>
           <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
             {isLoading ? (
@@ -171,9 +172,10 @@ export function SessionReferencesPopover({
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        align="end"
+        side={side}
+        align={align}
         sideOffset={8}
-        className="w-[360px] rounded-md border border-border bg-popover p-0 shadow-lg"
+        className="w-[360px] rounded-xl border border-border bg-popover p-0 shadow-sm"
       >
         <div className="flex items-center justify-between border-b border-border px-3 py-2">
           <div className="flex items-center gap-2 text-[12px] font-medium text-foreground">
@@ -186,34 +188,37 @@ export function SessionReferencesPopover({
         </div>
         <div className="max-h-[360px] overflow-y-auto p-2">
           {refsQuery.isError ? (
-            <div className="px-2 py-6 text-center text-[12px] text-destructive">
+            <div className="px-2 py-3 text-center text-[12px] text-destructive">
               Failed to load references.
             </div>
           ) : isLoading && !refs ? (
-            <div className="flex items-center justify-center gap-2 px-2 py-6 text-[12px] text-muted-foreground">
+            <div className="flex items-center justify-center gap-2 px-2 py-3 text-[12px] text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Loading references</span>
             </div>
+          ) : totalCount === 0 ? (
+            <div className="px-2 py-2 text-center text-[12px] text-muted-foreground">
+              No saved references yet.
+            </div>
           ) : (
             <>
-              <ReferenceSection
-                direction="outgoing"
-                refs={refs?.outgoing ?? []}
-                tasksById={tasksById}
-                onOpenTask={openTask}
-                onOpenFile={openFile}
-              />
-              <ReferenceSection
-                direction="incoming"
-                refs={refs?.incoming ?? []}
-                tasksById={tasksById}
-                onOpenTask={openTask}
-                onOpenFile={openFile}
-              />
-              {totalCount === 0 ? (
-                <div className="px-2 py-6 text-center text-[12px] text-muted-foreground">
-                  No saved references yet.
-                </div>
+              {refs && refs.outgoing.length > 0 ? (
+                <ReferenceSection
+                  direction="outgoing"
+                  refs={refs.outgoing}
+                  tasksById={tasksById}
+                  onOpenTask={openTask}
+                  onOpenFile={openFile}
+                />
+              ) : null}
+              {refs && refs.incoming.length > 0 ? (
+                <ReferenceSection
+                  direction="incoming"
+                  refs={refs.incoming}
+                  tasksById={tasksById}
+                  onOpenTask={openTask}
+                  onOpenFile={openFile}
+                />
               ) : null}
             </>
           )}
@@ -245,24 +250,18 @@ function ReferenceSection({
         <Icon className="h-3 w-3" />
         <span>{title}</span>
       </div>
-      {refs.length === 0 ? (
-        <div className="px-1.5 py-1.5 text-[12px] text-muted-foreground">
-          None
-        </div>
-      ) : (
-        <div className="space-y-1">
-          {refs.map((ref) => (
-            <ReferenceRow
-              key={ref.id}
-              direction={direction}
-              refItem={ref}
-              tasksById={tasksById}
-              onOpenTask={onOpenTask}
-              onOpenFile={onOpenFile}
-            />
-          ))}
-        </div>
-      )}
+      <div className="space-y-1">
+        {refs.map((ref) => (
+          <ReferenceRow
+            key={ref.id}
+            direction={direction}
+            refItem={ref}
+            tasksById={tasksById}
+            onOpenTask={onOpenTask}
+            onOpenFile={onOpenFile}
+          />
+        ))}
+      </div>
     </section>
   );
 }
@@ -316,8 +315,8 @@ function ReferenceRow({
   );
 
   const rowClassName = cn(
-    "group/ref flex w-full items-center gap-2 rounded-[3px] px-2 py-1.5 text-left",
-    canOpen ? "cursor-pointer hover:bg-muted/60" : "cursor-default opacity-80",
+    "group/ref flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left",
+    canOpen ? "cursor-pointer hover:bg-muted" : "cursor-default opacity-80",
   );
   const content = (
     <>

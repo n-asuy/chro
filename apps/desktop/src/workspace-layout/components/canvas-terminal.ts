@@ -43,10 +43,24 @@ const FLAG_DIM = 0b0000_0000_1000_0000;
 const FLAG_HIDDEN = 0b0000_0001_0000_0000;
 const FLAG_STRIKEOUT = 0b0000_0010_0000_0000;
 
-const FONT_FAMILY =
+export const DEFAULT_FONT_FAMILY =
   '"JetBrains Mono", "Menlo", "Cascadia Mono", "Consolas", "Liberation Mono", monospace';
-const FONT_SIZE = 13;
-const LINE_HEIGHT = 1.2;
+const DEFAULT_FONT_SIZE = 13;
+const DEFAULT_LINE_HEIGHT = 1.2;
+
+/** Renderer-facing typography. `fontFamily` is a ready-to-use CSS font stack
+ * (callers resolve a `null`/empty user value to {@link DEFAULT_FONT_FAMILY}). */
+export interface TerminalTypography {
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+}
+
+export const DEFAULT_TYPOGRAPHY: TerminalTypography = {
+  fontFamily: DEFAULT_FONT_FAMILY,
+  fontSize: DEFAULT_FONT_SIZE,
+  lineHeight: DEFAULT_LINE_HEIGHT,
+};
 
 // 16-color ANSI palette (matches the previous xterm theme so the look is
 // unchanged). Index 0..15 = standard + bright. Specials resolve via THEME.
@@ -224,6 +238,9 @@ export class CanvasTerminal {
 
   private cellWidth = 8;
   private cellHeight = 16;
+  private fontFamily = DEFAULT_FONT_FAMILY;
+  private fontSize = DEFAULT_FONT_SIZE;
+  private lineHeight = DEFAULT_LINE_HEIGHT;
   private snapshot: TerminalSnapshot | null = null;
   private focused = false;
   // Active text selection in viewport coordinates, and whether a drag is in
@@ -243,8 +260,14 @@ export class CanvasTerminal {
   private reportedCols = 0;
   private reportedRows = 0;
 
-  constructor(callbacks: CanvasTerminalCallbacks) {
+  constructor(
+    callbacks: CanvasTerminalCallbacks,
+    typography: TerminalTypography = DEFAULT_TYPOGRAPHY,
+  ) {
     this.callbacks = callbacks;
+    this.fontFamily = typography.fontFamily;
+    this.fontSize = typography.fontSize;
+    this.lineHeight = typography.lineHeight;
     this.canvas = document.createElement("canvas");
     this.canvas.tabIndex = 0;
     this.canvas.style.display = "block";
@@ -315,6 +338,27 @@ export class CanvasTerminal {
     this.scheduleRender();
   }
 
+  /** Apply new typography. Re-measures the cell and reflows the grid so the
+   * backend PTY follows the new column/row count. */
+  setTypography(typography: TerminalTypography): void {
+    if (
+      this.fontFamily === typography.fontFamily &&
+      this.fontSize === typography.fontSize &&
+      this.lineHeight === typography.lineHeight
+    ) {
+      return;
+    }
+    this.fontFamily = typography.fontFamily;
+    this.fontSize = typography.fontSize;
+    this.lineHeight = typography.lineHeight;
+    if (this.container) {
+      this.syncToContainer();
+    } else {
+      this.measureCell();
+      this.scheduleRender();
+    }
+  }
+
   dispose(): void {
     this.unmount();
     // Drag listeners live on `window` while a selection is in progress, and the
@@ -329,10 +373,10 @@ export class CanvasTerminal {
   // --- internals -----------------------------------------------------------
 
   private measureCell(): void {
-    this.ctx.font = `${FONT_SIZE}px ${FONT_FAMILY}`;
+    this.ctx.font = `${this.fontSize}px ${this.fontFamily}`;
     const advance = this.ctx.measureText("M").width;
     this.cellWidth = Math.max(1, Math.round(advance));
-    this.cellHeight = Math.max(1, Math.ceil(FONT_SIZE * LINE_HEIGHT));
+    this.cellHeight = Math.max(1, Math.ceil(this.fontSize * this.lineHeight));
   }
 
   /** Resize the backing store to the container and recompute the grid. */
@@ -377,7 +421,7 @@ export class CanvasTerminal {
     if (!snapshot) return;
 
     ctx.textBaseline = "top";
-    const baseFont = `${FONT_SIZE}px ${FONT_FAMILY}`;
+    const baseFont = `${this.fontSize}px ${this.fontFamily}`;
 
     for (let row = 0; row < snapshot.lines.length; row++) {
       const cells = snapshot.lines[row];
@@ -466,7 +510,7 @@ export class CanvasTerminal {
     ctx.fillRect(x, y, this.cellWidth, this.cellHeight);
     const cell = snapshot.lines[cursor.line]?.[cursor.col];
     if (cell?.c && cell.c !== " ") {
-      ctx.font = `${FONT_SIZE}px ${FONT_FAMILY}`;
+      ctx.font = `${this.fontSize}px ${this.fontFamily}`;
       ctx.fillStyle = THEME.background;
       ctx.fillText(cell.c, x, y);
     }

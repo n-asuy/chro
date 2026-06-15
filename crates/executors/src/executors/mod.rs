@@ -25,6 +25,7 @@ use crate::{
     env::ExecutionEnv,
     executors::{claude::ClaudeCode, codex::Codex},
     mcp_config::McpConfig,
+    process::ExecutionProcess,
     profile::ExecutorConfig,
 };
 
@@ -176,7 +177,7 @@ pub type CancellationToken = tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct SpawnedChild {
-    pub child: AsyncGroupChild,
+    pub child: ExecutionProcess,
     pub exit_signal: Option<ExecutorExitSignal>,
     pub cancel: Option<CancellationToken>,
 }
@@ -184,7 +185,7 @@ pub struct SpawnedChild {
 impl From<AsyncGroupChild> for SpawnedChild {
     fn from(child: AsyncGroupChild) -> Self {
         Self {
-            child,
+            child: ExecutionProcess::Group(child),
             exit_signal: None,
             cancel: None,
         }

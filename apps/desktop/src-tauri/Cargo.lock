@@ -488,12 +488,15 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chro-desktop"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "dirs 5.0.1",
  "fontdb",
+ "mac-notification-sys",
+ "objc2",
+ "objc2-foundation",
  "once_cell",
  "resvg",
  "serde",

@@ -5,7 +5,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use config::{AppTheme, EditorConfig, LanguagePreference, DEFAULT_MERGE_COMMIT_TEMPLATE};
+use config::{
+    AppTheme, AppearanceConfig, EditorConfig, LanguagePreference, NotificationConfig,
+    TerminalConfig, DEFAULT_MERGE_COMMIT_TEMPLATE,
+};
 use executors::{
     anthropic_model_presets, check_mcp_status, detect_claude_version, get_auth_status_all,
     get_install_status_all, install_tool, load_mcp_config, save_mcp_config, trigger_auth_login,
@@ -25,6 +28,18 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/preferences/editor",
             get(get_editor_config).put(update_editor_config),
+        )
+        .route(
+            "/preferences/appearance",
+            get(get_appearance_config).put(update_appearance_config),
+        )
+        .route(
+            "/preferences/terminal",
+            get(get_terminal_config).put(update_terminal_config),
+        )
+        .route(
+            "/preferences/notifications",
+            get(get_notification_config).put(update_notification_config),
         )
         .route(
             "/preferences/merge",
@@ -133,8 +148,6 @@ struct UpdateEditorConfigRequest {
     indent_with_spaces: Option<bool>,
     #[serde(default)]
     vim_mode: Option<bool>,
-    #[serde(default)]
-    theme: Option<AppTheme>,
 }
 
 async fn get_editor_config(
@@ -177,13 +190,149 @@ async fn update_editor_config(
             if let Some(v) = payload.vim_mode {
                 config.editor.vim_mode = v;
             }
-            if let Some(v) = payload.theme {
-                config.editor.theme = v;
-            }
         })
         .await?;
     Ok(Json(EditorConfigEnvelope {
         editor: updated.editor,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct AppearanceConfigEnvelope {
+    appearance: AppearanceConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAppearanceConfigRequest {
+    #[serde(default)]
+    theme: Option<AppTheme>,
+}
+
+async fn get_appearance_config(
+    State(state): State<AppState>,
+) -> Result<Json<AppearanceConfigEnvelope>, ApiError> {
+    let config = state.runtime().current_config().await;
+    Ok(Json(AppearanceConfigEnvelope {
+        appearance: config.appearance,
+    }))
+}
+
+async fn update_appearance_config(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateAppearanceConfigRequest>,
+) -> Result<Json<AppearanceConfigEnvelope>, ApiError> {
+    let updated = state
+        .runtime()
+        .update_config(|config| {
+            if let Some(v) = payload.theme {
+                config.appearance.theme = v;
+            }
+        })
+        .await?;
+    Ok(Json(AppearanceConfigEnvelope {
+        appearance: updated.appearance,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct TerminalConfigEnvelope {
+    terminal: TerminalConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTerminalConfigRequest {
+    #[serde(default)]
+    font_family: Option<Option<String>>,
+    #[serde(default)]
+    font_size: Option<u8>,
+    #[serde(default)]
+    line_height: Option<f32>,
+}
+
+async fn get_terminal_config(
+    State(state): State<AppState>,
+) -> Result<Json<TerminalConfigEnvelope>, ApiError> {
+    let config = state.runtime().current_config().await;
+    Ok(Json(TerminalConfigEnvelope {
+        terminal: config.terminal,
+    }))
+}
+
+async fn update_terminal_config(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateTerminalConfigRequest>,
+) -> Result<Json<TerminalConfigEnvelope>, ApiError> {
+    let updated = state
+        .runtime()
+        .update_config(|config| {
+            if let Some(v) = payload.font_family {
+                config.terminal.font_family =
+                    v.and_then(|name| {
+                        let trimmed = name.trim().to_string();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        }
+                    });
+            }
+            if let Some(v) = payload.font_size {
+                config.terminal.font_size = v.clamp(8, 32);
+            }
+            if let Some(v) = payload.line_height {
+                config.terminal.line_height = v.clamp(1.0, 3.0);
+            }
+        })
+        .await?;
+    Ok(Json(TerminalConfigEnvelope {
+        terminal: updated.terminal,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct NotificationConfigEnvelope {
+    notifications: NotificationConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateNotificationConfigRequest {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    on_task_complete: Option<bool>,
+    #[serde(default)]
+    on_input_needed: Option<bool>,
+}
+
+async fn get_notification_config(
+    State(state): State<AppState>,
+) -> Result<Json<NotificationConfigEnvelope>, ApiError> {
+    let config = state.runtime().current_config().await;
+    Ok(Json(NotificationConfigEnvelope {
+        notifications: config.notifications,
+    }))
+}
+
+async fn update_notification_config(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateNotificationConfigRequest>,
+) -> Result<Json<NotificationConfigEnvelope>, ApiError> {
+    let updated = state
+        .runtime()
+        .update_config(|config| {
+            if let Some(v) = payload.enabled {
+                config.notifications.enabled = v;
+            }
+            if let Some(v) = payload.on_task_complete {
+                config.notifications.on_task_complete = v;
+            }
+            if let Some(v) = payload.on_input_needed {
+                config.notifications.on_input_needed = v;
+            }
+        })
+        .await?;
+    Ok(Json(NotificationConfigEnvelope {
+        notifications: updated.notifications,
     }))
 }
 

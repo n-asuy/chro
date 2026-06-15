@@ -19,6 +19,7 @@ mod context_refs;
 mod developer;
 mod events;
 mod filesystem;
+mod flags;
 mod git;
 mod images;
 mod merges;
@@ -46,6 +47,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(config::router())
         .merge(events::router())
         .merge(developer::router())
+        .merge(flags::router())
         .merge(images::router())
         .merge(merges::router())
         .merge(git::router())

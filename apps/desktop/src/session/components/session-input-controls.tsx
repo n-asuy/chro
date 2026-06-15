@@ -1,4 +1,5 @@
 import type { TranslationFunction } from "@/i18n";
+import type { BaseCodingAgent, ReasoningEffort } from "@/lib/executor-client";
 import { Button } from "@chro/ui/button";
 import {
   Tooltip,
@@ -13,13 +14,14 @@ import {
   getPromptEditorScopeState,
   usePromptEditorStore,
 } from "../state/prompt-editor-store";
-import type { PendingUserQuestions } from "../state/user-question-store";
 import type { StoredTask } from "../types";
 import {
-  AgentUserQuestion,
-  type AgentUserQuestionHandle,
-} from "./agent-user-question";
-import { AtPopover, type AtPopoverHandle } from "./prompt-editor/at-popover";
+  AtPopover,
+  type AtPopoverHandle,
+  type ModelOption,
+  type ReasoningOption,
+  type RuntimeOption,
+} from "./prompt-editor/at-popover";
 import { PromptEditor } from "./prompt-editor/prompt-editor";
 import {
   SkillPopover,
@@ -50,6 +52,21 @@ export function PromptEditorWithPopover({
   onDrop,
   onPaste,
   t,
+  runtimeValue,
+  runtimeLabel,
+  runtimeOptions,
+  onSelectRuntime,
+  modelValue,
+  modelLabel,
+  modelOptions,
+  onSelectModel,
+  reasoningValue,
+  reasoningLabel,
+  reasoningOptions,
+  onSelectReasoning,
+  showReasoning,
+  runtimeLocked,
+  modelLocked,
 }: {
   editorHandle: PromptEditorHandle;
   atPopoverRef: React.RefObject<AtPopoverHandle | null>;
@@ -63,6 +80,21 @@ export function PromptEditorWithPopover({
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
   t: TranslationFunction;
+  runtimeValue: BaseCodingAgent | null;
+  runtimeLabel: string | null;
+  runtimeOptions: RuntimeOption[];
+  onSelectRuntime: (value: BaseCodingAgent) => void;
+  modelValue: string | null;
+  modelLabel: string | null;
+  modelOptions: ModelOption[];
+  onSelectModel: (value: string) => void;
+  reasoningValue: ReasoningEffort | null;
+  reasoningLabel: string | null;
+  reasoningOptions: ReasoningOption[];
+  onSelectReasoning: (value: ReasoningEffort) => void;
+  showReasoning: boolean;
+  runtimeLocked: boolean;
+  modelLocked: boolean;
 }) {
   const popover = usePromptEditorStore(
     (s) => getPromptEditorScopeState(s, editorHandle.scopeId).popover,
@@ -112,6 +144,30 @@ export function PromptEditorWithPopover({
         onClose={() => setPopover(editorHandle.scopeId, null)}
         activeIndex={atActiveIndex}
         onActiveIndexChange={onActiveIndexChange}
+        runtimeValue={runtimeValue}
+        runtimeLabel={runtimeLabel}
+        runtimeOptions={runtimeOptions}
+        onSelectRuntime={(value) => {
+          editorHandle.removeActiveTrigger({ keepPopoverOpen: true });
+          onSelectRuntime(value);
+        }}
+        modelValue={modelValue}
+        modelLabel={modelLabel}
+        modelOptions={modelOptions}
+        onSelectModel={(value) => {
+          editorHandle.removeActiveTrigger({ keepPopoverOpen: true });
+          onSelectModel(value);
+        }}
+        reasoningValue={reasoningValue}
+        reasoningLabel={reasoningLabel}
+        reasoningOptions={reasoningOptions}
+        onSelectReasoning={(value) => {
+          editorHandle.removeActiveTrigger({ keepPopoverOpen: true });
+          onSelectReasoning(value);
+        }}
+        showReasoning={showReasoning}
+        runtimeLocked={runtimeLocked}
+        modelLocked={modelLocked}
       />
       <PromptEditor
         handle={editorHandle}
@@ -272,33 +328,5 @@ function PromptQueueIndicator({
         ))}
       </div>
     </div>
-  );
-}
-
-export function AgentUserQuestionWithEditorState({
-  editorHandle,
-  questionRef,
-  pendingQuestions,
-  onAnswer,
-  onSkip,
-}: {
-  editorHandle: PromptEditorHandle;
-  questionRef: React.RefObject<AgentUserQuestionHandle | null>;
-  pendingQuestions: PendingUserQuestions;
-  onAnswer: (answers: Record<string, string>) => void;
-  onSkip: () => void;
-}) {
-  const hasText = usePromptEditorStore(
-    (s) => getPromptEditorScopeState(s, editorHandle.scopeId).hasText,
-  );
-
-  return (
-    <AgentUserQuestion
-      ref={questionRef}
-      pendingQuestions={pendingQuestions}
-      onAnswer={onAnswer}
-      onSkip={onSkip}
-      hasCustomText={hasText}
-    />
   );
 }

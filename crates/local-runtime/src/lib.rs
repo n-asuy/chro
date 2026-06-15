@@ -1,11 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
+    sync::Arc,
 };
 
 use approvals::Approvals;
@@ -24,10 +20,8 @@ use git::GitService;
 use image::ImageService;
 use log_types::LogEntry;
 use runtime::{container::ContainerService, MsgStoreMap, Runtime, RuntimeError, RuntimeOptions};
-use tokio::{
-    sync::{broadcast, RwLock},
-    task::JoinHandle,
-};
+use tokio::sync::RwLock;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 use uuid::Uuid;
 use worktree::WorktreeManager;
@@ -56,8 +50,6 @@ pub enum WorkspaceFileEventType {
 }
 
 const NORMALIZED_LOG_CACHE_CAPACITY: usize = 128;
-const WORKSPACE_FILE_EVENT_CHANNEL_CAPACITY: usize = 256;
-const WORKSPACE_WATCHER_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct NormalizedLogReplayCache {
@@ -92,172 +84,6 @@ impl NormalizedLogReplayCache {
     }
 }
 
-struct WorkspaceWatcherEntry {
-    sender: broadcast::Sender<WorkspaceFileEvent>,
-    task: JoinHandle<()>,
-    watcher_id: u64,
-}
-
-#[derive(Clone, Default)]
-struct WorkspaceWatcherService {
-    watchers: Arc<Mutex<HashMap<PathBuf, WorkspaceWatcherEntry>>>,
-    next_watcher_id: Arc<AtomicU64>,
-}
-
-impl WorkspaceWatcherService {
-    fn subscribe(
-        &self,
-        workspace_path: PathBuf,
-    ) -> Result<broadcast::Receiver<WorkspaceFileEvent>, RuntimeError> {
-        let workspace_path = canonicalize_workspace_path(&workspace_path);
-
-        if let Some(receiver) = self.subscribe_existing(&workspace_path) {
-            return Ok(receiver);
-        }
-
-        let components = filesystem::watch_directory(workspace_path.clone()).map_err(|err| {
-            RuntimeError::Other(anyhow::anyhow!(
-                "failed to start workspace watcher for {}: {err}",
-                workspace_path.display()
-            ))
-        })?;
-
-        let mut watchers = self.watchers.lock().unwrap();
-        self.remove_stale_locked(&mut watchers, &workspace_path);
-
-        if let Some(existing) = watchers.get(&workspace_path) {
-            return Ok(existing.sender.subscribe());
-        }
-
-        let (sender, _) = broadcast::channel(WORKSPACE_FILE_EVENT_CHANNEL_CAPACITY);
-        let receiver = sender.subscribe();
-        let watcher_id = self.next_watcher_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let task = self.spawn_task(
-            workspace_path.clone(),
-            watcher_id,
-            sender.clone(),
-            components,
-        );
-
-        watchers.insert(
-            workspace_path,
-            WorkspaceWatcherEntry {
-                sender,
-                task,
-                watcher_id,
-            },
-        );
-
-        Ok(receiver)
-    }
-
-    fn subscribe_existing(
-        &self,
-        workspace_path: &Path,
-    ) -> Option<broadcast::Receiver<WorkspaceFileEvent>> {
-        let mut watchers = self.watchers.lock().unwrap();
-        self.remove_stale_locked(&mut watchers, workspace_path);
-        watchers
-            .get(workspace_path)
-            .map(|entry| entry.sender.subscribe())
-    }
-
-    fn remove_if_matching(&self, workspace_path: &Path, watcher_id: u64) {
-        let mut watchers = self.watchers.lock().unwrap();
-        if watchers
-            .get(workspace_path)
-            .is_some_and(|entry| entry.watcher_id == watcher_id)
-        {
-            watchers.remove(workspace_path);
-        }
-    }
-
-    fn remove_if_idle(&self, workspace_path: &Path, watcher_id: u64) -> bool {
-        let mut watchers = self.watchers.lock().unwrap();
-        let should_remove = watchers.get(workspace_path).is_some_and(|entry| {
-            entry.watcher_id == watcher_id && entry.sender.receiver_count() == 0
-        });
-
-        if should_remove {
-            watchers.remove(workspace_path);
-        }
-
-        should_remove
-    }
-
-    fn remove_stale_locked(
-        &self,
-        watchers: &mut HashMap<PathBuf, WorkspaceWatcherEntry>,
-        workspace_path: &Path,
-    ) {
-        let should_remove = watchers
-            .get(workspace_path)
-            .is_some_and(|entry| entry.task.is_finished());
-        if should_remove {
-            watchers.remove(workspace_path);
-        }
-    }
-
-    fn spawn_task(
-        &self,
-        workspace_path: PathBuf,
-        watcher_id: u64,
-        sender: broadcast::Sender<WorkspaceFileEvent>,
-        components: filesystem::WatcherComponents,
-    ) -> JoinHandle<()> {
-        use futures::StreamExt;
-
-        let this = self.clone();
-
-        tokio::spawn(async move {
-            let (watcher, mut rx, canonical_root) = components;
-            let _watcher = watcher;
-            let mut idle_check = tokio::time::interval(WORKSPACE_WATCHER_IDLE_POLL_INTERVAL);
-            idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    result = rx.next() => {
-                        let Some(result) = result else {
-                            break;
-                        };
-
-                        let events = match result {
-                            Ok(evts) => evts,
-                            Err(errs) => {
-                                tracing::warn!(?errs, workspace = %workspace_path.display(), "workspace watcher errors");
-                                continue;
-                            }
-                        };
-
-                        for event in events {
-                            if let Some(file_event) = convert_debounced_event(&event, &canonical_root) {
-                                let _ = sender.send(file_event);
-                            }
-                        }
-                    }
-                    _ = idle_check.tick() => {
-                        if this.remove_if_idle(&workspace_path, watcher_id) {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            this.remove_if_matching(&workspace_path, watcher_id);
-        })
-    }
-
-    #[cfg(test)]
-    fn watcher_count(&self) -> usize {
-        self.watchers.lock().unwrap().len()
-    }
-}
-
-fn canonicalize_workspace_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 #[derive(Clone)]
 pub struct LocalRuntime {
     user_id: String,
@@ -274,7 +100,7 @@ pub struct LocalRuntime {
     file_search_cache: Arc<FileSearchCache>,
     normalized_log_cache: Arc<RwLock<NormalizedLogReplayCache>>,
     container: LocalContainerService,
-    workspace_watchers: WorkspaceWatcherService,
+    worktree_watchers: filesystem::WorktreeWatcherService,
 }
 
 impl LocalRuntime {
@@ -406,6 +232,7 @@ impl Runtime for LocalRuntime {
         let normalized_log_cache = Arc::new(RwLock::new(NormalizedLogReplayCache::default()));
         let events = EventService::new(db.clone(), event_resources);
         events.hydrate().await?;
+        let worktree_watchers = filesystem::WorktreeWatcherService::default();
         let container = LocalContainerService::new(
             db.clone(),
             git.clone(),
@@ -413,6 +240,7 @@ impl Runtime for LocalRuntime {
             config.clone(),
             approvals.clone(),
             logs_dir,
+            worktree_watchers.clone(),
         );
         let runtime = Self {
             user_id,
@@ -429,7 +257,7 @@ impl Runtime for LocalRuntime {
             file_search_cache,
             normalized_log_cache,
             container,
-            workspace_watchers: WorkspaceWatcherService::default(),
+            worktree_watchers,
         };
 
         runtime.start_background_housekeeping();
@@ -660,6 +488,13 @@ impl Runtime for LocalRuntime {
     async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError> {
         self.task_transcript_markdown(task_id).await
     }
+
+    async fn task_last_exchange(
+        &self,
+        task_id: Uuid,
+    ) -> Result<runtime::LastExchange, RuntimeError> {
+        self.task_last_exchange(task_id).await
+    }
 }
 
 impl LocalRuntime {
@@ -699,124 +534,46 @@ impl LocalRuntime {
         self.config.read().await.clone()
     }
 
-    /// Subscribe to workspace file change events.
+    /// Subscribe to workspace file change events, mapped into the workspace-tree
+    /// shape (dotfiles hidden). Backed by the shared per-worktree watcher.
     pub fn subscribe_workspace_file_events(
         &self,
         workspace_path: PathBuf,
-    ) -> Result<broadcast::Receiver<WorkspaceFileEvent>, RuntimeError> {
-        self.workspace_watchers.subscribe(workspace_path)
+    ) -> BoxStream<'static, WorkspaceFileEvent> {
+        let receiver = self.worktree_watchers.subscribe(workspace_path);
+        BroadcastStream::new(receiver)
+            .flat_map(|result| {
+                let events = match result {
+                    Ok(batch) => batch
+                        .iter()
+                        .filter_map(convert_worktree_event)
+                        .collect::<Vec<_>>(),
+                    // Lagged: drop this gap; the next change refreshes the tree.
+                    Err(_) => Vec::new(),
+                };
+                stream::iter(events)
+            })
+            .boxed()
     }
 }
 
-fn convert_debounced_event(
-    event: &filesystem::DebouncedEvent,
-    canonical_root: &Path,
-) -> Option<WorkspaceFileEvent> {
-    use notify_debouncer_full::notify::EventKind;
+fn convert_worktree_event(event: &filesystem::WorktreeEvent) -> Option<WorkspaceFileEvent> {
+    use filesystem::WorktreeEventKind;
 
-    let path = event.paths.first()?;
-    let relative_path = path
-        .strip_prefix(canonical_root)
-        .ok()?
-        .to_string_lossy()
-        .replace('\\', "/");
-
-    if relative_path.starts_with('.') || relative_path.contains("/.") {
+    // Hide dotfiles and dot-directories from the workspace tree.
+    if event.relative_path.starts_with('.') || event.relative_path.contains("/.") {
         return None;
     }
 
-    let is_directory = path.is_dir();
-
-    let event_type = match &event.kind {
-        EventKind::Create(_) => WorkspaceFileEventType::Created,
-        EventKind::Modify(_) => WorkspaceFileEventType::Modified,
-        EventKind::Remove(_) => WorkspaceFileEventType::Deleted,
-        EventKind::Any => return None,
-        EventKind::Access(_) => return None,
-        EventKind::Other => return None,
+    let event_type = match event.kind {
+        WorktreeEventKind::Created => WorkspaceFileEventType::Created,
+        WorktreeEventKind::Modified => WorkspaceFileEventType::Modified,
+        WorktreeEventKind::Deleted => WorkspaceFileEventType::Deleted,
     };
 
     Some(WorkspaceFileEvent {
         event_type,
-        relative_path,
-        is_directory,
+        relative_path: event.relative_path.clone(),
+        is_directory: event.is_dir,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-    use tokio::time::{sleep, timeout, Duration, Instant};
-
-    async fn wait_for_watcher_count(service: &WorkspaceWatcherService, expected: usize) {
-        let deadline = Instant::now() + Duration::from_secs(3);
-
-        loop {
-            if service.watcher_count() == expected {
-                return;
-            }
-
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for watcher count {expected}, actual {}",
-                service.watcher_count()
-            );
-
-            sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn workspace_watchers_are_reused_and_cleaned_up() {
-        let service = WorkspaceWatcherService::default();
-        let dir = tempdir().unwrap();
-
-        let rx1 = service.subscribe(dir.path().to_path_buf()).unwrap();
-        let rx2 = service.subscribe(dir.path().to_path_buf()).unwrap();
-
-        wait_for_watcher_count(&service, 1).await;
-
-        drop(rx1);
-        drop(rx2);
-
-        wait_for_watcher_count(&service, 0).await;
-    }
-
-    #[tokio::test]
-    async fn workspace_watchers_only_emit_events_for_their_workspace() {
-        let service = WorkspaceWatcherService::default();
-        let dir1 = tempdir().unwrap();
-        let dir2 = tempdir().unwrap();
-
-        let mut rx1 = service.subscribe(dir1.path().to_path_buf()).unwrap();
-        let mut rx2 = service.subscribe(dir2.path().to_path_buf()).unwrap();
-
-        wait_for_watcher_count(&service, 2).await;
-        sleep(Duration::from_millis(100)).await;
-
-        std::fs::write(dir1.path().join("alpha.txt"), "hello").unwrap();
-
-        let event = timeout(Duration::from_secs(3), rx1.recv())
-            .await
-            .expect("workspace 1 should receive a file event")
-            .expect("workspace 1 receiver should stay open");
-        assert_eq!(event.relative_path, "alpha.txt");
-        assert!(matches!(
-            event.event_type,
-            WorkspaceFileEventType::Created | WorkspaceFileEventType::Modified
-        ));
-
-        assert!(
-            timeout(Duration::from_millis(300), rx2.recv())
-                .await
-                .is_err(),
-            "workspace 2 unexpectedly received an event from workspace 1"
-        );
-
-        drop(rx1);
-        drop(rx2);
-
-        wait_for_watcher_count(&service, 0).await;
-    }
 }

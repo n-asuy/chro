@@ -1,7 +1,7 @@
 /**
  * Builds a file tree containing ONLY changed files, for the session sandbox
- * view. Unlike the full worktree listing, this mirrors Orca: when you look at
- * a task run you see just what the agent touched, nested under their folders.
+ * view. Unlike the full worktree listing, this is session-scoped: when you look
+ * at a task run you see just what the agent touched, nested under their folders.
  *
  * The session tree is intentionally undecorated (no diff colors/badges) — that
  * review belongs to the branch-scoped Source Control panel — so only the paths

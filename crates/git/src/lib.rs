@@ -566,14 +566,19 @@ impl GitService {
         Ok(())
     }
 
+    /// Commits `(ahead, behind)` of `branch_name` relative to `base_branch_name`.
+    ///
+    /// Computed with a single killable `git rev-list --left-right --count` rather
+    /// than a libgit2 revwalk: this endpoint is polled for every visible run, and
+    /// a libgit2 revwalk on a large history runs on a blocking thread that cannot
+    /// be cancelled. The subprocess is timeout-bounded.
     pub fn get_branch_status(
         &self,
         repo_path: impl AsRef<Path>,
         branch_name: &str,
         base_branch_name: &str,
     ) -> Result<(usize, usize), GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        self.branch_status_for_repo(&repo, branch_name, base_branch_name)
+        Ok(GitCli::new().ahead_behind(repo_path.as_ref(), branch_name, base_branch_name)?)
     }
 
     pub fn get_base_commit(
@@ -590,37 +595,6 @@ impl GitService {
             base_branch.get().peel_to_commit()?.id(),
         )?;
         Ok(CommitId::new(oid))
-    }
-
-    fn branch_status_for_repo(
-        &self,
-        repo: &Repository,
-        branch_name: &str,
-        base_branch_name: &str,
-    ) -> Result<(usize, usize), GitServiceError> {
-        let branch = self.find_branch(repo, branch_name)?;
-        let base_branch = self.find_branch(repo, base_branch_name)?;
-        self.get_branch_status_inner(
-            repo,
-            &branch.into_reference(),
-            &base_branch.into_reference(),
-        )
-    }
-
-    fn get_branch_status_inner(
-        &self,
-        repo: &Repository,
-        branch_ref: &Reference,
-        base_branch_ref: &Reference,
-    ) -> Result<(usize, usize), GitServiceError> {
-        let branch_target = branch_ref.target().ok_or_else(|| {
-            GitServiceError::BranchNotFound(branch_ref.name().unwrap_or("branch").to_string())
-        })?;
-        let base_target = base_branch_ref.target().ok_or_else(|| {
-            GitServiceError::BranchNotFound(base_branch_ref.name().unwrap_or("branch").to_string())
-        })?;
-        let (ahead, behind) = repo.graph_ahead_behind(branch_target, base_target)?;
-        Ok((ahead, behind))
     }
 
     fn perform_squash_merge(
@@ -819,91 +793,19 @@ impl GitService {
     }
 
     /// Get the status of the working directory
+    /// Working-tree status for the Source Control panel.
+    ///
+    /// Runs through the killable `git status` subprocess (porcelain, untracked
+    /// dirs not recursed, `GIT_OPTIONAL_LOCKS=0`) rather than a libgit2 status
+    /// scan. libgit2 status refreshes-and-writes the index (taking the index
+    /// lock, contending with concurrent stage/commit) and, with
+    /// `recurse_untracked_dirs`, crawls huge untracked trees — which is how a
+    /// worktree mid-`bun install` produced multi-minute, uncancellable status
+    /// calls that froze every session's git UI. The subprocess is bounded by a
+    /// timeout and can be killed.
     pub fn status(&self, repo_path: impl AsRef<Path>) -> Result<GitStatus, GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        let mut staged = Vec::new();
-        let mut modified = Vec::new();
-        let mut untracked = Vec::new();
-
-        let statuses = repo.statuses(Some(
-            git2::StatusOptions::new()
-                .include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .include_ignored(false),
-        ))?;
-
-        for entry in statuses.iter() {
-            let Some(path_str) = entry.path() else {
-                continue;
-            };
-            if path_str.trim().is_empty() {
-                continue;
-            }
-            let path = path_str.to_string();
-            let status = entry.status();
-
-            if status.is_index_new() {
-                staged.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Added,
-                });
-            } else if status.is_index_modified() {
-                staged.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Modified,
-                });
-            } else if status.is_index_deleted() {
-                staged.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Deleted,
-                });
-            } else if status.is_index_renamed() {
-                staged.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Renamed,
-                });
-            } else if status.is_index_typechange() {
-                staged.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::TypeChange,
-                });
-            }
-
-            if status.is_wt_modified() {
-                modified.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Modified,
-                });
-            } else if status.is_wt_deleted() {
-                modified.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Deleted,
-                });
-            } else if status.is_wt_renamed() {
-                modified.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::Renamed,
-                });
-            } else if status.is_wt_typechange() {
-                modified.push(FileChange {
-                    path: path.clone(),
-                    status: FileChangeStatus::TypeChange,
-                });
-            }
-
-            if status.is_wt_new() {
-                untracked.push(path);
-            }
-        }
-
-        let has_changes = !staged.is_empty() || !modified.is_empty() || !untracked.is_empty();
-
-        Ok(GitStatus {
-            staged,
-            modified,
-            untracked,
-            has_changes,
-        })
+        let raw = GitCli::new().status_porcelain(repo_path.as_ref())?;
+        Ok(parse_porcelain_status(&raw))
     }
 
     pub fn is_worktree_clean(&self, repo_path: &Path) -> Result<bool, GitServiceError> {
@@ -1070,6 +972,73 @@ impl GitService {
         });
 
         Ok(branches)
+    }
+}
+
+/// Parse `git status --porcelain=v1 -z` output into a [`GitStatus`].
+///
+/// Each NUL-separated record is `XY PATH`, where `X` is the index (staged)
+/// state and `Y` the worktree state. Rename/copy records carry their source
+/// path as the following NUL field, which is consumed and ignored. `??` marks
+/// an untracked entry (a directory when untracked dirs are not recursed).
+fn parse_porcelain_status(raw: &str) -> GitStatus {
+    let mut staged = Vec::new();
+    let mut modified = Vec::new();
+    let mut untracked = Vec::new();
+
+    let mut records = raw.split('\0');
+    while let Some(record) = records.next() {
+        // A valid record is at least "XY " followed by a path; the trailing
+        // empty split after the final NUL falls through here.
+        if record.len() < 3 {
+            continue;
+        }
+        let bytes = record.as_bytes();
+        let index = bytes[0] as char;
+        let worktree = bytes[1] as char;
+        let path = record[3..].to_string();
+
+        // Renames/copies append the source path as a separate NUL field.
+        if matches!(index, 'R' | 'C') || matches!(worktree, 'R' | 'C') {
+            let _source = records.next();
+        }
+
+        if index == '?' && worktree == '?' {
+            untracked.push(path);
+            continue;
+        }
+        if let Some(status) = porcelain_change_status(index) {
+            staged.push(FileChange {
+                path: path.clone(),
+                status,
+            });
+        }
+        if let Some(status) = porcelain_change_status(worktree) {
+            modified.push(FileChange { path, status });
+        }
+    }
+
+    let has_changes = !staged.is_empty() || !modified.is_empty() || !untracked.is_empty();
+    GitStatus {
+        staged,
+        modified,
+        untracked,
+        has_changes,
+    }
+}
+
+/// Map a single porcelain status code (index or worktree column) to a
+/// [`FileChangeStatus`]. Returns `None` for unmodified (' ') and untracked
+/// ('?'), which the caller handles separately.
+fn porcelain_change_status(code: char) -> Option<FileChangeStatus> {
+    match code {
+        'A' => Some(FileChangeStatus::Added),
+        'M' => Some(FileChangeStatus::Modified),
+        'D' => Some(FileChangeStatus::Deleted),
+        'R' => Some(FileChangeStatus::Renamed),
+        'C' => Some(FileChangeStatus::Copied),
+        'T' => Some(FileChangeStatus::TypeChange),
+        _ => None,
     }
 }
 
@@ -1376,6 +1345,64 @@ impl GitService {
             repo.set_head_detached(object.id())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod porcelain_tests {
+    use super::*;
+
+    #[test]
+    fn parses_porcelain_z_records() {
+        // `git status --porcelain=v1 -z`: NUL-separated "XY PATH"; renames carry
+        // a trailing NUL-separated source path.
+        let raw = concat!(
+            "A  staged_add.txt\0",
+            " M wt_mod.txt\0",
+            "?? untracked_dir/\0",
+            "R  renamed_new\0renamed_old\0",
+            "MM both.txt\0",
+        );
+        let status = parse_porcelain_status(raw);
+
+        let staged: Vec<_> = status
+            .staged
+            .iter()
+            .map(|c| (c.path.as_str(), c.status))
+            .collect();
+        assert_eq!(
+            staged,
+            vec![
+                ("staged_add.txt", FileChangeStatus::Added),
+                ("renamed_new", FileChangeStatus::Renamed),
+                ("both.txt", FileChangeStatus::Modified),
+            ]
+        );
+
+        let modified: Vec<_> = status
+            .modified
+            .iter()
+            .map(|c| (c.path.as_str(), c.status))
+            .collect();
+        assert_eq!(
+            modified,
+            vec![
+                ("wt_mod.txt", FileChangeStatus::Modified),
+                ("both.txt", FileChangeStatus::Modified),
+            ]
+        );
+
+        assert_eq!(status.untracked, vec!["untracked_dir/".to_string()]);
+        assert!(status.has_changes);
+    }
+
+    #[test]
+    fn parses_clean_worktree() {
+        let status = parse_porcelain_status("");
+        assert!(!status.has_changes);
+        assert!(status.staged.is_empty());
+        assert!(status.modified.is_empty());
+        assert!(status.untracked.is_empty());
     }
 }
 

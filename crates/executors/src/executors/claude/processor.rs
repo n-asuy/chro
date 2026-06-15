@@ -148,6 +148,9 @@ impl ClaudeLogProcessor {
                                     session_id_extracted = true;
                                 }
                             }
+                            if claude_json.is_synthetic_no_response() {
+                                continue;
+                            }
 
                             let patches = processor.normalize_entries(
                                 &claude_json,
@@ -237,6 +240,9 @@ impl ClaudeLogProcessor {
                                         result.push(LogEntry::SessionId(session_id.to_string()));
                                         session_id_emitted = true;
                                     }
+                                }
+                                if claude_json.is_synthetic_no_response() {
+                                    continue;
                                 }
 
                                 let patches = processor.normalize_entries(
@@ -1428,6 +1434,26 @@ mod tests {
         assert!(
             json_patches.is_empty(),
             "non-JSON 'System: status' stderr must not emit a SystemMessage patch"
+        );
+    }
+
+    #[test]
+    fn test_normalize_log_entries_suppresses_synthetic_no_response() {
+        let logs = vec![LogEntry::Stdout(
+            r#"{"type":"assistant","session_id":"s-1","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#
+                .to_string()
+                + "\n",
+        )];
+        let out = ClaudeLogProcessor::normalize_log_entries(&logs, "/tmp");
+        assert!(
+            out.iter()
+                .any(|entry| matches!(entry, LogEntry::SessionId(id) if id == "s-1")),
+            "session id should still be retained for follow-up"
+        );
+        assert!(
+            !out.iter()
+                .any(|entry| matches!(entry, LogEntry::JsonPatch(_))),
+            "synthetic sentinel must not render as assistant output"
         );
     }
 

@@ -37,11 +37,17 @@ fn broadcast_status<R: TauriRuntime>(app: &AppHandle<R>, status: &UpdateStatus) 
 }
 
 fn auto_updater_enabled() -> bool {
-    let Ok(value) = std::env::var("CHRO_ENABLE_AUTO_UPDATER") else {
-        return false;
-    };
-    let normalized = value.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+    // Release builds enable the auto-updater by default. CHRO_ENABLE_AUTO_UPDATER
+    // is an escape hatch: set it to a falsy value (`0`, `false`, `no`, `off`) to
+    // turn the updater off on a packaged build, e.g. for QA. Dev builds never
+    // reach the network path because callers short-circuit on `is_dev()` first.
+    match std::env::var("CHRO_ENABLE_AUTO_UPDATER") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off" | "")
+        }
+        Err(_) => true,
+    }
 }
 
 fn is_dev() -> bool {

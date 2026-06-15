@@ -115,6 +115,8 @@ export function findFocusedTab(layout: PaneLayout): Tab | null {
 function isSameRouteKind(a: TabKind, b: TabKind): boolean {
   if (a.type !== b.type) return false;
   switch (a.type) {
+    case "overview":
+      return b.type === "overview";
     case "session":
       return (
         b.type === "session" &&
@@ -143,11 +145,17 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
       return b.type === "browser" && a.browserId === b.browserId;
     case "cdp-browser":
       return b.type === "cdp-browser" && a.browserId === b.browserId;
+    case "skills":
+      return b.type === "skills";
   }
 }
 
 export function inferKindFromLocation(pathname: string): TabKind | null {
   if (!projectIdFromPathname(pathname)) return null;
+  // /projects/$id (project root) — the project home / overview surface.
+  if (/^\/projects\/[^/]+\/?$/.test(pathname)) {
+    return { type: "overview" };
+  }
   // /projects/$id/session/$taskId/$runId
   const sessionMatch = pathname.match(
     /^\/projects\/[^/]+\/session(?:\/([^/]+))?(?:\/([^/]+))?\/?$/,
@@ -172,6 +180,9 @@ export function inferKindFromLocation(pathname: string): TabKind | null {
   if (pathname.endsWith("/settings")) {
     return { type: "settings" };
   }
+  if (pathname.endsWith("/skills")) {
+    return { type: "skills" };
+  }
   return null;
 }
 
@@ -195,6 +206,8 @@ export function pathFromKind(
   if (!projectIdParam) return null;
   const base = `/projects/${projectIdParam}`;
   switch (kind.type) {
+    case "overview":
+      return base;
     case "session":
       if (!kind.taskId) return `${base}/session/`;
       return kind.runId
@@ -214,5 +227,7 @@ export function pathFromKind(
       return null;
     case "settings":
       return `${base}/settings`;
+    case "skills":
+      return `${base}/skills`;
   }
 }

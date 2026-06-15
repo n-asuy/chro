@@ -17,6 +17,8 @@ pub(crate) enum ApiError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("internal error: {0}")]
+    Internal(String),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
@@ -42,6 +44,10 @@ impl IntoResponse for ApiError {
         match &self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
+            ApiError::Internal(msg) => {
+                error!("internal error: {msg}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            }
             ApiError::Sqlx(err) => {
                 error!("sqlx error: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()

@@ -1,16 +1,7 @@
 import { cn } from "@/lib/cn";
+import type { OpenInIconId } from "../lib/open-in";
 
-export type OpenInIconId =
-  | "cmux"
-  | "cursor"
-  | "file-explorer"
-  | "finder"
-  | "ghostty"
-  | "iterm2"
-  | "powershell"
-  | "terminal"
-  | "vscode"
-  | "zed";
+export type { OpenInIconId };
 
 const iconUrls = {
   cmux: new URL("./open-in-app-icons/cmux.png", import.meta.url).href,

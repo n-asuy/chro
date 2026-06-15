@@ -648,6 +648,8 @@ function clampIndex(index: number, length: number): number {
 
 function defaultTitle(kind: TabKind): string {
   switch (kind.type) {
+    case "overview":
+      return "Home";
     case "session":
       return kind.taskId ? "Session" : "New session";
     case "file":
@@ -664,6 +666,8 @@ function defaultTitle(kind: TabKind): string {
       return "CDP Browser";
     case "settings":
       return "Settings";
+    case "skills":
+      return "Skills";
   }
 }
 

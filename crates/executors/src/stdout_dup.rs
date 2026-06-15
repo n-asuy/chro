@@ -22,12 +22,24 @@ use crate::executors::ExecutorError;
 pub fn create_stdout_pipe_writer<'b>(
     child: &mut AsyncGroupChild,
 ) -> Result<impl AsyncWrite + 'b, ExecutorError> {
+    let (read, write) = create_log_line_pipe()?;
+    child.inner().stdout = Some(read);
+    Ok(write)
+}
+
+/// Create a standalone pipe shaped like a child's stdout: the read end can be
+/// presented to the container as `ChildStdout`, the write end is an async
+/// writer the executor pushes structured log lines into. Used by executors
+/// whose real process has no useful stdout (PTY-hosted agents).
+pub fn create_log_line_pipe()
+-> Result<(tokio::process::ChildStdout, tokio::fs::File), ExecutorError> {
     let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(|e| {
         ExecutorError::Io(std::io::Error::other(format!("Failed to create pipe: {e}")))
     })?;
-    child.inner().stdout = Some(wrap_fd_as_child_stdout(pipe_reader)?);
-
-    wrap_fd_as_tokio_writer(pipe_writer)
+    Ok((
+        wrap_fd_as_child_stdout(pipe_reader)?,
+        wrap_fd_as_tokio_writer(pipe_writer)?,
+    ))
 }
 
 /// Convert os_pipe::PipeReader to tokio::process::ChildStdout
@@ -54,7 +66,7 @@ fn wrap_fd_as_child_stdout(
 /// Convert os_pipe::PipeWriter to a tokio file for async writing
 fn wrap_fd_as_tokio_writer(
     pipe_writer: os_pipe::PipeWriter,
-) -> Result<impl AsyncWrite, ExecutorError> {
+) -> Result<tokio::fs::File, ExecutorError> {
     #[cfg(unix)]
     {
         let raw_fd = pipe_writer.into_raw_fd();
