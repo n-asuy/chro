@@ -9,7 +9,9 @@ use axum::{
     Json, Router,
 };
 use db::models::ProjectRecord;
-use filesystem::{WorkspaceEntry, WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile};
+use filesystem::{
+    MediaEntry, WorkspaceEntry, WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile,
+};
 use runtime::{ProjectFileService, Runtime, RuntimeError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -24,6 +26,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/projects/ensure", post(ensure_project))
         .route("/projects/:project_id", get(get_project))
         .route("/projects/:project_id/entries", get(list_project_entries))
+        .route("/projects/:project_id/media", get(list_project_media))
         .route(
             "/projects/:project_id/file",
             get(read_project_file)
@@ -203,6 +206,64 @@ impl From<WorkspaceFile> for ProjectFileResponse {
     }
 }
 
+/// Query for the gallery media listing. Shared by the project and task-run
+/// media endpoints.
+#[derive(Debug, Deserialize)]
+pub(super) struct MediaQuery {
+    pub(super) limit: Option<usize>,
+}
+
+const DEFAULT_MEDIA_LIMIT: usize = 2000;
+const MAX_MEDIA_LIMIT: usize = 10_000;
+
+/// Clamp a caller-supplied media `limit` into the supported range, defaulting
+/// when absent. Shared so both media endpoints cap identically.
+pub(super) fn media_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_MEDIA_LIMIT)
+        .clamp(1, MAX_MEDIA_LIMIT)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaItemResponse {
+    relative_path: String,
+    kind: String,
+    size: Option<u64>,
+    modified_at: Option<String>,
+}
+
+impl From<MediaEntry> for MediaItemResponse {
+    fn from(entry: MediaEntry) -> Self {
+        Self {
+            relative_path: entry.relative_path,
+            kind: entry.kind.as_str().to_string(),
+            size: entry.size,
+            modified_at: format_system_time(entry.modified),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MediaEnvelope {
+    items: Vec<MediaItemResponse>,
+    /// True when more media exist than `limit`, so the gallery can say the view
+    /// is capped rather than implying it shows everything.
+    truncated: bool,
+}
+
+impl MediaEnvelope {
+    /// Build an envelope from a media listing. Shared with the task-run media
+    /// endpoint so both scopes return one shape.
+    pub(super) fn from_media(items: Vec<MediaEntry>, truncated: bool) -> Self {
+        Self {
+            items: items.into_iter().map(MediaItemResponse::from).collect(),
+            truncated,
+        }
+    }
+}
+
 async fn resolve_project_path(
     state: &AppState,
     identifier: &str,
@@ -239,6 +300,17 @@ async fn list_project_entries(
     };
 
     Ok(Json(ProjectEntriesEnvelope::from_entries(entries)))
+}
+
+async fn list_project_media(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<MediaQuery>,
+) -> Result<Json<MediaEnvelope>, ApiError> {
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let service = ProjectFileService::new(state.runtime(), project_path);
+    let (items, truncated) = service.list_media(media_limit(query.limit)).await?;
+    Ok(Json(MediaEnvelope::from_media(items, truncated)))
 }
 
 async fn read_project_file(

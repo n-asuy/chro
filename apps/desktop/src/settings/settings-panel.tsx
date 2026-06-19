@@ -1,3 +1,4 @@
+import { LoginTerminalDialog } from "@/components/dialogs/login-terminal-dialog";
 import {
   type SupportedLanguage,
   type TranslationFunction,
@@ -12,7 +13,6 @@ import {
   type ExecutorInstallInfo,
   fetchAuthStatus,
   fetchExecutorInstallStatus,
-  triggerAuthLogin,
 } from "@/lib/executor-client";
 import { installTool } from "@/lib/executor-install";
 import { setUiValue } from "@/lib/ui-state-client";
@@ -57,9 +57,6 @@ import {
   useState,
 } from "react";
 import { FeatureFlagsSection } from "./components/feature-flags-section";
-import { AppearancePane } from "./panes/appearance-pane";
-import { NotificationsPane } from "./panes/notifications-pane";
-import { TerminalPane } from "./panes/terminal-pane";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
@@ -67,6 +64,9 @@ import { useMcpSettings } from "./hooks/use-mcp-settings";
 import { useMergeSettings } from "./hooks/use-merge-settings";
 import { usePreferencesSettings } from "./hooks/use-preferences-settings";
 import { useWorktreeSettings } from "./hooks/use-worktree-settings";
+import { AppearancePane } from "./panes/appearance-pane";
+import { NotificationsPane } from "./panes/notifications-pane";
+import { TerminalPane } from "./panes/terminal-pane";
 import { useEditorConfigStore } from "./state/editor-config-store";
 
 type LanguageOption = SupportedLanguage;
@@ -330,9 +330,9 @@ export function SettingsPanel({
     ExecutorInstallInfo
   > | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
-  const [authTriggering, setAuthTriggering] = useState<BaseCodingAgent | null>(
-    null,
-  );
+  // Agent whose login terminal is currently open (null when closed).
+  const [authDialogAgent, setAuthDialogAgent] =
+    useState<BaseCodingAgent | null>(null);
   const [installingExecutor, setInstallingExecutor] =
     useState<BaseCodingAgent | null>(null);
 
@@ -381,37 +381,11 @@ export function SettingsPanel({
     };
   }, [activeTab, handleClaudeVersionReload, loadAgentAvailability]);
 
-  const handleTriggerAuth = useCallback(async (executor: BaseCodingAgent) => {
-    setAuthTriggering(executor);
-    try {
-      // The CLI opens the browser automatically; no window.open needed.
-      await triggerAuthLogin(executor);
-      // Poll for completion
-      const poll = setInterval(async () => {
-        try {
-          const result = await fetchAuthStatus();
-          const info =
-            executor === "CLAUDE_CODE" ? result.claude_code : result.codex;
-          if (info.type === "LOGIN_DETECTED") {
-            clearInterval(poll);
-            setAuthStatus({
-              CLAUDE_CODE: result.claude_code,
-              CODEX: result.codex,
-            });
-            setAuthTriggering(null);
-          }
-        } catch {
-          /* keep polling */
-        }
-      }, 2000);
-      // Stop polling after 5 minutes
-      setTimeout(() => {
-        clearInterval(poll);
-        setAuthTriggering(null);
-      }, 300_000);
-    } catch {
-      setAuthTriggering(null);
-    }
+  // Open the login terminal for an executor. The dialog hosts the agent's
+  // own login CLI in a PTY, so device-code / token prompts complete in-app
+  // without a browser redirect (works for headless/remote installs too).
+  const handleTriggerAuth = useCallback((executor: BaseCodingAgent) => {
+    setAuthDialogAgent(executor);
   }, []);
 
   const handleInstall = useCallback(
@@ -1164,8 +1138,8 @@ export function SettingsPanel({
               installInfo={installStatus?.CLAUDE_CODE ?? null}
               loading={authLoading}
               installing={installingExecutor === "CLAUDE_CODE"}
-              triggering={authTriggering === "CLAUDE_CODE"}
-              onTrigger={() => void handleTriggerAuth("CLAUDE_CODE")}
+              triggering={authDialogAgent === "CLAUDE_CODE"}
+              onTrigger={() => handleTriggerAuth("CLAUDE_CODE")}
               onInstall={() => void handleInstall("CLAUDE_CODE")}
             />
           }
@@ -1249,8 +1223,8 @@ export function SettingsPanel({
               installInfo={installStatus?.CODEX ?? null}
               loading={authLoading}
               installing={installingExecutor === "CODEX"}
-              triggering={authTriggering === "CODEX"}
-              onTrigger={() => void handleTriggerAuth("CODEX")}
+              triggering={authDialogAgent === "CODEX"}
+              onTrigger={() => handleTriggerAuth("CODEX")}
               onInstall={() => void handleInstall("CODEX")}
             />
           }
@@ -1651,6 +1625,16 @@ export function SettingsPanel({
           </main>
         </div>
       </div>
+      <LoginTerminalDialog
+        agent={authDialogAgent}
+        open={authDialogAgent !== null}
+        onOpenChange={(next) => {
+          if (!next) setAuthDialogAgent(null);
+        }}
+        onAuthenticated={() => {
+          void loadAgentAvailability();
+        }}
+      />
     </div>
   );
 }

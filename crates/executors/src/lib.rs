@@ -31,12 +31,12 @@ pub use mcp_config::{
     save_mcp_config,
 };
 pub use profile::{
-    AuthLoginResult, AuthStatusResult, ClaudeVersionResult, ExecutorConfig, ExecutorConfigs,
+    AuthLoginCommand, AuthStatusResult, ClaudeVersionResult, ExecutorConfig, ExecutorConfigs,
     ExecutorInstallInfo, ExecutorInstallStatusResult, ExecutorProfileId, InstallableTool,
     McpServerStatus, McpStatusResult, ModelPreset, PermissionMode,
     ProfileError, ToolInstallResult, anthropic_model_presets, canonical_variant_key,
     check_mcp_status, detect_claude_version, get_auth_status_all, get_install_status_all,
-    install_tool, to_default_variant, trigger_auth_login,
+    install_tool, resolve_auth_login_command, to_default_variant,
 };
 
 pub use approvals::{

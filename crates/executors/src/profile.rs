@@ -718,14 +718,22 @@ pub struct ExecutorInstallStatusResult {
     pub git: ExecutorInstallInfo,
 }
 
-/// Result of triggering an auth login flow for an executor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthLoginResult {
-    pub ok: bool,
-    pub executor: BaseCodingAgent,
-    pub message: Option<String>,
-    /// OAuth URL extracted from CLI stdout, if available.
-    pub auth_url: Option<String>,
+/// A resolved interactive login command for an executor's CLI.
+///
+/// The PTY layer spawns this directly so the CLI's own device-code / token
+/// prompts render in the terminal. We deliberately pick callback-free flows
+/// (no `localhost` redirect) so one path serves both local and headless
+/// (remote server) installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLoginCommand {
+    /// Resolved absolute path to the CLI binary.
+    pub program: String,
+    /// Arguments that start the interactive login.
+    pub args: Vec<String>,
+    /// Keystrokes to type once the CLI has rendered, for agents whose login is
+    /// an in-REPL command rather than a subcommand (e.g. Claude's `/login`).
+    /// `None` when the launched command shows the prompt on its own.
+    pub initial_input: Option<String>,
 }
 
 /// Query auth status for all executors.
@@ -975,123 +983,57 @@ pub async fn install_tool(tool: InstallableTool) -> ToolInstallResult {
     }
 }
 
-/// Extract a non-localhost URL from text output.
-fn extract_auth_url(text: &str) -> Option<String> {
-    let url_re = regex::Regex::new(r"https?://[^\s\x1b\]\)>]+").ok()?;
-    for m in url_re.find_iter(text) {
-        let url = m
-            .as_str()
-            .trim_end_matches(|c: char| c == '.' || c == ',' || c == ')');
-        // Skip localhost URLs
-        if url.contains("127.0.0.1") || url.contains("localhost") || url.contains("::1") {
-            continue;
-        }
-        return Some(url.to_string());
+/// How to launch each executor's interactive, callback-free login: the CLI
+/// arguments plus any keystrokes to type once the CLI has rendered.
+///
+/// Neither flow uses a `localhost` browser redirect, so both complete inside a
+/// terminal and work the same locally and on a headless server.
+fn auth_login_spec(executor: BaseCodingAgent) -> (&'static [&'static str], Option<&'static str>) {
+    match executor {
+        // Verified against codex 0.125: device authorization prints the URL and
+        // code on its own, no extra input needed.
+        BaseCodingAgent::Codex => (&["login", "--device-auth"], None),
+        // Claude has no login subcommand; sign-in is the in-REPL `/login`
+        // command, which prints the auth URL. Launch the interactive CLI and
+        // type `/login` once it has painted. (`setup-token` is for `claude -p`
+        // API usage and is not the subscription login.)
+        BaseCodingAgent::ClaudeCode => (&[], Some("/login\r")),
     }
-    None
 }
 
-/// Trigger the OAuth login flow for the given executor's CLI.
+/// Resolve the interactive login command for an executor so the PTY layer can
+/// host it in a terminal.
 ///
-/// Resolves the executable, spawns the login command, reads stdout/stderr
-/// for up to 15 seconds to extract the OAuth URL, then returns the URL
-/// so the frontend can open it in the browser.
-pub async fn trigger_auth_login(
+/// Returns [`ExecutorError::ExecutableNotFound`] when the CLI is not installed,
+/// carrying the manifest's install hint.
+pub async fn resolve_auth_login_command(
     executor: BaseCodingAgent,
-) -> Result<AuthLoginResult, ExecutorError> {
-    let (manifest, args): (&'static crate::cli_manifest::CliManifest, Vec<&str>) = match executor {
-        BaseCodingAgent::ClaudeCode => (&crate::cli_manifest::CLAUDE, vec!["auth", "login"]),
-        BaseCodingAgent::Codex => (&crate::cli_manifest::CODEX, vec!["login"]),
+) -> Result<AuthLoginCommand, ExecutorError> {
+    let manifest: &'static crate::cli_manifest::CliManifest = match executor {
+        BaseCodingAgent::ClaudeCode => &crate::cli_manifest::CLAUDE,
+        BaseCodingAgent::Codex => &crate::cli_manifest::CODEX,
     };
-    let program = manifest.command;
 
     let executable = crate::cli_resolver::resolve_cli(manifest)
         .await
         .map(|r| r.path)
         .ok_or_else(|| ExecutorError::ExecutableNotFound {
-            program: program.to_string(),
+            program: manifest.command.to_string(),
             install_hint: Some(manifest.install_hint.to_string()),
         })?;
 
-    let mut cmd = tokio::process::Command::new(&executable);
-    cmd.args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(ExecutorError::Io)?;
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    // Read output for up to 15 seconds looking for an auth URL
-    let auth_url = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        read_auth_url(stdout, stderr),
-    )
-    .await
-    .unwrap_or(None);
-
-    Ok(AuthLoginResult {
-        ok: true,
-        executor,
-        message: if auth_url.is_some() {
-            Some("Auth URL extracted from CLI output".to_string())
-        } else {
-            Some(format!("Auth login process started for {program}"))
-        },
-        auth_url,
+    let (args, initial_input) = auth_login_spec(executor);
+    Ok(AuthLoginCommand {
+        program: executable.to_string_lossy().into_owned(),
+        args: args.iter().map(|s| (*s).to_string()).collect(),
+        initial_input: initial_input.map(str::to_string),
     })
-}
-
-/// Read stdout and stderr concurrently, looking for an auth URL.
-async fn read_auth_url(
-    stdout: Option<tokio::process::ChildStdout>,
-    stderr: Option<tokio::process::ChildStderr>,
-) -> Option<String> {
-    use tokio::io::AsyncReadExt;
-
-    let read_stream = |mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>| async move {
-        let mut buf = vec![0u8; 4096];
-        let mut accumulated = String::new();
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    accumulated.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    if let Some(url) = extract_auth_url(&accumulated) {
-                        return Some(url);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        None
-    };
-
-    let stdout_fut = async {
-        match stdout {
-            Some(s) => read_stream(Box::new(s)).await,
-            None => None,
-        }
-    };
-    let stderr_fut = async {
-        match stderr {
-            Some(s) => read_stream(Box::new(s)).await,
-            None => None,
-        }
-    };
-
-    tokio::select! {
-        result = stdout_fut => if result.is_some() { return result; },
-        result = stderr_fut => if result.is_some() { return result; },
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_detected_version;
+    use super::{auth_login_spec, extract_detected_version};
+    use crate::executors::BaseCodingAgent;
 
     #[test]
     fn extract_detected_version_prefers_stdout() {
@@ -1105,5 +1047,24 @@ mod tests {
         let version = extract_detected_version(b"", b"codex 0.1.0\n");
 
         assert_eq!(version.as_deref(), Some("codex 0.1.0"));
+    }
+
+    #[test]
+    fn codex_login_uses_callback_free_device_auth() {
+        // The browser-callback flow (plain `codex login`) binds localhost on
+        // the server and breaks for headless installs, so the login terminal
+        // must use device authorization instead. It needs no typed input.
+        let (args, initial_input) = auth_login_spec(BaseCodingAgent::Codex);
+        assert_eq!(args, &["login", "--device-auth"]);
+        assert_eq!(initial_input, None);
+    }
+
+    #[test]
+    fn claude_login_runs_in_repl_login_command() {
+        // Claude has no login subcommand; launch the interactive CLI and type
+        // `/login`. `setup-token` (claude -p / API) must not be used.
+        let (args, initial_input) = auth_login_spec(BaseCodingAgent::ClaudeCode);
+        assert!(args.is_empty());
+        assert_eq!(initial_input, Some("/login\r"));
     }
 }

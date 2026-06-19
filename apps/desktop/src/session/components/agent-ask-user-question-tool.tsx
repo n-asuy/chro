@@ -1,5 +1,5 @@
 import { HelpCircle } from "lucide-react";
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
   QUESTIONS_TIMED_OUT_MESSAGE,
@@ -34,6 +34,39 @@ interface AgentAskUserQuestionToolProps {
   isError?: boolean;
   isStreaming?: boolean;
   toolCallId?: string;
+}
+
+// A single-line status row (e.g. "Question • Interrupted"). No vertical
+// padding: the row sits in ThinkingStep's icon-column layout, whose icon box
+// is centered on the text's line box. Adding py here would push the text below
+// the icon's center and leave the icon riding high.
+function QuestionStatusLine({
+  label,
+  status,
+  statusTitle,
+  truncateStatus = false,
+}: {
+  label: ReactNode;
+  status?: ReactNode;
+  statusTitle?: string;
+  truncateStatus?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-2 text-xs text-muted-foreground">
+      <span>{label}</span>
+      {status != null && (
+        <>
+          <span className="text-muted-foreground/50">&bull;</span>
+          <span
+            className={truncateStatus ? "min-w-0 truncate" : undefined}
+            title={statusTitle}
+          >
+            {status}
+          </span>
+        </>
+      )}
+    </div>
+  );
 }
 
 function arePropsEqual(
@@ -119,7 +152,7 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
     (questionCount === 0 || (isStreaming && !isDialogShown))
   ) {
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+      <div className="flex items-center gap-2 px-2 text-xs text-muted-foreground">
         <TextShimmer className="text-xs" duration={1.5}>
           Asking question...
         </TextShimmer>
@@ -131,11 +164,10 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
   if (state === "result" && (isSkipped || isTimedOut)) {
     const firstQuestion = questions[0]?.header || questions[0]?.question;
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-        <span>{firstQuestion || "Question"}</span>
-        <span className="text-muted-foreground/50">&bull;</span>
-        <span>{isTimedOut ? "Timed out" : "Skipped"}</span>
-      </div>
+      <QuestionStatusLine
+        label={firstQuestion || "Question"}
+        status={isTimedOut ? "Timed out" : "Skipped"}
+      />
     );
   }
 
@@ -146,13 +178,12 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
       ?.replace(/<\/?tool_use_error>/g, "")
       .trim();
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-        <span>Question</span>
-        <span className="text-muted-foreground/50">&bull;</span>
-        <span className="min-w-0 truncate" title={errorMessage}>
-          {errorMessage || "Error"}
-        </span>
-      </div>
+      <QuestionStatusLine
+        label="Question"
+        status={errorMessage || "Error"}
+        statusTitle={errorMessage}
+        truncateStatus
+      />
     );
   }
 
@@ -160,11 +191,7 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
   if (isCompleted && answers) {
     const entries = Object.entries(answers);
     if (entries.length === 0) {
-      return (
-        <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>Question answered</span>
-        </div>
-      );
+      return <QuestionStatusLine label="Question answered" />;
     }
 
     return (
@@ -195,11 +222,10 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
   // If streaming THIS message, show "Waiting for response..."
   if (isStreaming) {
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-        <span>{firstQuestion || "Question"}</span>
-        <span className="text-muted-foreground/50">&bull;</span>
-        <span>Waiting for response...</span>
-      </div>
+      <QuestionStatusLine
+        label={firstQuestion || "Question"}
+        status="Waiting for response..."
+      />
     );
   }
 
@@ -214,20 +240,15 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
     !isTimedOut
   ) {
     return (
-      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-        <span>{firstQuestion || "Question"}</span>
-        <span className="text-muted-foreground/50">&bull;</span>
-        <span>Submitting...</span>
-      </div>
+      <QuestionStatusLine
+        label={firstQuestion || "Question"}
+        status="Submitting..."
+      />
     );
   }
 
   // Not streaming and state is "call" - it was truly interrupted
   return (
-    <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-      <span>{firstQuestion || "Question"}</span>
-      <span className="text-muted-foreground/50">&bull;</span>
-      <span>Interrupted</span>
-    </div>
+    <QuestionStatusLine label={firstQuestion || "Question"} status="Interrupted" />
   );
 }, arePropsEqual);

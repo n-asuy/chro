@@ -10,9 +10,10 @@ import {
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { HelpCircle, Loader2 } from "lucide-react";
+import { HelpCircle, Loader2, Maximize2 } from "lucide-react";
 import { remarkWikilink } from "./remark-wikilink";
 import { looksLikeFilePath, stripLineColumnSuffix } from "./file-path-utils";
+import { openExpandedView } from "@/lib/mermaid-expanded-view";
 import { useLanguage } from "@/i18n";
 import type { LocalImageMetadata } from "@/session/context/local-images-context";
 import { useImageMetadata } from "@/session/hooks/use-image-metadata";
@@ -207,23 +208,36 @@ const MermaidCodeBlock = ({ code }: { code: string }) => {
         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Mermaid
         </span>
-        <div className="inline-flex items-center gap-0.5 rounded-sm border border-border/60 bg-background/80 p-0.5">
-          <button
-            type="button"
-            className={tabButtonClass(mode === "rendered")}
-            onClick={() => setMode("rendered")}
-            aria-pressed={mode === "rendered"}
-          >
-            {t("mermaidRenderedLabel")}
-          </button>
-          <button
-            type="button"
-            className={tabButtonClass(mode === "raw")}
-            onClick={() => setMode("raw")}
-            aria-pressed={mode === "raw"}
-          >
-            {t("rawLabel")}
-          </button>
+        <div className="inline-flex items-center gap-1">
+          {mode === "rendered" && svg ? (
+            <button
+              type="button"
+              className="flex h-[22px] w-[22px] items-center justify-center rounded-sm border border-border/60 bg-background/80 text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => openExpandedView(svg)}
+              aria-label={t("mermaidExpandLabel")}
+              title={t("mermaidExpandLabel")}
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          <div className="inline-flex items-center gap-0.5 rounded-sm border border-border/60 bg-background/80 p-0.5">
+            <button
+              type="button"
+              className={tabButtonClass(mode === "rendered")}
+              onClick={() => setMode("rendered")}
+              aria-pressed={mode === "rendered"}
+            >
+              {t("mermaidRenderedLabel")}
+            </button>
+            <button
+              type="button"
+              className={tabButtonClass(mode === "raw")}
+              onClick={() => setMode("raw")}
+              aria-pressed={mode === "raw"}
+            >
+              {t("rawLabel")}
+            </button>
+          </div>
         </div>
       </div>
 

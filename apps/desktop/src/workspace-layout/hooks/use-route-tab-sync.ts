@@ -147,6 +147,11 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
       return b.type === "cdp-browser" && a.browserId === b.browserId;
     case "skills":
       return b.type === "skills";
+    case "gallery":
+      return (
+        b.type === "gallery" &&
+        (a.taskRunId ?? null) === (b.taskRunId ?? null)
+      );
   }
 }
 
@@ -182,6 +187,11 @@ export function inferKindFromLocation(pathname: string): TabKind | null {
   }
   if (pathname.endsWith("/skills")) {
     return { type: "skills" };
+  }
+  // /projects/$id/gallery — the project-scoped media gallery. Run-scoped
+  // galleries are opened imperatively (no URL), like diff tabs.
+  if (pathname.endsWith("/gallery")) {
+    return { type: "gallery" };
   }
   return null;
 }
@@ -229,5 +239,9 @@ export function pathFromKind(
       return `${base}/settings`;
     case "skills":
       return `${base}/skills`;
+    case "gallery":
+      // Only the project-scoped gallery owns a URL; run-scoped galleries are
+      // imperative tabs (like diff) and do not round-trip through the path.
+      return kind.taskRunId ? null : `${base}/gallery`;
   }
 }

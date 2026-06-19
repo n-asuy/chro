@@ -190,6 +190,7 @@ const ja = {
   resultLabel: "Result",
   mermaidRenderedLabel: "Rendered",
   mermaidRenderingLabel: "図を描画中...",
+  mermaidExpandLabel: "図を拡大",
   mermaidRenderError:
     "Mermaid 図を描画できません。Raw に切り替えてソースを確認してください。",
   mcpJsonSyntaxError: "設定JSONの構文に誤りがあります。",
@@ -295,7 +296,6 @@ const ja = {
   rebaseUpstreamHint:
     "タスクが元々分岐したブランチを指定します。通常はターゲットブランチと同じです。",
   rebaseConfirmLabel: "リベース実行",
-  closeRebaseDialog: "リベースダイアログを閉じる",
   rebaseSuccessMessage: "リベースが完了しました。",
   rebaseErrorMessage: "リベースに失敗しました。",
   branchSelectorPlaceholder: "ブランチを選択",
@@ -304,6 +304,20 @@ const ja = {
   branchSelectorCurrent: "現在",
   branchSelectorRemote: "リモート",
   branchSelectorLoading: "ブランチを読み込み中...",
+  environmentLabel: "環境",
+  environmentChangesLabel: "変更",
+  environmentNoChangesLabel: "変更なし",
+  environmentGalleryLabel: "ギャラリー",
+  environmentWorktreeLabel: "Worktree",
+  environmentLocalLabel: "Local",
+  environmentWorktreeHint:
+    "Worktree は変更を分離し、Local はその場で編集します",
+  environmentFromLabel: "From",
+  environmentBaseBranchHint: "作業を開始するベースブランチ",
+  environmentIdLabel: "ID",
+  environmentBranchLabel: "ブランチ",
+  environmentCreateGitRepo: "Git リポジトリを作成",
+  environmentInitializingGit: "初期化中…",
   notificationTaskComplete: "タスクが完了しました",
   updateButtonAvailable: "アップデート",
   updateButtonDownloading: "更新中 {percent}%",
@@ -311,6 +325,7 @@ const ja = {
   updateDownloadedTitle: "インストール準備完了: {version}",
   updateRestartButton: "再起動して更新",
   updateRetryButton: "再試行",
+  retryMalformedToolCall: "再試行",
   updateCheckError: "アップデートの確認に失敗しました。",
   updateDownloadError: "アップデートのダウンロードに失敗しました。",
   updateInstallError: "アップデートのインストールに失敗しました。",
@@ -343,7 +358,8 @@ const ja = {
   appearanceThemeDark: "ダーク",
   settingsTabsTerminal: "ターミナル",
   terminalSettingsTitle: "ターミナル",
-  terminalSettingsDescription: "統合ターミナルのフォント表示をカスタマイズします。",
+  terminalSettingsDescription:
+    "統合ターミナルのフォント表示をカスタマイズします。",
   terminalFontFamilyTitle: "フォントファミリー",
   terminalFontFamilyDescription:
     "ターミナルのフォントスタック。空欄でデフォルトの等幅フォントを使用します。",
@@ -354,9 +370,11 @@ const ja = {
   terminalLineHeightDescription: "ターミナル行の高さ（倍率）。",
   settingsTabsNotifications: "通知",
   notificationsSettingsTitle: "通知",
-  notificationsSettingsDescription: "バックグラウンドの動作に対するデスクトップ通知。",
+  notificationsSettingsDescription:
+    "バックグラウンドの動作に対するデスクトップ通知。",
   notificationsEnabledTitle: "通知を有効化",
-  notificationsEnabledDescription: "chro がデスクトップ通知を表示することを許可します。",
+  notificationsEnabledDescription:
+    "chro がデスクトップ通知を表示することを許可します。",
   notificationsOnTaskCompleteTitle: "エージェントのタスク完了",
   notificationsOnTaskCompleteDescription:
     "アプリがバックグラウンドのときにエージェントが完了したら通知します。",
@@ -493,6 +511,17 @@ const ja = {
     "Codex を使用するには OpenAI にサインインしてください。",
   authDetectedVersion: "検出したバージョン: {version}",
   authNotSignedIn: "未認証",
+  authLoginDialogTitle: "{executor} にサインイン",
+  authLoginDialogDescription:
+    "下のターミナルの指示に従ってください。表示された URL を開き、コードを入力するとサインインが完了します。ブラウザのリダイレクトを使わないため、リモートサーバー上でも動作します。",
+  authLoginDialogConnecting: "ログインセッションを開始しています…",
+  authLoginDialogSuccess:
+    "サインインが完了しました。このウィンドウを閉じてください。",
+  authLoginDialogFailed:
+    "ログインセッションが終了しました (コード {code})。再試行してください。",
+  authLoginDialogError: "ログインセッションを開始できませんでした: {message}",
+  authLoginDialogClose: "閉じる",
+  authLoginDialogRetry: "再試行",
   copyMessage: "コピー",
   copied: "コピーしました",
 } as const;

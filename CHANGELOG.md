@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.37
+
+- Added a Media Gallery tab that shows the images and videos an agent has produced as a thumbnail grid, read from disk newest-first and gitignore-aware, scoped either to a single session's worktree or to the whole project, and opened from the new Environment popover
+- Reworked the session header's scattered execution controls and the standalone rebase dialog into a single "Environment" popover that gathers the worktree-vs-local toggle, the base branch ("From") picker, the changes/review summary, gallery access, rebase, merge-into-base, git-repository initialization, and the task's ID and branch in one place
+- Added a terminal-based sign-in dialog that runs the agent's login flow (Claude Code or Codex) inside an embedded terminal, so you authenticate by opening the URL it prints and entering the code, which also works over a remote server with no browser redirect needed
+- Added a "Create git repository" action so a project that is not yet a Git repository can be initialized in place, after which worktree-isolated sessions and base-branch selection become available
+- Added an Expand control on rendered Mermaid diagrams that opens a larger, zoomable view
+- Fixed runs silently stopping when the agent emitted a tool call the CLI could not parse even after its own retry (an intermittent model-side abort): the turn is now marked failed with a clear explanation and a one-click Retry to continue from where it stopped
+- Bundled the chro terminal CLI alongside the desktop app and added it to the PATH of agents the app launches, so an agent can invoke `chro task ...` by bare name to drive sub-tasks
+- Added a task references popover (Uses / Referenced by) to the session composer, and cleaned up the feature-flag list now that the structured question UI and canvas terminal renderer are the default
+
 ## 0.1.36
 
 - Reworked the Claude executor to run the agent as a real interactive terminal session, observed through Claude Code hooks plus session-transcript tailing instead of the deprecated non-interactive print mode, so the agent can pause mid-run and route permission requests, plan-mode approvals, and clarifying questions to the app while conversation streaming, persistence, and replay keep working

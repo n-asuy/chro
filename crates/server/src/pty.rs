@@ -56,10 +56,40 @@ pub enum PtyError {
     InputClosed,
 }
 
+/// What program the PTY should host.
+///
+/// The terminal tab launches an interactive login [`PtyCommand::Shell`]; auth
+/// flows launch a specific agent login CLI via [`PtyCommand::Program`] so the
+/// CLI's own device-code / token prompts render directly in the terminal
+/// (no browser callback, so it works headless and locally through one path).
+#[derive(Debug, Clone)]
+pub enum PtyCommand {
+    /// Interactive shell. `shell` overrides the binary; otherwise `$SHELL`,
+    /// then `/bin/bash` (or `cmd.exe` on Windows).
+    Shell { shell: Option<String> },
+    /// A specific executable with its arguments.
+    ///
+    /// `initial_input` is typed into the child once it produces its first
+    /// output (not on a fixed delay), so an interactive CLI that has finished
+    /// painting receives e.g. a slash command. The viewer can still type it by
+    /// hand if the auto-send lands too early.
+    Program {
+        program: String,
+        args: Vec<String>,
+        initial_input: Option<String>,
+    },
+}
+
+impl Default for PtyCommand {
+    fn default() -> Self {
+        Self::Shell { shell: None }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PtySpawnConfig {
     pub cwd: Option<PathBuf>,
-    pub shell: Option<String>,
+    pub command: PtyCommand,
     pub cols: u16,
     pub rows: u16,
     pub env: Vec<(String, String)>,
@@ -69,7 +99,7 @@ impl Default for PtySpawnConfig {
     fn default() -> Self {
         Self {
             cwd: None,
-            shell: None,
+            command: PtyCommand::default(),
             cols: 80,
             rows: 24,
             env: Vec::new(),
@@ -200,8 +230,32 @@ impl PtyService {
             })
             .map_err(|e| PtyError::OpenFailed(e.to_string()))?;
 
-        let shell = resolve_shell(config.shell.as_deref());
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = match &config.command {
+            PtyCommand::Shell { shell } => {
+                let shell = resolve_shell(shell.as_deref());
+                let mut cmd = CommandBuilder::new(&shell);
+                cmd.env("SHELL", &shell);
+                cmd
+            }
+            PtyCommand::Program { program, args, .. } => {
+                let mut cmd = CommandBuilder::new(program);
+                for arg in args {
+                    cmd.arg(arg);
+                }
+                // A child that shells out (e.g. an agent login CLI) still
+                // expects a usable `$SHELL`.
+                cmd.env("SHELL", resolve_shell(None));
+                cmd
+            }
+        };
+        // Bytes to type into the child once it has rendered (see `PtyCommand`).
+        let initial_input: Option<Bytes> = match &config.command {
+            PtyCommand::Program {
+                initial_input: Some(text),
+                ..
+            } => Some(Bytes::from(text.clone().into_bytes())),
+            _ => None,
+        };
         if let Some(cwd) = config.cwd.as_ref() {
             if cwd.is_dir() {
                 cmd.cwd(cwd);
@@ -210,13 +264,12 @@ impl PtyService {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // `portable-pty` does not inherit the parent env on every platform,
-        // so explicitly forward the user's PATH/HOME/SHELL when present.
+        // so explicitly forward the user's PATH/HOME/locale when present.
         for key in ["PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE"] {
             if let Ok(value) = std::env::var(key) {
                 cmd.env(key, value);
             }
         }
-        cmd.env("SHELL", &shell);
         for (k, v) in config.env.iter() {
             cmd.env(k, v);
         }
@@ -252,6 +305,7 @@ impl PtyService {
             output_tx.clone(),
             Arc::clone(&emulator),
             input_tx.clone(),
+            initial_input,
         );
 
         let child = Arc::new(StdMutex::new(Some(child)));
@@ -350,11 +404,16 @@ fn spawn_reader_thread(
     output_tx: broadcast::Sender<PtyOutbound>,
     emulator: Arc<StdMutex<Emulator>>,
     input_tx: mpsc::Sender<Bytes>,
+    initial_input: Option<Bytes>,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name(format!("pty-reader-{id}"))
         .spawn(move || {
             let mut buf = vec![0u8; READ_BUFFER_BYTES];
+            // Typed into the child after its first output burst, so an
+            // interactive CLI has started painting before it receives the
+            // keystrokes. Taken once, then never again.
+            let mut pending_initial = initial_input;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -376,6 +435,10 @@ fn spawn_reader_thread(
                         // Drop on broadcast failure (no subscribers) but keep
                         // draining so the child never blocks on a full pipe.
                         let _ = output_tx.send(PtyOutbound::Snapshot(Arc::new(snapshot)));
+                        // First paint observed: send the queued initial input.
+                        if let Some(bytes) = pending_initial.take() {
+                            let _ = input_tx.blocking_send(bytes);
+                        }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,

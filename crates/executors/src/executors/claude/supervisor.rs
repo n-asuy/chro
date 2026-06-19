@@ -16,6 +16,9 @@ use super::{
     hook_server::{ClaudeHookServer, HookEvent, HookEventKind},
     log_sink::LogLineSink,
     transcript::{TranscriptTailer, map_transcript_line},
+    types::{
+        MALFORMED_TOOL_CALL_ABORT_TEXT, MALFORMED_TOOL_CALL_MESSAGE, MALFORMED_TOOL_CALL_SUBTYPE,
+    },
 };
 use crate::process::ProcessExit;
 
@@ -51,6 +54,11 @@ impl RunSupervisor {
         let mut tailer: Option<TranscriptTailer> = None;
         let mut session_id: Option<String> = None;
         let mut last_assistant_message: Option<String> = None;
+        // Last assistant text observed in the transcript itself, used as a
+        // fallback signal for malformed-tool-call detection (the `Stop` hook's
+        // `last_assistant_message` is not guaranteed to carry the CLI's
+        // turn-ending failure text).
+        let mut last_assistant_text: Option<String> = None;
         let mut stop: Option<StopDrain> = None;
         let mut poll = tokio::time::interval(TAIL_POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -98,7 +106,7 @@ impl RunSupervisor {
                 exit = wait_for_exit(&mut self.child_exit) => {
                     // Flush whatever the transcript already holds, then decide.
                     if let Some(tailer) = tailer.as_mut() {
-                        self.pump_transcript(tailer).await;
+                        self.pump_transcript(tailer, &mut last_assistant_text).await;
                     }
                     if stop.is_some() {
                         break RunOutcome::Completed;
@@ -109,7 +117,7 @@ impl RunSupervisor {
                 _ = poll.tick() => {
                     let mut wrote = false;
                     if let Some(tailer) = tailer.as_mut() {
-                        wrote = self.pump_transcript(tailer).await;
+                        wrote = self.pump_transcript(tailer, &mut last_assistant_text).await;
                     }
                     if let Some(drain) = stop.as_mut() {
                         if drain.settled(wrote) {
@@ -126,16 +134,40 @@ impl RunSupervisor {
 
         match outcome {
             RunOutcome::Completed => {
-                self.sink
-                    .write_json(&json!({
+                // A turn that ends on the CLI's malformed-tool-call failure text
+                // ran no tool and produced no work; surface it as a recoverable
+                // error (marks the run failed, offers a retry) instead of a
+                // silent success. The Stop payload and the transcript tail are
+                // both checked because either may carry the failure text.
+                let aborted_on_malformed_tool_call = [
+                    last_assistant_message.as_deref(),
+                    last_assistant_text.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|text| text.contains(MALFORMED_TOOL_CALL_ABORT_TEXT));
+
+                let result = if aborted_on_malformed_tool_call {
+                    json!({
+                        "type": "result",
+                        "subtype": MALFORMED_TOOL_CALL_SUBTYPE,
+                        "is_error": true,
+                        "error": MALFORMED_TOOL_CALL_MESSAGE,
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "session_id": session_id,
+                        "result": MALFORMED_TOOL_CALL_MESSAGE,
+                    })
+                } else {
+                    json!({
                         "type": "result",
                         "subtype": "success",
                         "is_error": false,
                         "duration_ms": started.elapsed().as_millis() as u64,
                         "session_id": session_id,
                         "result": last_assistant_message,
-                    }))
-                    .await;
+                    })
+                };
+                self.sink.write_json(&result).await;
             }
             RunOutcome::DiedMidTurn(exit) => {
                 let code = exit.as_ref().and_then(|e| e.code);
@@ -175,11 +207,22 @@ impl RunSupervisor {
 
     /// Move new transcript lines into the synthetic stdout. Returns whether
     /// any line was written (drives the post-Stop quiescence check).
-    async fn pump_transcript(&self, tailer: &mut TranscriptTailer) -> bool {
+    ///
+    /// Records the most recent assistant text block in `last_assistant_text` so
+    /// the turn outcome can detect a malformed-tool-call abort even when the
+    /// `Stop` hook payload omits the CLI's turn-ending failure message.
+    async fn pump_transcript(
+        &self,
+        tailer: &mut TranscriptTailer,
+        last_assistant_text: &mut Option<String>,
+    ) -> bool {
         let mut wrote = false;
         for raw in tailer.read_new_lines().await {
             if let Some(mapped) = map_transcript_line(&raw) {
                 wrote = true;
+                if let Some(text) = assistant_text(&mapped) {
+                    *last_assistant_text = Some(text);
+                }
                 if !self.sink.write_line(&mapped).await {
                     break;
                 }
@@ -220,6 +263,31 @@ impl StopDrain {
     }
 }
 
+/// Concatenated text of a mapped assistant stream-json line, or `None` when the
+/// line is not an assistant message or carries no text blocks (thinking-only or
+/// tool_use turns). Tracks the turn's final assistant text for abort detection.
+fn assistant_text(mapped: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(mapped).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let blocks = value.get("message")?.get("content")?.as_array()?;
+    let mut text = String::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(chunk) = block.get("text").and_then(Value::as_str)
+        {
+            text.push_str(chunk);
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 async fn wait_for_exit(
     rx: &mut watch::Receiver<Option<ProcessExit>>,
 ) -> Option<ProcessExit> {
@@ -230,5 +298,35 @@ async fn wait_for_exit(
         if rx.changed().await.is_err() {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_text_concatenates_text_blocks() {
+        let mapped = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"hello "},{"type":"text","text":"world"}]}}"#;
+        assert_eq!(assistant_text(mapped).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn assistant_text_skips_non_assistant_and_textless_lines() {
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(assistant_text(user), None);
+
+        let tool_only = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#;
+        assert_eq!(assistant_text(tool_only), None);
+
+        assert_eq!(assistant_text("not json"), None);
+    }
+
+    #[test]
+    fn malformed_abort_text_matches_cli_turn_ending_sentinel() {
+        // The exact assistant line the CLI writes when its own reparse fails.
+        let sentinel = "The model's tool call could not be parsed (retry also failed).";
+        assert!(sentinel.contains(MALFORMED_TOOL_CALL_ABORT_TEXT));
+        assert!(!"All tests pass.".contains(MALFORMED_TOOL_CALL_ABORT_TEXT));
     }
 }

@@ -1,3 +1,4 @@
+import type { MediaKind } from "@/files/media-types";
 import type {
   DesktopWorkspaceEntry,
   DesktopWorkspaceFile,
@@ -140,6 +141,77 @@ export const listTaskRunEntries = async (
     `/rpc/task-runs/${taskRunId}/entries${query ? `?${query}` : ""}`,
   );
   return entries.map(toDesktopEntry);
+};
+
+/** A renderable media artifact surfaced by the gallery. */
+export type WorkspaceMediaItem = {
+  relativePath: string;
+  kind: MediaKind;
+  size: number | null;
+  modifiedAt: string | null;
+};
+
+export type WorkspaceMediaListing = {
+  items: WorkspaceMediaItem[];
+  /** True when the server capped the result; the gallery surfaces this. */
+  truncated: boolean;
+};
+
+type MediaItemResponse = {
+  relativePath: string;
+  kind: string;
+  size?: number | null;
+  modifiedAt?: string | null;
+};
+
+type MediaEnvelope = {
+  items: MediaItemResponse[];
+  truncated: boolean;
+};
+
+const toMediaItem = (item: MediaItemResponse): WorkspaceMediaItem => ({
+  relativePath: item.relativePath,
+  kind: item.kind === "video" ? "video" : "image",
+  size: item.size ?? null,
+  modifiedAt: item.modifiedAt ?? null,
+});
+
+const mediaQuery = (limit?: number): string => {
+  if (limit == null) return "";
+  const params = new URLSearchParams({ limit: String(limit) });
+  return `?${params.toString()}`;
+};
+
+/**
+ * List renderable media (images, video) under the project's main checkout,
+ * gitignore-aware and newest-first. Byte payloads are fetched separately via
+ * {@link getProjectBinaryFileUrl}.
+ */
+export const listProjectMedia = async (
+  projectId: string,
+  options?: { limit?: number },
+): Promise<WorkspaceMediaListing> => {
+  const envelope = await desktopFetch<MediaEnvelope>(
+    `/rpc/projects/${projectId}/media${mediaQuery(options?.limit)}`,
+  );
+  return {
+    items: envelope.items.map(toMediaItem),
+    truncated: envelope.truncated,
+  };
+};
+
+/** List renderable media inside a task run's worktree (a session's sandbox). */
+export const listTaskRunMedia = async (
+  taskRunId: string,
+  options?: { limit?: number },
+): Promise<WorkspaceMediaListing> => {
+  const envelope = await desktopFetch<MediaEnvelope>(
+    `/rpc/task-runs/${taskRunId}/media${mediaQuery(options?.limit)}`,
+  );
+  return {
+    items: envelope.items.map(toMediaItem),
+    truncated: envelope.truncated,
+  };
 };
 
 export const readProjectFile = async (

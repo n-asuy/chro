@@ -18,7 +18,8 @@ pub use watcher::{
     WorktreeWatcherService,
 };
 pub use workspace::{
-    WorkspaceBinaryFile, WorkspaceEntry, WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile,
+    classify_media, MediaEntry, MediaKind, WorkspaceBinaryFile, WorkspaceEntry,
+    WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile,
 };
 
 #[derive(Debug, Clone)]

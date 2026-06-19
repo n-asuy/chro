@@ -38,7 +38,11 @@ export type TabKind =
   | { type: "settings" }
   // Skill browser: lists the project's workspace skills plus the user's
   // global skills (~/.claude, ~/.agents, ~/.codex). One per project.
-  | { type: "skills" };
+  | { type: "skills" }
+  // Media gallery: a full-width grid of the renderable images/videos found on
+  // disk. Scope follows the file tree — worktree-relative when `taskRunId` is
+  // set (a session's creatives), otherwise the project's main checkout.
+  | { type: "gallery"; taskRunId?: string };
 
 export type TabKindType = TabKind["type"];
 
@@ -92,6 +96,10 @@ export function tabKey(kind: TabKind): TabKey {
       return "settings";
     case "skills":
       return "skills";
+    case "gallery":
+      // One gallery per scope: the project gallery and each run's gallery are
+      // distinct tabs, but re-opening the same scope focuses the existing one.
+      return kind.taskRunId ? `gallery:${kind.taskRunId}` : "gallery";
   }
 }
 

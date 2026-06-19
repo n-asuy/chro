@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLanguage } from "@/i18n";
+import { isImagePath } from "@/files/media-types";
 import { getTaskRunBinaryFileUrl } from "@/lib/project-client";
 import type { DiffChangeKind, DiffContent } from "../hooks";
 import "@/styles/diff-style-overrides.css";
@@ -23,16 +24,6 @@ type DiffViewerPanelProps = {
   onClose: () => void;
   diffs: { path: string; diff: DiffContent }[];
   taskRunId?: string | null;
-};
-
-const IMAGE_EXTENSIONS = new Set([
-  "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "avif", "svg", "tiff", "tif",
-]);
-
-const isImagePath = (path?: string | null): boolean => {
-  if (!path) return false;
-  const ext = path.toLowerCase().split(".").pop();
-  return ext ? IMAGE_EXTENSIONS.has(ext) : false;
 };
 
 const LANGUAGE_MAP: Record<string, string> = {

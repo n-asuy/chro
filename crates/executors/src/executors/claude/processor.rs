@@ -24,7 +24,7 @@ use tracing::warn;
 use super::types::{
     AmpBashResult, ApprovalStatus, ClaudeContentBlockDelta, ClaudeContentItem, ClaudeJson,
     ClaudeMessage, ClaudeStreamEvent, ClaudeToolData, ClaudeToolResultTextItem,
-    ClaudeToolWithInput,
+    ClaudeToolWithInput, MALFORMED_TOOL_CALL_MESSAGE, MALFORMED_TOOL_CALL_SUBTYPE,
 };
 
 /// Strategy for handling history and user messages.
@@ -998,15 +998,36 @@ impl ClaudeLogProcessor {
                 }
                 ClaudeStreamEvent::Unknown => {}
             },
-            ClaudeJson::Result { is_error, .. } => {
+            ClaudeJson::Result {
+                is_error,
+                subtype,
+                error,
+                ..
+            } => {
                 if is_error.unwrap_or(false) {
+                    // A malformed-tool-call abort carries a clean, user-facing
+                    // explanation and a dedicated error type the UI renders with
+                    // a retry button; every other error falls back to the raw
+                    // result JSON so nothing is silently swallowed.
+                    let (error_type, content) =
+                        if subtype.as_deref() == Some(MALFORMED_TOOL_CALL_SUBTYPE) {
+                            (
+                                NormalizedEntryError::MalformedToolCall,
+                                error
+                                    .clone()
+                                    .unwrap_or_else(|| MALFORMED_TOOL_CALL_MESSAGE.to_string()),
+                            )
+                        } else {
+                            (
+                                NormalizedEntryError::Other,
+                                serde_json::to_string(claude_json)
+                                    .unwrap_or_else(|_| "error".to_string()),
+                            )
+                        };
                     let entry = NormalizedEntry {
                         timestamp: None,
-                        entry_type: NormalizedEntryType::ErrorMessage {
-                            error_type: NormalizedEntryError::Other,
-                        },
-                        content: serde_json::to_string(claude_json)
-                            .unwrap_or_else(|_| "error".to_string()),
+                        entry_type: NormalizedEntryType::ErrorMessage { error_type },
+                        content,
                         metadata: Some(serde_json::to_value(claude_json).unwrap_or(Value::Null)),
                     };
                     let idx = entry_index_provider.next();
@@ -1359,6 +1380,55 @@ mod tests {
                 .unwrap();
         let patches = processor.normalize_entries(&json, "/tmp", &provider);
         assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn malformed_tool_call_result_renders_retryable_error() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"malformed_tool_call","is_error":true,"error":"boom"}"#,
+        )
+        .unwrap();
+        let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::MalformedToolCall,
+            }
+        );
+        assert_eq!(entries[0].content, "boom");
+    }
+
+    #[test]
+    fn malformed_tool_call_result_falls_back_to_default_message() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"result","subtype":"malformed_tool_call","is_error":true}"#)
+                .unwrap();
+        let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, MALFORMED_TOOL_CALL_MESSAGE);
+    }
+
+    #[test]
+    fn generic_error_result_uses_other_error_type() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"error":"died"}"#,
+        )
+        .unwrap();
+        let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::Other,
+            }
+        );
     }
 
     #[test]

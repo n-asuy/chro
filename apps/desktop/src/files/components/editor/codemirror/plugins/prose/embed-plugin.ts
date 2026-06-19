@@ -24,6 +24,12 @@ import {
 } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
+import {
+  AUDIO_EXTENSIONS,
+  IMAGE_EXTENSIONS,
+  PDF_EXTENSIONS,
+  VIDEO_EXTENSIONS,
+} from "@/files/media-types";
 import { cursorInNode } from "../../utility/tools";
 
 /**
@@ -58,21 +64,6 @@ function isInsideCallout(
 // Store view reference for click handling
 let embedCurrentView: EditorView | null = null;
 
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "bmp",
-  "avif",
-  "ico",
-]);
-const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "ogg", "m4a", "flac", "aac"]);
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv"]);
-const PDF_EXTENSION = "pdf";
-
 type EmbedType = "image" | "audio" | "video" | "pdf" | "note";
 
 function getEmbedType(path: string): EmbedType {
@@ -81,7 +72,7 @@ function getEmbedType(path: string): EmbedType {
   if (IMAGE_EXTENSIONS.has(ext)) return "image";
   if (AUDIO_EXTENSIONS.has(ext)) return "audio";
   if (VIDEO_EXTENSIONS.has(ext)) return "video";
-  if (ext === PDF_EXTENSION) return "pdf";
+  if (PDF_EXTENSIONS.has(ext)) return "pdf";
   return "note";
 }
 

@@ -1,4 +1,5 @@
 import { FilesEditor } from "@/files/components/editor/files-editor";
+import { GalleryPanel } from "@/gallery/gallery-panel";
 import { useFileTreeStore } from "@/files/state/file-tree-store";
 import { useFilesStore } from "@/files/state/files-store";
 import { useWorkingDiffs } from "@/files/state/working-diffs-store";
@@ -86,6 +87,11 @@ export function SettingsTabBody() {
 
 export function SkillsTabBody() {
   return <SkillsPanel />;
+}
+
+export function GalleryTabBody({ kind }: PaneItemRenderProps) {
+  if (kind.type !== "gallery") return null;
+  return <GalleryPanel taskRunId={kind.taskRunId} />;
 }
 
 export function TerminalTabBody({ tab }: PaneItemRenderProps) {

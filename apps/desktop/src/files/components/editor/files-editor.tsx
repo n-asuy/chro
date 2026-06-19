@@ -10,10 +10,15 @@ import {
   readWorkspaceFileAtPath,
   searchProjectFiles,
 } from "@/lib/project-client";
+import {
+  isImageExtension as isImageFile,
+  isPdfExtension as isPdfFile,
+  isVideoExtension as isVideoFile,
+} from "@/files/media-types";
 import type { DesktopWorkspaceFile } from "@/types/desktop";
 import { Button } from "@chro/ui/button";
 import { cn } from "@chro/ui/utils";
-import { Code, Eye, RefreshCw } from "lucide-react";
+import { Code, Eye, Maximize2, Minimize2, RefreshCw } from "lucide-react";
 import {
   type ChangeEvent,
   type KeyboardEvent,
@@ -23,6 +28,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import TextareaAutosize from "react-textarea-autosize";
 import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
@@ -48,21 +54,6 @@ import { ImageViewer } from "./image-viewer";
 import { PdfViewer } from "./pdf-viewer";
 import { VideoViewer } from "./video-viewer";
 
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "bmp",
-  "avif",
-]);
-
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv"]);
-
-const PDF_EXTENSIONS = new Set(["pdf"]);
-
 const EXCALIDRAW_EXTENSIONS = new Set(["excalidraw"]);
 
 const BASE_EXTENSIONS = new Set(["cbase"]);
@@ -77,21 +68,6 @@ const isProseFile = (extension?: string | null): boolean => {
   // and dotfiles (.env, .gitignore) fall through to the code editor.
   if (!extension) return false;
   return PROSE_EXTENSIONS.has(extension.toLowerCase());
-};
-
-const isImageFile = (extension?: string | null): boolean => {
-  if (!extension) return false;
-  return IMAGE_EXTENSIONS.has(extension.toLowerCase());
-};
-
-const isVideoFile = (extension?: string | null): boolean => {
-  if (!extension) return false;
-  return VIDEO_EXTENSIONS.has(extension.toLowerCase());
-};
-
-const isPdfFile = (extension?: string | null): boolean => {
-  if (!extension) return false;
-  return PDF_EXTENSIONS.has(extension.toLowerCase());
 };
 
 const isExcalidrawFile = (extension?: string | null): boolean => {
@@ -261,6 +237,9 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   );
   // Bumped manually to force the preview iframe to reload after a save / refresh
   const [htmlPreviewKey, setHtmlPreviewKey] = useState(0);
+  // Expands the HTML preview to fill the entire app window. Exits on Escape,
+  // when switching to raw source, or when the active file changes.
+  const [isHtmlFullscreen, setIsHtmlFullscreen] = useState(false);
 
   // In-editor find bar (Cmd/Ctrl+F). Rendered above the title/frontmatter so
   // it floats at the top of the file view like Obsidian's find panel.
@@ -271,10 +250,24 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     setIsFindOpen(false);
     editorRef.current?.focus();
   }, []);
-  // Close the find bar whenever the active file changes.
+  // Reset transient view state whenever the active file changes.
   useEffect(() => {
     setIsFindOpen(false);
+    setIsHtmlFullscreen(false);
   }, [editorFilePath]);
+
+  // Allow Escape to leave the fullscreen HTML preview.
+  useEffect(() => {
+    if (!isHtmlFullscreen) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setIsHtmlFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isHtmlFullscreen]);
 
   const relativePath = useMemo(
     () => relativePathForFile(editorFilePath, currentNode, workspaceRoot),
@@ -859,8 +852,14 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   // Code file layout: no title editing, no frontmatter, line numbers
   if (!isProse) {
     const showHtmlPreview = isHtml && htmlViewMode === "preview";
-    return (
-      <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]">
+    const htmlFullscreen = showHtmlPreview && isHtmlFullscreen;
+    const codeLayout = (
+      <div
+        className={cn(
+          "flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]",
+          htmlFullscreen && "fixed inset-0 z-[200]",
+        )}
+      >
         <div
           ref={editorContainerRef}
           className="flex flex-1 flex-col overflow-hidden bg-custom-background-100"
@@ -873,19 +872,39 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
             {isHtml && (
               <div className="ml-auto flex items-center gap-1">
                 {htmlViewMode === "preview" && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="size-6"
-                    onClick={async () => {
-                      if (isDirty) await saveNow();
-                      setHtmlPreviewKey((k) => k + 1);
-                    }}
-                    title="Refresh preview"
-                  >
-                    <RefreshCw className="size-3.5" />
-                  </Button>
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-6"
+                      onClick={async () => {
+                        if (isDirty) await saveNow();
+                        setHtmlPreviewKey((k) => k + 1);
+                      }}
+                      title="Refresh preview"
+                    >
+                      <RefreshCw className="size-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={isHtmlFullscreen ? "secondary" : "ghost"}
+                      size="icon"
+                      className="size-6"
+                      onClick={() => setIsHtmlFullscreen((value) => !value)}
+                      title={
+                        isHtmlFullscreen
+                          ? "Exit fullscreen (Esc)"
+                          : "Fullscreen preview"
+                      }
+                    >
+                      {isHtmlFullscreen ? (
+                        <Minimize2 className="size-3.5" />
+                      ) : (
+                        <Maximize2 className="size-3.5" />
+                      )}
+                    </Button>
+                  </>
                 )}
                 <Button
                   type="button"
@@ -909,7 +928,10 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
                   variant={htmlViewMode === "raw" ? "secondary" : "ghost"}
                   size="sm"
                   className="h-6 gap-1 px-2 text-[11px]"
-                  onClick={() => setHtmlViewMode("raw")}
+                  onClick={() => {
+                    setIsHtmlFullscreen(false);
+                    setHtmlViewMode("raw");
+                  }}
                   title="View raw source"
                 >
                   <Code className="size-3.5" />
@@ -959,6 +981,11 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
         </div>
       </div>
     );
+    // Fullscreen renders through a portal so the preview escapes the editor
+    // pane's stacking context and covers the right dock / sidebars.
+    return htmlFullscreen
+      ? createPortal(codeLayout, document.body)
+      : codeLayout;
   }
 
   return (

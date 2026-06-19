@@ -3,6 +3,7 @@ import {
   CdpBrowserTabBody,
   DiffTabBody,
   FileTabBody,
+  GalleryTabBody,
   InBrowserTabBody,
   OverviewTabBody,
   ProjectDiffTabBody,
@@ -103,5 +104,12 @@ export function ensurePaneItemsRegistered(): void {
     iconName: "book-open",
     Content: SkillsTabBody,
     resolveTitle: () => "Skills",
+  });
+
+  registerPaneItem({
+    type: "gallery",
+    iconName: "image",
+    Content: GalleryTabBody,
+    resolveTitle: () => "Gallery",
   });
 }

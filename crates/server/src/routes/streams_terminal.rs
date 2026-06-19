@@ -48,8 +48,10 @@ use terminal::TerminalSnapshot;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use executors::BaseCodingAgent;
+
 use crate::{
-    pty::{PtyOutbound, PtySession, PtySpawnConfig},
+    pty::{PtyCommand, PtyOutbound, PtySession, PtySpawnConfig},
     AppState,
 };
 
@@ -75,6 +77,10 @@ struct TerminalQuery {
     /// Override the shell binary. Falls back to `$SHELL`, then `/bin/bash`
     /// (or `cmd.exe` on Windows).
     shell: Option<String>,
+    /// When set (`codex` / `claude`), host that agent's interactive login CLI
+    /// in the PTY instead of a shell. Lets the device-code / token prompt run
+    /// in the terminal so auth completes without a browser callback.
+    login: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,12 +260,46 @@ async fn resolve_session(
         }
     }
 
+    let cols = params.cols.filter(|c| *c > 0).unwrap_or(80);
+    let rows = params.rows.filter(|r| *r > 0).unwrap_or(24);
+
+    // A login request hosts the agent's own login CLI in the PTY rather than a
+    // shell, so its device-code / token prompt completes inside the terminal.
+    if let Some(raw) = params.login.as_deref() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let agent = parse_login_agent(trimmed)
+                .ok_or_else(|| format!("unknown login agent: {trimmed}"))?;
+            let login = executors::resolve_auth_login_command(agent)
+                .await
+                .map_err(|err| format!("failed to resolve login command: {err}"))?;
+            let config = PtySpawnConfig {
+                cwd: None,
+                command: PtyCommand::Program {
+                    program: login.program,
+                    args: login.args,
+                    initial_input: login.initial_input,
+                },
+                cols,
+                rows,
+                env: Vec::new(),
+            };
+            return state
+                .pty()
+                .create(config)
+                .await
+                .map_err(|err| format!("failed to start login: {err}"));
+        }
+    }
+
     let cwd = resolve_cwd(state, params).await?;
     let config = PtySpawnConfig {
         cwd,
-        shell: params.shell.clone(),
-        cols: params.cols.filter(|c| *c > 0).unwrap_or(80),
-        rows: params.rows.filter(|r| *r > 0).unwrap_or(24),
+        command: PtyCommand::Shell {
+            shell: params.shell.clone(),
+        },
+        cols,
+        rows,
         env: Vec::new(),
     };
     state
@@ -267,6 +307,16 @@ async fn resolve_session(
         .create(config)
         .await
         .map_err(|err| format!("failed to start shell: {err}"))
+}
+
+/// Map the `login` query value to an executor. Accepts the short agent name
+/// and the frontend's enum spellings.
+fn parse_login_agent(raw: &str) -> Option<BaseCodingAgent> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "codex" => Some(BaseCodingAgent::Codex),
+        "claude" | "claude_code" | "claude-code" => Some(BaseCodingAgent::ClaudeCode),
+        _ => None,
+    }
 }
 
 async fn resolve_cwd(state: &AppState, params: &TerminalQuery) -> Result<Option<PathBuf>, String> {
@@ -295,4 +345,25 @@ async fn send_error_and_close(mut socket: WebSocket, message: &str) {
         let _ = socket.send(Message::Text(json)).await;
     }
     let _ = SinkExt::close(&mut socket).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_login_agent, BaseCodingAgent};
+
+    #[test]
+    fn parse_login_agent_accepts_short_and_enum_spellings() {
+        assert_eq!(parse_login_agent("codex"), Some(BaseCodingAgent::Codex));
+        assert_eq!(parse_login_agent("CODEX"), Some(BaseCodingAgent::Codex));
+        assert_eq!(
+            parse_login_agent("claude"),
+            Some(BaseCodingAgent::ClaudeCode)
+        );
+        assert_eq!(
+            parse_login_agent("CLAUDE_CODE"),
+            Some(BaseCodingAgent::ClaudeCode)
+        );
+        assert_eq!(parse_login_agent("bogus"), None);
+        assert_eq!(parse_login_agent(""), None);
+    }
 }

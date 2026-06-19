@@ -26,6 +26,7 @@ import {
   type ReasoningEffort,
   fetchExecutorProfile,
 } from "@/lib/executor-client";
+import { useFlag } from "@/lib/feature-flags-store";
 import { slugOrId } from "@/lib/slug";
 import { isUuidIdentifier } from "@/lib/uuid";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
@@ -67,9 +68,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
-  GitBranch,
   Image as ImageIcon,
-  Laptop,
   MessageSquare,
   Plus,
   Search,
@@ -89,15 +88,15 @@ import type { GitBranch as GitBranchType } from "./components/branch-selector";
 import { ConflictBanner } from "./components/conflict-banner";
 import { ConversationFindBar } from "./components/conversation-find-bar";
 import { ConversationMessageNav } from "./components/conversation-message-nav";
+import {
+  EnvironmentPopover,
+  type RebaseConfirmResult,
+} from "./components/environment-popover";
 // DiffViewerPanel is no longer rendered inline; the "Open Diff" header
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
 import { ImageUploadPreviewList } from "./components/image-upload-preview-list";
 import type { AtPopoverHandle } from "./components/prompt-editor/at-popover";
-import {
-  RebaseDialog,
-  type RebaseDialogResult,
-} from "./components/rebase-dialog";
 import { SessionHeader } from "./components/session-header";
 import {
   PromptEditorWithPopover,
@@ -107,6 +106,7 @@ import { SessionReferencesPopover } from "./components/session-references-popove
 import { SessionSidebarContent } from "./components/session-sidebar-content";
 import { TaskConversation } from "./components/task-conversation";
 import { useOptionalProjectTasks } from "./context/project-tasks-context";
+import { ConversationActionsContext } from "./conversation-actions";
 import {
   isWorktreeExecutionPath,
   resolveUseWorktreeForRun,
@@ -150,6 +150,12 @@ import {
 const SESSION_SIDEBAR_STORAGE_KEY = "desktop:session-sidebar-width";
 const SESSION_SIDEBAR_DEFAULT_WIDTH = 280;
 const DEFAULT_EXECUTORS: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX"];
+
+// Follow-up sent when retrying a turn that aborted on a malformed tool call.
+// Nudges the agent to re-issue the dropped call as a proper structured tool
+// call and pick up where it stopped.
+const MALFORMED_TOOL_CALL_RETRY_PROMPT =
+  "Your previous tool call was malformed and did not run, so the turn stopped. Re-issue that tool call as a proper tool call and continue from where you left off.";
 
 const httpToWs = (url: string): string =>
   url.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
@@ -277,7 +283,8 @@ export function SingleAgentSessionView({
   // Track stopping state for immediate UI feedback
   const [isStopping, setIsStopping] = useState(false);
   const openLayoutTab = useLayoutStore((s) => s.openTab);
-  const [rebaseDialogOpen, setRebaseDialogOpen] = useState(false);
+  const referencesPopoverEnabled = useFlag("session_references_popover");
+  const [environmentPopoverOpen, setEnvironmentPopoverOpen] = useState(false);
   const [isMergingDiffs, setIsMergingDiffs] = useState(false);
   const [mergeSuccess, setMergeSuccess] = useState(false);
   const [isAbortingConflicts, setIsAbortingConflicts] = useState(false);
@@ -336,8 +343,6 @@ export function SingleAgentSessionView({
     isGitRepository,
     baseBranch,
     setBaseBranch,
-    baseBranchCandidates,
-    isLoadingBaseBranches,
     baseBranchSearch,
     setBaseBranchSearch,
     filteredBaseBranches,
@@ -975,6 +980,61 @@ export function SingleAgentSessionView({
     routeTaskSlug,
   ]);
 
+  // Retry a turn that aborted on a malformed tool call: continue the existing
+  // session ("auto") with a fixed nudge, mirroring handleSend's optimistic
+  // pending-submission bookkeeping.
+  const handleRetryMalformedToolCall = useCallback(() => {
+    if (!activeTaskId || isSending) {
+      return;
+    }
+    const requestId = createPerfRequestId();
+    const createdAt = new Date().toISOString();
+    beginPendingSubmission({
+      requestId,
+      prompt: MALFORMED_TOOL_CALL_RETRY_PROMPT,
+      createdAt,
+      taskId: activeStreamTaskId,
+      taskSlug: routeTaskSlug,
+    });
+    setScrollToBottomSignal((value) => value + 1);
+    activeTaskRunIdRef.current = null;
+    void submitPrompt(
+      {
+        prompt: MALFORMED_TOOL_CALL_RETRY_PROMPT,
+        contextRefs: [],
+        imageIds: null,
+        selectedSkillIds: [],
+      },
+      {
+        requestId,
+        mode: "auto",
+        onAccepted: (response) => {
+          resolvePendingSubmission(requestId, response);
+        },
+      },
+    ).then((accepted) => {
+      if (!accepted) {
+        clearPendingSubmission(requestId);
+      }
+    });
+  }, [
+    activeTaskId,
+    isSending,
+    createPerfRequestId,
+    beginPendingSubmission,
+    activeStreamTaskId,
+    routeTaskSlug,
+    setScrollToBottomSignal,
+    submitPrompt,
+    resolvePendingSubmission,
+    clearPendingSubmission,
+  ]);
+
+  const conversationActions = useMemo(
+    () => ({ onRetryMalformedToolCall: handleRetryMalformedToolCall }),
+    [handleRetryMalformedToolCall],
+  );
+
   // User question handlers
   const handleQuestionAnswer = useCallback(
     async (answers: Record<string, string>) => {
@@ -1194,7 +1254,7 @@ export function SingleAgentSessionView({
 
   // Rebase handlers
   const handleRebaseSuccess = useCallback(() => {
-    setRebaseDialogOpen(false);
+    setEnvironmentPopoverOpen(false);
     // Refetch branch status to update commits_behind immediately
     void refetchBranchStatus();
   }, [refetchBranchStatus]);
@@ -1212,9 +1272,9 @@ export function SingleAgentSessionView({
     onError: handleRebaseError,
   });
 
-  // Fetch branches when rebase dialog opens
+  // Fetch branches when the environment popover opens (powers the rebase form)
   useEffect(() => {
-    if (!rebaseDialogOpen || !taskRunId) {
+    if (!environmentPopoverOpen || !taskRunId) {
       return;
     }
 
@@ -1234,17 +1294,11 @@ export function SingleAgentSessionView({
     };
 
     void fetchBranches();
-  }, [rebaseDialogOpen, taskRunId]);
+  }, [environmentPopoverOpen, taskRunId]);
 
   const handleRebaseConfirm = useCallback(
-    (result: RebaseDialogResult) => {
-      if (result.action === "canceled") {
-        setRebaseDialogOpen(false);
-        return;
-      }
-      if (result.targetBranch && result.upstreamBranch) {
-        void rebase(result.targetBranch, result.upstreamBranch);
-      }
+    (result: RebaseConfirmResult) => {
+      void rebase(result.targetBranch, result.upstreamBranch);
     },
     [rebase],
   );
@@ -1398,6 +1452,14 @@ export function SingleAgentSessionView({
   );
 
   const hasDiffs = diffItems.length > 0;
+  const diffAdditions = useMemo(
+    () => diffItems.reduce((sum, item) => sum + (item.entry.additions ?? 0), 0),
+    [diffItems],
+  );
+  const diffDeletions = useMemo(
+    () => diffItems.reduce((sum, item) => sum + (item.entry.deletions ?? 0), 0),
+    [diffItems],
+  );
   const commitsAhead = branchStatus?.commits_ahead ?? 0;
   // Use commits_behind for diff action availability.
   const commitsBehind = branchStatus?.commits_behind ?? 0;
@@ -1416,10 +1478,10 @@ export function SingleAgentSessionView({
       (commitsAhead > 0 || mergeSuccess),
   );
 
-  // Rebase requires Git branch context and pending work against the base branch.
+  // Rebase only needs the branch to be behind its base; local changes are not
+  // required so the worktree can be brought up to date even with no diffs.
   const canRebase = Boolean(
     taskRunId &&
-      hasDiffs &&
       branchStatus?.target_branch &&
       !isRebasing &&
       commitsBehind > 0,
@@ -1662,18 +1724,20 @@ export function SingleAgentSessionView({
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              <SessionReferencesPopover
-                taskId={sidebarActiveTaskId}
-                tasksById={tasksById}
-                side="top"
-                align="start"
-                onOpenTask={(taskIdOrSlug) =>
-                  navigateToSession(taskIdOrSlug, null)
-                }
-                onOpenFile={(path) =>
-                  openFilePath(path, taskRunId ?? undefined)
-                }
-              />
+              {referencesPopoverEnabled ? (
+                <SessionReferencesPopover
+                  taskId={sidebarActiveTaskId}
+                  tasksById={tasksById}
+                  side="top"
+                  align="start"
+                  onOpenTask={(taskIdOrSlug) =>
+                    navigateToSession(taskIdOrSlug, null)
+                  }
+                  onOpenFile={(path) =>
+                    openFilePath(path, taskRunId ?? undefined)
+                  }
+                />
+              ) : null}
             </div>
 
             <div className="flex items-center gap-2">
@@ -1689,160 +1753,6 @@ export function SingleAgentSessionView({
               />
             </div>
           </div>
-        </div>
-
-        {/* Footer Status Bar */}
-        <div className="mt-3 flex items-center justify-between px-1 text-xs font-medium text-muted-foreground">
-          {isLoadingBaseBranches ? null : isGitRepository ? (
-            <>
-              <div className="flex items-center gap-4">
-                <TooltipProvider delayDuration={120}>
-                  <Tooltip>
-                    <DropdownMenu>
-                      <TooltipTrigger asChild>
-                        <DropdownMenuTrigger
-                          type="button"
-                          disabled={isExecutorLocked}
-                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          <Laptop className="h-3 w-3" />
-                          <span>{useWorktree ? "Worktree" : "Local"}</span>
-                          <ChevronDown className="h-2.5 w-2.5" />
-                        </DropdownMenuTrigger>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="text-[11px]">
-                        Worktree isolates changes, Local edits in place
-                      </TooltipContent>
-                      <DropdownMenuContent align="start">
-                        <DropdownMenuItem
-                          onClick={() => setUseWorktree(true)}
-                          className="flex items-center justify-between gap-3 text-[11px]"
-                        >
-                          <span>Worktree</span>
-                          {useWorktree ? (
-                            <Check className="h-3.5 w-3.5" />
-                          ) : null}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setUseWorktree(false)}
-                          className="flex items-center justify-between gap-3 text-[11px]"
-                        >
-                          <span>Local</span>
-                          {!useWorktree ? (
-                            <Check className="h-3.5 w-3.5" />
-                          ) : null}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <TooltipProvider delayDuration={120}>
-                  <Tooltip>
-                    <DropdownMenu
-                      onOpenChange={(next) => {
-                        if (!next) setBaseBranchSearch("");
-                      }}
-                    >
-                      <TooltipTrigger asChild>
-                        <DropdownMenuTrigger
-                          type="button"
-                          disabled={isExecutorLocked}
-                          className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          <GitBranch className="h-3 w-3" />
-                          <span>From</span>
-                          <span className="max-w-[120px] truncate">
-                            {baseBranch ?? "main"}
-                          </span>
-                          <ChevronDown className="h-2.5 w-2.5" />
-                        </DropdownMenuTrigger>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="text-[11px]">
-                        Base branch to start working from
-                      </TooltipContent>
-                      <DropdownMenuContent align="end" className="w-64">
-                        <div className="p-2">
-                          <div className="relative">
-                            <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                            <input
-                              type="text"
-                              placeholder="Search branches..."
-                              value={baseBranchSearch}
-                              onChange={(e) =>
-                                setBaseBranchSearch(e.target.value)
-                              }
-                              onKeyDown={(e) => {
-                                if (e.key === "Escape") {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  return;
-                                }
-                                e.stopPropagation();
-                              }}
-                              className="w-full rounded-sm border border-border bg-background py-1.5 pl-7 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-                            />
-                          </div>
-                        </div>
-                        <DropdownMenuSeparator />
-                        <div className="max-h-48 overflow-y-auto">
-                          {filteredBaseBranches.length === 0 ? (
-                            <div className="p-2 text-center text-[11px] text-muted-foreground">
-                              No branches found
-                            </div>
-                          ) : (
-                            filteredBaseBranches.map((branch) => (
-                              <DropdownMenuItem
-                                key={branch.name}
-                                onClick={() => setBaseBranch(branch.name)}
-                                className="flex items-center justify-between gap-3 text-[11px]"
-                              >
-                                <span className="min-w-0 truncate">
-                                  {branch.name}
-                                </span>
-                                <div className="flex flex-shrink-0 items-center gap-1">
-                                  {branch.is_current && (
-                                    <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                                      current
-                                    </span>
-                                  )}
-                                  {baseBranch === branch.name && (
-                                    <Check className="h-3.5 w-3.5" />
-                                  )}
-                                </div>
-                              </DropdownMenuItem>
-                            ))
-                          )}
-                        </div>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-            </>
-          ) : (
-            <div className="flex w-full items-center justify-between gap-3">
-              <div className="flex items-center gap-1.5 text-muted-foreground">
-                <Laptop className="h-3 w-3" />
-                <span>Local</span>
-              </div>
-              <button
-                type="button"
-                disabled={isInitializingGit || !routeProjectId}
-                onClick={handleInitGitRepo}
-                className="flex cursor-pointer items-center gap-1.5 transition-colors hover:text-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <GitBranch className="h-3 w-3" />
-                <span>
-                  {isInitializingGit
-                    ? "Initializing..."
-                    : "Create git repository"}
-                </span>
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -1891,26 +1801,28 @@ export function SingleAgentSessionView({
     >
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTaskId || pendingSubmission ? (
-          <TaskConversation
-            key={conversationScrollKey}
-            entries={entries}
-            isLoading={isConversationLoading}
-            error={conversationError}
-            messagesEndRef={messagesEndRef}
-            scrollContainerRef={conversationScrollRef}
-            searchActive={find.searchActive}
-            expandAll={conversationExpandAll}
-            scrollCacheKey={conversationScrollKey}
-            isStreaming={isConversationStreaming}
-            scrollToBottomSignal={scrollToBottomSignal}
-            hasMoreHistory={hasMoreHistory}
-            isLoadingMoreHistory={isLoadingMoreHistory}
-            onLoadMoreHistory={loadMoreHistory}
-            onWikilinkClick={navigateToWikilink}
-            onFilePathClick={(path) =>
-              openFilePath(path, taskRunId ?? undefined)
-            }
-          />
+          <ConversationActionsContext.Provider value={conversationActions}>
+            <TaskConversation
+              key={conversationScrollKey}
+              entries={entries}
+              isLoading={isConversationLoading}
+              error={conversationError}
+              messagesEndRef={messagesEndRef}
+              scrollContainerRef={conversationScrollRef}
+              searchActive={find.searchActive}
+              expandAll={conversationExpandAll}
+              scrollCacheKey={conversationScrollKey}
+              isStreaming={isConversationStreaming}
+              scrollToBottomSignal={scrollToBottomSignal}
+              hasMoreHistory={hasMoreHistory}
+              isLoadingMoreHistory={isLoadingMoreHistory}
+              onLoadMoreHistory={loadMoreHistory}
+              onWikilinkClick={navigateToWikilink}
+              onFilePathClick={(path) =>
+                openFilePath(path, taskRunId ?? undefined)
+              }
+            />
+          </ConversationActionsContext.Provider>
         ) : (
           <ProjectOverview />
         )}
@@ -1920,16 +1832,6 @@ export function SingleAgentSessionView({
 
   return (
     <>
-      <RebaseDialog
-        open={rebaseDialogOpen}
-        onClose={() => setRebaseDialogOpen(false)}
-        isRebasing={isRebasing}
-        branches={branches}
-        isLoadingBranches={isLoadingBranches}
-        initialTargetBranch={currentTaskRunTargetBranch ?? undefined}
-        initialUpstreamBranch={currentTaskRunTargetBranch ?? undefined}
-        onConfirm={handleRebaseConfirm}
-      />
       <div className="flex h-full w-full justify-end bg-muted text-foreground">
         <div className="flex h-full w-full max-w-full bg-background">
           {/* The session list previously lived here as a ResizableSidebar.
@@ -1940,24 +1842,56 @@ export function SingleAgentSessionView({
             className="flex min-w-0 flex-1 flex-col bg-background"
           >
             <SessionHeader
-              taskId={sidebarActiveTaskId}
               taskTitle={activeTaskTitle}
-              taskBranch={activeTaskBranch}
-              hasDiffs={hasDiffs}
-              canRebase={canRebase}
-              canMergeDiffs={canMergeDiffs}
-              isRebasing={isRebasing}
-              isMergingDiffs={isMergingDiffs}
-              commitsBehind={commitsBehind}
-              onOpenDiffViewer={() => {
-                if (!taskRunId) return;
-                openLayoutTab(
-                  { type: "diff", runId: taskRunId },
-                  { returnFocusOnClose: true },
-                );
-              }}
-              onRebase={() => setRebaseDialogOpen(true)}
-              onMergeDiffs={handleMergeDiffs}
+              environmentControl={
+                <EnvironmentPopover
+                  taskId={sidebarActiveTaskId}
+                  taskBranch={activeTaskBranch}
+                  isGitRepository={isGitRepository}
+                  isExecutorLocked={isExecutorLocked}
+                  additions={diffAdditions}
+                  deletions={diffDeletions}
+                  hasDiffs={hasDiffs}
+                  onOpenDiffViewer={() => {
+                    if (!taskRunId) return;
+                    openLayoutTab(
+                      { type: "diff", runId: taskRunId },
+                      { returnFocusOnClose: true },
+                    );
+                  }}
+                  onOpenGallery={() => {
+                    if (!taskRunId) return;
+                    openLayoutTab(
+                      { type: "gallery", taskRunId },
+                      { returnFocusOnClose: true },
+                    );
+                  }}
+                  useWorktree={useWorktree}
+                  onUseWorktreeChange={setUseWorktree}
+                  baseBranch={baseBranch}
+                  baseBranchSearch={baseBranchSearch}
+                  onBaseBranchSearchChange={setBaseBranchSearch}
+                  filteredBaseBranches={filteredBaseBranches}
+                  onBaseBranchSelect={setBaseBranch}
+                  canRebase={canRebase}
+                  isRebasing={isRebasing}
+                  commitsBehind={commitsBehind}
+                  branches={branches}
+                  isLoadingBranches={isLoadingBranches}
+                  initialTargetBranch={currentTaskRunTargetBranch ?? undefined}
+                  initialUpstreamBranch={
+                    currentTaskRunTargetBranch ?? undefined
+                  }
+                  onRebaseConfirm={handleRebaseConfirm}
+                  canMergeDiffs={canMergeDiffs}
+                  isMergingDiffs={isMergingDiffs}
+                  onMergeDiffs={handleMergeDiffs}
+                  isInitializingGit={isInitializingGit}
+                  canInitGit={Boolean(routeProjectId)}
+                  onInitGitRepo={handleInitGitRepo}
+                  onOpenChange={setEnvironmentPopoverOpen}
+                />
+              }
               onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
               isSidebarCollapsed={sessionSidebarCollapsed}
               onOpenSidebar={() => toggleSessionSidebarCollapsed(false)}

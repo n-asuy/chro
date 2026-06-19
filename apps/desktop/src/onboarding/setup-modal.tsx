@@ -1,4 +1,5 @@
 import { OpenAiLogo } from "@/components/agent-logo";
+import { LoginTerminalDialog } from "@/components/dialogs/login-terminal-dialog";
 import { useLanguage } from "@/i18n";
 import {
   type AvailabilityInfo,
@@ -7,7 +8,6 @@ import {
   type InstallableTool,
   fetchAuthStatus,
   fetchExecutorInstallStatus,
-  triggerAuthLogin,
   updateExecutorProfile,
 } from "@/lib/executor-client";
 import { installTool } from "@/lib/executor-install";
@@ -151,6 +151,9 @@ export function SetupModal() {
   );
   const [signingInExecutor, setSigningInExecutor] =
     useState<BaseCodingAgent | null>(null);
+  // Agent whose login terminal is open (null when closed).
+  const [authDialogAgent, setAuthDialogAgent] =
+    useState<BaseCodingAgent | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -240,46 +243,13 @@ export function SetupModal() {
     [loadAvailability],
   );
 
-  const handleSignIn = useCallback(
-    async (executor: BaseCodingAgent) => {
-      setSigningInExecutor(executor);
-
-      try {
-        await triggerAuthLogin(executor);
-        clearAuthPolling();
-        pollRef.current = setInterval(async () => {
-          try {
-            const status = await fetchAuthStatus();
-            const nextAuthStatus = {
-              CLAUDE_CODE: status.claude_code,
-              CODEX: status.codex,
-            } satisfies Record<BaseCodingAgent, AvailabilityInfo>;
-            setAuthStatus(nextAuthStatus);
-
-            const info =
-              executor === "CLAUDE_CODE" ? status.claude_code : status.codex;
-            if (info.type === "LOGIN_DETECTED") {
-              clearAuthPolling();
-              setSigningInExecutor(null);
-              setSelectedExecutor(executor);
-            }
-          } catch {
-            /* keep polling */
-          }
-        }, 2000);
-
-        pollTimeoutRef.current = setTimeout(() => {
-          clearAuthPolling();
-          setSigningInExecutor(null);
-        }, 300_000);
-      } catch {
-        clearAuthPolling();
-        setSigningInExecutor(null);
-        void loadAvailability();
-      }
-    },
-    [clearAuthPolling, loadAvailability],
-  );
+  // Open the login terminal for an executor. The dialog hosts the agent's own
+  // login CLI in a PTY so device-code / token prompts complete in-app without
+  // a browser redirect (works for headless/remote installs too).
+  const handleSignIn = useCallback((executor: BaseCodingAgent) => {
+    setSigningInExecutor(executor);
+    setAuthDialogAgent(executor);
+  }, []);
 
   const handleAgentPrimaryAction = useCallback(
     async (executor: BaseCodingAgent) => {
@@ -379,71 +349,88 @@ export function SetupModal() {
   }, [clearAuthPolling, complete]);
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(next) => {
-        if (!next) handleDismiss();
-      }}
-    >
-      <DialogContent className="max-w-md border-custom-border-200 bg-custom-background-100 text-foreground">
-        <DialogHeader>
-          <DialogTitle>Set up Chro</DialogTitle>
-          <DialogDescription>
-            Install the CLI and sign in to your coding agent.
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <Dialog
+        open={isOpen}
+        onOpenChange={(next) => {
+          if (!next) handleDismiss();
+        }}
+      >
+        <DialogContent className="max-w-md border-custom-border-200 bg-custom-background-100 text-foreground">
+          <DialogHeader>
+            <DialogTitle>Set up Chro</DialogTitle>
+            <DialogDescription>
+              Install the CLI and sign in to your coding agent.
+            </DialogDescription>
+          </DialogHeader>
 
-        <div className="space-y-5 py-1">
-          <section className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Tools
-            </p>
-            <ToolCard
-              icon={<GitBranch className="size-5 text-muted-foreground" />}
-              name="Git"
-              description={gitDescription}
-              state={gitCardState}
-              onInstall={() => void handleInstall("GIT")}
-            />
-          </section>
+          <div className="space-y-5 py-1">
+            <section className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Tools
+              </p>
+              <ToolCard
+                icon={<GitBranch className="size-5 text-muted-foreground" />}
+                name="Git"
+                description={gitDescription}
+                state={gitCardState}
+                onInstall={() => void handleInstall("GIT")}
+              />
+            </section>
 
-          <section className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Agent
-            </p>
-            <AgentCard
-              icon={<img src="/icon_claude.png" alt="" className="size-6" />}
-              name="Claude Code"
-              description={claudeDescription}
-              state={claudeCardState}
-              selected={selectedExecutor === "CLAUDE_CODE"}
-              onSelect={() => setSelectedExecutor("CLAUDE_CODE")}
-              onPrimaryAction={() =>
-                void handleAgentPrimaryAction("CLAUDE_CODE")
-              }
-            />
-            <AgentCard
-              icon={<OpenAiLogo className="size-5 text-muted-foreground" />}
-              name="Codex"
-              description={codexDescription}
-              state={codexCardState}
-              selected={selectedExecutor === "CODEX"}
-              onSelect={() => setSelectedExecutor("CODEX")}
-              onPrimaryAction={() => void handleAgentPrimaryAction("CODEX")}
-            />
-          </section>
-        </div>
+            <section className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Agent
+              </p>
+              <AgentCard
+                icon={<img src="/icon_claude.png" alt="" className="size-6" />}
+                name="Claude Code"
+                description={claudeDescription}
+                state={claudeCardState}
+                selected={selectedExecutor === "CLAUDE_CODE"}
+                onSelect={() => setSelectedExecutor("CLAUDE_CODE")}
+                onPrimaryAction={() =>
+                  void handleAgentPrimaryAction("CLAUDE_CODE")
+                }
+              />
+              <AgentCard
+                icon={<OpenAiLogo className="size-5 text-muted-foreground" />}
+                name="Codex"
+                description={codexDescription}
+                state={codexCardState}
+                selected={selectedExecutor === "CODEX"}
+                onSelect={() => setSelectedExecutor("CODEX")}
+                onPrimaryAction={() => void handleAgentPrimaryAction("CODEX")}
+              />
+            </section>
+          </div>
 
-        <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-between">
-          <Button variant="ghost" onClick={handleDismiss}>
-            Skip for now
-          </Button>
-          <Button onClick={handleContinue} disabled={!canContinue}>
-            Continue
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+            <Button variant="ghost" onClick={handleDismiss}>
+              Skip for now
+            </Button>
+            <Button onClick={handleContinue} disabled={!canContinue}>
+              Continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <LoginTerminalDialog
+        agent={authDialogAgent}
+        open={authDialogAgent !== null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setAuthDialogAgent(null);
+            setSigningInExecutor(null);
+            void loadAvailability();
+          }
+        }}
+        onAuthenticated={(executor) => {
+          setSelectedExecutor(executor);
+          void loadAvailability();
+        }}
+      />
+    </>
   );
 }
 

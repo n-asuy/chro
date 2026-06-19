@@ -10,10 +10,7 @@ export type FlagStatus =
 // Matches the flag keys in crates/analytics/src/flags.rs.
 // The backend registry is the source of truth; this union exists for
 // autocomplete and compile-time safety when gating code on a flag.
-export type FlagKey =
-  | "inline_diff_v2"
-  | "terminal_canvas_renderer"
-  | "ask_user_question_ui";
+export type FlagKey = "session_references_popover";
 
 // Matches FlagView in crates/server/src/routes/rpc/flags.rs
 export interface FlagView {

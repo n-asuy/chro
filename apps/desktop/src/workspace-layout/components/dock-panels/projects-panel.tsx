@@ -400,7 +400,7 @@ interface InboxRowsProps {
 const InboxRows = memo(function InboxRows({ t }: InboxRowsProps) {
   const { tasks, isLoading } = useInboxTasksStream(true);
   const projectsById = useAllProjects(true);
-  const { isArchived } = useArchivedSessions();
+  const { archiveSession, isArchived } = useArchivedSessions();
   const activeTaskKey = useFocusedSessionTaskKey();
   const navigate = useNavigate();
 
@@ -438,6 +438,7 @@ const InboxRows = memo(function InboxRows({ t }: InboxRowsProps) {
             projectName={projectsById[task.project_id]?.name ?? null}
             isActive={activeTaskKey === task.id || activeTaskKey === task.slug}
             onOpen={() => openInboxSession(task)}
+            onArchive={() => archiveSession(task)}
             t={t}
           />
         ))
@@ -451,10 +452,18 @@ interface InboxRowProps {
   projectName: string | null;
   isActive: boolean;
   onOpen: () => void;
+  onArchive: () => void;
   t: TranslationFunction;
 }
 
-function InboxRow({ task, projectName, isActive, onOpen, t }: InboxRowProps) {
+function InboxRow({
+  task,
+  projectName,
+  isActive,
+  onOpen,
+  onArchive,
+  t,
+}: InboxRowProps) {
   const isRunning = Boolean(task.active_session_id);
   const isAwaitingInput = Boolean(task.awaiting_input);
   const dotKind = useTaskStatusDot(task);
@@ -477,7 +486,7 @@ function InboxRow({ task, projectName, isActive, onOpen, t }: InboxRowProps) {
         }
       }}
       className={cn(
-        "flex cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5",
+        "group/inbox flex cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5",
         isActive
           ? "bg-custom-sidebar-background-80"
           : "hover:bg-custom-sidebar-background-80",
@@ -515,9 +524,22 @@ function InboxRow({ task, projectName, isActive, onOpen, t }: InboxRowProps) {
         {isRunning ? (
           <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
         ) : (
-          <span className="text-sm text-custom-sidebar-text-400">
-            {formatRelativeTime(task.updated_at)}
-          </span>
+          <>
+            <span className="text-sm text-custom-sidebar-text-400 group-hover/inbox:hidden">
+              {formatRelativeTime(task.updated_at)}
+            </span>
+            <button
+              type="button"
+              aria-label="Archive session"
+              onClick={(event) => {
+                event.stopPropagation();
+                onArchive();
+              }}
+              className="hidden items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100 group-hover/inbox:flex"
+            >
+              <Archive className="h-3.5 w-3.5" />
+            </button>
+          </>
         )}
       </span>
     </div>

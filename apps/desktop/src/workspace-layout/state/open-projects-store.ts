@@ -14,7 +14,7 @@ export type OpenProjectTab = {
 };
 
 const STORAGE_KEY = "chro.openProjectTabs";
-const MAX_OPEN_PROJECTS = 20;
+const MAX_OPEN_PROJECTS = 30;
 
 function readFromStorage(): OpenProjectTab[] {
   const raw = getUiValue<OpenProjectTab[]>(STORAGE_KEY);

@@ -53,6 +53,44 @@ fn raise_fd_limit() {
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
 
+/// Prepend the directory holding the bundled `chro` CLI (provided by the desktop
+/// shell via `CHRO_CLI_DIR`) to this process's `PATH`. Executors derive the
+/// environment they hand to spawned agents from this `PATH`, so the prepend lets
+/// an agent invoke `chro task ...` by bare name instead of hitting "command not
+/// found". No-op when the variable is unset (standalone or dev launches) or the
+/// directory is already first on `PATH`.
+fn expose_cli_on_path() {
+    let Some(cli_dir) = std::env::var_os("CHRO_CLI_DIR") else {
+        return;
+    };
+    if let Some(updated) = prepend_path_entry(std::env::var_os("PATH"), &cli_dir) {
+        std::env::set_var("PATH", updated);
+    }
+}
+
+/// Build a `PATH` value with `dir` moved to the front, or `None` when `dir` is
+/// empty or already the first entry. Deduplicates so repeated launches do not
+/// grow `PATH`.
+fn prepend_path_entry(
+    current: Option<std::ffi::OsString>,
+    dir: &std::ffi::OsStr,
+) -> Option<std::ffi::OsString> {
+    if dir.is_empty() {
+        return None;
+    }
+    let dir_path = std::path::PathBuf::from(dir);
+    let existing: Vec<std::path::PathBuf> = current
+        .as_ref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    if existing.first() == Some(&dir_path) {
+        return None;
+    }
+    let mut entries = vec![dir_path.clone()];
+    entries.extend(existing.into_iter().filter(|p| *p != dir_path));
+    std::env::join_paths(entries).ok()
+}
+
 pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -60,6 +98,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .init();
 
     raise_fd_limit();
+    expose_cli_on_path();
 
     perf::set_perf_enabled(args.perf);
 
@@ -160,4 +199,63 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_path_tests {
+    use super::prepend_path_entry;
+    use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
+
+    fn join(parts: &[&str]) -> OsString {
+        std::env::join_paths(parts.iter().map(PathBuf::from)).unwrap()
+    }
+
+    fn split(value: &OsStr) -> Vec<PathBuf> {
+        std::env::split_paths(value).collect()
+    }
+
+    #[test]
+    fn prepends_cli_dir_to_front() {
+        let out = prepend_path_entry(Some(join(&["/usr/bin", "/bin"])), OsStr::new("/opt/chro")).unwrap();
+        assert_eq!(
+            split(&out),
+            vec![
+                PathBuf::from("/opt/chro"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn moves_existing_entry_to_front_without_duplicating() {
+        let out =
+            prepend_path_entry(Some(join(&["/usr/bin", "/opt/chro", "/bin"])), OsStr::new("/opt/chro"))
+                .unwrap();
+        assert_eq!(
+            split(&out),
+            vec![
+                PathBuf::from("/opt/chro"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn is_noop_when_already_first() {
+        assert!(prepend_path_entry(Some(join(&["/opt/chro", "/usr/bin"])), OsStr::new("/opt/chro")).is_none());
+    }
+
+    #[test]
+    fn is_noop_when_dir_is_empty() {
+        assert!(prepend_path_entry(Some(join(&["/usr/bin"])), OsStr::new("")).is_none());
+    }
+
+    #[test]
+    fn sets_sole_entry_when_path_is_unset() {
+        let out = prepend_path_entry(None, OsStr::new("/opt/chro")).unwrap();
+        assert_eq!(split(&out), vec![PathBuf::from("/opt/chro")]);
+    }
 }

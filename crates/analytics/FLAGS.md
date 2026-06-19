@@ -5,6 +5,4 @@
 
 | Key | Status | Owner | Created | Retire by | Default | Description |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ask_user_question_ui` | rolling_out | @n-asuy | 2026-06-14 | 2026-09-01 | off | Show the structured AskUserQuestion picker for agent clarifying questions. |
-| `inline_diff_v2` | experimental | @n-asuy | 2026-06-14 | 2026-09-01 | off | Render diffs inline in the editor gutter instead of the side panel. |
-| `terminal_canvas_renderer` | rolling_out | @n-asuy | 2026-06-14 | 2026-09-01 | on | Stream alacritty snapshots to a canvas renderer (replaces the DOM terminal). |
+| `session_references_popover` | rolling_out | @n-asuy | 2026-06-14 | 2026-09-01 | on | Show the task references popover (Uses / Referenced by) in the session composer. |

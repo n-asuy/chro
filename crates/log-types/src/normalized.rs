@@ -58,6 +58,9 @@ pub struct CommandRunResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NormalizedEntryError {
     SetupRequired,
+    /// The agent emitted a tool call the CLI could not parse, so the turn ended
+    /// without running it. Recoverable: the UI offers a one-click retry.
+    MalformedToolCall,
     Other,
 }
 

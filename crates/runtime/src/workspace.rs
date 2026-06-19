@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::anyhow;
 use filesystem::{
-    FilesystemError, WorkspaceBinaryFile, WorkspaceEntry, WorkspaceEntryDetail, WorkspaceFile,
+    FilesystemError, MediaEntry, WorkspaceBinaryFile, WorkspaceEntry, WorkspaceEntryDetail,
+    WorkspaceFile,
 };
 use tokio::{fs, task::spawn_blocking};
 
@@ -95,6 +96,16 @@ impl<'a, R: Runtime> ProjectFileService<'a, R> {
             )
         })
         .await
+    }
+
+    /// List renderable media (images, video) under the project root for the
+    /// gallery, gitignore-aware and newest-first. The boolean reports whether
+    /// the result was capped at `limit`.
+    pub async fn list_media(&self, limit: usize) -> Result<(Vec<MediaEntry>, bool), RuntimeError> {
+        let project_path = self.project_root().clone();
+        let fs_service = self.runtime.filesystem().clone();
+        self.run_blocking(move || fs_service.list_workspace_media(&project_path, limit))
+            .await
     }
 
     pub async fn read_file(&self, relative_path: &str) -> Result<WorkspaceFile, RuntimeError> {

@@ -6,6 +6,8 @@ use std::{
     time::SystemTime,
 };
 
+use ignore::WalkBuilder;
+
 use crate::{FilesystemError, FilesystemService};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,54 @@ pub struct WorkspaceEntry {
     pub created: Option<SystemTime>,
     /// Children entries when using recursive listing
     pub children: Option<Vec<WorkspaceEntry>>,
+}
+
+/// A renderable media artifact (image or video) found under a workspace root.
+/// The byte payload is served separately via the existing binary-file endpoint;
+/// this record carries only what the gallery grid needs to lay out and sort.
+#[derive(Debug, Clone)]
+pub struct MediaEntry {
+    pub relative_path: String,
+    pub kind: MediaKind,
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaKind::Image => "image",
+            MediaKind::Video => "video",
+        }
+    }
+}
+
+/// Extensions the gallery treats as still images. Kept as the single source of
+/// truth on the Rust side; the frontend mirror lives in `files/media-types.ts`.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico", "tiff", "tif",
+];
+
+/// Extensions the gallery treats as playable video.
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mov", "avi", "mkv", "m4v"];
+
+/// Classify a file extension into a [`MediaKind`], or `None` when it is not a
+/// media artifact the gallery renders.
+pub fn classify_media(extension: Option<&str>) -> Option<MediaKind> {
+    let ext = extension?.to_ascii_lowercase();
+    if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        Some(MediaKind::Image)
+    } else if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
+        Some(MediaKind::Video)
+    } else {
+        None
+    }
 }
 
 /// Get display name (without .md extension for markdown files)
@@ -129,6 +179,64 @@ impl FilesystemService {
             true,
             detail,
         )
+    }
+
+    /// Walk the workspace for renderable media (images, video) honoring
+    /// `.gitignore` and skipping heavy build directories, returning the newest
+    /// first. The boolean is `true` when more than `limit` media files exist and
+    /// the result was capped, so callers can surface that rather than implying
+    /// full coverage. Mirrors the gitignore-aware traversal used by file search.
+    pub fn list_workspace_media(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        limit: usize,
+    ) -> Result<(Vec<MediaEntry>, bool), FilesystemError> {
+        let root = workspace_root.as_ref();
+        ensure_workspace_dir(root)?;
+
+        let mut items: Vec<MediaEntry> = WalkBuilder::new(root)
+            .standard_filters(true)
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                name != ".git"
+                    && name != "node_modules"
+                    && name != "target"
+                    && name != "dist"
+                    && name != "build"
+            })
+            .build()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
+            .filter_map(|entry| {
+                let path = entry.path();
+                let kind = classify_media(path.extension().and_then(OsStr::to_str))?;
+                let relative = path.strip_prefix(root).ok()?;
+                let relative_path = relative_path_string(relative);
+                if relative_path.is_empty() {
+                    return None;
+                }
+                let metadata = entry.metadata().ok();
+                Some(MediaEntry {
+                    relative_path,
+                    kind,
+                    size: metadata.as_ref().map(std::fs::Metadata::len),
+                    modified: metadata.as_ref().and_then(|m| m.modified().ok()),
+                })
+            })
+            .collect();
+
+        // Newest first; entries without a modified time sort to the end so a
+        // missing timestamp never masquerades as the most recent creative.
+        items.sort_by(|a, b| match (a.modified, b.modified) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        });
+
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        Ok((items, truncated))
     }
 
     fn list_workspace_entries_internal(
@@ -817,6 +925,70 @@ mod tests {
         assert_eq!(entries[1].entry_type, WorkspaceEntryType::File);
         assert_eq!(entries[2].name, "diagram.svg");
         assert_eq!(entries[2].entry_type, WorkspaceEntryType::File);
+    }
+
+    #[test]
+    fn classifies_media_extensions() {
+        assert_eq!(classify_media(Some("png")), Some(MediaKind::Image));
+        assert_eq!(classify_media(Some("JPG")), Some(MediaKind::Image));
+        assert_eq!(classify_media(Some("svg")), Some(MediaKind::Image));
+        assert_eq!(classify_media(Some("mp4")), Some(MediaKind::Video));
+        assert_eq!(classify_media(Some("MOV")), Some(MediaKind::Video));
+        assert_eq!(classify_media(Some("txt")), None);
+        assert_eq!(classify_media(Some("")), None);
+        assert_eq!(classify_media(None), None);
+    }
+
+    #[test]
+    fn lists_media_skipping_build_dirs_and_gitignored() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::create_dir_all(workspace.join("assets")).unwrap();
+        fs::create_dir_all(workspace.join("node_modules/pkg")).unwrap();
+        fs::write(workspace.join(".gitignore"), "ignored.png\n").unwrap();
+
+        fs::write(workspace.join("assets/a.png"), b"x").unwrap();
+        fs::write(workspace.join("assets/b.mp4"), b"x").unwrap();
+        fs::write(workspace.join("assets/notes.txt"), b"x").unwrap();
+        fs::write(workspace.join("ignored.png"), b"x").unwrap();
+        fs::write(workspace.join("node_modules/pkg/icon.png"), b"x").unwrap();
+
+        let service = FilesystemService::new();
+        let (items, truncated) = service.list_workspace_media(workspace, 100).unwrap();
+        let paths: Vec<&str> = items.iter().map(|m| m.relative_path.as_str()).collect();
+
+        assert!(paths.contains(&"assets/a.png"), "found: {paths:?}");
+        assert!(paths.contains(&"assets/b.mp4"), "found: {paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.ends_with("notes.txt")),
+            "non-media leaked: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "build dir leaked: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| *p == "ignored.png"),
+            "gitignored leaked: {paths:?}"
+        );
+        assert_eq!(items.len(), 2);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn caps_media_at_limit_and_flags_truncation() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        for i in 0..5 {
+            fs::write(workspace.join(format!("img{i}.png")), b"x").unwrap();
+        }
+
+        let service = FilesystemService::new();
+        let (items, truncated) = service.list_workspace_media(workspace, 3).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(truncated);
     }
 
     #[test]

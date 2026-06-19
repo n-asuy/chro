@@ -8,6 +8,22 @@ use serde_json::Value;
 pub const SYNTHETIC_MODEL_ID: &str = "<synthetic>";
 pub const SYNTHETIC_NO_RESPONSE_TEXT: &str = "No response requested.";
 
+/// Substring of the assistant message the CLI emits when a tool call fails to
+/// parse even after its built-in retry, ending the turn without running the
+/// tool. A turn that finishes on this text produced no work, so it is treated
+/// as a recoverable malformed-tool-call abort rather than a normal completion.
+/// This is an intermittent model-side failure, not a wiring problem on our end.
+/// Verified against claude 2.1.173.
+pub const MALFORMED_TOOL_CALL_ABORT_TEXT: &str = "could not be parsed (retry also failed)";
+
+/// `result.subtype` synthesized for a malformed-tool-call abort. Distinguishes
+/// it from `success` so the run is marked failed and surfaced with a retry
+/// affordance instead of completing silently.
+pub const MALFORMED_TOOL_CALL_SUBTYPE: &str = "malformed_tool_call";
+
+/// User-facing explanation shown for a malformed-tool-call abort.
+pub const MALFORMED_TOOL_CALL_MESSAGE: &str = "The agent produced a malformed tool call and could not finish this turn. This is an intermittent model-side issue (the CLI's own retry also failed), not a code error. Retry to continue from here.";
+
 /// Approval status for tool use requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

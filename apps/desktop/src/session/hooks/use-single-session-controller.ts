@@ -73,6 +73,10 @@ export function useSingleSessionController({
         requestId?: string;
         restoreOnError?: boolean;
         onAccepted?: (response: StartClaudeResponse) => void;
+        // Force a specific task-message mode regardless of the session's
+        // `forceNewAttempt` toggle. A malformed-tool-call retry, for instance,
+        // must always continue the existing session ("auto"), never start over.
+        mode?: "auto" | "new";
       },
     ): Promise<boolean> => {
       const hasTaskContext = Boolean(activeTaskId);
@@ -81,7 +85,8 @@ export function useSingleSessionController({
         return false;
       }
 
-      const taskMessageMode = forceNewAttempt ? "new" : "auto";
+      const taskMessageMode =
+        options?.mode ?? (forceNewAttempt ? "new" : "auto");
       const requestProjectId = routeProjectId;
       const requestId = options?.requestId ?? createPerfRequestId();
       const finishSendTimer = startPerfTimer("session_send", {

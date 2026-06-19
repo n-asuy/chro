@@ -6,40 +6,17 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
-import {
-  FileDiff,
-  GitMerge,
-  GitPullRequestArrow,
-  Loader2,
-  PanelLeft,
-  Pencil,
-} from "lucide-react";
+import { PanelLeft, Pencil } from "lucide-react";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
 
-const shortIdFromUuid = (id?: string | null, length = 8): string | null => {
-  if (!id) return null;
-  const compact = id.replace(/-/g, "");
-  if (!compact) return null;
-  return compact.slice(0, length).toLowerCase();
-};
-
 type SessionHeaderProps = {
-  taskId?: string | null;
   taskTitle?: string | null;
-  taskBranch?: string | null;
-  hasDiffs: boolean;
-  canRebase: boolean;
-  canMergeDiffs: boolean;
-  isRebasing: boolean;
-  isMergingDiffs: boolean;
-  /** Commits behind the default branch for diff action state. */
-  commitsBehind?: number;
-  onOpenDiffViewer: () => void;
-  onRebase: () => void;
-  onMergeDiffs: () => void;
+  /** Consolidated environment popover (changes, worktree, base, rebase, merge). */
+  environmentControl?: ReactNode;
   onTitleChange?: (newTitle: string) => Promise<void>;
   /** Whether the sidebar is collapsed */
   isSidebarCollapsed?: boolean;
@@ -50,18 +27,8 @@ type SessionHeaderProps = {
 };
 
 export function SessionHeader({
-  taskId,
   taskTitle,
-  taskBranch,
-  hasDiffs,
-  canRebase,
-  canMergeDiffs,
-  isRebasing,
-  isMergingDiffs,
-  commitsBehind = 0,
-  onOpenDiffViewer,
-  onRebase,
-  onMergeDiffs,
+  environmentControl,
   onTitleChange,
   isSidebarCollapsed,
   onOpenSidebar,
@@ -120,8 +87,6 @@ export function SessionHeader({
     [handleSave, taskTitle],
   );
 
-  const taskShortId = shortIdFromUuid(taskId);
-  const taskDisplayId = taskShortId ?? taskId;
   return (
     <div
       className={cn(
@@ -192,112 +157,11 @@ export function SessionHeader({
           ) : null}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground">
-        {taskDisplayId ? (
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex cursor-default items-center gap-1.5">
-                  <span className="text-[10px] tracking-[0.08em] text-muted-foreground">
-                    ID
-                  </span>
-                  <span className="font-mono text-[12px] text-foreground">
-                    {taskDisplayId}
-                  </span>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-[11px]">
-                {taskBranch ? (
-                  <span>Branch: {taskBranch}</span>
-                ) : (
-                  <span>ID: {taskId}</span>
-                )}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : null}
-        <TooltipProvider delayDuration={120}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!canRebase}
-                onClick={onRebase}
-                className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
-              >
-                {isRebasing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <GitPullRequestArrow className="h-3.5 w-3.5" />
-                )}
-                <span>
-                  {isRebasing
-                    ? t("rebaseInProgressLabel")
-                    : t("rebaseButtonLabel")}
-                </span>
-                {commitsBehind > 0 && !isRebasing && (
-                  <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded font-medium">
-                    ↓{commitsBehind}
-                  </span>
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" align="center">
-              {commitsBehind > 0
-                ? `${commitsBehind} commit${commitsBehind !== 1 ? "s" : ""} behind`
-                : t("rebaseBranch")}
-            </TooltipContent>
-          </Tooltip>
-          {hasDiffs && (
-            <>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={onOpenDiffViewer}
-                    className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
-                  >
-                    <FileDiff className="h-3.5 w-3.5" />
-                    <span>{t("openDiffViewerLabel")}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" align="center">
-                  {t("openDiff")}
-                </TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={!canMergeDiffs}
-                    onClick={onMergeDiffs}
-                    className="inline-flex h-7 items-center gap-1.5 rounded-sm text-[12px]"
-                  >
-                    {isMergingDiffs ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <GitMerge className="h-3.5 w-3.5" />
-                    )}
-                    <span>
-                      {isMergingDiffs
-                        ? t("diffMergingLabel")
-                        : t("diffMergeButtonLabel")}
-                    </span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" align="center">
-                  {t("mergeBranch")}
-                </TooltipContent>
-              </Tooltip>
-            </>
-          )}
-        </TooltipProvider>
-      </div>
+      {environmentControl ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {environmentControl}
+        </div>
+      ) : null}
     </div>
   );
 }

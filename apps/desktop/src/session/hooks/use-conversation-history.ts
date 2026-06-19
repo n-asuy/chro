@@ -105,11 +105,13 @@ const generateEntryId = (): string => {
 const INITIAL_HISTORY_RUN_COUNT = 3;
 const HISTORY_RUN_PAGE_SIZE = 3;
 /**
- * Upper bound on a single historic-run log replay. A completed run's stream
- * finishes almost instantly; if it does not (wedged run, half-open socket) we
- * stop waiting so the conversation pane's `isLoading` always resolves.
+ * Idle timeout for a single historic-run log replay: give up only after the
+ * stream goes silent this long without finishing/closing. Because it re-arms on
+ * every message, a large run that keeps streaming is never truncated; a wedged
+ * run (silent, no `finished`) is abandoned quickly so `isLoading` always
+ * resolves. Short by design — a healthy replay sends data continuously.
  */
-const HISTORIC_LOAD_TIMEOUT_MS = 12_000;
+const HISTORIC_LOAD_IDLE_TIMEOUT_MS = 3_000;
 
 function sortRunsByCreatedAtAscending(
   taskRuns: TaskRunRecord[],
@@ -294,21 +296,26 @@ function loadHistoricTaskRunEntries(
       resolve();
     };
 
-    // Safety net: a historic replay must terminate. If the stream neither
-    // finishes nor closes within this window — e.g. the run is wedged in a
-    // non-terminal state, or the socket is half-open — resolve with whatever we
-    // replayed so the conversation pane never sits in `isLoading` forever (the
-    // gate that left a session showing a spinner with only post-send content).
-    timer = window.setTimeout(() => {
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      resolveWithEntries();
-    }, HISTORIC_LOAD_TIMEOUT_MS);
+    // Safety net: a historic replay must terminate. This is an *idle* timeout,
+    // not an absolute one — it is re-armed on every message, so a large run that
+    // legitimately streams for a while is never truncated, while a wedged run
+    // (opens, then goes silent without `finished`/close) gives up quickly so the
+    // conversation pane never sits in `isLoading` forever.
+    const armIdleTimer = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        resolveWithEntries();
+      }, HISTORIC_LOAD_IDLE_TIMEOUT_MS);
+    };
+    armIdleTimer();
 
     ws.onmessage = (event) => {
+      armIdleTimer(); // data is flowing; push the idle deadline back
       try {
         const msg = JSON.parse(event.data) as LogEntryMessage;
 
@@ -679,10 +686,14 @@ export function useConversationHistory({
       setIsLoadingMoreHistory(true);
 
       try {
-        for (const run of historicRuns) {
-          if (options.cancelled?.()) break;
-          try {
-            await loadHistoricTaskRunEntries(run.id, (entries) => {
+        // Replay the runs in parallel, not one-after-another: a single wedged
+        // replay (one that hits HISTORIC_LOAD_IDLE_TIMEOUT_MS instead of finishing)
+        // must not serialize behind the others. Worst-case wait for the page is
+        // one timeout, not N.
+        await Promise.allSettled(
+          historicRuns.map((run) => {
+            if (options.cancelled?.()) return Promise.resolve();
+            return loadHistoricTaskRunEntries(run.id, (entries) => {
               if (options.cancelled?.()) return;
               taskRunEntriesRef.current.set(run.id, {
                 taskRunId: run.id,
@@ -692,14 +703,14 @@ export function useConversationHistory({
               });
               loadedRunIdsRef.current.add(run.id);
               updateEntriesVersion();
+            }).catch((err) => {
+              console.error(
+                `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
+                err,
+              );
             });
-          } catch (err) {
-            console.error(
-              `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
-              err,
-            );
-          }
-        }
+          }),
+        );
       } finally {
         historyLoadingRef.current = false;
         if (!options.cancelled?.()) {

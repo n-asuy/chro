@@ -127,13 +127,6 @@ export type ExecutorInstallStatusResult = {
 
 export type InstallableTool = BaseCodingAgent | "GIT";
 
-export type AuthLoginResult = {
-  ok: boolean;
-  executor: BaseCodingAgent;
-  message: string | null;
-  auth_url: string | null;
-};
-
 export const fetchAuthStatus = async (): Promise<AuthStatusResult> => {
   return desktopFetch<AuthStatusResult>("/rpc/executor/auth-status");
 };
@@ -144,13 +137,3 @@ export const fetchExecutorInstallStatus =
       "/rpc/executor/install-status",
     );
   };
-
-export const triggerAuthLogin = async (
-  executor: BaseCodingAgent,
-): Promise<AuthLoginResult> => {
-  return desktopFetch<AuthLoginResult>("/rpc/executor/auth", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ executor }),
-  });
-};

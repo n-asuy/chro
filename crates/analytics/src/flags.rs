@@ -60,9 +60,7 @@ impl Status {
 /// branch); `FLAGS.md` regenerates on the next `cargo test`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
 pub enum Flag {
-    InlineDiffV2,
-    TerminalCanvasRenderer,
-    AskUserQuestionUi,
+    SessionReferencesPopover,
 }
 
 /// Static description of a flag. The `key` is the identifier shared with
@@ -89,32 +87,17 @@ impl Flag {
 
     pub fn meta(self) -> FlagMeta {
         match self {
-            Flag::InlineDiffV2 => FlagMeta {
-                key: "inline_diff_v2",
+            Flag::SessionReferencesPopover => FlagMeta {
+                key: "session_references_popover",
                 owner: "@n-asuy",
                 created: "2026-06-14",
                 retire_by: "2026-09-01",
-                default_enabled: false,
-                status: Status::Experimental,
-                description: "Render diffs inline in the editor gutter instead of the side panel.",
-            },
-            Flag::TerminalCanvasRenderer => FlagMeta {
-                key: "terminal_canvas_renderer",
-                owner: "@n-asuy",
-                created: "2026-06-14",
-                retire_by: "2026-09-01",
+                // Existing feature: default on so gating never removes it for
+                // anyone (telemetry-off users always get the default). PostHog
+                // and the dev panel can flip it off to measure/disable.
                 default_enabled: true,
                 status: Status::RollingOut,
-                description: "Stream alacritty snapshots to a canvas renderer (replaces the DOM terminal).",
-            },
-            Flag::AskUserQuestionUi => FlagMeta {
-                key: "ask_user_question_ui",
-                owner: "@n-asuy",
-                created: "2026-06-14",
-                retire_by: "2026-09-01",
-                default_enabled: false,
-                status: Status::RollingOut,
-                description: "Show the structured AskUserQuestion picker for agent clarifying questions.",
+                description: "Show the task references popover (Uses / Referenced by) in the session composer.",
             },
         }
     }

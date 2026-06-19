@@ -10,7 +10,7 @@ import { useOptionalProjectTasks } from "@/session/context/project-tasks-context
 import { useArchivedSessions } from "@/session/hooks";
 import type { StoredTask } from "@/session/types";
 import { useNavigate } from "@tanstack/react-router";
-import { BookOpen, Plus, Search } from "lucide-react";
+import { BookOpen, Images, Plus, Search } from "lucide-react";
 import { useMemo } from "react";
 import { useRightDockStore } from "../state/right-dock-store";
 import { QuickAction } from "./quick-action";
@@ -117,6 +117,14 @@ export function ProjectOverview() {
     });
   };
 
+  const openGallery = () => {
+    if (!projectSlug) return;
+    navigate({
+      to: "/projects/$projectId/gallery",
+      params: { projectId: projectSlug },
+    });
+  };
+
   // Prefer the resolved project name; fall back to the route slug so the header
   // is present from first paint (avoids a vertical layout shift when the name
   // resolves), then refines to the proper name in place.
@@ -158,6 +166,11 @@ export function ProjectOverview() {
                 icon={BookOpen}
                 label="Skills"
                 onClick={openSkills}
+              />
+              <QuickAction
+                icon={Images}
+                label="Gallery"
+                onClick={openGallery}
               />
             </section>
 

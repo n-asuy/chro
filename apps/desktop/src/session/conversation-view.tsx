@@ -19,6 +19,7 @@ import {
   Hammer,
   ImageIcon,
   MessageSquare,
+  RefreshCw,
   Search,
   Terminal,
 } from "lucide-react";
@@ -35,6 +36,7 @@ import { Markdown } from "./components/markdown";
 import RawLogText from "./components/raw-log-text";
 import { TextShimmer } from "./components/text-shimmer";
 import { ThinkingStep, ThinkingSteps } from "./components/thinking-steps";
+import { useConversationActions } from "./conversation-actions";
 import { useImageMetadata } from "./hooks/use-image-metadata";
 import type {
   CommandRunResult,
@@ -448,6 +450,32 @@ const CollapsibleEntry = ({
     >
       {renderContent(firstLine)}
     </MessageCard>
+  );
+};
+
+/**
+ * Error entry for a turn that aborted on a malformed tool call. Explains the
+ * (intermittent, model-side) failure and offers a one-click retry that
+ * re-prompts the agent to continue. The retry action comes from context, so it
+ * is hidden on surfaces that cannot send follow-ups (e.g. read-only replay).
+ */
+const MalformedToolCallEntry = ({ content }: { content: string }) => {
+  const { t } = useLanguage();
+  const { onRetryMalformedToolCall } = useConversationActions();
+  return (
+    <div className="flex flex-col gap-2">
+      <CollapsibleEntry content={content} markdown variant="error" />
+      {onRetryMalformedToolCall && (
+        <button
+          type="button"
+          onClick={onRetryMalformedToolCall}
+          className="inline-flex items-center gap-1.5 self-start rounded border border-destructive/40 px-2 py-1 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10"
+        >
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+          {t("retryMalformedToolCall")}
+        </button>
+      )}
+    </div>
   );
 };
 
@@ -1391,6 +1419,9 @@ const renderEntryBody = (
       );
     }
     case "error_message":
+      if (entry.entry_type.error_type?.type === "malformed_tool_call") {
+        return <MalformedToolCallEntry content={entry.content} />;
+      }
       return (
         <CollapsibleEntry content={entry.content} markdown variant="error" />
       );

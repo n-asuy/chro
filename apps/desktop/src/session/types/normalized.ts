@@ -88,6 +88,7 @@ export type ToolStatus =
  */
 export type NormalizedEntryError =
   | { type: "setup_required" }
+  | { type: "malformed_tool_call" }
   | { type: "other" };
 
 /**

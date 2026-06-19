@@ -84,6 +84,7 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/task-runs/:id/file", get(read_task_run_file))
         .route("/task-runs/:id/entries", get(list_task_run_entries))
+        .route("/task-runs/:id/media", get(list_task_run_media))
         .route(
             "/task-runs/by-session/:session_id",
             get(find_task_run_by_session_handler),
@@ -1281,6 +1282,26 @@ async fn list_task_run_entries(
 
     Ok(Json(super::projects::ProjectEntriesEnvelope::from_entries(
         entries,
+    )))
+}
+
+/// List renderable media inside a task run's worktree for the gallery. Mirrors
+/// `list_project_media` but roots at the run's worktree so a session's
+/// generated creatives are surfaced rather than the project main checkout.
+async fn list_task_run_media(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<super::projects::MediaQuery>,
+) -> Result<Json<super::projects::MediaEnvelope>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, _candidates) = task_run_path_candidates(&state, &run).await?;
+    let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
+    let (items, truncated) = service
+        .list_media(super::projects::media_limit(query.limit))
+        .await?;
+    Ok(Json(super::projects::MediaEnvelope::from_media(
+        items, truncated,
     )))
 }
 

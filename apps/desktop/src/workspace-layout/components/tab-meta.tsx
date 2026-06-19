@@ -4,6 +4,7 @@ import {
   FileText,
   Globe,
   House,
+  Image as ImageIcon,
   type LucideIcon,
   MessagesSquare,
   MonitorPlay,
@@ -35,6 +36,8 @@ export function iconForKind(tab: Tab): LucideIcon | null {
       return MonitorPlay;
     case "book-open":
       return BookOpen;
+    case "image":
+      return ImageIcon;
     default:
       return defaultIconForKind(tab);
   }
@@ -62,6 +65,8 @@ function defaultIconForKind(tab: Tab): LucideIcon | null {
       return MonitorPlay;
     case "skills":
       return BookOpen;
+    case "gallery":
+      return ImageIcon;
   }
 }
 

@@ -194,6 +194,16 @@ pub async fn launch_runtime<R: TauriRuntime>(
             env_vars.insert("CHRO_PERF_DIR".into(), dir);
         }
     }
+    // Make the bundled `chro` CLI reachable to agents the server spawns. The
+    // sidecar runs with its own environment (it does not inherit ours), so the
+    // directory holding the CLI is passed explicitly; the server prepends it to
+    // the PATH handed to executor processes, letting `chro task ...` resolve by
+    // bare name from inside a run instead of failing with "command not found".
+    if let Some(cli_dir) = resolve_cli_dir() {
+        env_vars.insert("CHRO_CLI_DIR".into(), cli_dir.to_string_lossy().into_owned());
+    } else {
+        warn!("[runtime] bundled `chro` CLI not found; `chro task ...` will be unavailable to agents");
+    }
 
     let command = resolve_sidecar(&app, &args, &env_vars)?;
     let (mut rx, child) = command
@@ -329,6 +339,49 @@ fn sidecar_next_to_current_exe() -> Option<PathBuf> {
     };
     let candidate = std::env::current_exe().ok()?.parent()?.join(binary_name);
     candidate.exists().then_some(candidate)
+}
+
+fn cli_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "chro.exe"
+    } else {
+        "chro"
+    }
+}
+
+/// Directory holding the `chro` CLI to expose to spawned agents, or `None` when
+/// no CLI is present. Mirrors the chro-server resolution: a source checkout
+/// prefers a freshly built CLI from its crate target dir, while a packaged build
+/// uses the sidecar staged next to the app executable.
+fn resolve_cli_dir() -> Option<PathBuf> {
+    if tauri::is_dev() {
+        if let Some(dir) = dev_cli_dir() {
+            return Some(dir);
+        }
+    }
+    cli_dir_next_to_current_exe()
+}
+
+fn cli_dir_next_to_current_exe() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join(cli_binary_name()).exists().then_some(dir)
+}
+
+/// Locate the cargo target dir for the `chro` CLI in a source checkout, anchored
+/// on the repo root so the desktop can launch from any subdirectory.
+fn dev_cli_dir() -> Option<PathBuf> {
+    let repo_root = repo_root()?;
+    for profile in ["debug", "release"] {
+        let dir = repo_root
+            .join("apps")
+            .join("cli")
+            .join("target")
+            .join(profile);
+        if dir.join(cli_binary_name()).exists() {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 /// Locate the cargo target binary for `chro-server`. We anchor on the repo

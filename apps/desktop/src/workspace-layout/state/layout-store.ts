@@ -668,6 +668,8 @@ function defaultTitle(kind: TabKind): string {
       return "Settings";
     case "skills":
       return "Skills";
+    case "gallery":
+      return "Gallery";
   }
 }
 

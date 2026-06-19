@@ -83,6 +83,13 @@ const tauriCargoTomlPath = path.join(srcTauriDir, "Cargo.toml");
 const rustServerCrateDir = path.join(repoRoot, "crates", "server");
 const rustServerBinaryBaseName = "chro-server";
 const rustServerManifestPath = path.join(rustServerCrateDir, "Cargo.toml");
+
+// The terminal CLI is staged as a second Tauri sidecar so agents launched by the
+// bundled server can call `chro task ...` by bare name (the server prepends the
+// sidecar dir to PATH via CHRO_CLI_DIR).
+const cliCrateDir = path.join(repoRoot, "apps", "cli");
+const cliBinaryBaseName = "chro";
+const cliManifestPath = path.join(cliCrateDir, "Cargo.toml");
 const npxCliPackageJsonPath = path.join(
   repoRoot,
   "apps",
@@ -566,30 +573,46 @@ function rustServerBuildEnv(triple: string): NodeJS.ProcessEnv | undefined {
   };
 }
 
-function buildAndStageRustBinary(context: TauriBuildContext) {
-  ensureRustTarget(context.triple);
-  console.log(`Building Rust server (${context.label})…`);
+interface StandaloneBinarySpec {
+  /** human-readable label e.g. "macOS arm64" */
+  label: string;
+  /** crate root whose `target/<triple>/release/` holds the built binary */
+  crateDir: string;
+  /** path to the crate's Cargo.toml */
+  manifestPath: string;
+  /** cargo `--bin` name and Tauri sidecar base name */
+  baseName: string;
+  /** rustup target triple */
+  triple: string;
+  /** whether the platform appends a `.exe` suffix */
+  exe: boolean;
+}
+
+function buildAndStageStandaloneBinary(spec: StandaloneBinarySpec) {
+  ensureRustTarget(spec.triple);
+  console.log(`Building ${spec.baseName} (${spec.label})…`);
   runCommand(
     "cargo",
     [
       "build",
       "--release",
       "--manifest-path",
-      rustServerManifestPath,
+      spec.manifestPath,
       "--bin",
-      rustServerBinaryBaseName,
+      spec.baseName,
       "--target",
-      context.triple,
+      spec.triple,
     ],
-    { cwd: repoRoot, env: rustServerBuildEnv(context.triple) },
+    { cwd: repoRoot, env: rustServerBuildEnv(spec.triple) },
   );
 
+  const binaryFileName = spec.exe ? `${spec.baseName}.exe` : spec.baseName;
   const sourcePath = path.join(
-    rustServerCrateDir,
+    spec.crateDir,
     "target",
-    context.triple,
+    spec.triple,
     "release",
-    context.binaryName,
+    binaryFileName,
   );
   if (!existsSync(sourcePath)) {
     throw new Error(
@@ -599,14 +622,33 @@ function buildAndStageRustBinary(context: TauriBuildContext) {
   mkdirSync(tauriBinariesDir, { recursive: true });
 
   // Tauri sidecar naming convention: `<base>-<triple>[.exe]`.
-  const stagedName = `${rustServerBinaryBaseName}-${context.triple}${
-    context.binaryName.endsWith(".exe") ? ".exe" : ""
-  }`;
+  const stagedName = `${spec.baseName}-${spec.triple}${spec.exe ? ".exe" : ""}`;
   const destinationPath = path.join(tauriBinariesDir, stagedName);
   if (existsSync(destinationPath)) {
     rmSync(destinationPath, { force: true });
   }
   copyFileSync(sourcePath, destinationPath);
+}
+
+// Stage every sidecar the bundle ships: the local server and the terminal CLI.
+function buildAndStageRustBinary(context: TauriBuildContext) {
+  const exe = context.binaryName.endsWith(".exe");
+  buildAndStageStandaloneBinary({
+    label: context.label,
+    crateDir: rustServerCrateDir,
+    manifestPath: rustServerManifestPath,
+    baseName: rustServerBinaryBaseName,
+    triple: context.triple,
+    exe,
+  });
+  buildAndStageStandaloneBinary({
+    label: context.label,
+    crateDir: cliCrateDir,
+    manifestPath: cliManifestPath,
+    baseName: cliBinaryBaseName,
+    triple: context.triple,
+    exe,
+  });
 }
 
 function tauriBuildEnv(skipSigning: boolean): NodeJS.ProcessEnv | undefined {
