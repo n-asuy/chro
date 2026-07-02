@@ -1,15 +1,7 @@
 import { useLanguage } from "@/i18n";
 import { Button } from "@chro/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@chro/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import {
-  Check,
   ChevronDown,
   ChevronRight,
   FileDiff,
@@ -20,10 +12,13 @@ import {
   Laptop,
   Loader2,
   Plus,
-  Search,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { BranchSelector, type GitBranch } from "./branch-selector";
+import {
+  BaseBranchDropdown,
+  WorktreeModeDropdown,
+} from "./execution-options-controls";
 
 export type RebaseConfirmResult = {
   targetBranch: string;
@@ -34,6 +29,12 @@ type EnvironmentPopoverProps = {
   /** Task identity surfaced in the trigger and the metadata footer. */
   taskId?: string | null;
   taskBranch?: string | null;
+  /**
+   * Branch this run was forked from and merges back into. Rendered after the
+   * worktree branch in the trigger as "worktree → target" so the destination is
+   * visible at a glance instead of leaving it ambiguous where the work lands.
+   */
+  runTargetBranch?: string | null;
 
   /** Whether the active project is a Git repository. */
   isGitRepository: boolean;
@@ -99,6 +100,7 @@ const ROW_CLASS =
 export function EnvironmentPopover({
   taskId,
   taskBranch,
+  runTargetBranch,
   isGitRepository,
   isExecutorLocked,
   additions,
@@ -187,6 +189,11 @@ export function EnvironmentPopover({
   const shortId = shortIdFromUuid(taskId);
   const triggerLabel =
     taskBranch ?? baseBranch ?? shortId ?? t("environmentLabel");
+  // Only annotate the destination when we have a real worktree branch heading
+  // somewhere else; a new session (no task branch yet) already shows its base.
+  const showTargetBranch = Boolean(
+    taskBranch && runTargetBranch && runTargetBranch !== taskBranch,
+  );
   const canConfirmRebase = targetBranch.trim().length > 0 && !isRebasing;
 
   return (
@@ -199,7 +206,21 @@ export function EnvironmentPopover({
           className="inline-flex h-7 max-w-[300px] items-center gap-1.5 rounded-sm text-[12px]"
         >
           <GitBranchIcon className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 truncate">{triggerLabel}</span>
+          <span className="flex min-w-0 flex-1 items-center gap-1">
+            {/* Worktree branch is the sole flexible part: it truncates to fill
+                whatever room is left so the target branch stays readable. */}
+            <span className="min-w-0 flex-1 truncate">{triggerLabel}</span>
+            {showTargetBranch && (
+              <>
+                <span className="shrink-0 text-muted-foreground/50">→</span>
+                {/* Target (e.g. main/develop) keeps its natural width and never
+                    truncates first; capped so a long branch can't blow out. */}
+                <span className="max-w-[160px] shrink-0 truncate text-muted-foreground">
+                  {runTargetBranch}
+                </span>
+              </>
+            )}
+          </span>
           {hasDiffs && (
             <span className="shrink-0 font-mono text-[11px] tabular-nums">
               <span className="text-emerald-600 dark:text-emerald-500">
@@ -264,109 +285,50 @@ export function EnvironmentPopover({
             </button>
 
             {/* Worktree / Local */}
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                type="button"
-                disabled={isExecutorLocked}
-                className={ROW_CLASS}
-              >
-                <Laptop className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="flex-1 text-left">
-                  {useWorktree
-                    ? t("environmentWorktreeLabel")
-                    : t("environmentLocalLabel")}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44">
-                <DropdownMenuItem
-                  onClick={() => onUseWorktreeChange(true)}
-                  className="flex items-center justify-between gap-3 text-[12px]"
+            <WorktreeModeDropdown
+              useWorktree={useWorktree}
+              onUseWorktreeChange={onUseWorktreeChange}
+              trigger={
+                <button
+                  type="button"
+                  disabled={isExecutorLocked}
+                  className={ROW_CLASS}
                 >
-                  <span>{t("environmentWorktreeLabel")}</span>
-                  {useWorktree ? <Check className="h-3.5 w-3.5" /> : null}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => onUseWorktreeChange(false)}
-                  className="flex items-center justify-between gap-3 text-[12px]"
-                >
-                  <span>{t("environmentLocalLabel")}</span>
-                  {!useWorktree ? <Check className="h-3.5 w-3.5" /> : null}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <Laptop className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 text-left">
+                    {useWorktree
+                      ? t("environmentWorktreeLabel")
+                      : t("environmentLocalLabel")}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                </button>
+              }
+            />
 
             {/* From (base branch) */}
-            <DropdownMenu
-              onOpenChange={(next) => {
-                if (!next) onBaseBranchSearchChange("");
-              }}
-            >
-              <DropdownMenuTrigger
-                type="button"
-                disabled={isExecutorLocked}
-                className={ROW_CLASS}
-              >
-                <GitBranchIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="shrink-0 text-muted-foreground">
-                  {t("environmentFromLabel")}
-                </span>
-                <span className="flex-1 truncate text-left font-medium">
-                  {baseBranch ?? "main"}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-64">
-                <div className="p-2">
-                  <div className="relative">
-                    <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                    <input
-                      type="text"
-                      placeholder={t("branchSelectorSearchPlaceholder")}
-                      value={baseBranchSearch}
-                      onChange={(e) => onBaseBranchSearchChange(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          return;
-                        }
-                        e.stopPropagation();
-                      }}
-                      className="w-full rounded-sm border border-border bg-background py-1.5 pl-7 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-                    />
-                  </div>
-                </div>
-                <DropdownMenuSeparator />
-                <div className="max-h-48 overflow-y-auto">
-                  {filteredBaseBranches.length === 0 ? (
-                    <div className="p-2 text-center text-[11px] text-muted-foreground">
-                      {t("branchSelectorEmpty")}
-                    </div>
-                  ) : (
-                    filteredBaseBranches.map((branch) => (
-                      <DropdownMenuItem
-                        key={branch.name}
-                        onClick={() => onBaseBranchSelect(branch.name)}
-                        className="flex items-center justify-between gap-3 text-[11px]"
-                      >
-                        <span className="min-w-0 truncate">{branch.name}</span>
-                        <div className="flex flex-shrink-0 items-center gap-1">
-                          {branch.is_current && (
-                            <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                              {t("branchSelectorCurrent")}
-                            </span>
-                          )}
-                          {baseBranch === branch.name && (
-                            <Check className="h-3.5 w-3.5" />
-                          )}
-                        </div>
-                      </DropdownMenuItem>
-                    ))
-                  )}
-                </div>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <BaseBranchDropdown
+              baseBranch={baseBranch}
+              baseBranchSearch={baseBranchSearch}
+              onBaseBranchSearchChange={onBaseBranchSearchChange}
+              filteredBaseBranches={filteredBaseBranches}
+              onBaseBranchSelect={onBaseBranchSelect}
+              trigger={
+                <button
+                  type="button"
+                  disabled={isExecutorLocked}
+                  className={ROW_CLASS}
+                >
+                  <GitBranchIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="shrink-0 text-muted-foreground">
+                    {t("environmentFromLabel")}
+                  </span>
+                  <span className="flex-1 truncate text-left font-medium">
+                    {baseBranch ?? "main"}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                </button>
+              }
+            />
 
             {/* Rebase (expandable) */}
             <div>

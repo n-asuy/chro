@@ -56,9 +56,9 @@ import {
   useMemo,
   useState,
 } from "react";
-import { FeatureFlagsSection } from "./components/feature-flags-section";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
+import { PiApiKeysControl } from "./pi-api-keys-control";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
 import { useMcpSettings } from "./hooks/use-mcp-settings";
 import { useMergeSettings } from "./hooks/use-merge-settings";
@@ -88,6 +88,7 @@ const MCP_STATUS_SUPPORTED_EXECUTORS: BaseCodingAgent[] = [
 const MCP_EXECUTOR_LABEL_KEYS: Record<BaseCodingAgent, TranslationKey> = {
   CLAUDE_CODE: "mcpExecutorOptionClaude",
   CODEX: "mcpExecutorOptionCodex",
+  PI: "mcpExecutorOptionPi",
 };
 
 type SettingsTabKey =
@@ -256,7 +257,9 @@ export function SettingsPanel({
     executorProfileError,
     profileSaving,
     availableExecutors,
+    claudeExecutionMode,
     handleExecutorSelect,
+    handleClaudeExecutionModeSelect,
     handleClaudeVersionReload,
   } = useExecutorProfileSettings({ t });
   const {
@@ -307,6 +310,9 @@ export function SettingsPanel({
     worktreeInfo,
     worktreeLoading,
     worktreeError,
+    worktreeSizes,
+    worktreeTotalSize,
+    worktreeSizesLoading,
     worktreeCleanupState,
     worktreeCleanupResult,
     selectedPaths,
@@ -346,10 +352,12 @@ export function SettingsPanel({
       setAuthStatus({
         CLAUDE_CODE: authResult.claude_code,
         CODEX: authResult.codex,
+        PI: authResult.pi,
       });
       setInstallStatus({
         CLAUDE_CODE: installResult.claude_code,
         CODEX: installResult.codex,
+        PI: installResult.pi,
       });
     } catch {
       // Silently fail — status will show as unknown
@@ -1120,6 +1128,21 @@ export function SettingsPanel({
       {/* Claude Code */}
       <SettingsSection heading={t("agentsClaudeCodeTitle")}>
         <SettingsRow
+          title={t("claudeExecutionModeCardTitle")}
+          description={t("claudeExecutionModeCardDescription")}
+          disabled={executorProfileLoading || profileSaving}
+          control={
+            <Switch
+              checked={claudeExecutionMode === "print"}
+              onCheckedChange={(checked) =>
+                void handleClaudeExecutionModeSelect(checked ? "print" : "pty")
+              }
+              disabled={executorProfileLoading || profileSaving}
+              aria-label={t("claudeExecutionModeToggleLabel")}
+            />
+          }
+        />
+        <SettingsRow
           title="Authentication"
           description={
             installStatus?.CLAUDE_CODE?.installed
@@ -1229,6 +1252,41 @@ export function SettingsPanel({
             />
           }
         />
+      </SettingsSection>
+
+      {/* pi */}
+      <SettingsSection heading={t("agentsPiTitle")}>
+        <SettingsRow
+          title="Authentication"
+          description={
+            installStatus?.PI?.installed
+              ? [
+                  t("authPiDescription"),
+                  formatDetectedVersion(t, installStatus?.PI ?? null),
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              : t("authPiInstallDescription")
+          }
+          control={
+            <AuthStatusControl
+              t={t}
+              info={authStatus?.PI ?? null}
+              installInfo={installStatus?.PI ?? null}
+              loading={authLoading}
+              installing={installingExecutor === "PI"}
+              triggering={authDialogAgent === "PI"}
+              onTrigger={() => handleTriggerAuth("PI")}
+              onInstall={() => void handleInstall("PI")}
+            />
+          }
+        />
+        <SettingsRow
+          title={t("agentsPiApiKeysTitle")}
+          description={t("agentsPiApiKeysDescription")}
+        >
+          <PiApiKeysControl t={t} />
+        </SettingsRow>
       </SettingsSection>
     </section>
   );
@@ -1408,7 +1466,11 @@ export function SettingsPanel({
                   {t("developerWorktreeTotalSize")}
                 </span>
                 <span className="font-workspace text-[13px] font-semibold text-foreground">
-                  {formatBytes(worktreeInfo.total_size_bytes)}
+                  {worktreeTotalSize != null
+                    ? formatBytes(worktreeTotalSize)
+                    : worktreeSizesLoading
+                      ? t("developerWorktreeCalculatingSize")
+                      : "—"}
                 </span>
               </div>
             </div>
@@ -1478,7 +1540,11 @@ export function SettingsPanel({
                       </span>
                       <div className="flex items-center gap-3">
                         <span className="font-workspace text-[11px] text-muted-foreground">
-                          {formatBytes(entry.size_bytes)}
+                          {worktreeSizes && worktreeSizes[entry.path] != null
+                            ? formatBytes(worktreeSizes[entry.path])
+                            : worktreeSizesLoading
+                              ? t("developerWorktreeCalculatingSize")
+                              : "—"}
                         </span>
                         {entry.modified_at ? (
                           <span className="font-workspace text-[11px] text-muted-foreground">
@@ -1544,8 +1610,6 @@ export function SettingsPanel({
           </>
         ) : null}
       </SettingsSection>
-
-      <FeatureFlagsSection />
     </section>
   );
 

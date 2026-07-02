@@ -1,7 +1,9 @@
-import { writeProjectFile } from "@/lib/project-client";
 /**
- * BaseViewer - main component for viewing a .cbase file
- * Parses the .cbase definition, indexes matching files, and renders the view.
+ * BaseViewer - main component for viewing a .cbase file.
+ *
+ * Parsing, indexing, schema inference, and view execution all run on the
+ * backend. This component fetches the materialized document, renders the active
+ * view, and sends UI-driven changes back for the backend to persist.
  */
 import {
   type FC,
@@ -13,29 +15,23 @@ import {
 } from "react";
 import { useProjectId } from "../../files/context/project-context";
 import { useFilesStore } from "../../files/state/files-store";
-import { updateViewFilters } from "../definition-updates";
-import { executeView } from "../engine";
-import { indexWorkspaceFiles } from "../indexer";
-import { CbaseParseError, parseCbase } from "../parser";
-import { mergeInferredProperties } from "../property-inference";
-import { looksLikeQueryLanguage } from "../query-language";
-import { serializeCbase } from "../serializer";
+import { persistCbase, queryCbase } from "../cbase-client";
 import type {
   CbaseDefinition,
+  CbaseDocument,
   CbaseFilter,
-  CbaseRow,
   SortDirection,
 } from "../types";
 import { BaseTable } from "./cbase-table";
 
 interface BaseViewerProps {
-  /** Raw YAML content of the .cbase file */
+  /** Raw content of the .cbase file (YAML or query language) */
   content: string;
   /** Relative path to the current .cbase file */
   basePath?: string;
   /** Callback to navigate to a file */
   onFileOpen?: (relativePath: string) => void;
-  /** Callback when view state changes require persisting the .cbase file */
+  /** Callback when view state changes require updating the editor content */
   onContentChange?: (content: string) => void;
 }
 
@@ -47,182 +43,156 @@ export const BaseViewer: FC<BaseViewerProps> = ({
 }) => {
   const projectId = useProjectId();
   const { openFile, selectNode } = useFilesStore();
-  const [definition, setDefinition] = useState<CbaseDefinition | null>(null);
+  const [document, setDocument] = useState<CbaseDocument | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
-  const [rows, setRows] = useState<CbaseRow[]>([]);
-  const [isIndexing, setIsIndexing] = useState(false);
-  const [indexError, setIndexError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
-  const isQueryLanguage = useRef(false);
-  const skipNextParse = useRef(false);
+  // Set after a persist so the resulting content change does not re-query.
+  const skipNextQuery = useRef(false);
 
-  // Parse .cbase content
+  // Fetch the materialized document whenever the source content changes.
   useEffect(() => {
-    if (skipNextParse.current) {
-      skipNextParse.current = false;
+    if (!projectId) return;
+    if (skipNextQuery.current) {
+      skipNextQuery.current = false;
       return;
     }
-    try {
-      isQueryLanguage.current = looksLikeQueryLanguage(content);
-      const def = parseCbase(content, { basePath });
-      setDefinition(def);
-      setParseError(null);
-      // Set default active view
-      const defaultView = def.views.find((v) => v.default) ?? def.views[0];
-      if (defaultView) {
-        setActiveViewId(defaultView.id);
-      }
-    } catch (e) {
-      setDefinition(null);
-      setParseError(e instanceof CbaseParseError ? e.message : String(e));
-    }
-  }, [content, basePath]);
-
-  // Index files when definition or file tree changes
-  useEffect(() => {
-    if (!definition || !projectId) return;
 
     let cancelled = false;
-    const controller = new AbortController();
+    setIsLoading(true);
+    setLoadError(null);
 
-    const doIndex = async () => {
-      setIsIndexing(true);
-      setIndexError(null);
-      try {
-        const indexed = await indexWorkspaceFiles(
-          projectId,
-          definition.dataset,
-          controller.signal,
-        );
-        if (!cancelled) {
-          setRows(indexed);
+    queryCbase(projectId, content, basePath)
+      .then((doc) => {
+        if (cancelled) return;
+        if (doc.parseError) {
+          setParseError(doc.parseError);
+          setDocument(null);
+          return;
         }
-      } catch (e) {
-        if (!cancelled) {
-          setIndexError(e instanceof Error ? e.message : String(e));
-        }
-      } finally {
-        if (!cancelled) {
-          setIsIndexing(false);
-        }
-      }
-    };
+        setParseError(null);
+        setDocument(doc);
+        setActiveViewId((prev) => {
+          const views = doc.definition?.views ?? [];
+          if (prev && views.some((view) => view.id === prev)) return prev;
+          const fallback = views.find((view) => view.default) ?? views[0];
+          return fallback?.id ?? null;
+        });
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setLoadError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
 
-    void doIndex();
     return () => {
       cancelled = true;
-      controller.abort();
     };
-  }, [definition, projectId]);
+  }, [content, basePath, projectId]);
 
-  const activeView = useMemo(
-    () =>
-      definition?.views.find((v) => v.id === activeViewId) ??
-      definition?.views[0] ??
-      null,
-    [definition, activeViewId],
-  );
+  const definition = document?.definition ?? null;
 
-  const effectiveProperties = useMemo(() => {
-    if (!definition) return {};
-    return mergeInferredProperties(definition.properties, rows);
-  }, [definition, rows]);
+  const activeView = useMemo(() => {
+    if (!definition) return null;
+    return (
+      definition.views.find((view) => view.id === activeViewId) ??
+      definition.views[0] ??
+      null
+    );
+  }, [definition, activeViewId]);
+
+  const effectiveProperties = document?.properties ?? {};
 
   const viewResult = useMemo(() => {
-    if (!definition || !activeView) return null;
-    return executeView(
-      rows,
-      activeView,
-      effectiveProperties,
-      definition.filters,
-      definition.sort,
+    if (!document || !activeView) return null;
+    return (
+      document.views.find((result) => result.view.id === activeView.id) ?? null
     );
-  }, [rows, activeView, effectiveProperties, definition]);
+  }, [document, activeView]);
 
   const persistDefinition = useCallback(
     (updated: CbaseDefinition) => {
-      if (isQueryLanguage.current) return;
-      const yaml = serializeCbase(updated);
-      setDefinition(updated);
-      skipNextParse.current = true;
-      onContentChange?.(yaml);
-      if (projectId && basePath) {
-        void writeProjectFile(projectId, basePath, yaml);
-      }
+      if (!document || document.isQueryLanguage) return;
+      if (!projectId || !basePath) return;
+      skipNextQuery.current = true;
+      // Optimistically reflect the definition change in the editor.
+      setDocument({ ...document, definition: updated });
+      persistCbase(projectId, basePath, updated, effectiveProperties)
+        .then((result) => {
+          setDocument(result.document);
+          onContentChange?.(result.content);
+        })
+        .catch((e) => {
+          skipNextQuery.current = false;
+          setLoadError(e instanceof Error ? e.message : String(e));
+        });
     },
-    [onContentChange, projectId, basePath],
+    [document, projectId, basePath, effectiveProperties, onContentChange],
   );
 
   const handleColumnsChange = useCallback(
     (columnIds: string[]) => {
       if (!definition || !activeViewId) return;
-      const updated: CbaseDefinition = {
+      persistDefinition({
         ...definition,
-        properties: { ...definition.properties },
-        views: definition.views.map((v) => {
-          if (v.id !== activeViewId) return v;
-          return {
-            ...v,
-            table: { ...v.table, columns: columnIds },
-          };
-        }),
-      };
-      // Add inferred properties that are now referenced as columns
-      for (const colId of columnIds) {
-        if (!updated.properties[colId] && effectiveProperties[colId]) {
-          updated.properties[colId] = effectiveProperties[colId];
-        }
-      }
-      persistDefinition(updated);
+        views: definition.views.map((view) =>
+          view.id === activeViewId
+            ? { ...view, table: { ...view.table, columns: columnIds } }
+            : view,
+        ),
+      });
     },
-    [definition, activeViewId, effectiveProperties, persistDefinition],
+    [definition, activeViewId, persistDefinition],
   );
 
   const handleSortChange = useCallback(
     (sortPropertyId: string | null, direction: SortDirection) => {
       if (!definition || !activeViewId) return;
-      const updated: CbaseDefinition = {
+      persistDefinition({
         ...definition,
-        views: definition.views.map((v) => {
-          if (v.id !== activeViewId) return v;
-          return {
-            ...v,
-            sort: sortPropertyId
-              ? [{ by: sortPropertyId, dir: direction }]
-              : undefined,
-          };
-        }),
-      };
-      // Add inferred property if referenced in sort
-      if (
-        sortPropertyId &&
-        !updated.properties[sortPropertyId] &&
-        effectiveProperties[sortPropertyId]
-      ) {
-        updated.properties = {
-          ...updated.properties,
-          [sortPropertyId]: effectiveProperties[sortPropertyId],
-        };
-      }
-      persistDefinition(updated);
+        views: definition.views.map((view) =>
+          view.id === activeViewId
+            ? {
+                ...view,
+                sort: sortPropertyId
+                  ? [{ by: sortPropertyId, dir: direction }]
+                  : undefined,
+              }
+            : view,
+        ),
+      });
     },
-    [definition, activeViewId, effectiveProperties, persistDefinition],
+    [definition, activeViewId, persistDefinition],
   );
 
   const handleColumnWidthsChange = useCallback(
     (columnWidths: Record<string, number>) => {
       if (!definition || !activeViewId) return;
-      const updated: CbaseDefinition = {
+      persistDefinition({
         ...definition,
-        views: definition.views.map((v) => {
-          if (v.id !== activeViewId || !v.table) return v;
-          return {
-            ...v,
-            table: { ...v.table, column_widths: columnWidths },
-          };
-        }),
-      };
-      persistDefinition(updated);
+        views: definition.views.map((view) =>
+          view.id === activeViewId && view.table
+            ? { ...view, table: { ...view.table, column_widths: columnWidths } }
+            : view,
+        ),
+      });
+    },
+    [definition, activeViewId, persistDefinition],
+  );
+
+  const handleViewFiltersChange = useCallback(
+    (filters: CbaseFilter[]) => {
+      if (!definition || !activeViewId) return;
+      const nextFilters = filters.length > 0 ? filters : undefined;
+      persistDefinition({
+        ...definition,
+        views: definition.views.map((view) =>
+          view.id === activeViewId ? { ...view, filters: nextFilters } : view,
+        ),
+      });
     },
     [definition, activeViewId, persistDefinition],
   );
@@ -242,21 +212,6 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     [onFileOpen, selectNode, openFile],
   );
 
-  const handleViewFiltersChange = useCallback(
-    (filters: CbaseFilter[]) => {
-      if (!definition || !activeViewId) return;
-      persistDefinition(
-        updateViewFilters(
-          definition,
-          activeViewId,
-          filters,
-          effectiveProperties,
-        ),
-      );
-    },
-    [definition, activeViewId, effectiveProperties, persistDefinition],
-  );
-
   if (parseError) {
     return (
       <div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-2 p-8 text-sm font-workspace">
@@ -266,7 +221,26 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     );
   }
 
-  if (!definition || !activeView) {
+  if (isLoading && !document) {
+    return (
+      <div className="flex h-full w-full flex-1 items-center justify-center text-sm text-muted-foreground font-workspace">
+        Loading...
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-sm font-workspace">
+        <span className="font-medium text-foreground">
+          Failed to load .cbase
+        </span>
+        <span className="text-muted-foreground">{loadError}</span>
+      </div>
+    );
+  }
+
+  if (!definition || !activeView || !viewResult) {
     return (
       <div className="flex h-full w-full flex-1 items-center justify-center text-sm text-muted-foreground font-workspace">
         Loading...
@@ -277,32 +251,19 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   return (
     <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace">
       <div className="min-h-0 flex-1 overflow-hidden">
-        {isIndexing && rows.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            Indexing files...
-          </div>
-        ) : indexError ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm">
-            <span className="font-medium text-foreground">
-              Failed to index files
-            </span>
-            <span className="text-muted-foreground">{indexError}</span>
-          </div>
-        ) : viewResult ? (
-          <BaseTable
-            rows={viewResult.rows}
-            totalCount={viewResult.totalCount}
-            view={activeView}
-            properties={effectiveProperties}
-            onRowClick={handleRowClick}
-            definedFilters={definition.filters ?? []}
-            viewFilters={activeView.filters ?? []}
-            onViewFiltersChange={handleViewFiltersChange}
-            onColumnsChange={handleColumnsChange}
-            onSortChange={handleSortChange}
-            onColumnWidthsChange={handleColumnWidthsChange}
-          />
-        ) : null}
+        <BaseTable
+          rows={viewResult.rows}
+          totalCount={viewResult.totalCount}
+          view={activeView}
+          properties={effectiveProperties}
+          onRowClick={handleRowClick}
+          definedFilters={definition.filters ?? []}
+          viewFilters={activeView.filters ?? []}
+          onViewFiltersChange={handleViewFiltersChange}
+          onColumnsChange={handleColumnsChange}
+          onSortChange={handleSortChange}
+          onColumnWidthsChange={handleColumnWidthsChange}
+        />
       </div>
     </div>
   );

@@ -22,9 +22,10 @@ use serde_json::Value;
 use tracing::warn;
 
 use super::types::{
-    AmpBashResult, ApprovalStatus, ClaudeContentBlockDelta, ClaudeContentItem, ClaudeJson,
-    ClaudeMessage, ClaudeStreamEvent, ClaudeToolData, ClaudeToolResultTextItem,
-    ClaudeToolWithInput, MALFORMED_TOOL_CALL_MESSAGE, MALFORMED_TOOL_CALL_SUBTYPE,
+    API_ERROR_MESSAGE, API_ERROR_SUBTYPE, AmpBashResult, ApprovalStatus, ClaudeContentBlockDelta,
+    ClaudeContentItem, ClaudeJson, ClaudeMessage, ClaudeStreamEvent, ClaudeToolData,
+    ClaudeToolResultTextItem, ClaudeToolWithInput, MALFORMED_TOOL_CALL_MESSAGE,
+    MALFORMED_TOOL_CALL_SUBTYPE,
 };
 
 /// Strategy for handling history and user messages.
@@ -1005,10 +1006,11 @@ impl ClaudeLogProcessor {
                 ..
             } => {
                 if is_error.unwrap_or(false) {
-                    // A malformed-tool-call abort carries a clean, user-facing
-                    // explanation and a dedicated error type the UI renders with
-                    // a retry button; every other error falls back to the raw
-                    // result JSON so nothing is silently swallowed.
+                    // A malformed-tool-call abort or a server-side API-error
+                    // abort each carry a clean, user-facing explanation and a
+                    // dedicated error type the UI renders with a retry button;
+                    // every other error falls back to the raw result JSON so
+                    // nothing is silently swallowed.
                     let (error_type, content) =
                         if subtype.as_deref() == Some(MALFORMED_TOOL_CALL_SUBTYPE) {
                             (
@@ -1016,6 +1018,13 @@ impl ClaudeLogProcessor {
                                 error
                                     .clone()
                                     .unwrap_or_else(|| MALFORMED_TOOL_CALL_MESSAGE.to_string()),
+                            )
+                        } else if subtype.as_deref() == Some(API_ERROR_SUBTYPE) {
+                            (
+                                NormalizedEntryError::ApiError,
+                                error
+                                    .clone()
+                                    .unwrap_or_else(|| API_ERROR_MESSAGE.to_string()),
                             )
                         } else {
                             (
@@ -1112,8 +1121,9 @@ impl ClaudeLogProcessor {
 
 /// Formats a raw model ID into a human-readable display name.
 /// Examples:
-///   "claude-opus-4-5-20251101" -> "Opus 4.5"
-///   "claude-sonnet-4-5-20251101" -> "Sonnet 4.5"
+///   "claude-fable-5" -> "Fable 5"
+///   "claude-opus-4-8" -> "Opus 4.8"
+///   "claude-sonnet-5" -> "Sonnet 5"
 ///   "claude-3-5-sonnet-20241022" -> "Sonnet 3.5"
 ///   "claude-3-opus-20240229" -> "Opus 3"
 fn format_model_display_name(model_id: &str) -> String {
@@ -1125,6 +1135,8 @@ fn format_model_display_name(model_id: &str) -> String {
         "Sonnet"
     } else if lower.contains("haiku") {
         "Haiku"
+    } else if lower.contains("fable") {
+        "Fable"
     } else {
         return model_id.to_string();
     };
@@ -1143,9 +1155,11 @@ fn extract_version_from_model_id(model_id: &str) -> Option<String> {
         .replace("-opus", " ")
         .replace("-sonnet", " ")
         .replace("-haiku", " ")
+        .replace("-fable", " ")
         .replace("opus-", " ")
         .replace("sonnet-", " ")
-        .replace("haiku-", " ");
+        .replace("haiku-", " ")
+        .replace("fable-", " ");
 
     let parts: Vec<&str> = cleaned.split_whitespace().next()?.split('-').collect();
 
@@ -1405,12 +1419,47 @@ mod tests {
     fn malformed_tool_call_result_falls_back_to_default_message() {
         let mut processor = ClaudeLogProcessor::new();
         let provider = EntryIndexProvider::new();
-        let json: ClaudeJson =
-            serde_json::from_str(r#"{"type":"result","subtype":"malformed_tool_call","is_error":true}"#)
-                .unwrap();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"malformed_tool_call","is_error":true}"#,
+        )
+        .unwrap();
         let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, MALFORMED_TOOL_CALL_MESSAGE);
+    }
+
+    #[test]
+    fn api_error_result_renders_retryable_error() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"result","subtype":"api_error","is_error":true,"error":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}"#,
+        )
+        .unwrap();
+        let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].entry_type,
+            NormalizedEntryType::ErrorMessage {
+                error_type: NormalizedEntryError::ApiError,
+            }
+        );
+        assert_eq!(
+            entries[0].content,
+            "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
+        );
+    }
+
+    #[test]
+    fn api_error_result_falls_back_to_default_message() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"result","subtype":"api_error","is_error":true}"#)
+                .unwrap();
+        let entries = patches_to_entries(&processor.normalize_entries(&json, "/tmp", &provider));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, API_ERROR_MESSAGE);
     }
 
     #[test]
@@ -1638,6 +1687,9 @@ mod tests {
 
     #[test]
     fn test_format_model_display_name() {
+        assert_eq!(format_model_display_name("claude-fable-5"), "Fable 5");
+        assert_eq!(format_model_display_name("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(format_model_display_name("claude-opus-4-8"), "Opus 4.8");
         assert_eq!(
             format_model_display_name("claude-opus-4-5-20251101"),
             "Opus 4.5"

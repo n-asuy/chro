@@ -1,9 +1,9 @@
 import type { TranslationFunction } from "@/i18n";
 import {
   type BaseCodingAgent,
+  type ClaudeExecutionMode,
   type ExecutorConfigs,
   type ExecutorProfileId,
-  type ExecutorProfileOptions,
   type UpdateExecutorProfileRequest,
   detectClaudeVersion,
   fetchExecutorProfile,
@@ -24,7 +24,6 @@ type ExecutorProfileState = {
   claudeVersionFetchedAtLabel: string | null;
   executorProfileId: ExecutorProfileId | null;
   executorConfigs: ExecutorConfigs | null;
-  executorProfileOptions: ExecutorProfileOptions | null;
   executorProfileLoading: boolean;
   executorProfileError: string | null;
   profileSaving: boolean;
@@ -32,8 +31,12 @@ type ExecutorProfileState = {
   availableExecutors: BaseCodingAgent[];
   availableVariants: string[];
   currentExecutorLabel: string;
+  claudeExecutionMode: ClaudeExecutionMode;
   handleExecutorSelect: (executor: BaseCodingAgent) => Promise<void>;
   handleVariantSelect: (variant: string) => Promise<void>;
+  handleClaudeExecutionModeSelect: (
+    mode: ClaudeExecutionMode,
+  ) => Promise<void>;
   handleClaudeVersionReload: () => void;
   handleExecutorProfileReload: () => void;
 };
@@ -56,8 +59,6 @@ export function useExecutorProfileSettings({
     useState<ExecutorProfileId | null>(null);
   const [executorConfigs, setExecutorConfigs] =
     useState<ExecutorConfigs | null>(null);
-  const [executorProfileOptions, setExecutorProfileOptions] =
-    useState<ExecutorProfileOptions | null>(null);
   const [executorProfileLoading, setExecutorProfileLoading] = useState(true);
   const [executorProfileError, setExecutorProfileError] = useState<
     string | null
@@ -66,6 +67,8 @@ export function useExecutorProfileSettings({
   const [profileSaveState, setProfileSaveState] = useState<
     "idle" | "saving" | "success" | "error"
   >("idle");
+  const [claudeExecutionMode, setClaudeExecutionMode] =
+    useState<ClaudeExecutionMode>("pty");
 
   const claudeVersionFetchedAtLabel = useMemo(() => {
     if (!claudeVersionFetchedAt) return null;
@@ -140,10 +143,9 @@ export function useExecutorProfileSettings({
       const response = await fetchExecutorProfile();
       setExecutorProfileId(response.profile);
       setExecutorConfigs(response.profiles);
-      setExecutorProfileOptions(response.options);
+      setClaudeExecutionMode(response.claude_execution_mode);
     } catch (error) {
       setExecutorConfigs(null);
-      setExecutorProfileOptions(null);
       setExecutorProfileError(
         error instanceof Error ? error.message : t("claudeModelLoadError"),
       );
@@ -161,7 +163,7 @@ export function useExecutorProfileSettings({
         const response = await updateExecutorProfile(changes);
         setExecutorProfileId(response.profile);
         setExecutorConfigs(response.profiles);
-        setExecutorProfileOptions(response.options);
+        setClaudeExecutionMode(response.claude_execution_mode);
         setProfileSaveState("success");
         setTimeout(() => {
           setProfileSaveState((prev) => (prev === "success" ? "idle" : prev));
@@ -207,6 +209,18 @@ export function useExecutorProfileSettings({
     [applyExecutorProfileUpdate, executorProfileId],
   );
 
+  const handleClaudeExecutionModeSelect = useCallback(
+    async (mode: ClaudeExecutionMode) => {
+      if (claudeExecutionMode === mode) return;
+      try {
+        await applyExecutorProfileUpdate({ claude_execution_mode: mode });
+      } catch {
+        // Errors are surfaced via executorProfileError state
+      }
+    },
+    [applyExecutorProfileUpdate, claudeExecutionMode],
+  );
+
   const handleExecutorProfileReload = useCallback(() => {
     void loadExecutorProfile();
   }, [loadExecutorProfile]);
@@ -230,7 +244,6 @@ export function useExecutorProfileSettings({
     claudeVersionFetchedAtLabel,
     executorProfileId,
     executorConfigs,
-    executorProfileOptions,
     executorProfileLoading,
     executorProfileError,
     profileSaving,
@@ -238,8 +251,10 @@ export function useExecutorProfileSettings({
     availableExecutors,
     availableVariants,
     currentExecutorLabel,
+    claudeExecutionMode,
     handleExecutorSelect,
     handleVariantSelect,
+    handleClaudeExecutionModeSelect,
     handleClaudeVersionReload,
     handleExecutorProfileReload,
   };

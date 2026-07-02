@@ -57,11 +57,16 @@ export function useJsonPatchWsStream<T extends object>(
   const subscribe = useCallback(
     (notify: () => void) => {
       if (!key) return () => {};
-      return acquireStream(key, () => initialDataRef.current(), {
-        notify,
-        getOptions: () =>
-          optionsRef.current as UseJsonPatchWsStreamOptions | undefined,
-      });
+      return acquireStream(
+        key,
+        () => initialDataRef.current(),
+        {
+          notify,
+          getOptions: () =>
+            optionsRef.current as UseJsonPatchWsStreamOptions | undefined,
+        },
+        optionsRef.current?.expectInitialMessage ?? true,
+      );
     },
     [key],
   );

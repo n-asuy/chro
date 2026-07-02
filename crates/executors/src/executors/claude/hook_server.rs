@@ -170,7 +170,8 @@ impl PermissionBroker {
             }
         };
 
-        self.log_approval_response(call_id, tool_name, &status).await;
+        self.log_approval_response(call_id, tool_name, &status)
+            .await;
 
         match status {
             ApprovalOutcome::Approved => {
@@ -179,10 +180,9 @@ impl PermissionBroker {
                 }
                 allow_decision("Approved by user", None)
             }
-            ApprovalOutcome::Denied { reason } => deny_decision(&format!(
-                "Denied by user: {}",
-                reason.unwrap_or_default()
-            )),
+            ApprovalOutcome::Denied { reason } => {
+                deny_decision(&format!("Denied by user: {}", reason.unwrap_or_default()))
+            }
             ApprovalOutcome::TimedOut => deny_decision("Approval request timed out"),
             ApprovalOutcome::Pending => deny_decision("Approval still pending"),
         }
@@ -357,7 +357,9 @@ async fn handle_hook(
         return (StatusCode::OK, Json(decision));
     }
 
-    let _ = state.events.send(HookEvent::from_payload(&event_name, payload));
+    let _ = state
+        .events
+        .send(HookEvent::from_payload(&event_name, payload));
     (StatusCode::OK, Json(json!({})))
 }
 
@@ -565,11 +567,7 @@ mod tests {
 
     /// Minimal HTTP POST helper so the test does not pull an HTTP client
     /// dependency into the crate.
-    async fn reqwest_lite_post(
-        url: &str,
-        token: Option<&str>,
-        body: &Value,
-    ) -> (u16, String) {
+    async fn reqwest_lite_post(url: &str, token: Option<&str>, body: &Value) -> (u16, String) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let address = url

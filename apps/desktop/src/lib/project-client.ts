@@ -598,3 +598,38 @@ export const revealInFinder = async (
     },
   );
 };
+
+/**
+ * Reveal a path from a task run's worktree (session sandbox) in the file
+ * manager. The server resolves the path against the run's worktree rather than
+ * the project checkout, so this points at the sandbox copy of the file.
+ */
+export const revealTaskRunInFinder = async (
+  taskRunId: string,
+  relativePath: string,
+): Promise<void> => {
+  await desktopFetch<Record<string, never>>(
+    `/rpc/task-runs/${taskRunId}/reveal-in-finder`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relative_path: relativePath }),
+    },
+  );
+};
+
+/**
+ * Resolve a worktree-relative path to its absolute on-disk path. The client
+ * does not know the worktree root in session-sandbox scope, so the server
+ * joins and boundary-checks the path. Used by "Copy Absolute Path".
+ */
+export const resolveTaskRunAbsolutePath = async (
+  taskRunId: string,
+  relativePath: string,
+): Promise<string> => {
+  const params = new URLSearchParams({ relative_path: relativePath });
+  const { absolute_path } = await desktopFetch<{ absolute_path: string }>(
+    `/rpc/task-runs/${taskRunId}/absolute-path?${params.toString()}`,
+  );
+  return absolute_path;
+};

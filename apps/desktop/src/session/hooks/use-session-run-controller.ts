@@ -1,0 +1,103 @@
+import { desktopFetch } from "@/lib/backend-client";
+import { useCallback, useState } from "react";
+import {
+  type SessionRunState,
+  deriveSessionRunState,
+  resolveCancelAction,
+} from "../domain/session-run-state";
+import type { PendingSessionSubmission } from "../domain/session-task-state";
+import type { TaskRunRecord } from "../types/api";
+
+type UseSessionRunControllerArgs = {
+  /** Runs for the active task from the task-runs WebSocket stream. */
+  taskRuns: TaskRunRecord[];
+  /** True until the task-runs stream has delivered its first snapshot. */
+  isTaskRunsLoading: boolean;
+  /** The active optimistic submission for this scope, or null. */
+  pendingSubmission: PendingSessionSubmission | null;
+  /** The task's `active_session_id`, used only as a stream-loading hint. */
+  activeSessionHint: string | null | undefined;
+  /** Abort an in-flight create request by its request id. */
+  abortSubmission: (requestId: string) => void;
+  /** Drop an optimistic submission by its request id. */
+  clearPendingSubmission: (requestId?: string) => void;
+};
+
+export type UseSessionRunControllerResult = SessionRunState & {
+  /** Alias of `isRunning`; whether to show Stop instead of Send. */
+  isSending: boolean;
+  /** A cancel RPC is in flight. */
+  isStopping: boolean;
+  /** Stop the active run, or abort the in-flight create when no run exists yet. */
+  handleCancel: () => Promise<void>;
+};
+
+async function cancelTaskRun(runId: string): Promise<void> {
+  await desktopFetch(`/rpc/task-runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+/**
+ * Owns session run state and cancellation, derived from the task-runs stream as
+ * the single source of truth. Replaces the previous imperative
+ * `activeTaskRunIdRef` whose cancel target went stale or null right after a
+ * send, so Stop did nothing during the window the user most wanted it.
+ */
+export function useSessionRunController({
+  taskRuns,
+  isTaskRunsLoading,
+  pendingSubmission,
+  activeSessionHint,
+  abortSubmission,
+  clearPendingSubmission,
+}: UseSessionRunControllerArgs): UseSessionRunControllerResult {
+  const [isStopping, setIsStopping] = useState(false);
+
+  const runState = deriveSessionRunState({
+    taskRuns,
+    isTaskRunsLoading,
+    pendingSubmission,
+    activeSessionHint,
+  });
+  const { cancelTargetRunId, isInCreateWindow } = runState;
+
+  const handleCancel = useCallback(async () => {
+    const action = resolveCancelAction(
+      { cancelTargetRunId, isInCreateWindow },
+      pendingSubmission,
+      isStopping,
+    );
+
+    if (action.type === "cancel-run") {
+      setIsStopping(true);
+      try {
+        await cancelTaskRun(action.runId);
+      } catch {
+        // Best-effort: the stream reflects the true status regardless.
+      } finally {
+        setIsStopping(false);
+      }
+      return;
+    }
+
+    if (action.type === "abort-create" && action.requestId) {
+      abortSubmission(action.requestId);
+      clearPendingSubmission(action.requestId);
+    }
+  }, [
+    cancelTargetRunId,
+    isInCreateWindow,
+    pendingSubmission,
+    isStopping,
+    abortSubmission,
+    clearPendingSubmission,
+  ]);
+
+  return {
+    ...runState,
+    isSending: runState.isRunning,
+    isStopping,
+    handleCancel,
+  };
+}

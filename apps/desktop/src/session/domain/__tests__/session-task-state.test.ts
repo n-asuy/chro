@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredTask } from "../../types";
 import type { StartClaudeResponse } from "../../types/api";
 import {
+  applyPendingSubmissionGroupsToTasks,
   applyPendingSubmissionToTasks,
   applyPendingSubmissionsToTasks,
   createPendingSessionSubmission,
@@ -124,6 +125,92 @@ describe("applyPendingSubmissionToTasks", () => {
     });
   });
 
+  it("adopts a freshly-streamed task instead of duplicating the optimistic row", () => {
+    const pending = createPendingSessionSubmission({
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "New task prompt",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds: ["task-1"],
+    });
+
+    const created = makeTask({
+      id: "task-2",
+      slug: "task-two",
+      title: "New task prompt",
+      active_session_id: null,
+      created_at: "2025-01-01T00:00:05.000Z",
+      updated_at: "2025-01-01T00:00:05.000Z",
+      sort_order: 5,
+    });
+
+    const result = applyPendingSubmissionToTasks(
+      [makeTask(), created],
+      pending,
+      "project-1",
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result.some((task) => task.id === pending.tempTaskId)).toBe(false);
+    expect(result.find((task) => task.id === "task-2")).toMatchObject({
+      active_session_id: "optimistic-run-req-1",
+    });
+  });
+
+  it("keeps the optimistic row until the stream delivers the created task", () => {
+    const pending = createPendingSessionSubmission({
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "New task prompt",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds: ["task-1"],
+    });
+
+    const result = applyPendingSubmissionToTasks(
+      [makeTask()],
+      pending,
+      "project-1",
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result.some((task) => task.id === "optimistic-task-req-1")).toBe(
+      true,
+    );
+  });
+
+  it("adopts the streamed task when the project had none at submission", () => {
+    const pending = createPendingSessionSubmission({
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "New task prompt",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds: [],
+    });
+
+    const created = makeTask({
+      id: "task-9",
+      created_at: "2025-01-01T00:00:05.000Z",
+    });
+
+    const result = applyPendingSubmissionToTasks(
+      [created],
+      pending,
+      "project-1",
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "task-9",
+      active_session_id: "optimistic-run-req-1",
+    });
+  });
+
   it("keeps a finished pending task visible without an active session", () => {
     const pending = finishPendingSessionSubmission(
       resolvePendingSessionSubmission(
@@ -196,6 +283,53 @@ describe("applyPendingSubmissionsToTasks", () => {
     expect(result.find((task) => task.id === "task-2")).toMatchObject({
       active_session_id: pendingB.tempRunId,
     });
+  });
+
+  it("does not let two new-task submissions adopt the same streamed task", () => {
+    const pendingA = createPendingSessionSubmission({
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "First new chat",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds: [],
+    });
+    const pendingB = createPendingSessionSubmission({
+      scopeId: "scope-2",
+      requestId: "req-2",
+      prompt: "Second new chat",
+      createdAt: "2025-01-01T00:00:01.000Z",
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds: [],
+    });
+
+    const taskA = makeTask({
+      id: "task-a",
+      created_at: "2025-01-01T00:00:05.000Z",
+    });
+    const taskB = makeTask({
+      id: "task-b",
+      created_at: "2025-01-01T00:00:06.000Z",
+    });
+
+    const result = applyPendingSubmissionsToTasks(
+      [taskA, taskB],
+      [pendingA, pendingB],
+      "project-1",
+    );
+
+    expect(result).toHaveLength(2);
+    expect([...result].map((task) => task.id).sort()).toEqual([
+      "task-a",
+      "task-b",
+    ]);
+    for (const task of result) {
+      expect([pendingA.tempRunId, pendingB.tempRunId]).toContain(
+        task.active_session_id,
+      );
+    }
   });
 });
 
@@ -404,5 +538,81 @@ describe("isPendingSubmissionSettledByTask", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("applyPendingSubmissionGroupsToTasks", () => {
+  const newSubmission = (
+    requestId: string,
+    prompt: string,
+    createdAt: string,
+    knownTaskIds: string[],
+  ) =>
+    createPendingSessionSubmission({
+      scopeId: requestId,
+      requestId,
+      prompt,
+      createdAt,
+      taskId: null,
+      taskSlug: null,
+      knownTaskIds,
+    });
+
+  it("returns the same list reference when there are no groups", () => {
+    const tasks = [makeTask()];
+    expect(applyPendingSubmissionGroupsToTasks(tasks, [])).toBe(tasks);
+  });
+
+  it("overlays each project's optimistic rows under that project", () => {
+    const streamed = [
+      makeTask({ id: "p1-task", project_id: "project-1" }),
+      makeTask({ id: "p2-task", project_id: "project-2" }),
+    ];
+    const p1 = newSubmission("r1", "Alpha work", "2025-01-02T00:00:00.000Z", [
+      "p1-task",
+    ]);
+    const p2 = newSubmission("r2", "Beta work", "2025-01-03T00:00:00.000Z", [
+      "p2-task",
+    ]);
+
+    const result = applyPendingSubmissionGroupsToTasks(streamed, [
+      { projectId: "project-1", submissions: [p1] },
+      { projectId: "project-2", submissions: [p2] },
+    ]);
+
+    const r1 = result.find((task) => task.id === p1.tempTaskId);
+    const r2 = result.find((task) => task.id === p2.tempTaskId);
+    expect(r1?.project_id).toBe("project-1");
+    expect(r1?.title).toBe("Alpha work");
+    expect(r2?.project_id).toBe("project-2");
+    expect(r2?.title).toBe("Beta work");
+    // The original streamed rows survive.
+    expect(result.some((task) => task.id === "p1-task")).toBe(true);
+    expect(result.some((task) => task.id === "p2-task")).toBe(true);
+  });
+
+  it("never adopts another project's task for a new-task submission", () => {
+    // project-2 has a freshly-streamed task that project-1's pending has never
+    // seen. A naive cross-project fold would let project-1 adopt it; scoping by
+    // project must prevent that.
+    const streamed = [makeTask({ id: "p2-fresh", project_id: "project-2" })];
+    const p1 = newSubmission(
+      "r1",
+      "Alpha work",
+      "2025-01-02T00:00:00.000Z",
+      [],
+    );
+
+    const result = applyPendingSubmissionGroupsToTasks(streamed, [
+      { projectId: "project-1", submissions: [p1] },
+    ]);
+
+    const adopted = result.find((task) => task.id === "p2-fresh");
+    expect(adopted?.project_id).toBe("project-2");
+    expect(adopted?.title).toBe("Existing task");
+    // project-1's optimistic row stands on its own instead of hijacking p2-fresh.
+    expect(result.find((task) => task.id === p1.tempTaskId)?.project_id).toBe(
+      "project-1",
+    );
   });
 });

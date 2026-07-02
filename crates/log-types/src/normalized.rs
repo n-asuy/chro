@@ -61,6 +61,10 @@ pub enum NormalizedEntryError {
     /// The agent emitted a tool call the CLI could not parse, so the turn ended
     /// without running it. Recoverable: the UI offers a one-click retry.
     MalformedToolCall,
+    /// The turn ended on a server-side API error (rate limit, session/weekly
+    /// usage limit, ...) before doing any work. Recoverable: the UI offers a
+    /// one-click retry.
+    ApiError,
     Other,
 }
 

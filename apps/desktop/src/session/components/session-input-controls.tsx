@@ -48,6 +48,7 @@ export function PromptEditorWithPopover({
   atActiveIndex,
   onActiveIndexChange,
   disabled,
+  dropActive,
   onSubmit,
   onDrop,
   onPaste,
@@ -76,6 +77,7 @@ export function PromptEditorWithPopover({
   atActiveIndex: number;
   onActiveIndexChange: (index: number) => void;
   disabled: boolean;
+  dropActive: boolean;
   onSubmit: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
@@ -173,6 +175,8 @@ export function PromptEditorWithPopover({
         handle={editorHandle}
         disabled={disabled}
         placeholder={`${t("inputPlaceholder")} @ for files, / for skills`}
+        dropPlaceholder={t("dropFilesPlaceholder")}
+        dropActive={dropActive}
         onSubmit={onSubmit}
         onPopoverKeyDown={(e) => {
           if (popover === "skill") {

@@ -5,6 +5,7 @@ export type OpenInIconId =
   | "finder"
   | "ghostty"
   | "iterm2"
+  | "obsidian"
   | "powershell"
   | "terminal"
   | "vscode"
@@ -14,6 +15,7 @@ const OPEN_IN_APP_IDS = [
   "file-manager",
   "cursor",
   "zed",
+  "obsidian",
   "cmux",
   "terminal",
   "iterm2",
@@ -89,6 +91,16 @@ export const getOpenInOptions = (): OpenInOption[] => {
       with: platform === "darwin" ? "Zed" : "zed",
       icon: "zed",
     },
+    // Obsidian registers the `obsidian://` URL scheme but not a folder document
+    // type, so handing it the workspace via LaunchServices/`open -a` only raises
+    // its last vault. We route through its URI instead (see
+    // openWorkspaceWithOption), which is also cross-platform, so it carries no
+    // `with` app name.
+    {
+      id: "obsidian",
+      label: "Obsidian",
+      icon: "obsidian",
+    },
   ];
 
   if (platform === "darwin") {
@@ -130,12 +142,19 @@ export const getSelectedOpenInOption = (): OpenInOption | null => {
   return options.find((option) => option.id === selectedAppId) ?? options[0];
 };
 
+// Hand `workspacePath` to Obsidian as a vault through its `obsidian://` URI
+// rather than LaunchServices. The `path` parameter takes an absolute filesystem
+// path and Obsidian resolves it to the owning vault.
+const buildObsidianUri = (workspacePath: string): string =>
+  `obsidian://open?path=${encodeURIComponent(workspacePath)}`;
+
 export const canOpenWorkspaceWithOption = (
   workspacePath: string | null | undefined,
   option: OpenInOption | null | undefined,
 ): boolean => {
   if (typeof window === "undefined" || !workspacePath || !option) return false;
   if (option.id === "cmux") return Boolean(window.desktop?.openInCmux);
+  if (option.id === "obsidian") return Boolean(window.desktop?.openExternalUrl);
   return Boolean(window.desktop?.openPath);
 };
 
@@ -151,6 +170,15 @@ export const openWorkspaceWithOption = async (
       throw new Error("Open in is available in the desktop app.");
     }
     await openInCmux(workspacePath);
+    return;
+  }
+
+  if (option.id === "obsidian") {
+    const openExternalUrl = desktop?.openExternalUrl;
+    if (!openExternalUrl) {
+      throw new Error("Open in is available in the desktop app.");
+    }
+    await openExternalUrl(buildObsidianUri(workspacePath));
     return;
   }
 

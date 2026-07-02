@@ -42,6 +42,15 @@ export interface UseJsonPatchWsStreamOptions<T = unknown> {
   onError?: (error: string) => void;
   /** Called on successful connection */
   onConnect?: () => void;
+  /**
+   * Whether a healthy backend is expected to send a message (the initial
+   * snapshot) shortly after connecting. True for snapshot streams, where a long
+   * silence means a stalled/half-open connection that must be force-reconnected.
+   * Set false for event-bus streams that are legitimately idle for long stretches
+   * (e.g. `/rpc/events`), so they are not torn down and reconnected on silence.
+   * Defaults to true. Read once, when the shared stream is first created.
+   */
+  expectInitialMessage?: boolean;
 }
 
 /**
@@ -90,7 +99,17 @@ interface StreamEntry {
   pendingOps: Operation[];
   flushTimer: TimerId | null;
   firstMessageTimer: TimerId | null;
+  /**
+   * Watchdog for the connect phase: armed when the socket is created, cleared
+   * the moment `onopen` fires. The first-message watchdog can only be armed
+   * inside `onopen`, so it never covers an upgrade that hangs without opening.
+   */
+  connectTimer: TimerId | null;
   firstMessageSeen: boolean;
+  /** Whether to arm the first-message stall watchdog (see options field). */
+  expectInitialMessage: boolean;
+  /** True once `onopen` has fired at least once; disables the initial-connect cap. */
+  everConnected: boolean;
   retryTimer: TimerId | null;
   retryCount: number;
   teardownTimer: TimerId | null;
@@ -107,7 +126,28 @@ interface StreamEntry {
  * `!data && !error` — spinning forever. Guards the first message only.
  */
 const FIRST_MESSAGE_TIMEOUT_MS = 15_000;
+/**
+ * How long to wait, after creating the socket, for `onopen`. A WebSocket upgrade
+ * to a healthy backend completes near-instantly; a long silence means the
+ * upgrade is hung — most often the backend blocked resolving the id while the
+ * DB is locked, so it never returns the `101` that fires `onopen`. The
+ * first-message watchdog can't help (it is only armed *inside* `onopen`), so
+ * without this a consumer — whose loading state is `!data && !error` — spins
+ * forever with no recovery. On timeout we surface an error (flips loading off)
+ * and force-close so `onclose` runs the normal reconnect/give-up path.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
 const MAX_RECONNECT_DELAY_MS = 8_000;
+/**
+ * How many times to retry an endpoint that has NEVER connected before giving up.
+ * A handshake that is rejected (HTTP 404 for a deleted/unknown id, connection
+ * refused) closes without ever firing `onopen`; retrying it forever lets a
+ * single dangling subscription storm the server with failed handshakes. Once a
+ * socket has connected at least once, this cap no longer applies and reconnects
+ * continue indefinitely, so transient drops (e.g. a server restart) still
+ * recover.
+ */
+const MAX_INITIAL_CONNECT_ATTEMPTS = 5;
 /**
  * Keep an idle (zero-subscriber) stream alive briefly before tearing it down,
  * to absorb StrictMode's mount→unmount→remount and fast navigation away-and-back.
@@ -152,20 +192,41 @@ function openSocket(entry: StreamEntry): void {
   const ws = new WebSocket(httpToWs(entry.endpoint));
   entry.socket = ws;
 
+  // Connect-phase watchdog: a hung upgrade never fires `onopen`, so the
+  // first-message watchdog (armed in `onopen`) would never run. Bound the
+  // connect phase here so a never-opening socket can't strand consumers in a
+  // permanent loading state.
+  entry.connectTimer = clearTimer(entry.connectTimer);
+  if (entry.expectInitialMessage) {
+    entry.connectTimer = setTimeout(() => {
+      entry.connectTimer = null;
+      if (entry.socket !== ws || entry.isConnected) return;
+      entry.error = "Stream connect timed out";
+      publish(entry);
+      // Closing a still-connecting socket triggers onclose, which schedules a
+      // backed-off reconnect (or gives up after the initial-connect cap).
+      ws.close();
+    }, CONNECT_TIMEOUT_MS);
+  }
+
   ws.onopen = () => {
     entry.isConnected = true;
     entry.error = null;
     entry.retryCount = 0;
+    entry.everConnected = true;
     entry.retryTimer = clearTimer(entry.retryTimer);
+    entry.connectTimer = clearTimer(entry.connectTimer);
     entry.firstMessageTimer = clearTimer(entry.firstMessageTimer);
-    entry.firstMessageTimer = setTimeout(() => {
-      entry.firstMessageTimer = null;
-      if (entry.firstMessageSeen) return;
-      entry.error = "Stream stalled: no data received";
-      publish(entry);
-      // Closing triggers onclose, which schedules a backed-off reconnect.
-      ws.close();
-    }, FIRST_MESSAGE_TIMEOUT_MS);
+    if (entry.expectInitialMessage) {
+      entry.firstMessageTimer = setTimeout(() => {
+        entry.firstMessageTimer = null;
+        if (entry.firstMessageSeen) return;
+        entry.error = "Stream stalled: no data received";
+        publish(entry);
+        // Closing triggers onclose, which schedules a backed-off reconnect.
+        ws.close();
+      }, FIRST_MESSAGE_TIMEOUT_MS);
+    }
     publish(entry);
     for (const sub of entry.subscribers) sub.getOptions()?.onConnect?.();
   };
@@ -215,10 +276,21 @@ function openSocket(entry: StreamEntry): void {
     if (entry.socket !== ws) return; // superseded by a newer socket; ignore
     entry.socket = null;
     entry.isConnected = false;
+    entry.connectTimer = clearTimer(entry.connectTimer);
+    entry.firstMessageTimer = clearTimer(entry.firstMessageTimer);
     publish(entry);
     if (entry.finished || (evt?.code === 1000 && evt?.wasClean)) return;
     if (entry.subscribers.size === 0) return; // nobody listening; let it rest
     entry.retryCount += 1;
+    // An endpoint that has never connected is almost certainly a permanent
+    // failure (handshake rejected: deleted/unknown id, refused). Stop after a
+    // bounded number of attempts so it can't storm the server. A socket that
+    // connected at least once keeps retrying forever (transient-drop recovery).
+    if (!entry.everConnected && entry.retryCount > MAX_INITIAL_CONNECT_ATTEMPTS) {
+      entry.error = "Unable to connect";
+      publish(entry);
+      return;
+    }
     scheduleReconnect(entry);
   };
 }
@@ -240,6 +312,7 @@ function scheduleReconnect(entry: StreamEntry): void {
 function teardownSocket(entry: StreamEntry): void {
   entry.flushTimer = clearTimer(entry.flushTimer);
   entry.firstMessageTimer = clearTimer(entry.firstMessageTimer);
+  entry.connectTimer = clearTimer(entry.connectTimer);
   entry.retryTimer = clearTimer(entry.retryTimer);
   entry.pendingOps = [];
   const ws = entry.socket;
@@ -254,7 +327,11 @@ function teardownSocket(entry: StreamEntry): void {
   entry.isConnected = false;
 }
 
-function getOrCreate(endpoint: string, initialData: () => object): StreamEntry {
+function getOrCreate(
+  endpoint: string,
+  initialData: () => object,
+  expectInitialMessage: boolean,
+): StreamEntry {
   let entry = registry.get(endpoint);
   if (!entry) {
     entry = {
@@ -269,7 +346,10 @@ function getOrCreate(endpoint: string, initialData: () => object): StreamEntry {
       pendingOps: [],
       flushTimer: null,
       firstMessageTimer: null,
+      connectTimer: null,
       firstMessageSeen: false,
+      expectInitialMessage,
+      everConnected: false,
       retryTimer: null,
       retryCount: 0,
       teardownTimer: null,
@@ -290,13 +370,18 @@ export function acquireStream(
   endpoint: string,
   initialData: () => object,
   subscriber: StreamSubscriber,
+  expectInitialMessage = true,
 ): () => void {
-  const entry = getOrCreate(endpoint, initialData);
+  const entry = getOrCreate(endpoint, initialData, expectInitialMessage);
   entry.teardownTimer = clearTimer(entry.teardownTimer);
   entry.subscribers.add(subscriber);
   // Open on first interest. A finished stream keeps its final data and is not
   // reopened; a reconnect already in flight (retryTimer set) is left alone.
+  // Re-acquiring an idle entry (first mount, or a remount after the registry
+  // gave up) starts from a clean backoff so it gets a fresh set of attempts.
   if (!entry.socket && !entry.finished && entry.retryTimer === null) {
+    entry.retryCount = 0;
+    entry.error = null;
     openSocket(entry);
   } else if (entry.isConnected) {
     subscriber.getOptions()?.onConnect?.();

@@ -10,6 +10,7 @@ import {
 import { useRebase } from "@/hooks/use-rebase";
 import { useLanguage } from "@/i18n";
 import {
+  type ModelOption,
   REASONING_OPTIONS,
   RUNTIME_DEFAULT_LABEL,
   getModelLabel,
@@ -25,6 +26,7 @@ import {
   type ExecutorProfileId,
   type ReasoningEffort,
   fetchExecutorProfile,
+  fetchPiModels,
 } from "@/lib/executor-client";
 import { useFlag } from "@/lib/feature-flags-store";
 import { slugOrId } from "@/lib/slug";
@@ -33,6 +35,7 @@ import { useSettingsModal } from "@/settings/components/settings-modal-provider"
 import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
 import { updateTaskTitle } from "@/tasks/task-api";
 import { ProjectOverview } from "@/workspace-layout/components/project-overview";
+import { ProjectSwitcherDropdown } from "@/workspace-layout/components/project-switcher-dropdown";
 import {
   useOptionalTab,
   useOptionalTabKind,
@@ -66,6 +69,7 @@ import {
   BookOpen,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FolderOpen,
   Image as ImageIcon,
@@ -92,6 +96,7 @@ import {
   EnvironmentPopover,
   type RebaseConfirmResult,
 } from "./components/environment-popover";
+import { NewSessionExecutionControls } from "./components/execution-options-controls";
 // DiffViewerPanel is no longer rendered inline; the "Open Diff" header
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
@@ -103,7 +108,6 @@ import {
   SendButtonWithState,
 } from "./components/session-input-controls";
 import { SessionReferencesPopover } from "./components/session-references-popover";
-import { SessionSidebarContent } from "./components/session-sidebar-content";
 import { TaskConversation } from "./components/task-conversation";
 import { useOptionalProjectTasks } from "./context/project-tasks-context";
 import { ConversationActionsContext } from "./conversation-actions";
@@ -116,15 +120,19 @@ import {
   useArchivedSessions,
   useConversationHistory,
   useDiffStream,
+  useJsonPatchWsStream,
   useProjectTasksStream,
   usePromptDraftPersistence,
   useSessionExecutionOptions,
+  useSessionRunController,
   useSessionSidebarState,
   useSessionTaskState,
   useSingleSessionController,
   useTaskRunsStream,
   useTaskSessionsStream,
 } from "./hooks";
+import type { LogEntryMessage } from "./hooks";
+import { useComposerFileDrag } from "./hooks/use-composer-file-drag";
 import { useConversationFind } from "./hooks/use-conversation-find";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
@@ -136,20 +144,25 @@ import {
   type UserQuestion,
   useUserQuestionStore,
 } from "./state/user-question-store";
-import type { StoredTask, UiEventMessage } from "./types";
+import type { StoredTask } from "./types";
 import {
   contextEntriesToRefs,
   formatContextForPrompt,
   formatSkillContextForPrompt,
 } from "./types/context";
+import { AbortControllerRegistry } from "./utils/abort-controller-registry";
 import {
   SESSION_DRAG_DATA_TYPE,
   parseSessionDragPayload,
 } from "./utils/session-dnd";
 
+// Stable empty document for the app-events stream: it carries no JSON-Patch
+// state, only fire-and-forget `ui_event` messages handled via `onMessage`.
+const EMPTY_APP_EVENTS_DOCUMENT = (): Record<string, never> => ({});
+
 const SESSION_SIDEBAR_STORAGE_KEY = "desktop:session-sidebar-width";
 const SESSION_SIDEBAR_DEFAULT_WIDTH = 280;
-const DEFAULT_EXECUTORS: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX"];
+const DEFAULT_EXECUTORS: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX", "PI"];
 
 // Follow-up sent when retrying a turn that aborted on a malformed tool call.
 // Nudges the agent to re-issue the dropped call as a proper structured tool
@@ -157,8 +170,11 @@ const DEFAULT_EXECUTORS: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX"];
 const MALFORMED_TOOL_CALL_RETRY_PROMPT =
   "Your previous tool call was malformed and did not run, so the turn stopped. Re-issue that tool call as a proper tool call and continue from where you left off.";
 
-const httpToWs = (url: string): string =>
-  url.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+// Follow-up sent when retrying a turn that stopped on a server-side API error
+// (rate limit, usage limit, ...). The previous turn did no work, so just nudge
+// the agent to pick up where it left off.
+const API_ERROR_RETRY_PROMPT =
+  "The previous turn stopped on a server-side API error before doing any work. Continue from where you left off.";
 
 const createPerfRequestId = (): string => {
   if (
@@ -215,11 +231,15 @@ export function SingleAgentSessionView({
     projectId: resolvedProjectId,
     projectSlug,
     workspacePath: workspace,
+    isScratch,
     isLoading: isProjectLoading,
   } = useProjectContext();
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
   const openFilePath = useFilesStore((state) => state.openFilePath);
   const navigate = useNavigate();
+  // Whether the new-chat "Choose project" picker is open. Local UI state only,
+  // so it is immune to WebSocket-patch object churn.
+  const [chooseProjectOpen, setChooseProjectOpen] = useState(false);
 
   // Route params — may contain slugs or UUIDs (backward compat).
   // Resolver hooks unify "rendered at /session/:taskId" and "rendered as a
@@ -245,6 +265,16 @@ export function SingleAgentSessionView({
   void tabKind;
   const isSessionMountedRef = useRef(true);
   const latestRouteProjectIdRef = useRef<string | null>(routeProjectId);
+  // Tracks in-flight send requests so a Stop pressed during the create window
+  // (before the run exists) can abort the POST, and so every in-flight request
+  // is aborted on reset/unmount.
+  const abortRegistryRef = useRef<AbortControllerRegistry | null>(null);
+  abortRegistryRef.current ??= new AbortControllerRegistry();
+  const abortRegistry = abortRegistryRef.current;
+  const abortSubmission = useCallback(
+    (requestId: string) => abortRegistry.abort(requestId),
+    [abortRegistry],
+  );
   const promptScopeId = useMemo(() => {
     if (tab) return `tab:${tab.id}`;
     return [
@@ -280,8 +310,6 @@ export function SingleAgentSessionView({
     },
     [editor, setPromptPopover],
   );
-  // Track stopping state for immediate UI feedback
-  const [isStopping, setIsStopping] = useState(false);
   const openLayoutTab = useLayoutStore((s) => s.openTab);
   const referencesPopoverEnabled = useFlag("session_references_popover");
   const [environmentPopoverOpen, setEnvironmentPopoverOpen] = useState(false);
@@ -311,8 +339,9 @@ export function SingleAgentSessionView({
     isSessionMountedRef.current = true;
     return () => {
       isSessionMountedRef.current = false;
+      abortRegistry.abortAll();
     };
-  }, []);
+  }, [abortRegistry]);
 
   const addErrorMessage = useCallback((message: string) => {
     const normalizedMessage = normalizeSessionErrorMessage(message);
@@ -357,9 +386,6 @@ export function SingleAgentSessionView({
   const { archiveSession, restoreSession, isArchived } = useArchivedSessions();
 
   // Session state
-  // Ref to track the active taskRunId for cancellation
-  // This is needed because URL params may not update immediately after sending
-  const activeTaskRunIdRef = useRef<string | null>(null);
   const [currentTaskRunTargetBranch, setCurrentTaskRunTargetBranch] = useState<
     string | null
   >(null);
@@ -378,6 +404,7 @@ export function SingleAgentSessionView({
     () => ({
       CLAUDE_CODE: t("mcpExecutorOptionClaude"),
       CODEX: t("mcpExecutorOptionCodex"),
+      PI: t("mcpExecutorOptionPi"),
     }),
     [t],
   );
@@ -453,14 +480,18 @@ export function SingleAgentSessionView({
     enabled: Boolean(routeProjectId) && !sharedProjectTasks,
   });
   const projectTasks = sharedProjectTasks ?? fallbackProjectTasks;
-  const {
-    tasks: streamedTasks,
-    isLoading: isTasksLoading,
-    error: tasksStreamError,
-  } = projectTasks;
+  // Feed the RAW stream tasks (no optimistic overlay) into useSessionTaskState.
+  // Its pending-settlement check must compare against the real stream; using
+  // the overlaid tasks lets a finished pending settle against its own
+  // synthesized row and clear itself before the real task arrives, which made a
+  // just-created session vanish from the sidebar until reload. The shared
+  // provider exposes `rawTasks`; the fallback stream is already un-overlaid.
+  const streamedTasks = sharedProjectTasks
+    ? sharedProjectTasks.rawTasks
+    : fallbackProjectTasks.tasks;
 
-  const isSessionsLoading = isTasksLoading;
-  const sessionsError = tasksStreamError;
+  const isSessionsLoading = projectTasks.isLoading;
+  const sessionsError = projectTasks.error;
 
   const {
     tasks: displayedTasks,
@@ -525,11 +556,17 @@ export function SingleAgentSessionView({
     : null;
   useDocumentTitle(activeTask?.title ?? null);
 
-  const isTaskRunning = Boolean(activeTask?.active_session_id);
-  const isPendingSubmissionRunning = Boolean(
-    pendingSubmission && !pendingSubmission.finishedAt,
-  );
-  const isSending = isTaskRunning || isPendingSubmissionRunning;
+  // Run state and cancellation derive from the task-runs stream as the single
+  // source of truth (see useSessionRunController). The optimistic submission
+  // only covers the create window before the run reaches the stream.
+  const { isSending, isStopping, handleCancel } = useSessionRunController({
+    taskRuns,
+    isTaskRunsLoading,
+    pendingSubmission,
+    activeSessionHint: activeTask?.active_session_id ?? null,
+    abortSubmission,
+    clearPendingSubmission,
+  });
   const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
   const isExecutorLocked = Boolean(taskRunId) || isSending;
   // The runtime (Claude↔Codex) can't change mid-session — that needs handoff,
@@ -540,14 +577,6 @@ export function SingleAgentSessionView({
     isSending ||
     (Boolean(taskRunId) &&
       sessionExecutorSelection?.executor !== "CLAUDE_CODE");
-
-  useEffect(() => {
-    if (pendingSubmission && !pendingSubmission.runId) {
-      activeTaskRunIdRef.current = null;
-      return;
-    }
-    activeTaskRunIdRef.current = taskRunId;
-  }, [pendingSubmission, taskRunId]);
 
   useEffect(() => {
     if (!activeRunRecord) {
@@ -669,11 +698,17 @@ export function SingleAgentSessionView({
       if (options?.clearPrompt !== false) {
         editor.clear();
       }
-      // Clear active taskRunId ref
-      activeTaskRunIdRef.current = null;
-      // Note: activeTaskId and taskRunId are derived from URL, so navigation clears them
+      // Abort any in-flight send for this view; navigation clears the derived
+      // activeTaskId/taskRunId.
+      abortRegistry.abortAll();
     },
-    [clearPendingSubmission, executorProfileId, editor, pendingSubmission],
+    [
+      clearPendingSubmission,
+      executorProfileId,
+      editor,
+      pendingSubmission,
+      abortRegistry,
+    ],
   );
 
   // Handle workspace change - reset session state when project changes
@@ -699,43 +734,26 @@ export function SingleAgentSessionView({
     previousWorkspaceRef.current = workspace;
   }, [handleFullReset, workspace, isProjectLoading]);
 
-  // Listen for UI events
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return undefined;
-    }
-
-    const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
-    const httpUrl = `${baseUrl}/rpc/events`;
-    const wsUrl = httpToWs(httpUrl);
-    const ws = new WebSocket(wsUrl);
-
-    ws.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as UiEventMessage;
-        if (
-          payload?.type === "ui_event" &&
-          payload.payload?.kind === "open_settings"
-        ) {
-          openSettingsModal();
-        }
-      } catch (error) {
-        console.warn("[desktop] Failed to parse ui_event", error);
+  // Listen for app-wide UI events (e.g. an "open settings" command from the
+  // tray). Shared through the stream registry so every session view reuses one
+  // connection and gets automatic reconnect; this is an event bus that is
+  // idle for long stretches, so it opts out of the initial-message watchdog.
+  const appEventsEndpoint = useMemo(
+    () => `${getBackendBaseUrl().replace(/\/$/, "")}/rpc/events`,
+    [],
+  );
+  const handleAppEvent = useCallback(
+    (msg: LogEntryMessage) => {
+      if (msg.type === "ui_event" && msg.payload?.kind === "open_settings") {
+        openSettingsModal();
       }
-    };
-
-    ws.onerror = () => {
-      console.warn("[desktop] UI event stream WebSocket error");
-    };
-
-    return () => {
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      ws.close();
-    };
-  }, [openSettingsModal]);
+    },
+    [openSettingsModal],
+  );
+  useJsonPatchWsStream(appEventsEndpoint, true, EMPTY_APP_EVENTS_DOCUMENT, {
+    onMessage: handleAppEvent,
+    expectInitialMessage: false,
+  });
 
   // Calculate new session URL
   const newSessionUrl = useMemo(() => {
@@ -817,6 +835,42 @@ export function SingleAgentSessionView({
     [executorProfileId, isExecutorLocked],
   );
 
+  // The runtime/model selector is a two-step menu: pick the runtime first, then
+  // pick a model from that runtime's own list. Mixing both in one flat list is
+  // confusing (and pi's model list is huge), so we navigate between the two
+  // steps in place instead of closing on the first click.
+  const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
+  const [runtimeMenuView, setRuntimeMenuView] = useState<"runtime" | "model">(
+    "runtime",
+  );
+  // Free-text filter for the model step (pi exposes hundreds of models).
+  const [modelQuery, setModelQuery] = useState("");
+  const modelSearchRef = useRef<HTMLInputElement>(null);
+  const handleRuntimeMenuOpenChange = useCallback(
+    (open: boolean) => {
+      setRuntimeMenuOpen(open);
+      setModelQuery("");
+      if (open) {
+        // Locked runtime (mid-session) only allows model changes, so jump
+        // straight to the model step; otherwise start at runtime selection.
+        setRuntimeMenuView(isExecutorLocked ? "model" : "runtime");
+      }
+    },
+    [isExecutorLocked],
+  );
+  const handleRuntimePick = useCallback(
+    (executor: BaseCodingAgent) => {
+      handleExecutorSelect(executor);
+      setModelQuery("");
+      setRuntimeMenuView("model");
+    },
+    [handleExecutorSelect],
+  );
+  const handleModelStepBack = useCallback(() => {
+    setModelQuery("");
+    setRuntimeMenuView("runtime");
+  }, []);
+
   // Current Runtime / Model / Reasoning values + options for the @ palette.
   const runtimeValue = sessionExecutorSelection?.executor ?? null;
   const runtimeLabel = runtimeValue
@@ -831,13 +885,66 @@ export function SingleAgentSessionView({
     [availableExecutors, executorLabels],
   );
   const modelValue = sessionExecutorSelection?.model ?? null;
-  const modelOptions = useMemo(
-    () => (runtimeValue ? getModelOptions(runtimeValue) : []),
-    [runtimeValue],
-  );
-  const modelLabel = runtimeValue
-    ? getModelLabel(runtimeValue, modelValue) ?? RUNTIME_DEFAULT_LABEL
-    : null;
+  // pi's model list is provider-dependent, so it is fetched from the agent
+  // (narrowed to the user's configured providers) rather than hardcoded.
+  const [piModels, setPiModels] = useState<ModelOption[] | null>(null);
+  useEffect(() => {
+    if (runtimeValue !== "PI") {
+      return;
+    }
+    let cancelled = false;
+    void fetchPiModels().then((models) => {
+      if (!cancelled) {
+        setPiModels(
+          models.map((m) => ({
+            value: m.value,
+            label: m.label,
+            description: m.provider,
+          })),
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [runtimeValue]);
+  const modelOptions = useMemo(() => {
+    if (!runtimeValue) return [];
+    if (runtimeValue === "PI") return piModels ?? [];
+    return getModelOptions(runtimeValue);
+  }, [runtimeValue, piModels]);
+  // Only surface the search box when the list is long enough to need it
+  // (pi); Claude/Codex have a handful of presets where it would be noise.
+  const showModelSearch = modelOptions.length > 8;
+  const filteredModelOptions = useMemo(() => {
+    const q = modelQuery.trim().toLowerCase();
+    if (!q) return modelOptions;
+    return modelOptions.filter(
+      (m) =>
+        m.label.toLowerCase().includes(q) ||
+        m.value.toLowerCase().includes(q) ||
+        (m.description?.toLowerCase().includes(q) ?? false),
+    );
+  }, [modelOptions, modelQuery]);
+  // Focus the search box when entering the model step so the user can type
+  // immediately (the step is reached via in-place nav, not a fresh open).
+  useEffect(() => {
+    if (!runtimeMenuOpen || runtimeMenuView !== "model" || !showModelSearch) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      modelSearchRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [runtimeMenuOpen, runtimeMenuView, showModelSearch]);
+  const modelLabel = useMemo(() => {
+    if (!runtimeValue) return null;
+    if (runtimeValue === "PI") {
+      if (!modelValue) return RUNTIME_DEFAULT_LABEL;
+      return piModels?.find((m) => m.value === modelValue)?.label ?? modelValue;
+    }
+    return getModelLabel(runtimeValue, modelValue) ?? RUNTIME_DEFAULT_LABEL;
+  }, [runtimeValue, modelValue, piModels]);
   const reasoningValue = sessionExecutorSelection?.reasoning_effort ?? null;
   const reasoningLabel =
     getReasoningLabel(reasoningValue) ?? RUNTIME_DEFAULT_LABEL;
@@ -845,7 +952,7 @@ export function SingleAgentSessionView({
     ? runtimeSupportsReasoning(runtimeValue)
     : false;
 
-  const { submitPrompt, handleCancel } = useSingleSessionController({
+  const { submitPrompt } = useSingleSessionController({
     workspace,
     routeProjectId,
     activeTaskId: activeStreamTaskId,
@@ -855,14 +962,11 @@ export function SingleAgentSessionView({
     baseBranch,
     sessionExecutorSelection,
     executorProfileId,
-    isSending,
-    isStopping,
     t,
     editor,
     isSessionMountedRef,
     latestRouteProjectIdRef,
-    activeTaskRunIdRef,
-    setIsStopping,
+    abortRegistry,
     addErrorMessage,
     navigateToSession,
     createPerfRequestId,
@@ -946,7 +1050,6 @@ export function SingleAgentSessionView({
       taskSlug: routeTaskSlug,
     });
     setScrollToBottomSignal((value) => value + 1);
-    activeTaskRunIdRef.current = null;
 
     editor.clearWithSnapshot();
     clearUploadItems();
@@ -980,59 +1083,74 @@ export function SingleAgentSessionView({
     routeTaskSlug,
   ]);
 
-  // Retry a turn that aborted on a malformed tool call: continue the existing
-  // session ("auto") with a fixed nudge, mirroring handleSend's optimistic
-  // pending-submission bookkeeping.
-  const handleRetryMalformedToolCall = useCallback(() => {
-    if (!activeTaskId || isSending) {
-      return;
-    }
-    const requestId = createPerfRequestId();
-    const createdAt = new Date().toISOString();
-    beginPendingSubmission({
-      requestId,
-      prompt: MALFORMED_TOOL_CALL_RETRY_PROMPT,
-      createdAt,
-      taskId: activeStreamTaskId,
-      taskSlug: routeTaskSlug,
-    });
-    setScrollToBottomSignal((value) => value + 1);
-    activeTaskRunIdRef.current = null;
-    void submitPrompt(
-      {
-        prompt: MALFORMED_TOOL_CALL_RETRY_PROMPT,
-        contextRefs: [],
-        imageIds: null,
-        selectedSkillIds: [],
-      },
-      {
-        requestId,
-        mode: "auto",
-        onAccepted: (response) => {
-          resolvePendingSubmission(requestId, response);
-        },
-      },
-    ).then((accepted) => {
-      if (!accepted) {
-        clearPendingSubmission(requestId);
+  // Retry a turn that ended without doing work (malformed tool call, server-side
+  // API error, ...): continue the existing session ("auto") with a fixed nudge,
+  // mirroring handleSend's optimistic pending-submission bookkeeping.
+  const retryTurnWith = useCallback(
+    (prompt: string) => {
+      if (!activeTaskId || isSending) {
+        return;
       }
-    });
-  }, [
-    activeTaskId,
-    isSending,
-    createPerfRequestId,
-    beginPendingSubmission,
-    activeStreamTaskId,
-    routeTaskSlug,
-    setScrollToBottomSignal,
-    submitPrompt,
-    resolvePendingSubmission,
-    clearPendingSubmission,
-  ]);
+      const requestId = createPerfRequestId();
+      const createdAt = new Date().toISOString();
+      beginPendingSubmission({
+        requestId,
+        prompt,
+        createdAt,
+        taskId: activeStreamTaskId,
+        taskSlug: routeTaskSlug,
+      });
+      setScrollToBottomSignal((value) => value + 1);
+      void submitPrompt(
+        {
+          prompt,
+          contextRefs: [],
+          imageIds: null,
+          selectedSkillIds: [],
+        },
+        {
+          requestId,
+          mode: "auto",
+          onAccepted: (response) => {
+            resolvePendingSubmission(requestId, response);
+          },
+        },
+      ).then((accepted) => {
+        if (!accepted) {
+          clearPendingSubmission(requestId);
+        }
+      });
+    },
+    [
+      activeTaskId,
+      isSending,
+      createPerfRequestId,
+      beginPendingSubmission,
+      activeStreamTaskId,
+      routeTaskSlug,
+      setScrollToBottomSignal,
+      submitPrompt,
+      resolvePendingSubmission,
+      clearPendingSubmission,
+    ],
+  );
+
+  const handleRetryMalformedToolCall = useCallback(
+    () => retryTurnWith(MALFORMED_TOOL_CALL_RETRY_PROMPT),
+    [retryTurnWith],
+  );
+
+  const handleRetryApiError = useCallback(
+    () => retryTurnWith(API_ERROR_RETRY_PROMPT),
+    [retryTurnWith],
+  );
 
   const conversationActions = useMemo(
-    () => ({ onRetryMalformedToolCall: handleRetryMalformedToolCall }),
-    [handleRetryMalformedToolCall],
+    () => ({
+      onRetryMalformedToolCall: handleRetryMalformedToolCall,
+      onRetryApiError: handleRetryApiError,
+    }),
+    [handleRetryMalformedToolCall, handleRetryApiError],
   );
 
   // User question handlers
@@ -1369,10 +1487,13 @@ export function SingleAgentSessionView({
   );
 
   // Input handlers (keyDown, composition moved to PromptEditor / usePromptEditor)
+  const fileDrag = useComposerFileDrag();
+
   const handleDropFiles = useCallback(
     (event: ReactDragEvent<HTMLElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      fileDrag.endDrag();
 
       const sessionPayload = parseSessionDragPayload(
         event.dataTransfer.getData(SESSION_DRAG_DATA_TYPE),
@@ -1396,7 +1517,7 @@ export function SingleAgentSessionView({
       }
       handleFiles(files);
     },
-    [workspace, editor, addErrorMessage, t, handleFiles],
+    [workspace, editor, addErrorMessage, t, handleFiles, fileDrag.endDrag],
   );
 
   const handlePasteFiles = useCallback(
@@ -1422,7 +1543,7 @@ export function SingleAgentSessionView({
     return () => clearTimeout(timeoutId);
   }, [activeTaskId, routeRunSlug, editor]);
 
-  // Note: activeTask, isTaskRunning, isSending, canSend are defined earlier for use in callbacks
+  // Note: activeTask, isSending, canSend are defined earlier for use in callbacks
   const activeTaskBranch = activeTask?.branch?.trim() || null;
   const activeTaskTitle = useMemo(() => {
     const title = activeTask?.title?.trim();
@@ -1513,6 +1634,14 @@ export function SingleAgentSessionView({
   );
   const showSessionListLoading = isSessionsLoading && sortedTasks.length === 0;
 
+  // A not-yet-started session: surface the "From" branch and Worktree/Local
+  // pickers beneath the prompt so they're chosen before the run begins. Once a
+  // run exists these move into the header environment popover, so the inline
+  // footer hides itself. Scratch and non-Git projects have no worktree/branch
+  // choice to make, so it stays hidden there too.
+  const showNewSessionExecutionControls =
+    !isScratch && !activeTaskId && !pendingSubmission && isGitRepository;
+
   // Render helpers
   const renderPromptContent = (
     containerClassName: string,
@@ -1521,7 +1650,8 @@ export function SingleAgentSessionView({
     <div
       className={containerClassName}
       onDrop={handleDropFiles}
-      onDragOver={(event) => event.preventDefault()}
+      onDragOver={fileDrag.onDragOver}
+      onDragLeave={fileDrag.onDragLeave}
       role="presentation"
     >
       <input
@@ -1533,8 +1663,19 @@ export function SingleAgentSessionView({
         onChange={(event) => handleFiles(event.target.files)}
       />
 
-      <div className={cn("w-full px-4 pb-4 pt-3", inputWrapperClassName)}>
-        <div className="flex flex-col gap-3 rounded-2xl border border-custom-border-200 bg-background p-4 shadow-sm focus-within:shadow-md">
+      {/* Wrapper doubles as the stacking context so the new-session tray can
+          tuck behind the card (card z-10 over tray z-0). */}
+      <div
+        className={cn("relative w-full px-4 pb-4 pt-3", inputWrapperClassName)}
+      >
+        <div
+          className={cn(
+            "relative z-10 flex flex-col gap-3 rounded-2xl border bg-background p-4 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:shadow-md",
+            fileDrag.isDragActive
+              ? "border-primary ring-2 ring-primary/20"
+              : "border-custom-border-200",
+          )}
+        >
           <ImageUploadPreviewList
             items={uploadItems}
             t={t}
@@ -1551,6 +1692,7 @@ export function SingleAgentSessionView({
             atActiveIndex={atActiveIndex}
             onActiveIndexChange={setAtActiveIndex}
             disabled={!workspace && !activeStreamTaskId}
+            dropActive={fileDrag.isDragActive}
             onSubmit={handleSend}
             onDrop={handleDropFiles}
             onPaste={handlePasteFiles}
@@ -1634,7 +1776,10 @@ export function SingleAgentSessionView({
 
               <div className="mx-1 h-4 w-px bg-border" />
 
-              <DropdownMenu>
+              <DropdownMenu
+                open={runtimeMenuOpen}
+                onOpenChange={handleRuntimeMenuOpenChange}
+              >
                 <DropdownMenuTrigger asChild>
                   <Button
                     type="button"
@@ -1669,10 +1814,10 @@ export function SingleAgentSessionView({
                     <ChevronDown className="h-3 w-3 text-muted-foreground/60" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  {/* Runtime can't change mid-session; hide it once locked so
-                      only the model stays switchable on a follow-up. */}
-                  {!isExecutorLocked ? (
+                <DropdownMenuContent align="start" className="min-w-[200px]">
+                  {/* Step 1 — pick a runtime. Runtime can't change mid-session,
+                      so once locked we skip straight to the model step. */}
+                  {runtimeMenuView === "runtime" && !isExecutorLocked ? (
                     <>
                       <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
                         Runtime
@@ -1683,44 +1828,127 @@ export function SingleAgentSessionView({
                         return (
                           <DropdownMenuItem
                             key={executor}
-                            onClick={() => handleExecutorSelect(executor)}
+                            // Stay open and advance to the model step instead of
+                            // committing-and-closing on the first click.
+                            onSelect={(event) => {
+                              event.preventDefault();
+                              handleRuntimePick(executor);
+                            }}
                             className="flex items-center justify-between gap-3 text-[11px]"
                           >
-                            <span>
+                            <span className="flex items-center gap-2">
+                              <AgentLogo
+                                agent={executor}
+                                className="h-3.5 w-3.5 shrink-0"
+                              />
                               {executorLabels[executor] ??
                                 executor.replace(/_/g, " ")}
                             </span>
-                            {isActive ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : null}
+                            <span className="flex items-center gap-1.5">
+                              {isActive ? (
+                                <Check className="h-3.5 w-3.5" />
+                              ) : null}
+                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                            </span>
                           </DropdownMenuItem>
                         );
                       })}
                     </>
-                  ) : null}
-                  {modelOptions.length > 0 ? (
+                  ) : (
                     <>
+                      {/* Step 2 — pick a model for the chosen runtime. */}
+                      {!isExecutorLocked ? (
+                        <DropdownMenuItem
+                          onSelect={(event) => {
+                            event.preventDefault();
+                            handleModelStepBack();
+                          }}
+                          className="flex items-center gap-2 text-[11px] text-muted-foreground"
+                        >
+                          <ChevronLeft className="h-3.5 w-3.5" />
+                          <AgentLogo
+                            agent={sessionExecutorSelection?.executor ?? null}
+                            className="h-3.5 w-3.5 shrink-0"
+                          />
+                          <span>{runtimeLabel ?? "Runtime"}</span>
+                        </DropdownMenuItem>
+                      ) : null}
                       {!isExecutorLocked ? <DropdownMenuSeparator /> : null}
                       <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
                         Model
                       </DropdownMenuLabel>
-                      {modelOptions.map((model) => {
-                        const isActive = modelValue === model.value;
-                        return (
-                          <DropdownMenuItem
-                            key={model.value}
-                            onClick={() => handleModelSelect(model.value)}
-                            className="flex items-center justify-between gap-3 text-[11px]"
-                          >
-                            <span>{model.label}</span>
-                            {isActive ? (
-                              <Check className="h-3.5 w-3.5" />
-                            ) : null}
-                          </DropdownMenuItem>
-                        );
-                      })}
+                      {showModelSearch ? (
+                        <div className="px-2 pb-1">
+                          <div className="relative">
+                            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                            <input
+                              ref={modelSearchRef}
+                              type="text"
+                              placeholder={t("modelSelectorSearchPlaceholder")}
+                              value={modelQuery}
+                              onChange={(event) =>
+                                setModelQuery(event.target.value)
+                              }
+                              // Radix menus run a typeahead on keystrokes; stop
+                              // propagation so the search box keeps the keys.
+                              onKeyDown={(event) => {
+                                if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setRuntimeMenuOpen(false);
+                                  return;
+                                }
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  const first = filteredModelOptions[0];
+                                  if (first) {
+                                    handleModelSelect(first.value);
+                                    setRuntimeMenuOpen(false);
+                                  }
+                                  return;
+                                }
+                                event.stopPropagation();
+                              }}
+                              className="w-full rounded-sm border border-border bg-background py-1.5 pl-7 pr-2 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                      {modelOptions.length === 0 ? (
+                        <DropdownMenuItem
+                          disabled
+                          className="text-[11px] text-muted-foreground"
+                        >
+                          {runtimeValue === "PI" && piModels === null
+                            ? t("loadingMessage")
+                            : RUNTIME_DEFAULT_LABEL}
+                        </DropdownMenuItem>
+                      ) : filteredModelOptions.length === 0 ? (
+                        <div className="px-2 py-2 text-center text-[11px] text-muted-foreground">
+                          {t("modelSelectorEmpty")}
+                        </div>
+                      ) : (
+                        <div className="max-h-[40vh] overflow-y-auto">
+                          {filteredModelOptions.map((model) => {
+                            const isActive = modelValue === model.value;
+                            return (
+                              <DropdownMenuItem
+                                key={model.value}
+                                onClick={() => handleModelSelect(model.value)}
+                                className="flex items-center justify-between gap-3 text-[11px]"
+                              >
+                                <span>{model.label}</span>
+                                {isActive ? (
+                                  <Check className="h-3.5 w-3.5" />
+                                ) : null}
+                              </DropdownMenuItem>
+                            );
+                          })}
+                        </div>
+                      )}
                     </>
-                  ) : null}
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
 
@@ -1754,13 +1982,28 @@ export function SingleAgentSessionView({
             </div>
           </div>
         </div>
+
+        {/* Tray tucked behind the card bottom: From-branch + Worktree/Local
+            pickers for a not-yet-started session. */}
+        {showNewSessionExecutionControls && (
+          <NewSessionExecutionControls
+            className="relative z-0 mx-0.5 -mt-4 h-[58px] rounded-b-2xl bg-muted/60 px-2 pt-4"
+            useWorktree={useWorktree}
+            onUseWorktreeChange={setUseWorktree}
+            baseBranch={baseBranch}
+            baseBranchSearch={baseBranchSearch}
+            onBaseBranchSearchChange={setBaseBranchSearch}
+            filteredBaseBranches={filteredBaseBranches}
+            onBaseBranchSelect={setBaseBranch}
+          />
+        )}
       </div>
     </div>
   );
 
   const renderGlobalPrompt = () => (
     <div className="bg-background/80 backdrop-blur">
-      {(hasConflicts || isRebaseInProgress) && (
+      {!isScratch && (hasConflicts || isRebaseInProgress) && (
         <div className="mx-auto max-w-2xl px-4 pt-4">
           <ConflictBanner
             attemptBranch={activeTaskBranch}
@@ -1844,53 +2087,62 @@ export function SingleAgentSessionView({
             <SessionHeader
               taskTitle={activeTaskTitle}
               environmentControl={
-                <EnvironmentPopover
-                  taskId={sidebarActiveTaskId}
-                  taskBranch={activeTaskBranch}
-                  isGitRepository={isGitRepository}
-                  isExecutorLocked={isExecutorLocked}
-                  additions={diffAdditions}
-                  deletions={diffDeletions}
-                  hasDiffs={hasDiffs}
-                  onOpenDiffViewer={() => {
-                    if (!taskRunId) return;
-                    openLayoutTab(
-                      { type: "diff", runId: taskRunId },
-                      { returnFocusOnClose: true },
-                    );
-                  }}
-                  onOpenGallery={() => {
-                    if (!taskRunId) return;
-                    openLayoutTab(
-                      { type: "gallery", taskRunId },
-                      { returnFocusOnClose: true },
-                    );
-                  }}
-                  useWorktree={useWorktree}
-                  onUseWorktreeChange={setUseWorktree}
-                  baseBranch={baseBranch}
-                  baseBranchSearch={baseBranchSearch}
-                  onBaseBranchSearchChange={setBaseBranchSearch}
-                  filteredBaseBranches={filteredBaseBranches}
-                  onBaseBranchSelect={setBaseBranch}
-                  canRebase={canRebase}
-                  isRebasing={isRebasing}
-                  commitsBehind={commitsBehind}
-                  branches={branches}
-                  isLoadingBranches={isLoadingBranches}
-                  initialTargetBranch={currentTaskRunTargetBranch ?? undefined}
-                  initialUpstreamBranch={
-                    currentTaskRunTargetBranch ?? undefined
-                  }
-                  onRebaseConfirm={handleRebaseConfirm}
-                  canMergeDiffs={canMergeDiffs}
-                  isMergingDiffs={isMergingDiffs}
-                  onMergeDiffs={handleMergeDiffs}
-                  isInitializingGit={isInitializingGit}
-                  canInitGit={Boolean(routeProjectId)}
-                  onInitGitRepo={handleInitGitRepo}
-                  onOpenChange={setEnvironmentPopoverOpen}
-                />
+                isScratch ? undefined : (
+                  <EnvironmentPopover
+                    taskId={sidebarActiveTaskId}
+                    taskBranch={activeTaskBranch}
+                    runTargetBranch={
+                      branchStatus?.target_branch ??
+                      currentTaskRunTargetBranch ??
+                      null
+                    }
+                    isGitRepository={isGitRepository}
+                    isExecutorLocked={isExecutorLocked}
+                    additions={diffAdditions}
+                    deletions={diffDeletions}
+                    hasDiffs={hasDiffs}
+                    onOpenDiffViewer={() => {
+                      if (!taskRunId) return;
+                      openLayoutTab(
+                        { type: "diff", runId: taskRunId },
+                        { returnFocusOnClose: true },
+                      );
+                    }}
+                    onOpenGallery={() => {
+                      if (!taskRunId) return;
+                      openLayoutTab(
+                        { type: "gallery", taskRunId },
+                        { returnFocusOnClose: true },
+                      );
+                    }}
+                    useWorktree={useWorktree}
+                    onUseWorktreeChange={setUseWorktree}
+                    baseBranch={baseBranch}
+                    baseBranchSearch={baseBranchSearch}
+                    onBaseBranchSearchChange={setBaseBranchSearch}
+                    filteredBaseBranches={filteredBaseBranches}
+                    onBaseBranchSelect={setBaseBranch}
+                    canRebase={canRebase}
+                    isRebasing={isRebasing}
+                    commitsBehind={commitsBehind}
+                    branches={branches}
+                    isLoadingBranches={isLoadingBranches}
+                    initialTargetBranch={
+                      currentTaskRunTargetBranch ?? undefined
+                    }
+                    initialUpstreamBranch={
+                      currentTaskRunTargetBranch ?? undefined
+                    }
+                    onRebaseConfirm={handleRebaseConfirm}
+                    canMergeDiffs={canMergeDiffs}
+                    isMergingDiffs={isMergingDiffs}
+                    onMergeDiffs={handleMergeDiffs}
+                    isInitializingGit={isInitializingGit}
+                    canInitGit={Boolean(routeProjectId)}
+                    onInitGitRepo={handleInitGitRepo}
+                    onOpenChange={setEnvironmentPopoverOpen}
+                  />
+                )
               }
               onTitleChange={activeStreamTaskId ? handleTitleChange : undefined}
               isSidebarCollapsed={sessionSidebarCollapsed}
@@ -1913,6 +2165,26 @@ export function SingleAgentSessionView({
                 </div>
               </div>
             </main>
+            {isScratch && !activeTaskId && !pendingSubmission ? (
+              <div className="flex shrink-0 justify-center pt-1">
+                <ProjectSwitcherDropdown
+                  open={chooseProjectOpen}
+                  onOpenChange={setChooseProjectOpen}
+                  align="center"
+                  side="top"
+                  trigger={
+                    <button
+                      type="button"
+                      onClick={() => setChooseProjectOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                    >
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      {t("chooseProject")}
+                    </button>
+                  }
+                />
+              </div>
+            ) : null}
             {renderGlobalPrompt()}
           </div>
         </div>

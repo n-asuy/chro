@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use config::{
@@ -10,11 +10,12 @@ use config::{
     TerminalConfig, DEFAULT_MERGE_COMMIT_TEMPLATE,
 };
 use executors::{
-    anthropic_model_presets, check_mcp_status, detect_claude_version, get_auth_status_all,
-    get_install_status_all, install_tool, load_mcp_config, save_mcp_config, AuthStatusResult,
-    BaseCodingAgent, ClaudeVersionResult, ExecutorConfigs, ExecutorInstallStatusResult,
+    check_mcp_status, delete_pi_credential, detect_claude_version,
+    get_auth_status_all, get_install_status_all, install_tool, list_pi_credentials, list_pi_models,
+    load_mcp_config, save_mcp_config, set_pi_api_key, AuthStatusResult, BaseCodingAgent,
+    ClaudeExecutionMode, ClaudeVersionResult, ExecutorConfigs, ExecutorInstallStatusResult,
     ExecutorProfileId, InstallableTool, LoadedMcpConfig, McpConfigPayload, McpStatusResult,
-    ModelPreset, SavedMcpConfig, ToolInstallResult,
+    PiCredentialInfo, PiModelOption, SavedMcpConfig, ToolInstallResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,6 +56,12 @@ pub(super) fn router() -> Router<AppState> {
         .route("/executor/install", post(install_executor_handler))
         .route("/executor/mcp-status", get(check_mcp_status_handler))
         .route("/executor/auth-status", get(get_auth_status_handler))
+        .route("/executor/pi/models", get(get_pi_models_handler))
+        .route("/executor/pi/credentials", get(get_pi_credentials_handler))
+        .route(
+            "/executor/pi/api-key",
+            put(set_pi_api_key_handler).delete(delete_pi_credential_handler),
+        )
         .route(
             "/executor/profile",
             get(get_executor_profile).put(update_executor_profile),
@@ -205,6 +212,26 @@ struct AppearanceConfigEnvelope {
 struct UpdateAppearanceConfigRequest {
     #[serde(default)]
     theme: Option<AppTheme>,
+    /// Accent seed hex. Absent leaves it unchanged; explicit `null` clears it
+    /// (reset to the built-in brand). Malformed values are ignored (cleared) so a
+    /// bad pick degrades to brand instead of corrupting config.
+    #[serde(default, deserialize_with = "double_option")]
+    accent: Option<Option<String>>,
+}
+
+/// Validate and normalize an accent seed to lowercase `#rrggbb`. Accepts 3- or
+/// 6-digit hex with a leading `#`; returns `None` for anything malformed.
+fn normalize_accent_hex(raw: &str) -> Option<String> {
+    let hex = raw.trim().strip_prefix('#')?;
+    let expanded = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).collect::<String>(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    expanded
+        .chars()
+        .all(|c| c.is_ascii_hexdigit())
+        .then(|| format!("#{}", expanded.to_lowercase()))
 }
 
 async fn get_appearance_config(
@@ -225,6 +252,9 @@ async fn update_appearance_config(
         .update_config(|config| {
             if let Some(v) = payload.theme {
                 config.appearance.theme = v;
+            }
+            if let Some(accent) = payload.accent {
+                config.appearance.accent = accent.and_then(|hex| normalize_accent_hex(&hex));
             }
         })
         .await?;
@@ -265,15 +295,14 @@ async fn update_terminal_config(
         .runtime()
         .update_config(|config| {
             if let Some(v) = payload.font_family {
-                config.terminal.font_family =
-                    v.and_then(|name| {
-                        let trimmed = name.trim().to_string();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed)
-                        }
-                    });
+                config.terminal.font_family = v.and_then(|name| {
+                    let trimmed = name.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                });
             }
             if let Some(v) = payload.font_size {
                 config.terminal.font_size = v.clamp(8, 32);
@@ -386,12 +415,21 @@ async fn update_merge_settings(
 struct ExecutorProfileEnvelope {
     profile: ExecutorProfileId,
     profiles: ExecutorConfigs,
-    options: ExecutorProfileOptions,
+    /// Global Claude execution mode (PTY vs headless `claude -p`). App-wide,
+    /// not part of the per-run profile.
+    claude_execution_mode: ClaudeExecutionMode,
 }
 
-#[derive(Debug, Serialize)]
-struct ExecutorProfileOptions {
-    anthropic_models: &'static [ModelPreset],
+/// Deserialize an optional field that distinguishes "key absent" (leave the
+/// value unchanged) from "key present and null" (clear it). Without this,
+/// serde maps both to `None` and an execution-mode-only update would silently
+/// reset the executor variant.
+fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::deserialize(de)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,9 +437,13 @@ struct UpdateExecutorProfileRequest {
     /// The executor to use (e.g., "CLAUDE_CODE", "CODEX")
     #[serde(default)]
     executor: Option<BaseCodingAgent>,
-    /// The variant to use (e.g., "DEFAULT", "PLAN", "APPROVALS")
+    /// The variant to use (e.g., "DEFAULT", "PLAN", "APPROVALS"). Absent leaves
+    /// the variant untouched; explicit `null` resets it to the default variant.
+    #[serde(default, deserialize_with = "double_option")]
+    variant: Option<Option<String>>,
+    /// Global Claude execution mode. Absent leaves it unchanged.
     #[serde(default)]
-    variant: Option<String>,
+    claude_execution_mode: Option<ClaudeExecutionMode>,
 }
 
 async fn get_executor_profile(
@@ -411,9 +453,7 @@ async fn get_executor_profile(
     Ok(Json(ExecutorProfileEnvelope {
         profile: config.executor_profile,
         profiles: ExecutorConfigs::get_cached(),
-        options: ExecutorProfileOptions {
-            anthropic_models: anthropic_model_presets(),
-        },
+        claude_execution_mode: config.claude_code_execution_mode,
     }))
 }
 
@@ -421,7 +461,11 @@ async fn update_executor_profile(
     State(state): State<AppState>,
     Json(payload): Json<UpdateExecutorProfileRequest>,
 ) -> Result<Json<ExecutorProfileEnvelope>, ApiError> {
-    let UpdateExecutorProfileRequest { executor, variant } = payload;
+    let UpdateExecutorProfileRequest {
+        executor,
+        variant,
+        claude_execution_mode,
+    } = payload;
 
     let updated = state
         .runtime()
@@ -429,16 +473,19 @@ async fn update_executor_profile(
             if let Some(new_executor) = executor {
                 config.executor_profile.executor = new_executor;
             }
-            config.executor_profile.variant = variant;
+            if let Some(new_variant) = variant {
+                config.executor_profile.variant = new_variant;
+            }
+            if let Some(mode) = claude_execution_mode {
+                config.claude_code_execution_mode = mode;
+            }
         })
         .await?;
 
     Ok(Json(ExecutorProfileEnvelope {
         profile: updated.executor_profile,
         profiles: ExecutorConfigs::get_cached(),
-        options: ExecutorProfileOptions {
-            anthropic_models: anthropic_model_presets(),
-        },
+        claude_execution_mode: updated.claude_code_execution_mode,
     }))
 }
 
@@ -538,8 +585,70 @@ async fn get_auth_status_handler() -> Json<AuthStatusResult> {
         .unwrap_or_else(|_| AuthStatusResult {
             claude_code: executors::AvailabilityInfo::NotFound,
             codex: executors::AvailabilityInfo::NotFound,
+            pi: executors::AvailabilityInfo::NotFound,
         });
     Json(result)
+}
+
+/// Configured pi models for the runtime picker. Empty when pi is unconfigured or
+/// unreachable, in which case the picker falls back to "Default".
+async fn get_pi_models_handler() -> Json<Vec<PiModelOption>> {
+    Json(list_pi_models().await.unwrap_or_default())
+}
+
+/// Providers configured in pi's auth file (no secrets returned).
+async fn get_pi_credentials_handler() -> Json<Vec<PiCredentialInfo>> {
+    Json(list_pi_credentials())
+}
+
+#[derive(Debug, Serialize)]
+struct PiCredentialMutationResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPiApiKeyRequest {
+    provider: String,
+    key: String,
+}
+
+/// Store an API key for a pi provider in `~/.pi/agent/auth.json`.
+async fn set_pi_api_key_handler(
+    Json(payload): Json<SetPiApiKeyRequest>,
+) -> Json<PiCredentialMutationResult> {
+    match set_pi_api_key(&payload.provider, &payload.key) {
+        Ok(()) => Json(PiCredentialMutationResult {
+            ok: true,
+            message: None,
+        }),
+        Err(err) => Json(PiCredentialMutationResult {
+            ok: false,
+            message: Some(err.to_string()),
+        }),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PiProviderQuery {
+    provider: String,
+}
+
+/// Remove a pi provider credential.
+async fn delete_pi_credential_handler(
+    Query(query): Query<PiProviderQuery>,
+) -> Json<PiCredentialMutationResult> {
+    match delete_pi_credential(&query.provider) {
+        Ok(()) => Json(PiCredentialMutationResult {
+            ok: true,
+            message: None,
+        }),
+        Err(err) => Json(PiCredentialMutationResult {
+            ok: false,
+            message: Some(err.to_string()),
+        }),
+    }
 }
 
 async fn get_install_status_handler() -> Json<ExecutorInstallStatusResult> {
@@ -590,4 +699,34 @@ async fn update_ui_state(
     Ok(Json(UiStateEnvelope {
         ui_state: updated.ui_state,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_accent_hex;
+
+    #[test]
+    fn normalizes_valid_six_digit_hex() {
+        assert_eq!(
+            normalize_accent_hex("#7C3AED").as_deref(),
+            Some("#7c3aed")
+        );
+        assert_eq!(normalize_accent_hex("  #0c6cbe ").as_deref(), Some("#0c6cbe"));
+    }
+
+    #[test]
+    fn expands_three_digit_hex() {
+        assert_eq!(normalize_accent_hex("#0af").as_deref(), Some("#00aaff"));
+    }
+
+    #[test]
+    fn rejects_malformed_values() {
+        assert_eq!(normalize_accent_hex("not-a-color"), None);
+        assert_eq!(normalize_accent_hex(""), None);
+        assert_eq!(normalize_accent_hex("#"), None);
+        assert_eq!(normalize_accent_hex("#12"), None);
+        assert_eq!(normalize_accent_hex("#1234"), None);
+        assert_eq!(normalize_accent_hex("7c3aed"), None); // missing '#'
+        assert_eq!(normalize_accent_hex("#zzzzzz"), None);
+    }
 }

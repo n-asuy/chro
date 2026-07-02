@@ -163,6 +163,7 @@ impl LocalRuntime {
         match base.as_str() {
             "claude" | "claude_code" => Some(executors::BaseCodingAgent::ClaudeCode),
             "codex" => Some(executors::BaseCodingAgent::Codex),
+            "pi" => Some(executors::BaseCodingAgent::Pi),
             _ => None,
         }
     }

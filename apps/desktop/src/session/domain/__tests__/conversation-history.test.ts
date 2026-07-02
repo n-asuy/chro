@@ -8,6 +8,7 @@ import {
   createSyntheticUserMessageEntry,
   filterConversationLogEntries,
   flattenConversationEntries,
+  withAuthoritativeRunOrder,
 } from "../conversation-history";
 
 const makeSession = (
@@ -447,5 +448,72 @@ describe("createConversationFlattenCache", () => {
 
     expect(after).toEqual(before);
     expect(after).not.toBe(before);
+  });
+});
+
+describe("withAuthoritativeRunOrder", () => {
+  it("re-stamps known runs with the authoritative server created_at", () => {
+    const states = [
+      makeState("run-hi", "client-early", []),
+      makeState("run-aaa", "client-late", []),
+    ];
+    const authoritative = new Map([
+      ["run-hi", "2026-06-27T04:40:02.458483+00:00"],
+      ["run-aaa", "2026-06-27T04:40:34.360443+00:00"],
+    ]);
+
+    const result = withAuthoritativeRunOrder(states, authoritative);
+
+    expect(result.map((s) => s.createdAt)).toEqual([
+      "2026-06-27T04:40:02.458483+00:00",
+      "2026-06-27T04:40:34.360443+00:00",
+    ]);
+    // Preserves other fields (e.g. the streaming `finished` flag).
+    expect(result[0].taskRunId).toBe("run-hi");
+  });
+
+  it("leaves a brand-new optimistic run (absent from the stream) untouched", () => {
+    const states = [makeState("optimistic-run-1", "2026-06-27T05:00:00.000Z", [])];
+    const result = withAuthoritativeRunOrder(states, new Map());
+    expect(result[0]).toBe(states[0]); // same ref: no needless rebuild
+  });
+
+  it("orders a still-streaming run after completed runs once flattened", () => {
+    // Regression for the "3rd message jumps to the top" bug: the active run's
+    // self-assembled createdAt was earlier than the completed runs', so the
+    // createdAt sort placed it first. The server stamps every run on one clock,
+    // so re-stamping from it restores send order.
+    const sessions: TaskSessionRecord[] = [];
+    const states = [
+      // Completed runs whose state createdAt drifted later than send time
+      // (re-stamped from a now()/client clock during streaming bookkeeping).
+      makeState("run-hi", "2026-06-27T04:40:50.000Z", [
+        makeAssistantEntry("run-hi", "a", "Hi!"),
+      ]),
+      makeState("run-yo", "2026-06-27T04:40:55.000Z", [
+        makeAssistantEntry("run-yo", "a", "Yo!"),
+      ]),
+      // The active run carried a client createdAt earlier than the above, so the
+      // raw createdAt sort placed it first.
+      makeState("run-aaa", "2026-06-27T04:40:34.000Z", [
+        makeAssistantEntry("run-aaa", "a", "Aaa…"),
+      ]),
+    ];
+    const authoritative = new Map([
+      ["run-hi", "2026-06-27T04:40:02.458483+00:00"],
+      ["run-yo", "2026-06-27T04:40:12.834+00:00"],
+      ["run-aaa", "2026-06-27T04:40:34.360443+00:00"],
+    ]);
+
+    const wrong = flattenConversationEntries(states, sessions).map(
+      (e) => (e.type === "NORMALIZED_ENTRY" ? e.content.content : ""),
+    );
+    expect(wrong[0]).toBe("Aaa…"); // demonstrates the bug without the fix
+
+    const fixed = flattenConversationEntries(
+      withAuthoritativeRunOrder(states, authoritative),
+      sessions,
+    ).map((e) => (e.type === "NORMALIZED_ENTRY" ? e.content.content : ""));
+    expect(fixed).toEqual(["Hi!", "Yo!", "Aaa…"]);
   });
 });

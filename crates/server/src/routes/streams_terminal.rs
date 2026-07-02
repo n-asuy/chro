@@ -315,6 +315,7 @@ fn parse_login_agent(raw: &str) -> Option<BaseCodingAgent> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "codex" => Some(BaseCodingAgent::Codex),
         "claude" | "claude_code" | "claude-code" => Some(BaseCodingAgent::ClaudeCode),
+        "pi" => Some(BaseCodingAgent::Pi),
         _ => None,
     }
 }

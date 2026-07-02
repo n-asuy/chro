@@ -1,7 +1,7 @@
 mod assets;
 mod legacy_migration;
 
-pub use assets::{asset_dir, config_path, profiles_path};
+pub use assets::{asset_dir, chats_dir, config_path, profiles_path};
 pub use legacy_migration::migrate_legacy_dirs;
 
 use std::{
@@ -10,13 +10,13 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use executors::ExecutorProfileId;
+use executors::{ClaudeExecutionMode, ExecutorProfileId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-const CURRENT_VERSION: u32 = 18;
+const CURRENT_VERSION: u32 = 19;
 
 pub const DEFAULT_MERGE_COMMIT_TEMPLATE: &str =
     "{{title}} (chro {{task_short_id}}){{description_block}}";
@@ -56,12 +56,18 @@ impl Default for AppTheme {
 pub struct AppearanceConfig {
     #[serde(default)]
     pub theme: AppTheme,
+    /// Optional user-chosen accent seed as a `#rrggbb` hex string. `None` follows
+    /// the built-in brand accent. The per-mode readability clamp happens at
+    /// derivation time in the renderer, not on this stored seed.
+    #[serde(default)]
+    pub accent: Option<String>,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
             theme: AppTheme::default(),
+            accent: None,
         }
     }
 }
@@ -204,6 +210,10 @@ pub struct Config {
     pub notifications: NotificationConfig,
     #[serde(default)]
     pub merge_commit_template: Option<String>,
+    /// How Claude Code runs: interactive PTY (default) or headless `claude -p`.
+    /// Applied globally to every Claude run at spawn time.
+    #[serde(default)]
+    pub claude_code_execution_mode: ClaudeExecutionMode,
     /// Opaque JSON blob for frontend UI state (panel widths, sidebar collapsed, etc.).
     #[serde(default)]
     pub ui_state: serde_json::Map<String, Value>,
@@ -231,6 +241,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             notifications: NotificationConfig::default(),
             merge_commit_template: None,
+            claude_code_execution_mode: ClaudeExecutionMode::default(),
             ui_state: serde_json::Map::new(),
         }
     }
@@ -580,6 +591,18 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
         json["version"] = Value::from(18);
     }
 
+    if json
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(18)
+        < 19
+    {
+        // claude_code_execution_mode defaults to "pty" via serde; no data
+        // migration needed — existing installs keep the PTY behavior.
+        json["version"] = Value::from(19);
+    }
+
     if json.get("language").is_none() {
         json["language"] = serde_json::json!(LanguagePreference::default());
     }
@@ -720,5 +743,100 @@ mod tests {
         let final_content = fs::read_to_string(&path).unwrap();
         let final_json: Value = serde_json::from_str(&final_content).unwrap();
         assert!(final_json.get("workspace_dir").is_none());
+    }
+
+    #[test]
+    fn execution_mode_defaults_to_pty_and_roundtrips() {
+        use executors::ClaudeExecutionMode;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        let service = ConfigService::new(&path);
+
+        assert_eq!(
+            Config::default().claude_code_execution_mode,
+            ClaudeExecutionMode::Pty
+        );
+
+        let mut config = Config::default();
+        config.claude_code_execution_mode = ClaudeExecutionMode::Print;
+        service.save(config).unwrap();
+        let loaded = service.load().unwrap();
+        assert_eq!(
+            loaded.claude_code_execution_mode,
+            ClaudeExecutionMode::Print
+        );
+    }
+
+    #[test]
+    fn appearance_accent_defaults_to_none_and_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        let service = ConfigService::new(&path);
+
+        // Default: no accent seed.
+        assert_eq!(Config::default().appearance.accent, None);
+
+        let mut config = Config::default();
+        config.appearance.accent = Some("#7c3aed".to_string());
+        service.save(config).unwrap();
+        let loaded = service.load().unwrap();
+        assert_eq!(loaded.appearance.accent.as_deref(), Some("#7c3aed"));
+    }
+
+    #[test]
+    fn legacy_config_without_accent_loads_without_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": CURRENT_VERSION,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "executor_profile": { "executor": "CLAUDE_CODE" },
+                "analytics_enabled": false,
+                "telemetry_id": "test-telemetry-id",
+                "language": "en",
+                "show_hidden_entries": false,
+                "appearance": { "theme": "dark" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let service = ConfigService::new(&path);
+        let config = service.load().unwrap();
+        assert_eq!(config.appearance.theme, AppTheme::Dark);
+        assert_eq!(config.appearance.accent, None);
+    }
+
+    #[test]
+    fn migration_from_v18_defaults_execution_mode_to_pty() {
+        use executors::ClaudeExecutionMode;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 18,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "executor_profile": { "executor": "CLAUDE_CODE" },
+                "analytics_enabled": false,
+                "telemetry_id": "test-telemetry-id",
+                "language": "en",
+                "show_hidden_entries": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let service = ConfigService::new(&path);
+        let config = service.load().unwrap();
+        assert_eq!(config.version, CURRENT_VERSION);
+        assert_eq!(
+            config.claude_code_execution_mode,
+            ClaudeExecutionMode::Pty
+        );
     }
 }

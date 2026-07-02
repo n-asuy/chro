@@ -397,7 +397,7 @@ const ExpandChevron = ({ expanded, onClick, variant }: ExpandChevronProps) => (
   <ChevronDown
     onClick={onClick}
     className={cn(
-      "h-4 w-4 shrink-0 cursor-pointer",
+      "h-4 w-4 shrink-0 cursor-pointer transition-transform duration-150 ease-out",
       expanded ? "" : "-rotate-90",
       variant === "system"
         ? "text-muted-foreground"
@@ -473,6 +473,33 @@ const MalformedToolCallEntry = ({ content }: { content: string }) => {
         >
           <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
           {t("retryMalformedToolCall")}
+        </button>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Error entry for a turn that ended on a server-side API error (rate limit,
+ * usage limit, ...). Shows the CLI's own message and offers a one-click retry
+ * that re-prompts the agent to continue. The retry action comes from context,
+ * so it is hidden on surfaces that cannot send follow-ups (e.g. read-only
+ * replay).
+ */
+const ApiErrorEntry = ({ content }: { content: string }) => {
+  const { t } = useLanguage();
+  const { onRetryApiError } = useConversationActions();
+  return (
+    <div className="flex flex-col gap-2">
+      <CollapsibleEntry content={content} markdown variant="error" />
+      {onRetryApiError && (
+        <button
+          type="button"
+          onClick={onRetryApiError}
+          className="inline-flex items-center gap-1.5 self-start rounded border border-destructive/40 px-2 py-1 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10"
+        >
+          <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+          {t("retryApiError")}
         </button>
       )}
     </div>
@@ -634,7 +661,10 @@ const PlanPresentationCard = ({
         >
           <span className="flex-1">{t("planLabel")}</span>
           <ChevronDown
-            className={cn("h-4 w-4", expanded ? "" : "-rotate-90")}
+            className={cn(
+              "h-4 w-4 transition-transform duration-150 ease-out",
+              expanded ? "" : "-rotate-90",
+            )}
           />
         </button>
         {expanded && (
@@ -1421,6 +1451,9 @@ const renderEntryBody = (
     case "error_message":
       if (entry.entry_type.error_type?.type === "malformed_tool_call") {
         return <MalformedToolCallEntry content={entry.content} />;
+      }
+      if (entry.entry_type.error_type?.type === "api_error") {
+        return <ApiErrorEntry content={entry.content} />;
       }
       return (
         <CollapsibleEntry content={entry.content} markdown variant="error" />

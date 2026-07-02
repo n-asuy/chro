@@ -32,11 +32,13 @@ type ExecutorInstallDialogProps = {
 const FALLBACK_COMMANDS: Record<BaseCodingAgent, string> = {
   CLAUDE_CODE: "claude",
   CODEX: "codex",
+  PI: "pi",
 };
 
 const EXECUTOR_LABELS: Record<BaseCodingAgent, string> = {
   CLAUDE_CODE: "Claude Code",
   CODEX: "Codex",
+  PI: "pi",
 };
 
 export function ExecutorInstallDialog({

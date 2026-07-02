@@ -166,3 +166,21 @@ export interface CbaseViewResult {
   /** Total count before limit */
   totalCount: number;
 }
+
+/**
+ * Materialized view payload produced by the backend: the parsed definition, the
+ * effective (inferred) property schema, and the executed result of every view.
+ * Mirrors the `cbase` crate's `CbaseDocument`.
+ */
+export interface CbaseDocument {
+  /** The parsed definition (absent when parsing failed) */
+  definition?: CbaseDefinition;
+  /** Effective property schema (explicit + inferred), keyed by property ID */
+  properties: Record<string, CbaseProperty>;
+  /** Executed result for each view in definition order */
+  views: CbaseViewResult[];
+  /** Whether the source was written in the query language (read-only in the UI) */
+  isQueryLanguage: boolean;
+  /** Parse error message, set when the .cbase file is invalid */
+  parseError?: string;
+}

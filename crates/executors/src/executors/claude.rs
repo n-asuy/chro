@@ -1,19 +1,27 @@
 //! Claude Code agent implementation.
 //!
-//! Claude runs as a regular interactive TUI inside a PTY (the headless
-//! `--print` stream-json mode is deprecated upstream). The run is observed
-//! out-of-band instead of through stdio:
+//! Two execution modes are supported, selected by [`ClaudeExecutionMode`]:
 //!
-//! - Claude Code hooks (registered via a per-run `--settings` file) POST to a
-//!   per-run HTTP endpoint: `UserPromptSubmit` discovers the session
-//!   transcript, `Stop` signals turn completion, `PreToolUse` carries the
-//!   permission/question flow.
-//! - The session transcript JSONL is tailed and mapped back to stream-json,
-//!   so the existing log normalization, persistence and replay pipelines are
-//!   unchanged.
-//! - The PTY's own byte stream (TUI rendering) is drained and discarded; the
-//!   container reads a synthetic stdout pipe carrying the mapped lines plus a
-//!   synthesized final `result` line.
+//! - **PTY (default).** Claude runs as a regular interactive TUI inside a PTY.
+//!   The run is observed out-of-band instead of through stdio:
+//!   - Claude Code hooks (registered via a per-run `--settings` file) POST to a
+//!     per-run HTTP endpoint: `UserPromptSubmit` discovers the session
+//!     transcript, `Stop` signals turn completion, `PreToolUse` carries the
+//!     permission/question flow.
+//!   - The session transcript JSONL is tailed and mapped back to stream-json.
+//!   - The PTY's own byte stream (TUI rendering) is drained and discarded; the
+//!     container reads a synthetic stdout pipe carrying the mapped lines plus a
+//!     synthesized final `result` line.
+//! - **Print (headless).** Claude runs once via `--print --output-format
+//!   stream-json`, writing stream-json straight to stdout, which the container
+//!   consumes directly. There is no PTY, no hooks, no transcript tail, and no
+//!   approval or interactive-question flow: a simpler, more stable path suited
+//!   to batch / parallel runs. Permissions are always skipped so the run never
+//!   blocks on a prompt that nothing can answer.
+//!
+//! Both modes emit the same stream-json and feed the same
+//! [`ClaudeLogProcessor`], so log normalization, persistence and replay are
+//! identical regardless of how Claude was run.
 
 mod hook_server;
 mod hooks;
@@ -32,6 +40,7 @@ pub use types::{
 use std::{io::Read, path::Path, sync::Arc};
 
 use async_trait::async_trait;
+use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use events::MsgStore;
 use log_types::LogEntry;
@@ -66,6 +75,47 @@ use crate::{
 /// wrapped into the scrollback needlessly.
 const PTY_SIZE: (u16, u16) = (200, 50);
 
+/// How the Claude CLI is executed.
+///
+/// `Pty` hosts the interactive TUI and observes it out-of-band (hooks +
+/// transcript tail); `Print` runs `claude --print` headless and reads
+/// stream-json straight from stdout. The two produce identical log streams and
+/// differ only in reliability and feature surface (Print has no approvals and
+/// no interactive questions). See the module docs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeExecutionMode {
+    Pty,
+    Print,
+}
+
+impl Default for ClaudeExecutionMode {
+    fn default() -> Self {
+        Self::Pty
+    }
+}
+
+impl ClaudeExecutionMode {
+    /// Stable string used to persist the mode (matches the serde `snake_case`
+    /// wire form). Kept in sync with [`Self::from_db_str`].
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Pty => "pty",
+            Self::Print => "print",
+        }
+    }
+
+    /// Parse a persisted mode string. Returns `None` for unknown values so the
+    /// caller can fall back deliberately rather than guess.
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "pty" => Some(Self::Pty),
+            "print" => Some(Self::Print),
+            _ => None,
+        }
+    }
+}
+
 /// Claude Code agent configuration.
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -90,6 +140,10 @@ pub struct ClaudeCode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerously_skip_permissions: Option<bool>,
 
+    /// How the CLI is run: interactive PTY (default) or headless `--print`.
+    #[serde(default)]
+    pub execution_mode: ClaudeExecutionMode,
+
     /// Command overrides.
     #[serde(flatten)]
     #[ts(skip)]
@@ -112,6 +166,7 @@ impl Default for ClaudeCode {
             approvals: None,
             model: None,
             dangerously_skip_permissions: Some(true),
+            execution_mode: ClaudeExecutionMode::default(),
             cmd: CmdOverrides::default(),
             approvals_service: None,
         }
@@ -131,6 +186,17 @@ impl ClaudeCode {
     pub fn with_approvals(mut self, enabled: bool) -> Self {
         self.approvals = Some(enabled);
         self
+    }
+
+    pub fn with_execution_mode(mut self, mode: ClaudeExecutionMode) -> Self {
+        self.execution_mode = mode;
+        self
+    }
+
+    /// Override the execution mode on a resolved agent. Used to apply the
+    /// global setting at spawn time without baking it into every profile.
+    pub fn set_execution_mode(&mut self, mode: ClaudeExecutionMode) {
+        self.execution_mode = mode;
     }
 
     /// Get the permission mode based on configuration.
@@ -167,6 +233,26 @@ impl ClaudeCode {
     }
 
     async fn spawn_internal(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        env: &ExecutionEnv,
+        follow_up_args: Option<&[String]>,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        match self.execution_mode {
+            ClaudeExecutionMode::Pty => {
+                self.spawn_pty(current_dir, prompt, env, follow_up_args)
+                    .await
+            }
+            ClaudeExecutionMode::Print => {
+                self.spawn_print(current_dir, prompt, env, follow_up_args)
+                    .await
+            }
+        }
+    }
+
+    /// Host the interactive TUI in a PTY and observe it via hooks + transcript.
+    async fn spawn_pty(
         &self,
         current_dir: &Path,
         prompt: &str,
@@ -252,6 +338,86 @@ impl ClaudeCode {
             child: ExecutionProcess::Pty(pty),
             exit_signal: None,
             cancel: Some(cancel),
+        })
+    }
+
+    /// Build the `claude --print` command for headless execution.
+    ///
+    /// Permissions are always skipped: print mode has no interactive approval
+    /// path, so anything short of skipping would block the run on a prompt that
+    /// nothing can answer.
+    fn build_print_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        let mut builder = CommandBuilder::for_manifest(&cli_manifest::CLAUDE).extend_params([
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]);
+
+        if let Some(model) = &self.model {
+            builder = builder.extend_params(["--model", model]);
+        }
+
+        apply_overrides(builder, &self.cmd)
+    }
+
+    /// Run `claude --print` once, headless, and hand its real stdout (already
+    /// stream-json) straight to the container. No PTY, hooks or transcript tail.
+    async fn spawn_print(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        env: &ExecutionEnv,
+        follow_up_args: Option<&[String]>,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let builder = self.build_print_command_builder()?;
+        let command_parts = if let Some(args) = follow_up_args {
+            builder.build_follow_up(args)?
+        } else {
+            builder.build_initial()?
+        };
+
+        let (program_path, mut args) = command_parts.into_resolved().await?;
+        // The prompt is the trailing positional argument to `--print`.
+        args.push(self.append_prompt.combine_prompt(prompt));
+
+        tracing::info!(
+            program = %program_path.display(),
+            args = ?args,
+            current_dir = %current_dir.display(),
+            is_follow_up = follow_up_args.is_some(),
+            "[ClaudeCode::spawn_print] spawning headless claude --print"
+        );
+
+        let mut process = tokio::process::Command::new(&program_path);
+        process
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .current_dir(current_dir)
+            .args(&args)
+            .env_clear();
+        for (key, value) in pty_environment() {
+            process.env(key, value);
+        }
+        // Bound MCP tool-call execution time; see the PTY path for rationale.
+        process.env("MCP_TOOL_TIMEOUT", "60000");
+        process.env("NO_COLOR", "1");
+        for (key, value) in &env.vars {
+            process.env(key, value);
+        }
+        if let Some(path) = build_claude_path_env() {
+            process.env("PATH", path);
+        }
+
+        let child = process.group_spawn()?;
+
+        Ok(SpawnedChild {
+            child: child.into(),
+            exit_signal: None,
+            cancel: None,
         })
     }
 }
@@ -480,7 +646,10 @@ mod tests {
         let env: std::collections::HashMap<String, String> = pty_environment().collect();
         assert!(!env.contains_key("CLAUDECODE"));
         assert!(!env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
-        assert_eq!(env.get("CHRO_PTY_ENV_PROBE").map(String::as_str), Some("keep"));
+        assert_eq!(
+            env.get("CHRO_PTY_ENV_PROBE").map(String::as_str),
+            Some("keep")
+        );
         unsafe {
             std::env::remove_var("CHRO_PTY_ENV_PROBE");
         }
@@ -507,5 +676,67 @@ mod tests {
         assert!(params.contains(&"--permission-mode".to_string()));
         assert!(params.contains(&"plan".to_string()));
         assert!(!params.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn default_execution_mode_is_pty() {
+        assert_eq!(
+            ClaudeCode::default().execution_mode,
+            ClaudeExecutionMode::Pty
+        );
+    }
+
+    #[test]
+    fn print_command_builder_uses_headless_stream_json_flags() {
+        let claude = ClaudeCode::default().with_execution_mode(ClaudeExecutionMode::Print);
+        let params = claude
+            .build_print_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(params.contains(&"--print".to_string()));
+        assert!(params.contains(&"--output-format".to_string()));
+        assert!(params.contains(&"stream-json".to_string()));
+        assert!(params.contains(&"--verbose".to_string()));
+        // Headless always skips permissions: there is no approval path.
+        assert!(params.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn print_command_includes_model_override() {
+        let mut claude = ClaudeCode::default().with_execution_mode(ClaudeExecutionMode::Print);
+        claude.model = Some("claude-sonnet-4-20250514".to_string());
+        let params = claude
+            .build_print_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(
+            params
+                .windows(2)
+                .any(|w| w == ["--model", "claude-sonnet-4-20250514"]),
+            "model override must be passed: {params:?}"
+        );
+    }
+
+    #[test]
+    fn execution_mode_serde_roundtrip() {
+        // Old profiles without the field default to PTY.
+        let without: ClaudeCode = serde_json::from_str("{}").unwrap();
+        assert_eq!(without.execution_mode, ClaudeExecutionMode::Pty);
+
+        let with: ClaudeCode = serde_json::from_str(r#"{"execution_mode":"print"}"#).unwrap();
+        assert_eq!(with.execution_mode, ClaudeExecutionMode::Print);
+    }
+
+    #[test]
+    fn execution_mode_db_str_roundtrip() {
+        for mode in [ClaudeExecutionMode::Pty, ClaudeExecutionMode::Print] {
+            assert_eq!(ClaudeExecutionMode::from_db_str(mode.as_db_str()), Some(mode));
+        }
+        // The persisted form matches the serde wire form, so old rows stay valid.
+        assert_eq!(ClaudeExecutionMode::Pty.as_db_str(), "pty");
+        assert_eq!(ClaudeExecutionMode::Print.as_db_str(), "print");
+        assert_eq!(ClaudeExecutionMode::from_db_str("garbage"), None);
     }
 }

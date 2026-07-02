@@ -13,6 +13,11 @@
           "sandbox": "danger-full-access"
         }
       }
+    },
+    "PI": {
+      "DEFAULT": {
+        "PI": {}
+      }
     }
   }
 }

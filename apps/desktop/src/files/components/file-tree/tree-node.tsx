@@ -230,8 +230,8 @@ export const TreeNode = ({
   const nodeContent = (
     <div
       className={cn(
-        "font-workspace text-[12px] leading-[1.35] group flex min-h-[28px] cursor-pointer items-center rounded-md mx-1 pr-2 text-custom-sidebar-text-200 hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
-        isSelected && "bg-[rgba(41,154,214,0.12)] text-custom-sidebar-text-100",
+        "font-workspace text-[12px] leading-[1.35] group flex min-h-[28px] cursor-pointer items-center rounded-md mx-1 pr-2 text-custom-sidebar-text-200 transition-colors duration-150 ease-out hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
+        isSelected && "bg-primary/10 text-custom-sidebar-text-100",
         isDragOver &&
           "ring-2 ring-custom-primary-100 ring-inset bg-custom-primary-100/10",
         isDragging && "opacity-50",
@@ -252,7 +252,12 @@ export const TreeNode = ({
           !isDirectory && "opacity-0",
         )}
       >
-        <ChevronRight className={cn("size-4", isExpanded && "rotate-90")} />
+        <ChevronRight
+          className={cn(
+            "size-4 transition-transform duration-150 ease-out",
+            isExpanded && "rotate-90",
+          )}
+        />
       </span>
       {isEditing ? (
         <input

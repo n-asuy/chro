@@ -1,16 +1,15 @@
-
+import { fetchPreferences } from "@/lib/preferences-client";
 import {
+  type ReactNode,
   createContext,
   useCallback,
   useContext,
   useEffect,
   useMemo,
   useState,
-  type ReactNode,
 } from "react";
-import ja, { type TranslationDictionary } from "./locales/ja";
 import en from "./locales/en";
-import { fetchPreferences } from "@/lib/preferences-client";
+import ja, { type TranslationDictionary } from "./locales/ja";
 
 export type SupportedLanguage = "ja" | "en";
 
@@ -99,4 +98,13 @@ export function useLanguage() {
     throw new Error("useLanguage must be used within a LanguageProvider");
   }
   return context;
+}
+
+/**
+ * Like {@link useLanguage} but returns null instead of throwing when no
+ * provider is mounted. Used by the global error boundary, which can render
+ * above the LanguageProvider (e.g. when a provider itself throws).
+ */
+export function useOptionalLanguage(): LanguageContextValue | null {
+  return useContext(LanguageContext);
 }

@@ -1,5 +1,6 @@
 import { FolderPickerDialog } from "@/components/dialogs/folder-picker-dialog";
 import { useLanguage } from "@/i18n";
+import { cn } from "@/lib/cn";
 import { revealInFinder } from "@/lib/project-client";
 import { usePromptEditorHandle } from "@/session/hooks/use-prompt-editor";
 import {
@@ -38,15 +39,15 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
+import { useDecoratedTree } from "../../hooks/use-decorated-tree";
 import { useFileTreeDnd } from "../../hooks/use-file-tree-dnd";
 import { useFileTreeExternalDrop } from "../../hooks/use-file-tree-external-drop";
-import { useGitStatus } from "../../hooks/use-git-status";
-import {
-  EMPTY_DECORATIONS,
-  buildGitDecorations,
-} from "../../lib/git-status-decoration";
+import { EMPTY_DECORATIONS } from "../../lib/git-status-decoration";
 import { useFileTreeStore } from "../../state/file-tree-store";
-import { useFilesStore } from "../../state/files-store";
+import {
+  type WorktreeTreeView,
+  useFilesStore,
+} from "../../state/files-store";
 import type { FileNode } from "../../types/file-tree";
 import {
   FileNodeType,
@@ -105,26 +106,33 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     editingPath,
     addRoot,
     removeRoot,
+    worktreeTreeView,
+    setWorktreeTreeView,
   } = useFilesStore();
 
   // A session sandbox (task-run worktree) is read-only here: it lists and
   // opens files, but project-scoped mutations are hidden/disabled.
   const isWorktreeScope = scopeTaskRunId != null;
 
-  // Git status decorations: tint + badge changed files and roll the
-  // status up to ancestor folders. Only in local/project mode — in a worktree
-  // session the tree stays plain (no diff colors); that change review lives in
-  // the branch-scoped Source Control panel. The right dock shows one panel at a
+  // Worktree-only toggle between the changed-files view and the full worktree
+  // listing. The data swap lives in the dock panel, which reacts to
+  // `worktreeTreeView`; this just sets the mode.
+  const worktreeViewOptions: { value: WorktreeTreeView; label: string }[] = [
+    { value: "changed", label: t("worktreeChangedFiles") },
+    { value: "all", label: t("worktreeAllFiles") },
+  ];
+
+  // Git status decorations: tint + badge changed files and roll the status up to
+  // ancestor folders. Computed by the backend (`decorated-tree` endpoint) and
+  // rendered directly. Only in local/project mode — in a worktree session the
+  // tree stays plain (no diff colors); that change review lives in the
+  // branch-scoped Source Control panel. The right dock shows one panel at a
   // time, so this poller does not overlap with the source-control panel's.
-  const { status: gitStatus } = useGitStatus({
+  const { decorations: serverDecorations } = useDecoratedTree({
     projectId,
-    autoRefresh: !isWorktreeScope,
+    enabled: !isWorktreeScope,
   });
-  const decorations = useMemo(
-    () =>
-      isWorktreeScope ? EMPTY_DECORATIONS : buildGitDecorations(gitStatus),
-    [gitStatus, isWorktreeScope],
-  );
+  const decorations = isWorktreeScope ? EMPTY_DECORATIONS : serverDecorations;
 
   const deriveAdHocRootName = useCallback((absolutePath: string): string => {
     const trimmed = absolutePath.replace(/[\\/]+$/, "");
@@ -198,6 +206,45 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
 
   const { expandedPaths, toggleFolderWithHydration, collapseAll } =
     useFileTreeStore();
+
+  // When a folder expands, fade its freshly-revealed descendant rows in (see
+  // `.tree-row-reveal`). This is derived DURING render — not in an effect — so
+  // the new rows already carry the class on their first mount. Doing it in an
+  // effect applies the class a frame late, after the rows have already painted,
+  // so they just pop in (the bug this replaces). The window is cleared a beat
+  // later so scrolling never re-triggers the animation.
+  const [prevExpanded, setPrevExpanded] = useState(expandedPaths);
+  const [justExpanded, setJustExpanded] = useState<{
+    path: string;
+    token: number;
+  } | null>(null);
+  if (prevExpanded !== expandedPaths) {
+    if (expandedPaths.size > prevExpanded.size) {
+      let added: string | null = null;
+      for (const candidate of expandedPaths) {
+        if (!prevExpanded.has(candidate)) {
+          added = candidate;
+          break;
+        }
+      }
+      if (added) {
+        const path = added;
+        setJustExpanded((current) => ({
+          path,
+          token: (current?.token ?? 0) + 1,
+        }));
+      }
+    }
+    setPrevExpanded(expandedPaths);
+  }
+  useEffect(() => {
+    if (!justExpanded) return;
+    const { token } = justExpanded;
+    const timer = setTimeout(() => {
+      setJustExpanded((current) => (current?.token === token ? null : current));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [justExpanded]);
 
   // Compute visible rows from the current expansion state.
   // Each WorkspaceRoot contributes a synthetic header row labeled with its
@@ -711,6 +758,30 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
               </>
             )}
           </TooltipProvider>
+          {isWorktreeScope && (
+            <div
+              role="group"
+              aria-label={t("worktreeFileViewLabel")}
+              className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs"
+            >
+              {worktreeViewOptions.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={worktreeTreeView === value}
+                  onClick={() => setWorktreeTreeView(value)}
+                  className={cn(
+                    "rounded-[4px] px-2 py-0.5 transition",
+                    worktreeTreeView === value
+                      ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
+                      : "text-custom-text-300 hover:text-custom-text-100",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {onClose && (
           <TooltipProvider delayDuration={150}>
@@ -756,7 +827,9 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             onScroll={handleTreeScroll}
             role="tree"
           >
-            {isWorktreeScope && fileTree.length === 0 ? (
+            {isWorktreeScope &&
+            worktreeTreeView === "changed" &&
+            fileTree.length === 0 ? (
               <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-custom-sidebar-text-400">
                 {t("sessionNoChanges")}
               </div>
@@ -771,6 +844,10 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
 
                   const { node, isExpanded, indentPx, isWorkspaceRoot } = row;
                   const isSelected = selectedSet.has(node.path);
+                  const isNewlyRevealed =
+                    justExpanded != null &&
+                    node.path !== justExpanded.path &&
+                    node.path.startsWith(`${justExpanded.path}/`);
                   const isDirectory = node.type === FileNodeType.Directory;
                   const isDragOver =
                     dragState.dropTargetPath === node.path ||
@@ -804,46 +881,55 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                         transform: `translateY(${virtualItem.start}px)`,
                       }}
                     >
-                      <TreeContextMenu
-                        node={node}
-                        workspacePath={workspacePath}
-                        readOnly={isWorktreeScope}
-                        onDelete={handleDelete}
-                        onRename={handleRename}
-                        onDuplicate={handleDuplicate}
-                        onCreateFile={(parentPath, kind) =>
-                          quickCreate(FileNodeType.File, parentPath, kind)
-                        }
-                        onCreateFolder={(parentPath) =>
-                          quickCreate(FileNodeType.Directory, parentPath)
-                        }
-                        isWorkspaceRoot={isWorkspaceRoot}
-                        isPrimaryRoot={matchedRoot?.isPrimary ?? false}
-                        onAddFolderToProject={handleAddFolderToProject}
-                        onRemoveFolderFromProject={
-                          handleRemoveFolderFromProject
+                      <div
+                        className={
+                          isNewlyRevealed ? "tree-row-reveal" : undefined
                         }
                       >
-                        <TreeNode
+                        <TreeContextMenu
                           node={node}
-                          isExpanded={isExpanded}
-                          isSelected={isSelected}
-                          indentPx={indentPx}
-                          isDragOver={isDragOver}
-                          isDragging={isDragging}
-                          gitStatus={nodeGitStatus}
-                          onToggle={() => {
-                            if (isDirectory) {
-                              void toggleFolderWithHydration(node.path);
-                            }
-                          }}
-                          onSelect={() => selectNode(node.path)}
-                          onOpen={() =>
-                            openFile(node.path, scopeTaskRunId ?? undefined)
+                          workspacePath={workspacePath}
+                          readOnly={isWorktreeScope}
+                          scopeTaskRunId={scopeTaskRunId}
+                          onDelete={handleDelete}
+                          onRename={handleRename}
+                          onDuplicate={handleDuplicate}
+                          onCreateFile={(parentPath, kind) =>
+                            quickCreate(FileNodeType.File, parentPath, kind)
                           }
-                          onMouseDown={(e) => dndHandlers.onMouseDown(e, node)}
-                        />
-                      </TreeContextMenu>
+                          onCreateFolder={(parentPath) =>
+                            quickCreate(FileNodeType.Directory, parentPath)
+                          }
+                          isWorkspaceRoot={isWorkspaceRoot}
+                          isPrimaryRoot={matchedRoot?.isPrimary ?? false}
+                          onAddFolderToProject={handleAddFolderToProject}
+                          onRemoveFolderFromProject={
+                            handleRemoveFolderFromProject
+                          }
+                        >
+                          <TreeNode
+                            node={node}
+                            isExpanded={isExpanded}
+                            isSelected={isSelected}
+                            indentPx={indentPx}
+                            isDragOver={isDragOver}
+                            isDragging={isDragging}
+                            gitStatus={nodeGitStatus}
+                            onToggle={() => {
+                              if (isDirectory) {
+                                void toggleFolderWithHydration(node.path);
+                              }
+                            }}
+                            onSelect={() => selectNode(node.path)}
+                            onOpen={() =>
+                              openFile(node.path, scopeTaskRunId ?? undefined)
+                            }
+                            onMouseDown={(e) =>
+                              dndHandlers.onMouseDown(e, node)
+                            }
+                          />
+                        </TreeContextMenu>
+                      </div>
                     </div>
                   );
                 })}

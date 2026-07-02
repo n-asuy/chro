@@ -24,6 +24,18 @@ pub const MALFORMED_TOOL_CALL_SUBTYPE: &str = "malformed_tool_call";
 /// User-facing explanation shown for a malformed-tool-call abort.
 pub const MALFORMED_TOOL_CALL_MESSAGE: &str = "The agent produced a malformed tool call and could not finish this turn. This is an intermittent model-side issue (the CLI's own retry also failed), not a code error. Retry to continue from here.";
 
+/// `result.subtype` synthesized when a turn ends on a CLI-reported API error
+/// (rate limit, session/weekly usage limit, image-processing failure, ...).
+/// The CLI writes these as synthetic `isApiErrorMessage` assistant lines and
+/// then ends the turn; without a dedicated outcome they would be recorded as a
+/// silent success, so the run would appear to finish while having done no work.
+pub const API_ERROR_SUBTYPE: &str = "api_error";
+
+/// Fallback explanation for an API-error abort, used only when the CLI's own
+/// message text is empty. Normally the CLI's specific message is preserved and
+/// shown instead (for example the rate-limit or usage-limit text).
+pub const API_ERROR_MESSAGE: &str = "The agent stopped on a server-side API error (such as a rate limit or usage limit), so this turn did no work. Retry to continue from here.";
+
 /// Approval status for tool use requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

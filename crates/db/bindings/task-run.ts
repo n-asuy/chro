@@ -8,4 +8,10 @@ import type { RunStatus } from "./run-status";
  * Represents a single execution of a task. Multiple runs can exist per task.
  * Supports both local (worktree) and remote (Northflank Job) execution modes.
  */
-export type TaskRun = { id: string, slug: string | null, task_id: string, execution_mode: ExecutionMode, status: RunStatus, run_reason: string | null, executor_action: string | null, executor_action_type: string | null, exit_code: number | null, dropped: boolean, before_head_commit: string | null, after_head_commit: string | null, branch_name: string | null, target_branch: string | null, container_ref: string | null, workspace_path: string | null, executor_label: string | null, resume_session_id: string | null, worktree_deleted: boolean, executor_job_id: string | null, s3_prefix: string | null, logs_uri: string | null, summary_uri: string | null, diffs_prefix: string | null, logs_retrieval_failed: boolean, started_at: string | null, completed_at: string | null, created_at: string, updated_at: string, };
+export type TaskRun = { id: string, slug: string | null, task_id: string, execution_mode: ExecutionMode, status: RunStatus, run_reason: string | null, executor_action: string | null, executor_action_type: string | null, exit_code: number | null, dropped: boolean, before_head_commit: string | null, after_head_commit: string | null, branch_name: string | null, target_branch: string | null, container_ref: string | null, workspace_path: string | null, executor_label: string | null, resume_session_id: string | null, 
+/**
+ * Claude execution engine pinned at session birth ("pty" / "print"), reused
+ * for every follow-up so a session is never resumed under the other engine.
+ * `None` for legacy runs predating the column (resolved as PTY at spawn).
+ */
+claude_execution_mode: string | null, worktree_deleted: boolean, executor_job_id: string | null, s3_prefix: string | null, logs_uri: string | null, summary_uri: string | null, diffs_prefix: string | null, logs_retrieval_failed: boolean, started_at: string | null, completed_at: string | null, created_at: string, updated_at: string, };

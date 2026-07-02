@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ConversationFlattenCache,
   createConversationFlattenCache,
+  withAuthoritativeRunOrder,
 } from "../domain/conversation-history";
 import {
   type PendingSessionSubmission,
@@ -587,6 +588,16 @@ export function useConversationHistory({
     return sorted[sorted.length - 1].id;
   }, [runs]);
 
+  // Authoritative run ordering: the server stamps every run's created_at on one
+  // clock. A run state's own createdAt is assembled from optimistic client times
+  // and now() fallbacks, so it cannot be trusted to order runs relative to one
+  // another (it let a streaming run sort above completed ones). Keyed by run id.
+  const runCreatedAtById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const run of runs) map.set(run.id, run.created_at);
+    return map;
+  }, [runs]);
+
   // Diagnostic: surface why the conversation pane can sit in `isLoading`. Fires
   // on any change to the gating inputs so a stuck-loading reproduction reveals
   // which gate failed to resolve — the runs stream (`runs_loading`) or the
@@ -922,7 +933,12 @@ export function useConversationHistory({
       loadingRunIds.add(pendingRunId);
     }
 
-    return flattenCacheRef.current.flatten(allStates, sessions, {
+    // Order runs by the server's authoritative created_at, not each state's
+    // self-assembled client/optimistic time, so a streaming run can never sort
+    // above already-completed runs.
+    const orderedStates = withAuthoritativeRunOrder(allStates, runCreatedAtById);
+
+    return flattenCacheRef.current.flatten(orderedStates, sessions, {
       promptOverridesByRun,
       loadingRunIds,
     });
@@ -931,6 +947,7 @@ export function useConversationHistory({
     activeRunId,
     entriesVersion,
     isStreaming,
+    runCreatedAtById,
     scopedPendingSubmission,
     sessionScopeId,
     sessions,

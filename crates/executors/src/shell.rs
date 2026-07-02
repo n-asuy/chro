@@ -539,4 +539,3 @@ pub fn detect_shell() -> (&'static str, &'static str) {
         ("/bin/sh", "-c")
     }
 }
-

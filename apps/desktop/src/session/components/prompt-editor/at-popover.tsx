@@ -174,10 +174,15 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
     const [skills, setSkills] = useState<SkillSummary[]>([]);
     const [debouncedQuery, setDebouncedQuery] = useState(query);
     const [view, setView] = useState<"categories" | CategoryView>("categories");
+    // Local filter for the setting sub-views (Runtime / Model / Reasoning). It
+    // backs a real, focusable search input so a model can be filtered by
+    // clicking and typing in the popover instead of only via the prompt editor.
+    const [settingFilter, setSettingFilter] = useState("");
     const requestIdRef = useRef(0);
     const defaultRequestIdRef = useRef(0);
     const skillRequestIdRef = useRef(0);
     const listRef = useRef<HTMLDivElement>(null);
+    const settingInputRef = useRef<HTMLInputElement>(null);
 
     // Reset view when popover closes
     useEffect(() => {
@@ -185,6 +190,16 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         setView("categories");
       }
     }, [open]);
+
+    // Entering a setting sub-view: clear the local filter and focus its search
+    // input so the model/runtime/reasoning list can be filtered by typing here.
+    useEffect(() => {
+      const isSetting =
+        view === "runtime" || view === "model" || view === "reasoning";
+      if (!isSetting) return;
+      setSettingFilter("");
+      settingInputRef.current?.focus();
+    }, [view]);
 
     // Debounce query
     useEffect(() => {
@@ -327,7 +342,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         items.push({ kind: "file", path: r.path, is_file: r.is_file });
       }
     } else if (view === "runtime") {
-      const q = query.toLowerCase();
+      const q = (settingFilter || query).toLowerCase();
       for (const opt of runtimeOptions) {
         if (q && !opt.label.toLowerCase().includes(q)) continue;
         items.push({
@@ -338,7 +353,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         });
       }
     } else if (view === "model") {
-      const q = query.toLowerCase();
+      const q = (settingFilter || query).toLowerCase();
       for (const opt of modelOptions) {
         if (q && !opt.label.toLowerCase().includes(q)) continue;
         items.push({
@@ -350,7 +365,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         });
       }
     } else if (view === "reasoning") {
-      const q = query.toLowerCase();
+      const q = (settingFilter || query).toLowerCase();
       for (const opt of reasoningOptions) {
         if (q && !opt.label.toLowerCase().includes(q)) continue;
         items.push({
@@ -560,12 +575,30 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
           )}
 
           {isSettingView && (
-            <div className="mb-1 border-b border-border/40 px-2 py-1.5 text-[13px]">
-              {query ? (
-                <span>{query}</span>
-              ) : (
-                <span className="text-muted-foreground">Search</span>
-              )}
+            <div className="mb-1 border-b border-border/40 px-2 py-1.5">
+              <input
+                ref={settingInputRef}
+                type="text"
+                value={settingFilter}
+                placeholder="Search"
+                aria-label="Search"
+                spellCheck={false}
+                autoCapitalize="none"
+                // Allow the input to take focus despite the popover container's
+                // mousedown-preventDefault (which keeps the prompt editor focused).
+                onMouseDown={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  setSettingFilter(e.target.value);
+                  onActiveIndexChange(0);
+                }}
+                onKeyDown={(e) => {
+                  // Drive list navigation/selection; let typing fall through.
+                  if (handleKeyDownInternal(e)) {
+                    e.preventDefault();
+                  }
+                }}
+                className="w-full bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
             </div>
           )}
 

@@ -35,7 +35,6 @@ Generated at: 2026-04-04T09:30:10.610Z
 | `apps/desktop/src/session/components/session-header.tsx` | SessionHeader | - |
 | `apps/desktop/src/session/components/session-input-controls.tsx` | PromptEditorWithPopover, SendButtonWithState | - |
 | `apps/desktop/src/session/components/session-list.tsx` | SessionList | - |
-| `apps/desktop/src/session/components/session-sidebar-content.tsx` | SessionSidebarContent | - |
 | `apps/desktop/src/session/components/task-conversation.tsx` | TaskConversation | - |
 | `apps/desktop/src/session/components/text-shimmer.tsx` | TextShimmer | - |
 | `apps/desktop/src/session/context/local-images-context.tsx` | LocalImageMetadata | /rpc/images/{id}/file |

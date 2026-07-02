@@ -10,6 +10,10 @@ interface PromptEditorProps {
   handle: PromptEditorHandle;
   disabled?: boolean;
   placeholder?: string;
+  /** Shown instead of `placeholder` while files are dragged over the composer. */
+  dropPlaceholder?: string;
+  /** Whether files are currently being dragged over the composer. */
+  dropActive?: boolean;
   onSubmit: () => void;
   onPopoverKeyDown?: (e: React.KeyboardEvent) => boolean;
   onDrop?: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -31,6 +35,8 @@ export function PromptEditor({
   handle,
   disabled = false,
   placeholder = "Input task",
+  dropPlaceholder,
+  dropActive = false,
   onSubmit,
   onPopoverKeyDown,
   onDrop,
@@ -90,14 +96,22 @@ export function PromptEditor({
     [handle, onSubmit, onPopoverKeyDown],
   );
 
+  const activePlaceholder =
+    dropActive && dropPlaceholder ? dropPlaceholder : placeholder;
+
   return (
     <div className="relative">
       {isEmpty && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute left-0 top-0 select-none text-sm leading-relaxed text-muted-foreground"
+          className={cn(
+            "pointer-events-none absolute left-0 top-0 select-none text-sm leading-relaxed",
+            dropActive && dropPlaceholder
+              ? "text-primary"
+              : "text-muted-foreground",
+          )}
         >
-          {placeholder}
+          {activePlaceholder}
         </div>
       )}
       <div
@@ -105,12 +119,12 @@ export function PromptEditor({
         contentEditable={disabled ? false : "plaintext-only"}
         role="textbox"
         aria-multiline="true"
-        aria-placeholder={placeholder}
+        aria-placeholder={activePlaceholder}
         aria-disabled={disabled}
         suppressContentEditableWarning
         data-prompt-editor-drop="true"
         className={cn(
-          "relative max-h-48 min-h-[56px] w-full resize-none border-none bg-transparent p-0 text-sm leading-relaxed shadow-none outline-none",
+          "relative max-h-48 min-h-[24px] w-full resize-none border-none bg-transparent p-0 text-sm leading-relaxed shadow-none outline-none",
           "[&_[data-type=file]]:inline-flex [&_[data-type=file]]:items-center [&_[data-type=file]]:rounded [&_[data-type=file]]:bg-blue-50 [&_[data-type=file]]:px-1 [&_[data-type=file]]:text-blue-600 [&_[data-type=file]]:dark:bg-blue-950 [&_[data-type=file]]:dark:text-blue-400",
           "[&_[data-type=session]]:inline-flex [&_[data-type=session]]:items-center [&_[data-type=session]]:rounded [&_[data-type=session]]:bg-blue-50 [&_[data-type=session]]:px-1 [&_[data-type=session]]:text-blue-600 [&_[data-type=session]]:dark:bg-blue-950 [&_[data-type=session]]:dark:text-blue-400",
           "[&_[data-type=skill]]:inline-flex [&_[data-type=skill]]:items-center [&_[data-type=skill]]:rounded [&_[data-type=skill]]:bg-emerald-50 [&_[data-type=skill]]:px-1 [&_[data-type=skill]]:text-emerald-700 [&_[data-type=skill]]:dark:bg-emerald-950 [&_[data-type=skill]]:dark:text-emerald-300",

@@ -338,6 +338,23 @@ impl GitCli {
         Ok(())
     }
 
+    /// Stage the given pathspecs, which may be files or directories. `git add`
+    /// recurses into directories, so a folded untracked directory entry (e.g.
+    /// `crates/`, the form `git status` reports when untracked dirs are not
+    /// recursed) stages every file beneath it; it also records additions,
+    /// modifications, and — since Git 2.0 — deletions of tracked files. The
+    /// `--` separator stops a path that looks like an option from being
+    /// misparsed.
+    pub fn add_paths(&self, repo_path: &Path, paths: &[String]) -> Result<(), GitCliError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args: Vec<&str> = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.run(repo_path, &args)?;
+        Ok(())
+    }
+
     /// Create a commit with the given message
     pub fn commit(&self, repo_path: &Path, message: &str) -> Result<(), GitCliError> {
         self.run(repo_path, &["commit", "-m", message])?;

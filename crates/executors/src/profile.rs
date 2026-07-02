@@ -145,6 +145,11 @@ impl ExecutorProfileId {
                     codex.model_reasoning_effort = Some(effort.clone());
                 }
             }
+            CodingAgent::Pi(pi) => {
+                if let Some(model) = &self.model {
+                    pi.model = Some(model.clone());
+                }
+            }
         }
     }
 }
@@ -373,31 +378,6 @@ impl PermissionMode {
     }
 }
 
-/// Model preset for Anthropic models.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPreset {
-    pub id: &'static str,
-    pub name: &'static str,
-}
-
-/// Returns available Anthropic model presets.
-pub const fn anthropic_model_presets() -> &'static [ModelPreset] {
-    &[
-        ModelPreset {
-            id: "claude-sonnet-4-20250514",
-            name: "Claude Sonnet 4",
-        },
-        ModelPreset {
-            id: "claude-3-5-sonnet-20241022",
-            name: "Claude 3.5 Sonnet",
-        },
-        ModelPreset {
-            id: "claude-3-opus-20240229",
-            name: "Claude 3 Opus",
-        },
-    ]
-}
-
 /// Result of detecting Claude CLI version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeVersionResult {
@@ -509,13 +489,22 @@ pub async fn check_mcp_status(executor: BaseCodingAgent) -> McpStatusResult {
     match executor {
         BaseCodingAgent::ClaudeCode => check_claude_mcp_status().await,
         BaseCodingAgent::Codex => check_codex_mcp_status().await,
+        // pi does not expose a chro-managed MCP server list.
+        BaseCodingAgent::Pi => McpStatusResult {
+            ok: true,
+            servers: Vec::new(),
+            error: None,
+            message: None,
+        },
     }
 }
 
 /// Resolve a manifest CLI and build a command for it, prepending the binary's
 /// directory to `PATH` so co-located runtimes (e.g. a Node shim's `node`) are
 /// reachable. Falls back to the bare command name when discovery fails.
-async fn mcp_command(manifest: &'static crate::cli_manifest::CliManifest) -> tokio::process::Command {
+async fn mcp_command(
+    manifest: &'static crate::cli_manifest::CliManifest,
+) -> tokio::process::Command {
     match crate::cli_resolver::resolve_cli(manifest).await {
         Some(resolved) => {
             let mut command = tokio::process::Command::new(&resolved.path);
@@ -699,6 +688,7 @@ fn parse_mcp_list_output(output: &str) -> Vec<McpServerStatus> {
 pub struct AuthStatusResult {
     pub claude_code: AvailabilityInfo,
     pub codex: AvailabilityInfo,
+    pub pi: AvailabilityInfo,
 }
 
 /// Installation info for executor CLIs required by onboarding and auth flows.
@@ -715,6 +705,7 @@ pub struct ExecutorInstallInfo {
 pub struct ExecutorInstallStatusResult {
     pub claude_code: ExecutorInstallInfo,
     pub codex: ExecutorInstallInfo,
+    pub pi: ExecutorInstallInfo,
     pub git: ExecutorInstallInfo,
 }
 
@@ -754,6 +745,7 @@ pub fn get_auth_status_all() -> AuthStatusResult {
     AuthStatusResult {
         claude_code: availability_for(BaseCodingAgent::ClaudeCode),
         codex: availability_for(BaseCodingAgent::Codex),
+        pi: availability_for(BaseCodingAgent::Pi),
     }
 }
 
@@ -831,11 +823,13 @@ fn extract_detected_version(stdout: &[u8], stderr: &[u8]) -> Option<String> {
 pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
     let claude_code = detect_install_info_for_manifest(&crate::cli_manifest::CLAUDE).await;
     let codex = detect_install_info_for_manifest(&crate::cli_manifest::CODEX).await;
+    let pi = detect_install_info_for_manifest(&crate::cli_manifest::PI).await;
     let git = detect_install_info("git").await;
 
     ExecutorInstallStatusResult {
         claude_code,
         codex,
+        pi,
         git,
     }
 }
@@ -846,6 +840,7 @@ pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
 pub enum InstallableTool {
     ClaudeCode,
     Codex,
+    Pi,
     Git,
 }
 
@@ -854,6 +849,7 @@ impl std::fmt::Display for InstallableTool {
         match self {
             Self::ClaudeCode => write!(f, "CLAUDE_CODE"),
             Self::Codex => write!(f, "CODEX"),
+            Self::Pi => write!(f, "PI"),
             Self::Git => write!(f, "GIT"),
         }
     }
@@ -902,6 +898,15 @@ async fn get_install_strategy(
                 return Ok(("npm", "npm install -g @openai/codex"));
             }
             Err("Automatic install requires Homebrew or npm. Open the install guide to continue manually.".into())
+        }
+        InstallableTool::Pi => {
+            if resolve_executable_path("npm").await.is_some() {
+                return Ok(("npm", "npm install -g @earendil-works/pi-coding-agent"));
+            }
+            Err(
+                "Automatic install requires npm. Open the install guide to continue manually."
+                    .into(),
+            )
         }
         InstallableTool::Git => {
             if cfg!(target_os = "macos") {
@@ -998,6 +1003,9 @@ fn auth_login_spec(executor: BaseCodingAgent) -> (&'static [&'static str], Optio
         // type `/login` once it has painted. (`setup-token` is for `claude -p`
         // API usage and is not the subscription login.)
         BaseCodingAgent::ClaudeCode => (&[], Some("/login\r")),
+        // pi likewise signs in via the in-REPL `/login` command (OAuth or API
+        // key). Launch the interactive TUI and type `/login` once it paints.
+        BaseCodingAgent::Pi => (&[], Some("/login\r")),
     }
 }
 
@@ -1012,6 +1020,7 @@ pub async fn resolve_auth_login_command(
     let manifest: &'static crate::cli_manifest::CliManifest = match executor {
         BaseCodingAgent::ClaudeCode => &crate::cli_manifest::CLAUDE,
         BaseCodingAgent::Codex => &crate::cli_manifest::CODEX,
+        BaseCodingAgent::Pi => &crate::cli_manifest::PI,
     };
 
     let executable = crate::cli_resolver::resolve_cli(manifest)

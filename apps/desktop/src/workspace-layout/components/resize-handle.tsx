@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
+import { useCallback, useEffect, useRef } from "react";
 import { useLayoutStore } from "../state/layout-store";
 import type { SplitDirection } from "../types";
 
@@ -60,19 +60,19 @@ export function ResizeHandle({
     [direction, resize, splitId],
   );
 
-  const onPointerUp = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    draggingRef.current = null;
+  }, []);
+
+  useEffect(
+    () => () => {
       draggingRef.current = null;
     },
     [],
   );
-
-  useEffect(() => () => {
-    draggingRef.current = null;
-  }, []);
 
   return (
     <div
@@ -83,10 +83,14 @@ export function ResizeHandle({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       className={cn(
-        "relative shrink-0 bg-border/60 hover:bg-primary/40",
+        // Color-only eased highlight (no width animation, so it can't snap);
+        // a transparent ::before widens the hit area beyond the 1px line so the
+        // divider stays easy to grab.
+        "relative shrink-0 bg-border transition-colors duration-150 ease-out hover:bg-primary/70",
+        "before:absolute before:z-10 before:content-['']",
         direction === "h"
-          ? "w-px cursor-col-resize hover:w-0.5"
-          : "h-px cursor-row-resize hover:h-0.5",
+          ? "w-px cursor-col-resize before:inset-y-0 before:-inset-x-[3px]"
+          : "h-px cursor-row-resize before:inset-x-0 before:-inset-y-[3px]",
       )}
     />
   );

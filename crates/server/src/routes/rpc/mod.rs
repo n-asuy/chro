@@ -14,6 +14,7 @@
 //! - `merges`: Merge record management (merged from api.rs)
 
 mod approvals;
+mod cbase;
 mod config;
 mod context_refs;
 mod developer;
@@ -52,6 +53,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(merges::router())
         .merge(git::router())
         .merge(filesystem::router())
+        .merge(cbase::router())
 }
 
 pub(crate) fn sessions_router() -> Router<AppState> {

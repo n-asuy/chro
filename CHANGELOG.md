@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.38
+
+- Added support for the Pi coding agent alongside Claude Code and Codex: install it from the setup flow, sign in with provider API keys (OpenAI, Google, Anthropic, OpenRouter, and custom providers) managed in Settings or through the terminal login dialog, pick from its live model catalog, and run full multi-turn sessions with follow-ups, forks, and cancellation
+- Added a spreadsheet editor for CSV and TSV files with in-cell editing, arrow/Tab navigation, click-drag and Shift-click range selection, clipboard copy/cut/paste, row and column insert/delete, and draggable column widths, saving through the regular autosave path and staying read-only where the file tree is read-only
+- Added an opt-in "Headless mode (claude -p)" setting that runs Claude non-interactively for batch and parallel work (approvals and clarifying questions are disabled there), and made each session remember the engine it started with so toggling the setting mid-session no longer breaks follow-ups and retries
+- Added drag-and-drop file attachment to the message composer, which highlights and switches its placeholder to "Drop files here to attach" while a file drag is over it
+- Reworked the agent picker into a two-step runtime-then-model menu with a search box for long model lists
+- Added "Copy absolute path" and "Reveal in Finder" to the file tree's context menu in session scope, resolving against the session's worktree on disk
+- Added a Collapse-all button to the projects panel toolbar
+- Refreshed the app's visual design: the Inter typeface now ships with the app (text previously fell back to the OS font), on a unified color palette with quieter shadows and borders and refined spacing across the file tree, docks, working steps, and menus, plus a more compact empty composer
+- Replaced raw crash screens with a friendly localized error view offering Retry, Reload, and Go to start, with expandable error details, a copy button, and graceful handling of repeating errors
+- Moved .cbase view parsing, filtering, and sorting plus file-tree git status decoration to the Rust backend, so large vaults no longer index on the UI thread and the file tree hydrates its change badges in a single request
+- Made the Worktree Directories list in developer settings appear immediately, with folder sizes computed in the background instead of blocking the whole list
+- Fixed Claude runs that hit an API error (rate limit, usage or session limit) being recorded as successful completions with no output: the turn now fails with the CLI's actual message and offers a one-click Retry
+- Fixed sessions staying in a "running" state forever when the agent process crashed or errored out: abnormal exits now mark the run failed and release the session immediately
+- Fixed loading spinners getting stuck when a stream stalled or dropped: reconnection now distinguishes rejected handshakes (which stop after a few attempts) from transient drops (which keep retrying), leaves legitimately idle streams alone, and lets deleted sessions reject cleanly instead of erroring
+- Fixed conversation messages occasionally jumping out of order after a few turns by ordering runs on server-authoritative timestamps, and cleared the sidebar's running spinner as soon as a turn finishes instead of after the background auto-commit
+- Fixed a newly created session vanishing from the session list after its first reply (until reload) and duplicate rows appearing when the real session streamed in before the create request returned
+- Made archiving work for sessions stuck in a running state by cancelling the orphaned run first, and kept the archive action available on every session row
+- Removed the developer Feature Flags section from Settings; flags now resolve from built-in defaults with no local overrides
+
 ## 0.1.37
 
 - Added a Media Gallery tab that shows the images and videos an agent has produced as a thumbnail grid, read from disk newest-first and gitignore-aware, scoped either to a single session's worktree or to the whole project, and opened from the new Environment popover

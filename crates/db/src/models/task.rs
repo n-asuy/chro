@@ -560,6 +560,10 @@ pub struct TaskRun {
     pub workspace_path: Option<String>,
     pub executor_label: Option<String>,
     pub resume_session_id: Option<String>,
+    /// Claude execution engine pinned at session birth ("pty" / "print"), reused
+    /// for every follow-up so a session is never resumed under the other engine.
+    /// `None` for legacy runs predating the column (resolved as PTY at spawn).
+    pub claude_execution_mode: Option<String>,
     pub worktree_deleted: bool,
     // Remote execution fields (nullable)
     pub executor_job_id: Option<String>,
@@ -597,6 +601,7 @@ impl TaskRun {
             workspace_path: None,
             executor_label: None,
             resume_session_id: None,
+            claude_execution_mode: None,
             worktree_deleted: false,
             executor_job_id: None,
             s3_prefix: None,
@@ -635,9 +640,9 @@ impl TaskRun {
                 exit_code, dropped, before_head_commit, after_head_commit, executor_job_id, s3_prefix,
                 logs_uri, summary_uri, diffs_prefix, logs_retrieval_failed, started_at, completed_at,
                 created_at, updated_at, branch_name, target_branch, container_ref, workspace_path,
-                executor_label, resume_session_id, worktree_deleted
+                executor_label, resume_session_id, claude_execution_mode, worktree_deleted
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )",
         )
         .bind(self.id)
@@ -668,10 +673,30 @@ impl TaskRun {
         .bind(self.workspace_path.clone())
         .bind(self.executor_label.clone())
         .bind(self.resume_session_id.clone())
+        .bind(self.claude_execution_mode.clone())
         .bind(self.worktree_deleted as i32)
         .execute(pool)
         .await?;
 
+        Ok(())
+    }
+
+    /// Pin (or update) the Claude execution engine for this run. Called once at
+    /// the first spawn of a fresh session; follow-up runs inherit the value at
+    /// creation so the whole chain shares one engine.
+    pub async fn set_claude_execution_mode(
+        pool: &Pool<Sqlite>,
+        run_id: Uuid,
+        mode: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE task_runs SET claude_execution_mode = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(mode)
+        .bind(Utc::now())
+        .bind(run_id)
+        .execute(pool)
+        .await?;
         Ok(())
     }
 

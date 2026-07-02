@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SettingsRow } from "../components/settings-row";
 import { SettingsSection } from "../components/settings-section";
 import { useAppearanceConfigStore } from "../state/appearance-store";
@@ -27,18 +27,57 @@ const THEME_LABEL_KEYS: Record<AppTheme, TranslationKey> = {
   dark: "appearanceThemeDark",
 };
 
+/** Swatch shown when no custom accent is set (the built-in brand). */
+const BRAND_DEFAULT_ACCENT = "#0c6cbe";
+/** Coalesce rapid picker drags into a single save + derivation. */
+const ACCENT_COMMIT_DELAY_MS = 160;
+
 export function AppearancePane() {
   const { t } = useLanguage();
   const theme = useAppearanceConfigStore((s) => s.config.theme);
+  const accent = useAppearanceConfigStore((s) => s.config.accent);
   const loaded = useAppearanceConfigStore((s) => s.loaded);
   const load = useAppearanceConfigStore((s) => s.load);
   const update = useAppearanceConfigStore((s) => s.update);
+
+  // Local draft drives the swatch during interaction. It is intentionally NOT
+  // re-synced from `config.accent`, so an optimistic echo or rollback can't
+  // clobber an in-flight pick. `null` means "follow the persisted value".
+  const [draft, setDraft] = useState<string | null>(null);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const displayAccent = draft ?? accent ?? BRAND_DEFAULT_ACCENT;
 
   useEffect(() => {
     if (!loaded) {
       void load();
     }
   }, [loaded, load]);
+
+  useEffect(
+    () => () => {
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+    },
+    [],
+  );
+
+  const handlePickAccent = useCallback(
+    (value: string) => {
+      setDraft(value);
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+      // Debounced commit: the store guards against stale out-of-order echoes,
+      // and use-theme re-derives the live UI from the optimistic value.
+      commitTimer.current = setTimeout(() => {
+        void update({ accent: value });
+      }, ACCENT_COMMIT_DELAY_MS);
+    },
+    [update],
+  );
+
+  const handleResetAccent = useCallback(() => {
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    setDraft(null);
+    void update({ accent: null });
+  }, [update]);
 
   return (
     <section className="flex flex-col gap-6">
@@ -93,6 +132,41 @@ export function AppearancePane() {
                 })}
               </DropdownMenuContent>
             </DropdownMenu>
+          }
+        />
+        <SettingsRow
+          title={t("appearanceAccentTitle")}
+          description={t("appearanceAccentDescription")}
+          control={
+            <div className="flex items-center gap-2">
+              <label
+                className="relative inline-flex h-9 w-9 cursor-pointer items-center justify-center overflow-hidden rounded-lg border border-border/40 transition hover:border-border/60"
+                title={displayAccent}
+              >
+                <span
+                  className="absolute inset-0"
+                  style={{ backgroundColor: displayAccent }}
+                />
+                <input
+                  type="color"
+                  value={displayAccent}
+                  onChange={(event) => handlePickAccent(event.target.value)}
+                  aria-label={t("appearanceAccentTitle")}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+              </label>
+              {accent ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleResetAccent}
+                  className="font-workspace h-9 rounded-lg px-3 text-[13px] text-muted-foreground transition hover:text-foreground"
+                >
+                  {t("appearanceAccentReset")}
+                </Button>
+              ) : null}
+            </div>
           }
         />
       </SettingsSection>

@@ -29,6 +29,12 @@ export const DEFAULT_EDITOR_CONFIG: EditorConfig = {
 
 export type AppearanceConfig = {
   theme: AppTheme;
+  /**
+   * User-chosen accent seed as a `#rrggbb` hex string. Absent/null follows the
+   * built-in brand accent. Sending `null` resets to brand; the per-mode
+   * readability clamp is applied at derivation time, not on this seed.
+   */
+  accent?: string | null;
 };
 
 type AppearanceConfigResponse = {

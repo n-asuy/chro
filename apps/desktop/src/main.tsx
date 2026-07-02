@@ -5,11 +5,16 @@ import ReactDOM from "react-dom/client";
 import { capture, identify, initAnalytics } from "./lib/analytics";
 import { loadUiState } from "./lib/ui-state-client";
 import { routeTree } from "./routeTree.gen";
+import { RootErrorBoundary, RouteErrorBoundary } from "./system/error-boundary";
 import "./app/globals.css";
 
 const router = createRouter({
   routeTree,
   defaultPreload: "intent",
+  // Replace TanStack Router's bare default error screen with a recoverable
+  // fallback so a render error in any route (editor crashes, runaway setState
+  // loops) no longer leaves the user stuck on a dead full-screen error.
+  defaultErrorComponent: RouteErrorBoundary,
 });
 
 const queryClient = new QueryClient();
@@ -54,9 +59,11 @@ if (rootElement && !rootElement.innerHTML) {
   const root = ReactDOM.createRoot(rootElement);
   root.render(
     <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
+      <RootErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>
+      </RootErrorBoundary>
     </StrictMode>,
   );
 }

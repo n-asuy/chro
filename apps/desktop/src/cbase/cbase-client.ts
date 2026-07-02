@@ -1,0 +1,51 @@
+/**
+ * RPC client for the backend cbase engine.
+ *
+ * Parsing, indexing, schema inference, and view execution all run server-side;
+ * the frontend only sends the raw file content (or an updated definition) and
+ * renders the materialized document it receives back.
+ */
+
+import { desktopFetch } from "@/lib/backend-client";
+import type { CbaseDefinition, CbaseDocument, CbaseProperty } from "./types";
+
+const jsonInit = (body: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+/** Parse, index, and materialize a `.cbase` file for the given project. */
+export const queryCbase = async (
+  projectId: string,
+  content: string,
+  basePath?: string,
+): Promise<CbaseDocument> =>
+  desktopFetch<CbaseDocument>(
+    `/rpc/projects/${projectId}/cbase/query`,
+    jsonInit({ content, basePath }),
+  );
+
+/** Response from persisting UI-driven changes back to a `.cbase` file. */
+export interface PersistCbaseResult {
+  /** The serialized YAML written to disk */
+  content: string;
+  /** The refreshed document after the write */
+  document: CbaseDocument;
+}
+
+/**
+ * Persist a UI-driven definition change: the backend backfills any referenced
+ * inferred properties, serializes the definition, writes the file, and returns
+ * the refreshed document.
+ */
+export const persistCbase = async (
+  projectId: string,
+  basePath: string,
+  definition: CbaseDefinition,
+  properties: Record<string, CbaseProperty>,
+): Promise<PersistCbaseResult> =>
+  desktopFetch<PersistCbaseResult>(
+    `/rpc/projects/${projectId}/cbase/persist`,
+    jsonInit({ basePath, definition, properties }),
+  );

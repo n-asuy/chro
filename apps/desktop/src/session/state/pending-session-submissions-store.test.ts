@@ -103,4 +103,53 @@ describe("pending session submissions store", () => {
       finishedAt: "2025-01-01T00:00:02.000Z",
     });
   });
+
+  it("is idempotent: re-finishing an already-finished submission is a no-op", () => {
+    // Regression guard for the settle loop: the settle effect re-finishes
+    // whenever it sees a terminal run, and it re-runs on every task-runs stream
+    // tick. If finishing minted a fresh submission (and a fresh state) each
+    // time, the effect's dependency would change forever and React would throw
+    // "Maximum update depth exceeded" (seen when a run fails instantly, e.g. pi
+    // with no API key). Re-finishing must return the SAME state reference.
+    const store = usePendingSessionSubmissionsStore.getState();
+    store.beginPendingSubmission("project-1", {
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "New task prompt",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      taskId: null,
+      taskSlug: null,
+    });
+
+    store.finishPendingSubmission(
+      "project-1",
+      "req-1",
+      "2025-01-01T00:00:02.000Z",
+    );
+    const stateAfterFirstFinish =
+      usePendingSessionSubmissionsStore.getState().submissionsByProjectId;
+    const submissionAfterFirstFinish = stateAfterFirstFinish["project-1"]?.[
+      "req-1"
+    ];
+
+    // A later, different timestamp must not overwrite the first finish nor mint
+    // a new object — the submission is already settled.
+    store.finishPendingSubmission(
+      "project-1",
+      "req-1",
+      "2025-01-01T00:00:09.000Z",
+    );
+
+    expect(
+      usePendingSessionSubmissionsStore.getState().submissionsByProjectId,
+    ).toBe(stateAfterFirstFinish);
+    expect(
+      usePendingSessionSubmissionsStore.getState().submissionsByProjectId[
+        "project-1"
+      ]?.["req-1"],
+    ).toBe(submissionAfterFirstFinish);
+    expect(submissionAfterFirstFinish?.finishedAt).toBe(
+      "2025-01-01T00:00:02.000Z",
+    );
+  });
 });

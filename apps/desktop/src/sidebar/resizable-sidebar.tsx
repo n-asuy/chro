@@ -1,7 +1,7 @@
-
-import type { Dispatch, ReactElement, SetStateAction } from "react";
-import React, { useCallback, useEffect, useState, useRef } from "react";
 import { cn } from "@/lib/cn";
+import type { Dispatch, ReactElement, SetStateAction } from "react";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface ResizableSidebarProps {
   showPeek?: boolean;
@@ -245,9 +245,11 @@ export function ResizableSidebar({
 
           <div
             className={cn(
-              "transition-all duration-200 cursor-ew-resize absolute h-full w-1 z-[20]",
-              !isResizing && "hover:bg-custom-background-90",
-              isResizing && "w-1.5 bg-custom-background-80",
+              "transition-colors duration-150 ease-out cursor-ew-resize absolute h-full w-0.5 z-[20]",
+              // transparent ::before widens the grab zone past the 2px line
+              "before:absolute before:inset-y-0 before:-inset-x-[3px] before:content-['']",
+              !isResizing && "hover:bg-primary/70",
+              isResizing && "bg-primary/70",
               "top-0",
               isRight ? "left-0" : "right-0",
             )}
@@ -306,9 +308,10 @@ export function ResizableSidebar({
             {children}
             <div
               className={cn(
-                "transition-all duration-200 cursor-ew-resize absolute h-full w-1 z-[20]",
-                !isResizing && "hover:bg-custom-background-90",
-                isResizing && "bg-custom-background-80",
+                "transition-colors duration-150 ease-out cursor-ew-resize absolute h-full w-0.5 z-[20]",
+                "before:absolute before:inset-y-0 before:-inset-x-[3px] before:content-['']",
+                !isResizing && "hover:bg-primary/70",
+                isResizing && "bg-primary/70",
                 "top-0",
                 isRight ? "left-0" : "right-0",
               )}

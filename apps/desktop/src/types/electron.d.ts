@@ -33,7 +33,7 @@ declare global {
     | { type: "downloaded"; version: string }
     | { type: "error"; message: string };
 
-  type DesktopExecutor = "CLAUDE_CODE" | "CODEX";
+  type DesktopExecutor = "CLAUDE_CODE" | "CODEX" | "PI";
 
   type ExecutorInstallResult = {
     ok: boolean;

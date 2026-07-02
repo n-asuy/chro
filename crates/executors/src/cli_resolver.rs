@@ -36,17 +36,13 @@ pub struct ResolvedBinary {
 #[derive(Debug, Clone)]
 pub enum ResolutionSource {
     /// Matched via the manifest's `env_override` variable.
-    EnvOverride {
-        env_name: &'static str,
-    },
+    EnvOverride { env_name: &'static str },
     /// Matched a candidate path under the user's home directory.
     UnderHome(&'static str),
     /// Matched an absolute candidate path.
     Absolute(&'static str),
     /// Matched via `PATH` lookup using `which`.
-    Path {
-        name: &'static str,
-    },
+    Path { name: &'static str },
 }
 
 /// Resolve a CLI binary using the manifest's layered discovery sequence.

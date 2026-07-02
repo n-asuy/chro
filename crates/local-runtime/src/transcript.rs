@@ -20,10 +20,7 @@ impl LocalRuntime {
     /// chronological order) and return the content. The runtime inlines this
     /// content into the executor's prompt at start-of-execution time, so no
     /// transcript file ever lands on disk.
-    pub async fn task_transcript_markdown(
-        &self,
-        task_id: Uuid,
-    ) -> Result<String, RuntimeError> {
+    pub async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError> {
         let runs = db::models::TaskRun::list_by_task_id(self.db.pool(), task_id).await?;
 
         // list_by_task_id returns DESC — reverse to chronological order.
@@ -390,7 +387,10 @@ mod tests {
         ];
         let md = render_raw_transcript(&entries, "task-1");
         assert!(md.contains("First message"), "first message missing:\n{md}");
-        assert!(md.contains("Second message"), "second message missing:\n{md}");
+        assert!(
+            md.contains("Second message"),
+            "second message missing:\n{md}"
+        );
         assert!(md.contains("Third message"), "third message missing:\n{md}");
     }
 

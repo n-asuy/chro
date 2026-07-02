@@ -6,13 +6,15 @@ import { useCallback } from "react";
 import type { PromptEditorHandle } from "../state/prompt-editor-store";
 import type { StartClaudeResponse } from "../types";
 import type { ContextRefPayload } from "../types/context";
+import {
+  type AbortControllerRegistry,
+  isAbortError,
+} from "../utils/abort-controller-registry";
 import { sendTaskMessage } from "../utils/task-message-api";
 
 type MutableRef<T> = {
   current: T;
 };
-
-type SetState<T> = (value: T | ((prev: T) => T)) => void;
 
 export type PreparedPromptPayload = {
   prompt: string;
@@ -31,14 +33,11 @@ type UseSingleSessionControllerArgs = {
   baseBranch: string | null;
   sessionExecutorSelection: ExecutorProfileId | null;
   executorProfileId: ExecutorProfileId | null;
-  isSending: boolean;
-  isStopping: boolean;
   t: TranslationFunction;
   editor: PromptEditorHandle;
   isSessionMountedRef: MutableRef<boolean>;
   latestRouteProjectIdRef: MutableRef<string | null>;
-  activeTaskRunIdRef: MutableRef<string | null>;
-  setIsStopping: SetState<boolean>;
+  abortRegistry: AbortControllerRegistry;
   addErrorMessage: (message: string) => void;
   navigateToSession: (taskId?: string | null, runId?: string | null) => void;
   createPerfRequestId: () => string;
@@ -54,14 +53,11 @@ export function useSingleSessionController({
   baseBranch,
   sessionExecutorSelection,
   executorProfileId,
-  isSending,
-  isStopping,
   t,
   editor,
   isSessionMountedRef,
   latestRouteProjectIdRef,
-  activeTaskRunIdRef,
-  setIsStopping,
+  abortRegistry,
   addErrorMessage,
   navigateToSession,
   createPerfRequestId,
@@ -89,6 +85,9 @@ export function useSingleSessionController({
         options?.mode ?? (forceNewAttempt ? "new" : "auto");
       const requestProjectId = routeProjectId;
       const requestId = options?.requestId ?? createPerfRequestId();
+      // Track the request so a Stop pressed before its run exists (the create
+      // window) can abort the in-flight POST instead of silently doing nothing.
+      const abortController = abortRegistry.create(requestId);
       const finishSendTimer = startPerfTimer("session_send", {
         request_id: requestId,
         task_id: activeTaskId ?? null,
@@ -115,9 +114,11 @@ export function useSingleSessionController({
               selectedSkillIds: payload.selectedSkillIds,
               useWorktree,
               targetBranch: baseBranch,
+              signal: abortController.signal,
             })
           : await desktopFetch<StartClaudeResponse>("/rpc/executions/claude", {
               method: "POST",
+              signal: abortController.signal,
               headers: {
                 "Content-Type": "application/json",
                 "x-perf-request-id": requestId,
@@ -146,13 +147,9 @@ export function useSingleSessionController({
             response_task_id: response.task_id,
             response_task_run_id: response.task_run_id,
           });
-          if (isSessionMountedRef.current) {
-            activeTaskRunIdRef.current = null;
-          }
           return false;
         }
 
-        activeTaskRunIdRef.current = response.task_run_id;
         recordPerfEvent("session_task_run_started", {
           request_id: requestId,
           task_id: response.task_id,
@@ -168,6 +165,12 @@ export function useSingleSessionController({
         });
         return true;
       } catch (error) {
+        if (isAbortError(error)) {
+          // The user cancelled during the create window. Not an error: no toast,
+          // and the prompt stays discarded (the caller drops the optimistic row).
+          finishSendTimer({ outcome: "aborted" });
+          return false;
+        }
         console.error("[submitPrompt] Failed to start Claude execution", error);
         finishSendTimer({
           outcome: "error",
@@ -185,6 +188,8 @@ export function useSingleSessionController({
           editor.restore();
         }
         return false;
+      } finally {
+        abortRegistry.release(requestId);
       }
     },
     [
@@ -202,34 +207,13 @@ export function useSingleSessionController({
       baseBranch,
       isSessionMountedRef,
       latestRouteProjectIdRef,
-      activeTaskRunIdRef,
+      abortRegistry,
       navigateToSession,
       editor,
     ],
   );
 
-  const handleCancel = useCallback(async () => {
-    if (!isSending || isStopping) return;
-    const targetRunId = activeTaskRunIdRef.current ?? null;
-    if (!targetRunId) return;
-
-    try {
-      setIsStopping(true);
-      await desktopFetch(
-        `/rpc/task-runs/${encodeURIComponent(targetRunId)}/cancel`,
-        {
-          method: "POST",
-        },
-      );
-    } catch {
-      // ignore
-    } finally {
-      setIsStopping(false);
-    }
-  }, [isSending, isStopping, activeTaskRunIdRef, taskRunId, setIsStopping]);
-
   return {
     submitPrompt,
-    handleCancel,
   };
 }

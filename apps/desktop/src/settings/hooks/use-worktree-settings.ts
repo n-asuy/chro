@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   fetchWorktreeInfo,
+  fetchWorktreeSizes,
   cleanupWorktrees,
   type WorktreeInfoResponse,
 } from "@/lib/developer-client";
@@ -17,6 +18,11 @@ type WorktreeSettingsState = {
   worktreeInfo: WorktreeInfoResponse | null;
   worktreeLoading: boolean;
   worktreeError: string | null;
+  /** Per-directory sizes (path -> bytes), resolved after the list appears. */
+  worktreeSizes: Record<string, number> | null;
+  /** Sum of all worktree sizes, resolved after the list appears. */
+  worktreeTotalSize: number | null;
+  worktreeSizesLoading: boolean;
   worktreeCleanupState: WorktreeCleanupState;
   worktreeCleanupResult: WorktreeCleanupResult | null;
   selectedPaths: Set<string>;
@@ -40,18 +46,47 @@ export function useWorktreeSettings({
   );
   const [worktreeLoading, setWorktreeLoading] = useState(false);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  const [worktreeSizes, setWorktreeSizes] = useState<Record<
+    string,
+    number
+  > | null>(null);
+  const [worktreeTotalSize, setWorktreeTotalSize] = useState<number | null>(
+    null,
+  );
+  const [worktreeSizesLoading, setWorktreeSizesLoading] = useState(false);
   const [worktreeCleanupState, setWorktreeCleanupState] =
     useState<WorktreeCleanupState>("idle");
   const [worktreeCleanupResult, setWorktreeCleanupResult] =
     useState<WorktreeCleanupResult | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
 
+  // Phase 2: resolve directory sizes after the list is already on screen.
+  // Best-effort — a failure leaves sizes unknown but keeps the list usable.
+  const loadWorktreeSizes = useCallback(async () => {
+    setWorktreeSizesLoading(true);
+    try {
+      const result = await fetchWorktreeSizes();
+      setWorktreeSizes(result.sizes);
+      setWorktreeTotalSize(result.total_size_bytes);
+    } catch {
+      setWorktreeSizes(null);
+      setWorktreeTotalSize(null);
+    } finally {
+      setWorktreeSizesLoading(false);
+    }
+  }, []);
+
+  // Phase 1: enumerate directories (cheap, returns immediately), then kick off
+  // size computation in the background so the list appears without waiting.
   const loadWorktreeInfo = useCallback(async () => {
     setWorktreeLoading(true);
     setWorktreeError(null);
+    setWorktreeSizes(null);
+    setWorktreeTotalSize(null);
     try {
       const info = await fetchWorktreeInfo();
       setWorktreeInfo(info);
+      void loadWorktreeSizes();
     } catch (error) {
       setWorktreeError(
         error instanceof Error
@@ -61,7 +96,7 @@ export function useWorktreeSettings({
     } finally {
       setWorktreeLoading(false);
     }
-  }, [t]);
+  }, [t, loadWorktreeSizes]);
 
   const handleCleanupAllWorktrees = useCallback(async () => {
     setWorktreeCleanupState("cleaning");
@@ -175,6 +210,9 @@ export function useWorktreeSettings({
     worktreeInfo,
     worktreeLoading,
     worktreeError,
+    worktreeSizes,
+    worktreeTotalSize,
+    worktreeSizesLoading,
     worktreeCleanupState,
     worktreeCleanupResult,
     selectedPaths,

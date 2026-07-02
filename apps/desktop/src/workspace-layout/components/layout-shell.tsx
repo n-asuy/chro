@@ -87,7 +87,7 @@ function LayoutShellInner() {
   useSessionTabArchiveSync();
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden bg-muted/40 text-foreground">
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-muted text-foreground">
       <ProjectTabsHeader />
       <PaneDndContext>
         <div className="flex min-h-0 flex-1 gap-1.5 px-1.5 pt-1.5 pb-1.5">

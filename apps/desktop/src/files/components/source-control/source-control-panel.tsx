@@ -1,3 +1,4 @@
+import { useBranchStatus } from "@/hooks/use-branch-status";
 import { cn } from "@/lib/cn";
 import {
   type BranchInfo,
@@ -307,9 +308,26 @@ export const SourceControlPanel = () => {
   const [scope, setScope] = useState<SourceControlScope>(
     scopeTaskRunId ? "all" : "uncommitted",
   );
-  const [baseRef, setBaseRef] = useState(DEFAULT_BASE_REF);
+
+  // The base ref a session branch is compared against in "all" scope. Defaults
+  // to the run's actual target branch (what it forked from and merges back
+  // into) rather than a hardcoded "main", so the comparison reflects reality
+  // instead of always reading "vs main". The dropdown sets an explicit override;
+  // `null` means "follow the run".
+  const { status: branchStatus } = useBranchStatus({
+    taskRunId: scopeTaskRunId,
+    enabled: Boolean(scopeTaskRunId),
+    pollInterval: 30000,
+  });
+  const [baseRefOverride, setBaseRefOverride] = useState<string | null>(null);
+  const baseRef =
+    baseRefOverride ?? branchStatus?.target_branch ?? DEFAULT_BASE_REF;
+
   useEffect(() => {
     setScope(scopeTaskRunId ? "all" : "uncommitted");
+    // Drop any manual base-ref override so the newly scoped run's target branch
+    // takes effect.
+    setBaseRefOverride(null);
   }, [scopeTaskRunId]);
 
   const activeBase = scope === "all" ? baseRef : undefined;
@@ -673,7 +691,7 @@ export const SourceControlPanel = () => {
           {scope === "all" && (
             <ChevronDown
               className={cn(
-                "size-3.5 shrink-0 text-custom-text-300",
+                "size-3.5 shrink-0 text-custom-text-300 transition-transform duration-150 ease-out",
                 branchDropdownOpen && "rotate-180",
               )}
             />
@@ -715,7 +733,7 @@ export const SourceControlPanel = () => {
                     type="button"
                     onClick={() => {
                       // Pick the base ref to compare the branch against.
-                      setBaseRef(branch.name);
+                      setBaseRefOverride(branch.name);
                       setBranchDropdownOpen(false);
                     }}
                     className={cn(

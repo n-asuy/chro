@@ -24,6 +24,7 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/projects", get(list_projects))
         .route("/projects/ensure", post(ensure_project))
+        .route("/projects/general", post(ensure_general_project))
         .route("/projects/:project_id", get(get_project))
         .route("/projects/:project_id/entries", get(list_project_entries))
         .route("/projects/:project_id/media", get(list_project_media))
@@ -57,19 +58,53 @@ pub(super) fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 struct ProjectEnvelope {
     project: ProjectRecord,
+    /// True when this is the hidden "General" project that backs scratch chats
+    /// (keyed on the chats root). The frontend uses it to hide git affordances
+    /// and surface the "Choose project" picker for general chats.
+    is_general: bool,
+}
+
+impl ProjectEnvelope {
+    fn new(project: ProjectRecord) -> Self {
+        let is_general = project.git_repo_path == config::chats_dir().to_string_lossy();
+        Self {
+            project,
+            is_general,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectListItem {
+    #[serde(flatten)]
+    project: ProjectRecord,
+    /// True for the hidden "General" project that backs scratch chats. Lets the
+    /// cross-project inbox keep its sessions visible while dropping sessions
+    /// from projects the user removed from the sidebar.
+    is_general: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct ProjectsEnvelope {
-    projects: Vec<ProjectRecord>,
+    projects: Vec<ProjectListItem>,
 }
 
 /// List every known project. Used by the cross-project inbox to resolve task
 /// `project_id`s to names without each project being open in the sidebar.
-async fn list_projects(
-    State(state): State<AppState>,
-) -> Result<Json<ProjectsEnvelope>, ApiError> {
-    let projects = ProjectRecord::list_all(state.pool()).await?;
+async fn list_projects(State(state): State<AppState>) -> Result<Json<ProjectsEnvelope>, ApiError> {
+    let chats_dir = config::chats_dir();
+    let chats_dir = chats_dir.to_string_lossy();
+    let projects = ProjectRecord::list_all(state.pool())
+        .await?
+        .into_iter()
+        .map(|project| {
+            let is_general = project.git_repo_path == chats_dir;
+            ProjectListItem {
+                project,
+                is_general,
+            }
+        })
+        .collect();
     Ok(Json(ProjectsEnvelope { projects }))
 }
 
@@ -95,7 +130,23 @@ async fn ensure_project(
     )
     .await?;
 
-    Ok(Json(ProjectEnvelope { project }))
+    Ok(Json(ProjectEnvelope::new(project)))
+}
+
+/// Ensure the single hidden "General" project that backs general-purpose
+/// ("scratch") chats, keyed on the persistent chats root. Idempotent: repeated
+/// calls return the same project. The frontend calls this to obtain the slug it
+/// navigates to when opening a new chat, without ever adding it to the projects
+/// tree.
+async fn ensure_general_project(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectEnvelope>, ApiError> {
+    let chats_dir = config::chats_dir();
+    let chats_dir = chats_dir.to_string_lossy();
+    let project =
+        ProjectRecord::ensure_with_name_hint(state.pool(), chats_dir.as_ref(), Some("General"))
+            .await?;
+    Ok(Json(ProjectEnvelope::new(project)))
 }
 
 async fn get_project(
@@ -108,7 +159,7 @@ async fn get_project(
             sqlx::Error::RowNotFound => ApiError::NotFound,
             other => ApiError::Sqlx(other),
         })?;
-    Ok(Json(ProjectEnvelope { project }))
+    Ok(Json(ProjectEnvelope::new(project)))
 }
 
 #[derive(Debug, Deserialize)]

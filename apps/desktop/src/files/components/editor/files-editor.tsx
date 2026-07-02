@@ -1,4 +1,9 @@
 import {
+  isImageExtension as isImageFile,
+  isPdfExtension as isPdfFile,
+  isVideoExtension as isVideoFile,
+} from "@/files/media-types";
+import {
   getProjectAssetUrl,
   getProjectBinaryFileUrl,
   getTaskRunAssetUrl,
@@ -10,11 +15,6 @@ import {
   readWorkspaceFileAtPath,
   searchProjectFiles,
 } from "@/lib/project-client";
-import {
-  isImageExtension as isImageFile,
-  isPdfExtension as isPdfFile,
-  isVideoExtension as isVideoFile,
-} from "@/files/media-types";
 import type { DesktopWorkspaceFile } from "@/types/desktop";
 import { Button } from "@chro/ui/button";
 import { cn } from "@chro/ui/utils";
@@ -33,18 +33,20 @@ import TextareaAutosize from "react-textarea-autosize";
 import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
 import { useAutoSave } from "../../hooks/use-auto-save";
+import { delimiterForExtension } from "../../lib/csv";
 import {
   type Frontmatter,
   combineFrontmatterAndBody,
   parseFrontmatter,
 } from "../../lib/frontmatter";
 import { useFileTreeStore } from "../../state/file-tree-store";
-import { useFilesStore, type WorkspaceRoot } from "../../state/files-store";
+import { type WorkspaceRoot, useFilesStore } from "../../state/files-store";
 import type { FileNode } from "../../types/file-tree";
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from "./codemirror";
 import { FormattingMenu } from "./codemirror/plugins/bubble-menu";
-import { EditorFindBar } from "./editor-find-bar";
 import type { EmbedPluginConfig } from "./codemirror/plugins/prose";
+import { CsvEditor } from "./csv-editor";
+import { EditorFindBar } from "./editor-find-bar";
 import { ExcalidrawEditor } from "./excalidraw-editor";
 import {
   FrontmatterEditor,
@@ -59,6 +61,8 @@ const EXCALIDRAW_EXTENSIONS = new Set(["excalidraw"]);
 const BASE_EXTENSIONS = new Set(["cbase"]);
 
 const HTML_EXTENSIONS = new Set(["html", "htm"]);
+
+const CSV_EXTENSIONS = new Set(["csv", "tsv"]);
 
 /** Extensions rendered as prose (WYSIWYG markdown editor) */
 const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
@@ -83,6 +87,11 @@ const isBaseFile = (extension?: string | null): boolean => {
 const isHtmlFile = (extension?: string | null): boolean => {
   if (!extension) return false;
   return HTML_EXTENSIONS.has(extension.toLowerCase());
+};
+
+const isCsvFile = (extension?: string | null): boolean => {
+  if (!extension) return false;
+  return CSV_EXTENSIONS.has(extension.toLowerCase());
 };
 
 const findNodeByPath = (
@@ -137,24 +146,6 @@ const relativePathForFile = (
   // matching candidate root before reading from disk. Leaving the leading
   // slash in place is what triggers that resolution.
   return filePath;
-};
-
-const computeStats = (content: string) => {
-  const words = content.split(/\s+/).filter(Boolean).length;
-  const characters = content.length;
-  const lines = content.split(/\n/).length;
-  return { words, characters, lines };
-};
-
-const formatTimestamp = (value?: string | null): string => {
-  const date = new Date(value ?? new Date().toISOString());
-  return date.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 };
 
 type FilesEditorProps = {
@@ -281,6 +272,7 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   const isExcalidraw = isExcalidrawFile(fileExtension);
   const isBase = isBaseFile(fileExtension);
   const isHtml = isHtmlFile(fileExtension);
+  const isCsv = isCsvFile(fileExtension);
   const isProse = isProseFile(fileExtension);
   const headerPathLabel = currentNode
     ? relativePath ?? currentNode.path.replace(/^\/+/, "")
@@ -504,8 +496,6 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     workspaceRootPath,
     fileContentVersion,
   ]);
-
-  const stats = useMemo(() => computeStats(content), [content]);
 
   /**
    * Handle internal link click - navigate to the linked file
@@ -747,6 +737,23 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     );
   }
 
+  // Handle .csv / .tsv files with the spreadsheet editor. Edits flow back
+  // through `setContent`, which the shared auto-save hook persists. Task-run
+  // and non-primary workspace roots have no write-back path, so the grid is
+  // read-only there (matching how those files are treated elsewhere).
+  if (isCsv && loadedFilePath === editorFilePath) {
+    return (
+      <CsvEditor
+        content={content}
+        delimiter={delimiterForExtension(fileExtension)}
+        fileName={currentNode?.name ?? fallbackFileName}
+        pathLabel={headerPathLabel}
+        onChange={setContent}
+        readOnly={Boolean(taskRunId) || Boolean(workspaceRootPath)}
+      />
+    );
+  }
+
   // Show loading state when content hasn't been loaded yet for the current file
   // This prevents showing stale content from the previous file
   const isContentStale = loadedFilePath !== editorFilePath;
@@ -973,11 +980,6 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
               </div>
             )}
           </div>
-          <footer className="flex h-10 items-center gap-4 border-t border-border bg-muted px-5 text-[12px] text-muted-foreground">
-            <span>Modified {formatTimestamp(workspaceFile?.modifiedAt)}</span>
-            <span>Lines {stats.lines}</span>
-            <span>Chars {stats.characters}</span>
-          </footer>
         </div>
       </div>
     );
@@ -1057,12 +1059,6 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
             </div>
           </div>
         </div>
-        <footer className="flex h-10 items-center gap-4 border-t border-border bg-muted px-5 text-[12px] text-muted-foreground">
-          <span>Modified {formatTimestamp(workspaceFile?.modifiedAt)}</span>
-          <span>Words {stats.words}</span>
-          <span>Chars {stats.characters}</span>
-          <span>Lines {stats.lines}</span>
-        </footer>
       </div>
     </div>
   );

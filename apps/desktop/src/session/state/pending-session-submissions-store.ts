@@ -24,6 +24,7 @@ export type BeginPendingSessionSubmissionInput = {
 type ScopedBeginPendingSessionSubmissionInput =
   BeginPendingSessionSubmissionInput & {
     scopeId: string;
+    knownTaskIds?: string[];
   };
 
 type PendingSessionSubmissionsByProjectId = Record<
@@ -100,7 +101,17 @@ export const usePendingSessionSubmissionsStore =
 
       set((state) => {
         const pending = state.submissionsByProjectId[key]?.[requestId];
-        if (!pending) {
+        // Finishing is idempotent: a submission settles exactly once. If it is
+        // absent, or already finished, return the SAME state object so zustand
+        // notifies no subscriber. This is the invariant that keeps the settle
+        // effect from looping: that effect re-finishes whenever it sees a
+        // terminal run, and minting a fresh submission object each time would
+        // change its dependency and re-trigger it forever — an infinite update
+        // loop ("Maximum update depth exceeded") for any run that reaches a
+        // terminal status while its optimistic submission is still present
+        // (e.g. a run that fails instantly, such as pi with no API key
+        // configured for its default provider).
+        if (!pending || pending.finishedAt !== null) {
           return state;
         }
 
@@ -147,6 +158,40 @@ export const usePendingSessionSubmissionsStore =
       });
     },
   }));
+
+export interface ProjectPendingSubmissions {
+  projectId: string | null;
+  submissions: PendingSessionSubmission[];
+}
+
+/**
+ * Every pending submission across all projects, grouped by owning project and
+ * ordered oldest-first within each. Read-only: the per-session
+ * `usePendingSessionSubmissions` hook owns settling and cleanup, so this is a
+ * pure overlay source. Lets a cross-project session list show optimistic rows
+ * for in-flight new sessions no matter how the list is grouped.
+ */
+export function useAllPendingSessionSubmissions(): ProjectPendingSubmissions[] {
+  const byProjectId = usePendingSessionSubmissionsStore(
+    (state) => state.submissionsByProjectId,
+  );
+
+  return useMemo(() => {
+    const groups: ProjectPendingSubmissions[] = [];
+    for (const [key, byRequestId] of Object.entries(byProjectId)) {
+      const submissions = Object.values(byRequestId).sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
+      if (submissions.length === 0) continue;
+      groups.push({
+        projectId: key === UNRESOLVED_PROJECT_KEY ? null : key,
+        submissions,
+      });
+    }
+    return groups;
+  }, [byProjectId]);
+}
 
 export function usePendingSessionSubmissions(
   projectId: string | null,

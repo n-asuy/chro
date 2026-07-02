@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 type WindowMode = "onboarding" | "session";
-type DesktopExecutor = "CLAUDE_CODE" | "CODEX";
+type DesktopExecutor = "CLAUDE_CODE" | "CODEX" | "PI";
 
 type UpdateStatus =
   | { type: "checking" }

@@ -95,6 +95,14 @@ export interface WorkspaceRoot {
   children?: FileNode[];
 }
 
+/**
+ * How the file tree presents a task run's worktree. "changed" lists only the
+ * files the agent touched (sourced from the run's diff); "all" lists the whole
+ * worktree directory tree (the same entries RPC the project root uses). Only
+ * meaningful while a worktree scope is active.
+ */
+export type WorktreeTreeView = "changed" | "all";
+
 interface FilesState {
   // Project context
   projectId: string | null;
@@ -104,6 +112,11 @@ interface FilesState {
   // file opens are routed through that run and project-scoped mutations are
   // disabled. Null means the project root is the active scope.
   scopeTaskRunId: string | null;
+
+  // How the worktree tree is presented (changed-only vs. full listing). Sticky
+  // across sessions so the user's choice persists while switching runs. Ignored
+  // outside worktree scope (the project root always lists everything).
+  worktreeTreeView: WorktreeTreeView;
 
   // Tree state
   roots: WorkspaceRoot[];
@@ -143,6 +156,9 @@ interface FilesActions {
   // Active workspace scope (see `scopeTaskRunId`). Setting a non-null run id
   // switches the tree into read-only worktree mode.
   setScopeTaskRunId: (taskRunId: string | null) => void;
+
+  // Switch the worktree tree between changed-only and full-listing views.
+  setWorktreeTreeView: (view: WorktreeTreeView) => void;
 
   // Root management
   setRoots: (roots: WorkspaceRoot[]) => void;
@@ -215,6 +231,7 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   // Initial state
   projectId: null,
   scopeTaskRunId: null,
+  worktreeTreeView: "changed",
   roots: [],
   rootPath: null,
   selectedPaths: [],
@@ -232,6 +249,11 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   setScopeTaskRunId: (taskRunId) => {
     if (get().scopeTaskRunId === taskRunId) return;
     set({ scopeTaskRunId: taskRunId });
+  },
+
+  setWorktreeTreeView: (view) => {
+    if (get().worktreeTreeView === view) return;
+    set({ worktreeTreeView: view });
   },
 
   // Root management

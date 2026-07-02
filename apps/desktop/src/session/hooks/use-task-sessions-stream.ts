@@ -36,9 +36,10 @@ export function useTaskSessionsStream({
     [],
   );
 
+  const active = enabled && !!taskId;
   const { data, isConnected, error } = useJsonPatchWsStream<TaskSessionsState>(
     endpoint,
-    enabled && !!taskId,
+    active,
     initialData,
   );
 
@@ -70,7 +71,9 @@ export function useTaskSessionsStream({
     return result;
   }, [sessions]);
 
-  const isLoading = !data && !error;
+  // A disabled stream (no task, or not enabled) has nothing to load, so it is
+  // never "loading"; see the matching note in use-task-runs-stream.
+  const isLoading = active && !data && !error;
 
   return {
     sessions,

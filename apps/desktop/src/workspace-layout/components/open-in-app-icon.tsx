@@ -13,6 +13,7 @@ const iconUrls = {
   finder: new URL("./open-in-app-icons/finder.png", import.meta.url).href,
   ghostty: new URL("./open-in-app-icons/ghostty.svg", import.meta.url).href,
   iterm2: new URL("./open-in-app-icons/iterm2.svg", import.meta.url).href,
+  obsidian: new URL("./open-in-app-icons/obsidian.svg", import.meta.url).href,
   powershell: new URL("./open-in-app-icons/powershell.svg", import.meta.url)
     .href,
   terminal: new URL("./open-in-app-icons/terminal.svg", import.meta.url).href,

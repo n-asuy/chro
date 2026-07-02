@@ -1,5 +1,9 @@
 import { useLanguage } from "@/i18n";
-import { revealInFinder } from "@/lib/project-client";
+import {
+  resolveTaskRunAbsolutePath,
+  revealInFinder,
+  revealTaskRunInFinder,
+} from "@/lib/project-client";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -56,9 +60,15 @@ interface TreeContextMenuProps {
   onRemoveFolderFromProject?: (path: string) => void;
   /**
    * Read-only scope (a session sandbox): mutating actions are suppressed and
-   * only scope-correct, non-destructive items (copy relative path) remain.
+   * only scope-correct, non-destructive items (copy paths, reveal) remain.
    */
   readOnly?: boolean;
+  /**
+   * Active task-run id when this tree is scoped to a session sandbox. Routes
+   * path resolution and reveal through the run's worktree instead of the
+   * project checkout. Null/undefined in project scope.
+   */
+  scopeTaskRunId?: string | null;
 }
 
 export const TreeContextMenu = ({
@@ -75,6 +85,7 @@ export const TreeContextMenu = ({
   onAddFolderToProject,
   onRemoveFolderFromProject,
   readOnly = false,
+  scopeTaskRunId = null,
 }: TreeContextMenuProps) => {
   const { t } = useLanguage();
   const projectId = useProjectId();
@@ -125,6 +136,29 @@ export const TreeContextMenu = ({
     });
   };
 
+  // Session-sandbox variants: the worktree root lives server-side only, so both
+  // the absolute path and the reveal are resolved by the run-scoped endpoints
+  // against the run's worktree rather than the project checkout.
+  const handleCopyAbsolutePathWorktree = async () => {
+    if (!scopeTaskRunId) return;
+    try {
+      const absolutePath = await resolveTaskRunAbsolutePath(
+        scopeTaskRunId,
+        node.path,
+      );
+      await navigator.clipboard.writeText(absolutePath);
+    } catch (err) {
+      console.warn("[tree-context-menu] Failed to copy absolute path:", err);
+    }
+  };
+
+  const handleRevealInFinderWorktree = () => {
+    if (!scopeTaskRunId) return;
+    revealTaskRunInFinder(scopeTaskRunId, node.path).catch((err) => {
+      console.warn("[tree-context-menu] Failed to reveal in finder:", err);
+    });
+  };
+
   const isDirectory = node.type === FileNodeType.Directory;
 
   // For directories, create inside; for files, create in parent directory
@@ -140,9 +174,9 @@ export const TreeContextMenu = ({
     onCreateFolder(targetParentPath);
   };
 
-  // Read-only scope (session sandbox): no create/rename/delete/reveal — those
-  // are project-scoped. Root rows get no menu; file/dir rows keep only the
-  // scope-agnostic "copy relative path".
+  // Read-only scope (session sandbox): no create/rename/delete — those mutate
+  // the project. Root rows get no menu; file/dir rows keep the non-destructive,
+  // worktree-resolved items (copy paths + reveal in the run's sandbox).
   if (readOnly) {
     if (isWorkspaceRoot) {
       return <div className="block">{children}</div>;
@@ -154,11 +188,28 @@ export const TreeContextMenu = ({
         </ContextMenuTrigger>
         <ContextMenuContent className="z-20 w-48 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
           <ContextMenuItem
+            onSelect={handleCopyAbsolutePathWorktree}
+            disabled={!scopeTaskRunId}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+          >
+            <Copy className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("copyFullPath")}</span>
+          </ContextMenuItem>
+          <ContextMenuItem
             onSelect={handleCopyRelativePath}
             className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
           >
             <FileText className="h-3.5 w-3.5 shrink-0" />
             <span>{t("copyRelativePath")}</span>
+          </ContextMenuItem>
+          <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+          <ContextMenuItem
+            onSelect={handleRevealInFinderWorktree}
+            disabled={!scopeTaskRunId}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+          >
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("revealInFinder")}</span>
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>

@@ -1,10 +1,14 @@
 import { desktopFetch } from "./backend-client";
 
 // Base coding agent types (matches BaseCodingAgent enum in Rust)
-export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX";
+export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX" | "PI";
 
 // Reasoning effort (Codex only; matches ReasoningEffort enum in Rust, kebab-case)
 export type ReasoningEffort = "low" | "medium" | "high" | "x-high";
+
+// How Claude Code runs (matches ClaudeExecutionMode enum in Rust, snake_case).
+// "pty" hosts the interactive TUI; "print" runs headless `claude -p`.
+export type ClaudeExecutionMode = "pty" | "print";
 
 // Current executor profile selection
 export type ExecutorProfileId = {
@@ -23,25 +27,16 @@ export type ExecutorConfigs = {
   executors: Record<BaseCodingAgent, ExecutorConfig>;
 };
 
-// Model preset for display
-type ExecutorModelPreset = {
-  id: string;
-  name: string;
-};
-
-export type ExecutorProfileOptions = {
-  anthropic_models: ExecutorModelPreset[];
-};
-
 type ExecutorProfileResponse = {
   profile: ExecutorProfileId;
   profiles: ExecutorConfigs;
-  options: ExecutorProfileOptions;
+  claude_execution_mode: ClaudeExecutionMode;
 };
 
 export type UpdateExecutorProfileRequest = {
   executor?: BaseCodingAgent;
   variant?: string | null;
+  claude_execution_mode?: ClaudeExecutionMode;
 };
 
 type ClaudeVersionResult =
@@ -110,6 +105,7 @@ export type AvailabilityInfo =
 export type AuthStatusResult = {
   claude_code: AvailabilityInfo;
   codex: AvailabilityInfo;
+  pi: AvailabilityInfo;
 };
 
 export type ExecutorInstallInfo = {
@@ -122,6 +118,7 @@ export type ExecutorInstallInfo = {
 export type ExecutorInstallStatusResult = {
   claude_code: ExecutorInstallInfo;
   codex: ExecutorInstallInfo;
+  pi: ExecutorInstallInfo;
   git: ExecutorInstallInfo;
 };
 
@@ -129,6 +126,73 @@ export type InstallableTool = BaseCodingAgent | "GIT";
 
 export const fetchAuthStatus = async (): Promise<AuthStatusResult> => {
   return desktopFetch<AuthStatusResult>("/rpc/executor/auth-status");
+};
+
+// A pi model the user can select. `value` is pi's `provider/id` form, passed
+// verbatim as `--model`; `label` is the human-facing name.
+export type PiModelOption = {
+  value: string;
+  label: string;
+  provider: string;
+};
+
+let piModelsCache: Promise<PiModelOption[]> | null = null;
+
+/**
+ * pi's configured models, queried from the agent (`get_available_models` +
+ * custom providers), narrowed to the providers the user has set up. Cached for
+ * the app session; pass `refresh` after a sign-in to re-query.
+ */
+export const fetchPiModels = (refresh = false): Promise<PiModelOption[]> => {
+  if (refresh || !piModelsCache) {
+    piModelsCache = desktopFetch<PiModelOption[]>(
+      "/rpc/executor/pi/models",
+    ).catch(() => []);
+  }
+  return piModelsCache;
+};
+
+// A provider configured in pi's auth file. Never carries the secret value.
+export type PiCredentialInfo = {
+  provider: string;
+  /** "api_key" | "oauth" | "unknown" */
+  kind: string;
+};
+
+export const fetchPiCredentials = async (): Promise<PiCredentialInfo[]> => {
+  return desktopFetch<PiCredentialInfo[]>("/rpc/executor/pi/credentials");
+};
+
+type PiCredentialMutationResult = { ok: boolean; message?: string };
+
+/** Store an API key for a pi provider (written to `~/.pi/agent/auth.json`). */
+export const setPiApiKey = async (
+  provider: string,
+  key: string,
+): Promise<PiCredentialMutationResult> => {
+  const result = await desktopFetch<PiCredentialMutationResult>(
+    "/rpc/executor/pi/api-key",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, key }),
+    },
+  );
+  // New credentials may unlock new providers' models.
+  if (result.ok) void fetchPiModels(true);
+  return result;
+};
+
+export const deletePiCredential = async (
+  provider: string,
+): Promise<PiCredentialMutationResult> => {
+  const params = new URLSearchParams({ provider });
+  const result = await desktopFetch<PiCredentialMutationResult>(
+    `/rpc/executor/pi/api-key?${params.toString()}`,
+    { method: "DELETE" },
+  );
+  if (result.ok) void fetchPiModels(true);
+  return result;
 };
 
 export const fetchExecutorInstallStatus =

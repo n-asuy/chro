@@ -35,6 +35,13 @@ pub fn map_transcript_line(raw: &str) -> Option<String> {
     if line_type == "assistant" && is_synthetic_no_response_line(&value) {
         return None;
     }
+    // CLI API-error lines (rate limit, usage limit, ...) are synthetic
+    // bookkeeping the CLI writes before ending the turn, not model output. They
+    // are surfaced as a structured, retryable run outcome instead (see the run
+    // supervisor), so they must not also render as a plain assistant message.
+    if line_type == "assistant" && is_api_error_value(&value) {
+        return None;
+    }
 
     let mut message = value.get("message")?.clone();
     if !message.is_object() {
@@ -97,6 +104,55 @@ fn is_synthetic_no_response_line(value: &Value) -> bool {
         }
     }
     saw_sentinel
+}
+
+/// True when an assistant transcript line carries the CLI's `isApiErrorMessage`
+/// flag. The CLI sets it on the synthetic message it writes for a server-side
+/// API error (rate limit, usage limit, ...) just before ending the turn.
+fn is_api_error_value(value: &Value) -> bool {
+    value
+        .get("isApiErrorMessage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The message text of a CLI API-error assistant line, or `None` when the line
+/// is not one. The run supervisor uses it to end the turn on a recoverable
+/// error carrying the CLI's exact text (e.g. the rate-limit or usage-limit
+/// message) instead of recording a silent success. The returned text may be
+/// empty when the line carries no text block; the caller substitutes a default.
+pub fn api_error_line_text(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    if !is_api_error_value(&value) {
+        return None;
+    }
+    Some(message_text(value.get("message")?))
+}
+
+/// Concatenated text of a message's `content`, accepting either a plain string
+/// or an array of content blocks (only `text` blocks contribute).
+fn message_text(message: &Value) -> String {
+    let Some(content) = message.get("content") else {
+        return String::new();
+    };
+    if let Some(text) = content.as_str() {
+        return text.trim().to_string();
+    }
+    let Some(items) = content.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for item in items {
+        if item.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(chunk) = item.get("text").and_then(Value::as_str)
+        {
+            out.push_str(chunk);
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Incremental reader over an append-only transcript file.
@@ -226,6 +282,40 @@ mod tests {
             value["message"]["content"][0]["text"],
             "No response requested."
         );
+    }
+
+    #[test]
+    fn skips_api_error_assistant_lines() {
+        let raw = r#"{"type":"assistant","sessionId":"s-1","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}]}}"#;
+        assert_eq!(map_transcript_line(raw), None);
+    }
+
+    #[test]
+    fn api_error_line_text_extracts_cli_message() {
+        let raw = r#"{"type":"assistant","sessionId":"s-1","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets 4pm (Asia/Tokyo)"}]}}"#;
+        assert_eq!(
+            api_error_line_text(raw).as_deref(),
+            Some("You've hit your session limit · resets 4pm (Asia/Tokyo)")
+        );
+    }
+
+    #[test]
+    fn api_error_line_text_handles_string_content() {
+        let raw = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":"API Error: overloaded"}}"#;
+        assert_eq!(
+            api_error_line_text(raw).as_deref(),
+            Some("API Error: overloaded")
+        );
+    }
+
+    #[test]
+    fn api_error_line_text_ignores_normal_assistant_lines() {
+        let raw = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here is the answer."}]}}"#;
+        assert_eq!(api_error_line_text(raw), None);
+
+        let user =
+            r#"{"type":"user","isApiErrorMessage":true,"message":{"role":"user","content":"hi"}}"#;
+        assert_eq!(api_error_line_text(user), None);
     }
 
     #[tokio::test]

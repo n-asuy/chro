@@ -123,6 +123,7 @@ export function FileTreeDockPanel() {
   const expandPath = useFileTreeStore((s) => s.expandPath);
   const replaceExpandedPaths = useFileTreeStore((s) => s.replaceExpandedPaths);
   const fileTree = useFilesStore((s) => s.fileTree);
+  const worktreeTreeView = useFilesStore((s) => s.worktreeTreeView);
   const revealRequest = useFilesStore((s) => s.revealRequest);
   const expandedPaths = useFileTreeStore((s) => s.expandedPaths);
   const handledRevealTokenRef = useRef(0);
@@ -151,10 +152,11 @@ export function FileTreeDockPanel() {
     return () => setScopeTaskRunId(null);
   }, [setScopeTaskRunId]);
 
-  // In session scope the tree shows ONLY the files the agent changed,
+  // In session scope the "changed" view shows ONLY the files the agent changed,
   // sourced from the run's diff stream. stats_only keeps it light: we
   // only need the changed paths, not file contents — the session tree is plain
-  // (no diff colors), so change kinds aren't needed either.
+  // (no diff colors), so change kinds aren't needed either. The stream stays
+  // subscribed in the "all" view too, so toggling back is instant.
   const { diffs: scopeDiffs } = useDiffStream({
     taskRunId: scopeTaskRunId,
     statsOnly: true,
@@ -165,9 +167,10 @@ export function FileTreeDockPanel() {
   // Build the changed-files-only tree and expand it (including the synthetic
   // root) so every change is visible by default. Expansion is ephemeral
   // (replaceExpandedPaths does not persist), so it never pollutes the project
-  // tree's saved state.
+  // tree's saved state. Skipped in the "all" view, which loads the full
+  // worktree listing instead (effect below).
   useEffect(() => {
-    if (!scopeTaskRunId) return;
+    if (!scopeTaskRunId || worktreeTreeView !== "changed") return;
     const tree = buildChangedFilesTree(changedPaths);
     setFileTree(tree);
     const expanded = new Set(collectDirectoryPaths(tree));
@@ -175,7 +178,47 @@ export function FileTreeDockPanel() {
     replaceExpandedPaths(expanded);
   }, [
     scopeTaskRunId,
+    worktreeTreeView,
     changedPaths,
+    primaryRoot,
+    setFileTree,
+    replaceExpandedPaths,
+  ]);
+
+  // In the "all" view the tree shows the full worktree directory listing — the
+  // same entries RPC the project root uses, scoped to the run's worktree. Only
+  // the top level loads here; deeper folders hydrate on expand via
+  // hydrateDirectory, which already routes through listTaskRunEntries while in
+  // scope. Just the synthetic root is expanded so the user drives the rest, and
+  // the listing loads once per scope so expanding folders is never reset out
+  // from under the user as the agent works.
+  useEffect(() => {
+    if (!scopeTaskRunId || worktreeTreeView !== "all") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const entries = await listTaskRunEntries(scopeTaskRunId, {
+          detail: "basic",
+        });
+        if (cancelled) return;
+        setFileTree(entries.map((e) => entryToFileNode(e)));
+        const expanded = new Set<string>();
+        if (primaryRoot) expanded.add(primaryRoot.path);
+        replaceExpandedPaths(expanded);
+      } catch (error) {
+        if (cancelled) return;
+        console.error(
+          "[file-tree-dock-panel] Failed to load worktree entries:",
+          error,
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    scopeTaskRunId,
+    worktreeTreeView,
     primaryRoot,
     setFileTree,
     replaceExpandedPaths,

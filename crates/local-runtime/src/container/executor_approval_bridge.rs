@@ -44,7 +44,8 @@ impl ExecutorApprovalBridge {
         let Some(task_id) = self.task_id else {
             return;
         };
-        if let Err(error) = TaskRecord::set_awaiting_input(self.db.pool(), task_id, awaiting).await {
+        if let Err(error) = TaskRecord::set_awaiting_input(self.db.pool(), task_id, awaiting).await
+        {
             tracing::warn!(
                 %task_id,
                 awaiting,

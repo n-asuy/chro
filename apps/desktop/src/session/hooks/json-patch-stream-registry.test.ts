@@ -9,6 +9,9 @@ import {
 /** Behavioral contract constant mirrored from the registry. */
 const TEARDOWN_GRACE_MS = 5_000;
 const FIRST_MESSAGE_TIMEOUT_MS = 15_000;
+const CONNECT_TIMEOUT_MS = 15_000;
+const MAX_RECONNECT_DELAY_MS = 8_000;
+const MAX_INITIAL_CONNECT_ATTEMPTS = 5;
 
 /** Controllable WebSocket double: tests drive open/message/close explicitly. */
 class FakeWebSocket {
@@ -176,6 +179,44 @@ describe("json-patch-stream-registry", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
+  it("gives up reconnecting after repeated failures that never connected", () => {
+    const endpoint = uniqueEndpoint();
+    acquireStream(endpoint, initialData, makeSubscriber());
+
+    // Each socket is rejected at the handshake: it closes (1006) without ever
+    // firing `onopen`. Drive many close→backoff cycles; the registry must stop
+    // opening new sockets instead of storming forever.
+    for (let i = 0; i < 20; i++) {
+      FakeWebSocket.last().driveServerClose(1006, false);
+      vi.advanceTimersByTime(MAX_RECONNECT_DELAY_MS);
+    }
+
+    // initial attempt + at most MAX_INITIAL_CONNECT_ATTEMPTS retries
+    expect(FakeWebSocket.instances.length).toBeLessThanOrEqual(
+      MAX_INITIAL_CONNECT_ATTEMPTS + 1,
+    );
+    expect(getStreamSnapshot(endpoint).error).toBeTruthy();
+    expect(getStreamSnapshot(endpoint).isConnected).toBe(false);
+  });
+
+  it("keeps reconnecting indefinitely once it has connected at least once", () => {
+    const endpoint = uniqueEndpoint();
+    acquireStream(endpoint, initialData, makeSubscriber());
+
+    // Connect once, then suffer many unclean drops, reconnecting each time.
+    // A stream that has proven reachable (e.g. survives a server restart) must
+    // never hit the initial-connect give-up cap.
+    FakeWebSocket.last().driveOpen();
+    for (let i = 0; i < 20; i++) {
+      FakeWebSocket.last().driveServerClose(1006, false);
+      vi.advanceTimersByTime(MAX_RECONNECT_DELAY_MS);
+      FakeWebSocket.last().driveOpen();
+    }
+
+    expect(getStreamSnapshot(endpoint).isConnected).toBe(true);
+    expect(getStreamSnapshot(endpoint).error).toBeNull();
+  });
+
   it("does not reconnect after a clean finish", () => {
     const endpoint = uniqueEndpoint();
     acquireStream(endpoint, initialData, makeSubscriber());
@@ -195,5 +236,44 @@ describe("json-patch-stream-registry", () => {
     expect(getStreamSnapshot(endpoint).error).toBe(
       "Stream stalled: no data received",
     );
+  });
+
+  it("force-closes and reconnects when the upgrade never opens (connect watchdog)", () => {
+    const endpoint = uniqueEndpoint();
+    acquireStream(endpoint, initialData, makeSubscriber());
+    const hung = FakeWebSocket.last();
+
+    // The socket never fires `onopen` (hung upgrade — e.g. backend blocked on a
+    // locked DB). Without the connect watchdog this would spin forever, since
+    // the first-message watchdog is only armed inside `onopen`.
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS);
+
+    // Error flips the consumer's `!data && !error` loading state off, and the
+    // hung socket is closed so the reconnect path can run.
+    expect(getStreamSnapshot(endpoint).error).toBe("Stream connect timed out");
+    expect(hung.closed).toBe(true);
+
+    // A backed-off reconnect opens a fresh socket; if it opens, the stream
+    // recovers (e.g. once the DB lock clears).
+    vi.advanceTimersByTime(MAX_RECONNECT_DELAY_MS);
+    expect(FakeWebSocket.instances.length).toBeGreaterThan(1);
+    FakeWebSocket.last().driveOpen();
+    FakeWebSocket.last().driveMessage(snapshotReplace({ t1: { id: "t1" } }));
+    vi.advanceTimersByTime(0);
+    expect(getStreamSnapshot(endpoint).error).toBeNull();
+    expect(getStreamSnapshot(endpoint).data).toEqual({
+      tasks: { t1: { id: "t1" } },
+    });
+  });
+
+  it("does not arm the connect watchdog for idle event-bus streams", () => {
+    const endpoint = uniqueEndpoint();
+    // expectInitialMessage = false: an event bus may legitimately stay silent.
+    acquireStream(endpoint, initialData, makeSubscriber(), false);
+    const ws = FakeWebSocket.last();
+
+    vi.advanceTimersByTime(CONNECT_TIMEOUT_MS + 1000);
+    expect(ws.closed).toBe(false);
+    expect(getStreamSnapshot(endpoint).error).toBeNull();
   });
 });

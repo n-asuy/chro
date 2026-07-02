@@ -30,7 +30,7 @@ import { useProximityHover } from "../hooks/use-proximity-hover";
  */
 
 const SPRING_FAST = { type: "spring", duration: 0.08, bounce: 0 } as const;
-const SPRING_SLOW = { type: "spring", duration: 0.24, bounce: 0.15 } as const;
+const SPRING_SLOW = { type: "spring", duration: 0.24, bounce: 0.1 } as const;
 
 // Fixed shape scale (the upstream component reads these from a shape
 // context; chro uses one rounded scale everywhere).

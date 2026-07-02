@@ -27,6 +27,20 @@ pub fn config_path() -> PathBuf {
     asset_dir().join("config.json")
 }
 
+/// Persistent root for general-purpose ("scratch") chats. Each scratch chat
+/// runs in a per-chat subfolder under this directory, and the hidden "General"
+/// project is keyed on this path. Created on first use so it can serve as a
+/// valid, existing workspace path.
+pub fn chats_dir() -> PathBuf {
+    let path = asset_dir().join("chats");
+
+    if !path.exists() {
+        std::fs::create_dir_all(&path).expect("Failed to create chats directory");
+    }
+
+    path
+}
+
 pub fn profiles_path() -> PathBuf {
     asset_dir().join("profiles.json")
 }

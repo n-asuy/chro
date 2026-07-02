@@ -5,6 +5,41 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Self-hosted Inter (variable, latin). The UI font was referenced everywhere as
+ * `var(--font-inter)` but the variable was never defined and the family was
+ * never loaded, so the app silently fell back to the OS default with no
+ * controlled metrics. Ship the font for real and define the variable once.
+ */
+@font-face {
+  font-family: "InterVariable";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./fonts/InterVariable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "InterVariable";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./fonts/InterVariable-Italic.woff2") format("woff2");
+}
+:root {
+  --font-inter: "InterVariable";
+  /*
+   * Motion vocabulary (single source of truth). Two curves only:
+   *   --ease-out      enters / reveals / transforms (decelerate)
+   *   --ease-standard state + color transitions (symmetric)
+   * Duration tiers map to Tailwind: 150ms fast (hover/chevron/resize),
+   * ~200ms base (overlays/view), ~300ms disclosure reveals.
+   * --ease-out equals Tailwind's `ease-out`, so utility classes and raw CSS
+   * share the exact same curve.
+   */
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 @layer components {
   /*
    * Active workspace tab: browser-style shape whose rounded top and
@@ -90,7 +125,7 @@
 
   [data-session-select-active="true"] [data-session-select-text="true"]::selection,
   [data-session-select-active="true"] [data-session-select-text="true"] *::selection {
-    background: rgba(37, 99, 235, 0.28);
+    background: hsl(var(--primary) / 0.28);
   }
 
   [data-session-select-active="true"] [data-session-select-text="true"] button,
@@ -104,85 +139,83 @@
 }
 @layer base {
   html {
-    font-family: "Inter", sans-serif;
+    font-family: var(--font-inter), "Inter", system-ui, -apple-system,
+      BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: "cv05" 1, "calt" 1;
+    letter-spacing: -0.006em;
+    text-rendering: optimizeLegibility;
   }
 
   :root {
-    color-scheme: light !important;
+    color-scheme: light;
 
-    --color-primary-10: 229, 243, 250;
-    --color-primary-20: 216, 237, 248;
-    --color-primary-30: 199, 229, 244;
-    --color-primary-40: 169, 214, 239;
-    --color-primary-50: 144, 202, 234;
-    --color-primary-60: 109, 186, 227;
-    --color-primary-70: 75, 170, 221;
-    --color-primary-80: 41, 154, 214;
-    --color-primary-90: 34, 129, 180;
-    --color-primary-100: 0, 99, 153;
-    --color-primary-200: 0, 92, 143;
-    --color-primary-300: 0, 86, 133;
-    --color-primary-400: 0, 77, 117;
-    --color-primary-500: 0, 66, 102;
-    --color-primary-600: 0, 53, 82;
-    --color-primary-700: 0, 43, 66;
-    --color-primary-800: 0, 33, 51;
-    --color-primary-900: 0, 23, 36;
+    /* Brand azure ramp (generated from a single base; see .claude/palette-gen.mjs) */
+    --color-primary-10: 236, 243, 250;
+    --color-primary-20: 221, 234, 246;
+    --color-primary-30: 197, 220, 239;
+    --color-primary-40: 163, 199, 230;
+    --color-primary-50: 129, 179, 221;
+    --color-primary-60: 90, 155, 211;
+    --color-primary-70: 51, 132, 200;
+    --color-primary-80: 27, 117, 194;
+    --color-primary-90: 11, 99, 174;
+    --color-primary-100: 12, 108, 190;
+    --color-primary-200: 11, 101, 177;
+    --color-primary-300: 11, 94, 164;
+    --color-primary-400: 10, 84, 146;
+    --color-primary-500: 9, 75, 129;
+    --color-primary-600: 9, 66, 113;
+    --color-primary-700: 8, 59, 100;
+    --color-primary-800: 7, 50, 84;
+    --color-primary-900: 7, 43, 71;
 
+    /* Cool-neutral surfaces: depth comes from borders + tonal steps, not float */
     --color-background-100: 255, 255, 255; /* primary bg */
-    --color-background-90: 249, 249, 249; /* secondary bg - cleaner, closer to white */
-    --color-background-80: 240, 240, 240; /* tertiary bg - softer gray */
+    --color-background-90: 246, 247, 249; /* secondary bg */
+    --color-background-80: 238, 240, 243; /* tertiary bg */
 
-    --color-text-100: 23, 23, 23; /* primary text */
-    --color-text-200: 58, 58, 58; /* secondary text */
-    --color-text-300: 82, 82, 82; /* tertiary text */
-    --color-text-400: 163, 163, 163; /* placeholder text */
+    --color-text-100: 23, 24, 27; /* primary text */
+    --color-text-200: 61, 64, 70; /* secondary text */
+    --color-text-300: 98, 102, 110; /* tertiary text */
+    --color-text-400: 155, 161, 170; /* placeholder text */
 
-    --color-scrollbar: 163, 163, 163; /* scrollbar thumb */
+    --color-scrollbar: 179, 184, 192; /* scrollbar thumb */
 
-    --color-border-100: 245, 245, 245; /* subtle border= 1 */
-    --color-border-200: 229, 229, 229; /* subtle border- 2 */
-    --color-border-300: 212, 212, 212; /* strong border- 1 */
-    --color-border-400: 185, 185, 185; /* strong border- 2 */
+    --color-border-100: 241, 242, 245; /* subtle border 1 */
+    --color-border-200: 230, 232, 236; /* subtle border 2 */
+    --color-border-300: 218, 221, 227; /* strong border 1 */
+    --color-border-400: 201, 205, 213; /* strong border 2 */
 
-    --color-shadow-2xs:
-      0px 0px 1px 0px rgba(23, 23, 23, 0.06),
-      0px 1px 2px 0px rgba(23, 23, 23, 0.06),
-      0px 1px 2px 0px rgba(23, 23, 23, 0.14);
+    /*
+     * Restrained elevation. Shadows are reserved for true overlays (menus,
+     * popovers, modals); surfaces in the layout lean on borders + tonal steps.
+     * Single soft layer + a hairline contact shadow reads as crafted depth
+     * rather than the floating-card look that flattened the UI.
+     */
+    --color-shadow-2xs: 0px 1px 1px 0px rgba(17, 18, 21, 0.05);
     --color-shadow-xs:
-      0px 1px 2px 0px rgba(0, 0, 0, 0.16),
-      0px 2px 4px 0px rgba(16, 24, 40, 0.12),
-      0px 1px 8px -1px rgba(16, 24, 40, 0.1);
+      0px 1px 2px 0px rgba(17, 18, 21, 0.06),
+      0px 1px 1px -0.5px rgba(17, 18, 21, 0.04);
     --color-shadow-sm:
-      0px 1px 4px 0px rgba(0, 0, 0, 0.01), 0px 4px 8px 0px rgba(0, 0, 0, 0.02),
-      0px 1px 12px 0px rgba(0, 0, 0, 0.12);
+      0px 1px 2px 0px rgba(17, 18, 21, 0.05),
+      0px 2px 5px -1px rgba(17, 18, 21, 0.06);
     --color-shadow-rg:
-      0px 3px 6px 0px rgba(0, 0, 0, 0.1),
-      0px 4px 4px 0px rgba(16, 24, 40, 0.08),
-      0px 1px 12px 0px rgba(16, 24, 40, 0.04);
+      0px 2px 4px -1px rgba(17, 18, 21, 0.06),
+      0px 4px 10px -2px rgba(17, 18, 21, 0.07);
     --color-shadow-md:
-      0px 4px 8px 0px rgba(0, 0, 0, 0.12),
-      0px 6px 12px 0px rgba(16, 24, 40, 0.12),
-      0px 1px 16px 0px rgba(16, 24, 40, 0.12);
+      0px 2px 4px -1px rgba(17, 18, 21, 0.06),
+      0px 8px 18px -3px rgba(17, 18, 21, 0.09);
     --color-shadow-lg:
-      0px 6px 12px 0px rgba(0, 0, 0, 0.12),
-      0px 8px 16px 0px rgba(0, 0, 0, 0.12),
-      0px 1px 24px 0px rgba(16, 24, 40, 0.12);
+      0px 4px 8px -2px rgba(17, 18, 21, 0.07),
+      0px 12px 26px -4px rgba(17, 18, 21, 0.11);
     --color-shadow-xl:
-      0px 0px 18px 0px rgba(0, 0, 0, 0.16),
-      0px 0px 24px 0px rgba(16, 24, 40, 0.16),
-      0px 0px 52px 0px rgba(16, 24, 40, 0.16);
+      0px 6px 12px -4px rgba(17, 18, 21, 0.08),
+      0px 18px 40px -6px rgba(17, 18, 21, 0.14);
     --color-shadow-2xl:
-      0px 8px 16px 0px rgba(0, 0, 0, 0.12),
-      0px 12px 24px 0px rgba(16, 24, 40, 0.12),
-      0px 1px 32px 0px rgba(16, 24, 40, 0.12);
-    --color-shadow-3xl:
-      0px 12px 24px 0px rgba(0, 0, 0, 0.12),
-      0px 16px 32px 0px rgba(0, 0, 0, 0.12),
-      0px 1px 48px 0px rgba(16, 24, 40, 0.12);
-    --color-shadow-4xl:
-      0px 8px 40px 0px rgba(0, 0, 61, 0.05),
-      0px 12px 32px -16px rgba(0, 0, 0, 0.05);
+      0px 8px 16px -6px rgba(17, 18, 21, 0.10),
+      0px 26px 56px -10px rgba(17, 18, 21, 0.18);
+    --color-shadow-3xl: 0px 32px 70px -14px rgba(17, 18, 21, 0.22);
+    --color-shadow-4xl: 0px 40px 90px -18px rgba(17, 18, 21, 0.26);
 
     --color-sidebar-background-100: var(
       --color-background-100
@@ -240,11 +273,11 @@
   }
 
   :root[data-theme="light"] {
-    color-scheme: light !important;
+    color-scheme: light;
 
     --color-background-100: 255, 255, 255; /* primary bg */
-    --color-background-90: 249, 249, 249; /* secondary bg - cleaner, closer to white */
-    --color-background-80: 240, 240, 240; /* tertiary bg - softer gray */
+    --color-background-90: 246, 247, 249; /* secondary bg */
+    --color-background-80: 238, 240, 243; /* tertiary bg */
 
     /* pi */
     --color-pi-50: var(--color-background-90);
@@ -261,17 +294,17 @@
   }
 
   :root[data-theme="light"] {
-    --color-text-100: 23, 23, 23; /* primary text */
-    --color-text-200: 58, 58, 58; /* secondary text */
-    --color-text-300: 82, 82, 82; /* tertiary text */
-    --color-text-400: 163, 163, 163; /* placeholder text */
+    --color-text-100: 23, 24, 27; /* primary text */
+    --color-text-200: 61, 64, 70; /* secondary text */
+    --color-text-300: 98, 102, 110; /* tertiary text */
+    --color-text-400: 155, 161, 170; /* placeholder text */
 
-    --color-scrollbar: 163, 163, 163; /* scrollbar thumb */
+    --color-scrollbar: 179, 184, 192; /* scrollbar thumb */
 
-    --color-border-100: 245, 245, 245; /* subtle border= 1 */
-    --color-border-200: 229, 229, 229; /* subtle border- 2 */
-    --color-border-300: 212, 212, 212; /* strong border- 1 */
-    --color-border-400: 185, 185, 185; /* strong border- 2 */
+    --color-border-100: 241, 242, 245; /* subtle border 1 */
+    --color-border-200: 230, 232, 236; /* subtle border 2 */
+    --color-border-300: 218, 221, 227; /* strong border 1 */
+    --color-border-400: 201, 205, 213; /* strong border 2 */
 
     /* onboarding colors */
     --gradient-onboarding-100: linear-gradient(
@@ -334,49 +367,49 @@
   }
 
   :root[data-theme="dark"] {
-    color-scheme: dark !important;
+    color-scheme: dark;
 
-    --color-primary-10: 8, 31, 43;
-    --color-primary-20: 10, 37, 51;
-    --color-primary-30: 13, 49, 69;
-    --color-primary-40: 16, 58, 81;
-    --color-primary-50: 18, 68, 94;
-    --color-primary-60: 23, 86, 120;
-    --color-primary-70: 28, 104, 146;
-    --color-primary-80: 31, 116, 163;
-    --color-primary-90: 34, 129, 180;
-    --color-primary-100: 40, 146, 204;
-    --color-primary-200: 41, 154, 214;
-    --color-primary-300: 75, 170, 221;
-    --color-primary-400: 109, 186, 227;
-    --color-primary-500: 144, 202, 234;
-    --color-primary-600: 169, 214, 239;
-    --color-primary-700: 199, 229, 244;
-    --color-primary-800: 216, 237, 248;
-    --color-primary-900: 229, 243, 250;
+    /* Brand azure ramp, dark context (generated; see .claude/palette-gen.mjs) */
+    --color-primary-10: 32, 40, 49;
+    --color-primary-20: 34, 48, 61;
+    --color-primary-30: 39, 61, 82;
+    --color-primary-40: 45, 80, 110;
+    --color-primary-50: 52, 99, 139;
+    --color-primary-60: 59, 120, 171;
+    --color-primary-70: 67, 142, 204;
+    --color-primary-80: 71, 155, 224;
+    --color-primary-90: 88, 170, 238;
+    --color-primary-100: 74, 163, 236;
+    --color-primary-200: 86, 169, 238;
+    --color-primary-300: 97, 175, 239;
+    --color-primary-400: 113, 183, 241;
+    --color-primary-500: 128, 191, 243;
+    --color-primary-600: 142, 198, 245;
+    --color-primary-700: 154, 204, 246;
+    --color-primary-800: 168, 212, 248;
+    --color-primary-900: 179, 218, 250;
 
-    --color-background-100: 25, 25, 25; /* primary bg */
-    --color-background-90: 32, 32, 32; /* secondary bg */
-    --color-background-80: 44, 44, 44; /* tertiary bg */
+    /* Cool near-black surfaces, finely stepped (Obsidian-grade dark) */
+    --color-background-100: 28, 29, 33; /* primary bg */
+    --color-background-90: 32, 33, 38; /* secondary bg */
+    --color-background-80: 38, 39, 44; /* tertiary bg */
 
-    --color-shadow-2xs:
-      0px 0px 1px 0px rgba(0, 0, 0, 0.15), 0px 1px 3px 0px rgba(0, 0, 0, 0.5);
+    --color-shadow-2xs: 0px 1px 2px 0px rgba(0, 0, 0, 0.35);
     --color-shadow-xs:
-      0px 0px 2px 0px rgba(0, 0, 0, 0.2), 0px 2px 4px 0px rgba(0, 0, 0, 0.5);
+      0px 1px 2px 0px rgba(0, 0, 0, 0.4), 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3);
     --color-shadow-sm:
-      0px 0px 4px 0px rgba(0, 0, 0, 0.2), 0px 2px 6px 0px rgba(0, 0, 0, 0.5);
+      0px 1px 2px 0px rgba(0, 0, 0, 0.35), 0px 2px 6px -1px rgba(0, 0, 0, 0.45);
     --color-shadow-rg:
-      0px 0px 6px 0px rgba(0, 0, 0, 0.2), 0px 4px 6px 0px rgba(0, 0, 0, 0.5);
+      0px 2px 4px -1px rgba(0, 0, 0, 0.4), 0px 5px 12px -2px rgba(0, 0, 0, 0.5);
     --color-shadow-md:
-      0px 2px 8px 0px rgba(0, 0, 0, 0.2), 0px 4px 8px 0px rgba(0, 0, 0, 0.5);
+      0px 2px 4px -1px rgba(0, 0, 0, 0.4), 0px 9px 20px -3px rgba(0, 0, 0, 0.55);
     --color-shadow-lg:
-      0px 4px 12px 0px rgba(0, 0, 0, 0.25), 0px 4px 10px 0px rgba(0, 0, 0, 0.55);
+      0px 4px 8px -2px rgba(0, 0, 0, 0.45), 0px 14px 30px -4px rgba(0, 0, 0, 0.6);
     --color-shadow-xl:
-      0px 0px 14px 0px rgba(0, 0, 0, 0.25), 0px 6px 10px 0px rgba(0, 0, 0, 0.55);
+      0px 6px 12px -4px rgba(0, 0, 0, 0.5), 0px 20px 44px -6px rgba(0, 0, 0, 0.66);
     --color-shadow-2xl:
-      0px 0px 18px 0px rgba(0, 0, 0, 0.25), 0px 8px 12px 0px rgba(0, 0, 0, 0.6);
-    --color-shadow-3xl:
-      0px 4px 24px 0px rgba(0, 0, 0, 0.3), 0px 12px 40px 0px rgba(0, 0, 0, 0.65);
+      0px 8px 16px -6px rgba(0, 0, 0, 0.55), 0px 28px 60px -10px rgba(0, 0, 0, 0.72);
+    --color-shadow-3xl: 0px 34px 74px -14px rgba(0, 0, 0, 0.78);
     /* pi */
     --color-pi-50: var(--color-background-90);
     --color-pi-100: var(--color-background-90);
@@ -392,17 +425,17 @@
   }
 
   :root[data-theme="dark"] {
-    --color-text-100: 229, 229, 229; /* primary text */
-    --color-text-200: 163, 163, 163; /* secondary text */
-    --color-text-300: 115, 115, 115; /* tertiary text */
-    --color-text-400: 82, 82, 82; /* placeholder text */
+    --color-text-100: 223, 225, 229; /* primary text */
+    --color-text-200: 169, 173, 181; /* secondary text */
+    --color-text-300: 124, 129, 138; /* tertiary text */
+    --color-text-400: 89, 94, 103; /* placeholder text */
 
-    --color-scrollbar: 82, 82, 82; /* scrollbar thumb */
+    --color-scrollbar: 74, 77, 85; /* scrollbar thumb */
 
-    --color-border-100: 34, 34, 34; /* subtle border= 1 */
-    --color-border-200: 38, 38, 38; /* subtle border- 2 */
-    --color-border-300: 46, 46, 46; /* strong border- 1 */
-    --color-border-400: 58, 58, 58; /* strong border- 2 */
+    --color-border-100: 37, 38, 43; /* subtle border 1 */
+    --color-border-200: 43, 44, 50; /* subtle border 2 */
+    --color-border-300: 52, 53, 60; /* strong border 1 */
+    --color-border-400: 63, 65, 74; /* strong border 2 */
 
     /* onboarding colors */
     --gradient-onboarding-100: linear-gradient(
@@ -510,6 +543,116 @@
 
 body {
   color: rgba(var(--color-text-100));
+  font-family: var(--font-inter), "Inter", system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv05" 1, "calt" 1;
+  letter-spacing: -0.006em;
+}
+
+/*
+ * Consistent, eased hover/focus feedback for every interactive surface.
+ * Most components changed bg/text/border on :hover with no transition, so the
+ * feedback snapped (the "cheap" tell). One base rule gives the whole app the
+ * same calm color ease instead of scattering transition utilities across ~120
+ * call sites. Tailwind `transition-*` utilities still win where a component
+ * needs bespoke timing (they resolve in a later layer); this only fills the
+ * gap where no transition was declared at all.
+ */
+@layer base {
+  a,
+  button,
+  summary,
+  [role="button"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="menuitemcheckbox"],
+  [role="menuitemradio"],
+  [role="option"],
+  [role="switch"],
+  [role="checkbox"],
+  [role="radio"],
+  [data-hover-surface] {
+    transition-property: color, background-color, border-color, fill, stroke,
+      text-decoration-color, opacity, box-shadow;
+    transition-timing-function: var(--ease-standard);
+    transition-duration: 150ms;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    a,
+    button,
+    summary,
+    [role="button"],
+    [role="tab"],
+    [role="menuitem"],
+    [role="menuitemcheckbox"],
+    [role="menuitemradio"],
+    [role="option"],
+    [role="switch"],
+    [role="checkbox"],
+    [role="radio"],
+    [data-hover-surface] {
+      transition-duration: 0ms;
+    }
+  }
+}
+
+/*
+ * Suppress every transition for one frame while the theme flips, so light/dark
+ * switches snap cleanly instead of leaving interactive elements mid-crossfade
+ * while static surfaces change instantly. Toggled by use-theme.ts.
+ */
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+/*
+ * File-tree subtree reveal. The tree is virtualized (absolutely-positioned
+ * rows), so a height collapse isn't possible; instead the rows that appear
+ * when a folder expands get a quick, quiet fade + 3px rise. Fast and ease-out,
+ * never bouncy — motion as polish, not decoration.
+ */
+@keyframes tree-row-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.tree-row-reveal {
+  animation: tree-row-reveal 280ms var(--ease-out);
+  will-change: opacity, transform;
+}
+
+/*
+ * Group reveal for non-virtualized disclosures (e.g. the left Projects tree's
+ * chats, which mount as a block when a project expands). Same quiet, fast
+ * ease-out, with a slightly larger rise since a group is dropping in.
+ */
+@keyframes tree-group-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.tree-group-reveal {
+  animation: tree-group-reveal 300ms var(--ease-out);
+  will-change: opacity, transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-row-reveal,
+  .tree-group-reveal {
+    animation: none;
+  }
 }
 
 /* scrollbar style */
@@ -545,66 +688,72 @@ body {
 :-ms-input-placeholder {
   color: rgb(var(--color-text-400));
 }
+/*
+ * shadcn semantic tokens. Generated from the SAME palette as the granular
+ * --color-* tokens above so the two systems can no longer contradict each
+ * other (see .claude/palette-gen.mjs). Radius tightened 12px -> 8px for a
+ * denser, tool-grade feel; depth comes from --border, not shadow.
+ */
 :root,
 :root[data-theme="light"] {
   --background: 0 0% 100%;
-  --foreground: 0 0% 9%;
+  --foreground: 225 8% 9.8%;
   --card: 0 0% 100%;
-  --card-foreground: 0 0% 9%;
+  --card-foreground: 225 8% 9.8%;
   --popover: 0 0% 100%;
-  --popover-foreground: 0 0% 9%;
-  --primary: 201 100% 30%;
+  --popover-foreground: 225 8% 9.8%;
+  --primary: 207.6 88.1% 39.6%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 0 0% 96%;
-  --secondary-foreground: 0 0% 23%;
-  --muted: 0 0% 96%;
-  --muted-foreground: 0 0% 35%;
-  --accent: 210 40% 96%;
-  --accent-foreground: 0 0% 23%;
-  --destructive: 358 69% 55%;
-  --destructive-foreground: 0 0% 98%;
-  --border: 0 0% 90%;
-  --input: 0 0% 90%;
-  --ring: 201 100% 35%;
-  --radius: 0.75rem;
+  --secondary: 225 16.7% 95.3%;
+  --secondary-foreground: 220 6.9% 25.7%;
+  --muted: 225 16.7% 95.3%;
+  --muted-foreground: 220 5.8% 40.8%;
+  --accent: 216 17.2% 94.3%;
+  --accent-foreground: 220 6.9% 25.7%;
+  --destructive: 356.3 62.6% 53.9%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 13.6% 91.4%;
+  --input: 220 13.6% 91.4%;
+  --ring: 207.6 88.1% 39.6%;
+  --radius: 0.5rem;
   --sidebar-background: 0 0% 100%;
-  --sidebar-foreground: 0 0% 23%;
-  --sidebar-primary: 201 100% 30%;
+  --sidebar-foreground: 220 6.9% 25.7%;
+  --sidebar-primary: 207.6 88.1% 39.6%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 0 0% 94%;
-  --sidebar-accent-foreground: 0 0% 23%;
-  --sidebar-border: 0 0% 90%;
-  --sidebar-ring: 201 100% 35%;
+  --sidebar-accent: 216 17.2% 94.3%;
+  --sidebar-accent-foreground: 225 8% 9.8%;
+  --sidebar-border: 220 13.6% 91.4%;
+  --sidebar-ring: 207.6 88.1% 39.6%;
 }
 
 :root[data-theme="dark"] {
-  --background: 0 0% 10%;
-  --foreground: 0 0% 100%;
-  --card: 0 0% 15%;
-  --card-foreground: 0 0% 100%;
-  --popover: 0 0% 15%;
-  --popover-foreground: 0 0% 100%;
-  --primary: 201 100% 60%;
-  --primary-foreground: 0 0% 10%;
-  --secondary: 0 0% 20%;
-  --secondary-foreground: 0 0% 100%;
-  --muted: 0 0% 20%;
-  --muted-foreground: 0 0% 70%;
-  --accent: 0 0% 25%;
-  --accent-foreground: 0 0% 100%;
-  --destructive: 0 100% 45%;
+  --background: 228 8.2% 12%;
+  --foreground: 220 10.3% 88.6%;
+  --card: 230 8.6% 13.7%;
+  --card-foreground: 220 10.3% 88.6%;
+  --popover: 230 8.6% 13.7%;
+  --popover-foreground: 220 10.3% 88.6%;
+  --primary: 207 81% 60.8%;
+  --primary-foreground: 201.4 38.9% 7.1%;
+  --secondary: 230 7.3% 16.1%;
+  --secondary-foreground: 220 10.3% 88.6%;
+  --muted: 230 7.3% 16.1%;
+  --muted-foreground: 220 7.5% 68.6%;
+  --accent: 225 8.7% 18%;
+  --accent-foreground: 220 11.1% 94.7%;
+  --destructive: 356.5 69.2% 60.6%;
   --destructive-foreground: 0 0% 100%;
-  --border: 0 0% 30%;
-  --input: 0 0% 30%;
-  --ring: 201 100% 60%;
-  --sidebar-background: 0 0% 10%;
-  --sidebar-foreground: 0 0% 96%;
-  --sidebar-primary: 201 100% 48%;
-  --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 0 0% 16%;
-  --sidebar-accent-foreground: 0 0% 96%;
-  --sidebar-border: 0 0% 16%;
-  --sidebar-ring: 201 100% 60%;
+  --border: 231.4 7.5% 18.2%;
+  --input: 231.4 7.5% 18.2%;
+  --ring: 207 81% 60.8%;
+  --sidebar-background: 225 7.7% 10.2%;
+  --sidebar-foreground: 220 7.5% 68.6%;
+  --sidebar-primary: 207 81% 60.8%;
+  --sidebar-primary-foreground: 201.4 38.9% 7.1%;
+  --sidebar-accent: 230 7.3% 16.1%;
+  --sidebar-accent-foreground: 220 10.3% 88.6%;
+  --sidebar-border: 230 7.5% 15.7%;
+  --sidebar-ring: 207 81% 60.8%;
 }
 
 /* Text selection highlight */
@@ -680,7 +829,7 @@ body {
 }
 
 .mu-editor a {
-  color: #7c3aed !important;
+  color: hsl(var(--primary)) !important;
   text-decoration: none !important;
 }
 
@@ -763,7 +912,7 @@ body {
   display: inline !important;
   font-size: 1em !important;
   line-height: 1.5 !important;
-  color: #7c3aed !important;
+  color: hsl(var(--primary)) !important;
 }
 
 /* Hide the markdown text when not active (show image instead) */

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
 };
@@ -16,13 +17,13 @@ use db::{
 use diff_stream;
 use events::MsgStore;
 use executors::{
-    BaseCodingAgent, CodingAgent, ExecutionEnv, ExecutionProcess, ExecutorApprovalService,
-    ExecutorConfigs, ExecutorExitResult, ExecutorProfileId, NoopExecutorApprovalService,
-    RepoContext, StandardCodingAgentExecutor,
+    BaseCodingAgent, ClaudeExecutionMode, CodingAgent, ExecutionEnv, ExecutionProcess,
+    ExecutorApprovalService, ExecutorConfigs, ExecutorExitResult, ExecutorProfileId,
+    NoopExecutorApprovalService, RepoContext, StandardCodingAgentExecutor,
 };
 use futures::{
     stream::{self, BoxStream},
-    StreamExt,
+    FutureExt, StreamExt,
 };
 use git::{DiffTarget, GitService};
 use log_types::{Diff, LogEntry};
@@ -364,6 +365,93 @@ impl LocalContainerService {
         Ok(())
     }
 
+    /// Drop the in-memory bookkeeping for a finished run: the child handle, the
+    /// execution handle, and the broadcast channel. Removing an absent key is a
+    /// no-op, so this is safe to call from any completion path.
+    async fn drop_execution_registry(&self, run_id: Uuid) {
+        self.child_store.write().await.remove(&run_id);
+        self.executions.write().await.remove(&run_id);
+        self.event_channels.write().await.remove(&run_id);
+    }
+
+    /// Safety-net finalizer for a run whose execution task ended abnormally: an
+    /// error bubbled out of [`Self::run_execution_process`], or the task
+    /// panicked, before the normal completion path could clear the session
+    /// pointer. Forces a still-running run to a failed terminal state, which
+    /// clears `active_session_id`/`awaiting_input` (so the sidebar's running
+    /// indicator resolves immediately via the task-records change hook), and
+    /// drops the in-memory registry.
+    ///
+    /// Without this, an abnormal exit left `active_session_id` set until the
+    /// next server restart or housekeeping sweep, leaving the session row stuck
+    /// "running".
+    async fn finalize_failed_execution(&self, run_id: Uuid) {
+        // Only force a failed status when the run is still Running; a run that
+        // already reached a terminal state (e.g. Cancelled) keeps its real
+        // outcome while we still clear any dangling session pointer below.
+        match TaskRun::find_by_id(self.db.pool(), run_id).await {
+            Ok(Some(run)) if run.status == RunStatus::Running => {
+                if let Err(err) = self.mark_run_completion(run_id, Some(1)).await {
+                    error!(%run_id, error = %err, "[finalize_failed_execution] mark_run_completion failed");
+                }
+            }
+            Ok(Some(run)) => {
+                if let Err(err) = self.complete_task_execution(run_id, run.status).await {
+                    error!(%run_id, error = %err, "[finalize_failed_execution] complete_task_execution failed");
+                }
+            }
+            Ok(None) => {
+                warn!(%run_id, "[finalize_failed_execution] task_run not found");
+            }
+            Err(err) => {
+                error!(%run_id, error = %err, "[finalize_failed_execution] task_run lookup failed");
+            }
+        }
+        self.drop_execution_registry(run_id).await;
+    }
+
+    /// Resolve the Claude execution engine for a run, pinning it at session
+    /// birth so the whole follow-up chain shares one engine.
+    ///
+    /// - Already pinned (set on a prior spawn, or inherited from the parent run
+    ///   at follow-up creation): reuse it verbatim.
+    /// - Unpinned initial run: take the current app-wide setting and persist it.
+    /// - Unpinned follow-up: a legacy session predating the pin column, always
+    ///   PTY-born. Resolve to PTY (never resume it headless) and persist.
+    async fn resolve_pinned_claude_mode(
+        &self,
+        run_id: Uuid,
+        is_follow_up: bool,
+    ) -> ClaudeExecutionMode {
+        if let Ok(Some(run)) = TaskRun::find_by_id(self.db.pool(), run_id).await {
+            if let Some(pinned) = run
+                .claude_execution_mode
+                .as_deref()
+                .and_then(ClaudeExecutionMode::from_db_str)
+            {
+                return pinned;
+            }
+        }
+
+        let mode = if is_follow_up {
+            ClaudeExecutionMode::Pty
+        } else {
+            self.config.read().await.claude_code_execution_mode
+        };
+
+        if let Err(err) =
+            TaskRun::set_claude_execution_mode(self.db.pool(), run_id, mode.as_db_str()).await
+        {
+            warn!(
+                %run_id,
+                error = %err,
+                "[resolve_pinned_claude_mode] failed to persist pinned execution mode"
+            );
+        }
+
+        mode
+    }
+
     async fn run_execution_process(
         &self,
         params: ExecutionStartParams,
@@ -387,9 +475,20 @@ impl LocalContainerService {
             "[run_execution_process] using coding agent"
         );
 
+        // Pin the Claude execution engine (PTY vs headless `claude -p`) to the
+        // mode the session was born under and reuse it for every follow-up. The
+        // app-wide setting seeds NEW sessions only: resuming a PTY-born
+        // transcript headless (or vice versa) replays control entries the other
+        // engine never writes and corrupts the conversation. See
+        // `resolve_pinned_claude_mode`.
+        if let CodingAgent::ClaudeCode(claude) = &mut agent {
+            let execution_mode = self.resolve_pinned_claude_mode(run_id, is_follow_up).await;
+            claude.set_execution_mode(execution_mode);
+        }
+
         let approvals_service: Arc<dyn ExecutorApprovalService> = if matches!(
             agent_kind,
-            BaseCodingAgent::Codex | BaseCodingAgent::ClaudeCode
+            BaseCodingAgent::Codex | BaseCodingAgent::ClaudeCode | BaseCodingAgent::Pi
         ) {
             let task_id = TaskRun::find_by_id(self.db.pool(), params.task_run_id)
                 .await?
@@ -807,19 +906,25 @@ impl LocalContainerService {
 
         tracing::debug!(%run_id, "[run_execution_process] calling mark_run_completion");
 
-        if exit_code == Some(0) {
-            self.try_commit_changes(run_id, &params.workspace_path)
-                .await;
-        }
-
+        // Mark the run complete (which clears the task's `active_session_id`)
+        // BEFORE the auto-commit. The agent process is already gone by this
+        // point, so the turn is done — the sidebar's "running" spinner must
+        // resolve now. The auto-commit below is a full `git status` + `add` +
+        // `commit` that can take many seconds (and stall on a large or locked
+        // worktree); awaiting it before clearing `active_session_id` left the
+        // sidebar spinning long after the conversation already showed the turn
+        // finished. Completion visibility must not be gated on housekeeping.
         if let Err(e) = self.mark_run_completion(run_id, exit_code).await {
             tracing::error!(%run_id, error = %e, "[run_execution_process] mark_run_completion failed");
             return Err(e);
         }
 
-        self.child_store.write().await.remove(&run_id);
-        self.executions.write().await.remove(&run_id);
-        self.event_channels.write().await.remove(&run_id);
+        if exit_code == Some(0) {
+            self.try_commit_changes(run_id, &params.workspace_path)
+                .await;
+        }
+
+        self.drop_execution_registry(run_id).await;
 
         Ok(())
     }
@@ -938,34 +1043,66 @@ impl ContainerService for LocalContainerService {
             map.insert(run_id, msg_store.clone());
         }
 
+        // Gate the worker on registration so it can never finalize-and-remove
+        // its own execution handle before this function has inserted it (the
+        // spawned task may start on another runtime thread the instant it is
+        // spawned, and a fast failure would otherwise race the insert below).
+        let (registered_tx, registered_rx) = oneshot::channel::<()>();
+
         let handle = tokio::spawn(async move {
-            if let Err(err) = service
-                .run_execution_process(params, events_tx.clone(), cancel_rx, msg_store)
-                .await
-            {
-                error!(error = %err, "execution failed");
+            if registered_rx.await.is_err() {
+                return;
+            }
+
+            // Run the execution and finalize on EVERY terminal outcome. The
+            // normal completion path inside `run_execution_process` clears the
+            // session pointer itself; catching the error and panic paths here
+            // guarantees `active_session_id` is never left set, so the sidebar's
+            // running indicator always resolves without a restart.
+            let outcome = AssertUnwindSafe(service.run_execution_process(
+                params,
+                events_tx.clone(),
+                cancel_rx,
+                msg_store,
+            ))
+            .catch_unwind()
+            .await;
+
+            let failure = match outcome {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(err.to_string()),
+                Err(_) => Some("execution task panicked".to_string()),
+            };
+
+            if let Some(message) = failure {
+                error!(%run_id, error = %message, "execution failed; finalizing run");
                 runtime::perf::record_event(
                     "execution_process_error",
                     serde_json::json!({
                         "task_run_id": run_id,
-                        "error": err.to_string(),
+                        "error": message,
                     }),
                 );
                 let _ = events_tx.send(ExecutionEvent::Error {
                     id: run_id,
-                    message: err.to_string(),
+                    message,
                 });
+                service.finalize_failed_execution(run_id).await;
             }
         });
 
-        let mut executions = self.executions.write().await;
-        executions.insert(
-            run_id,
-            ExecutionHandle {
-                cancel: cancel_tx,
-                join: handle,
-            },
-        );
+        {
+            let mut executions = self.executions.write().await;
+            executions.insert(
+                run_id,
+                ExecutionHandle {
+                    cancel: cancel_tx,
+                    join: handle,
+                },
+            );
+        }
+        // Release the worker now that its handle is registered.
+        let _ = registered_tx.send(());
         Ok(())
     }
 
@@ -1322,6 +1459,213 @@ fn escape_json_pointer_segment(segment: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use db::models::{AgentProfile, TaskSession};
+
+    /// Build a `LocalContainerService` backed by a throwaway on-disk SQLite db.
+    /// Only the fields the finalizer touches (`db`, the in-memory registries)
+    /// matter here; the rest are constructed with cheap defaults.
+    async fn build_service() -> (LocalContainerService, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let db = DBService::new_with_path(temp.path().join("test.db"))
+            .await
+            .unwrap();
+        let msg_stores: MsgStoreMap = Arc::new(RwLock::new(HashMap::new()));
+        let approvals = Approvals::new(msg_stores.clone());
+        let config = Arc::new(RwLock::new(Config::default()));
+        let service = LocalContainerService::new(
+            db,
+            GitService::new(),
+            msg_stores,
+            config,
+            approvals,
+            temp.path().join("logs"),
+            filesystem::WorktreeWatcherService::default(),
+        );
+        (service, temp)
+    }
+
+    /// Seed a project + task + agent profile + session + run, with the task's
+    /// `active_session_id` pointing at the live session and `awaiting_input`
+    /// set, mirroring a running task. The run is inserted with `run_status`.
+    /// Returns `(task_id, run_id)`.
+    async fn seed_running_task(
+        service: &LocalContainerService,
+        run_status: RunStatus,
+    ) -> (Uuid, Uuid) {
+        let pool = service.db.pool();
+
+        let project = ProjectRecord::new("finalize-test", "/tmp/finalize-test");
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path, created_at, updated_at)
+             VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+        )
+        .bind(project.id)
+        .bind(&project.name)
+        .bind(&project.git_repo_path)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Insert the task with no session pointer first: the FK is circular
+        // (task_records.active_session_id -> task_sessions.id -> task_records.id),
+        // so the session pointer is wired up last.
+        let task = TaskRecord::new(project.id, "stuck running task", None);
+        task.insert(pool).await.unwrap();
+
+        let agent_id = AgentProfile::ensure_default_desktop_profile(pool)
+            .await
+            .unwrap();
+
+        let mut run = TaskRun::new_local(task.id, None);
+        run.status = run_status;
+        run.insert(pool).await.unwrap();
+
+        let session = TaskSession::new(task.id, agent_id, Some("prompt".to_string()));
+        sqlx::query(
+            "INSERT INTO task_sessions (id, task_id, task_run_id, agent_profile_id, prompt, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+        )
+        .bind(session.id)
+        .bind(session.task_id)
+        .bind(run.id)
+        .bind(session.agent_profile_id)
+        .bind(&session.prompt)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "UPDATE task_records SET active_session_id = ?, awaiting_input = 1 WHERE id = ?",
+        )
+        .bind(session.id)
+        .bind(task.id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        (task.id, run.id)
+    }
+
+    /// The core regression: when an execution ends abnormally, the finalizer
+    /// must clear the task's `active_session_id`/`awaiting_input` (so the
+    /// sidebar's running indicator resolves) and drop the in-memory registry,
+    /// rather than leaving the row stuck "running" until a restart.
+    #[tokio::test]
+    async fn finalize_failed_execution_clears_running_session() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+
+        // Seed the in-memory registry as if the run were live.
+        service
+            .event_channels
+            .write()
+            .await
+            .insert(run_id, broadcast::channel(4).0);
+        service.executions.write().await.insert(
+            run_id,
+            ExecutionHandle {
+                cancel: oneshot::channel().0,
+                join: tokio::spawn(async {}),
+            },
+        );
+
+        service.finalize_failed_execution(run_id).await;
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.active_session_id, None);
+        assert_eq!(task_after.status, TaskStatus::Failed);
+        assert!(!task_after.awaiting_input);
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Failed);
+
+        assert!(!service.event_channels.read().await.contains_key(&run_id));
+        assert!(!service.executions.read().await.contains_key(&run_id));
+    }
+
+    /// A run that already reached a terminal state through another path (e.g.
+    /// cancellation) keeps its real outcome; the finalizer must not clobber it
+    /// to Failed, but it must still clear the dangling session pointer.
+    #[tokio::test]
+    async fn finalize_failed_execution_preserves_terminal_run_status() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Cancelled).await;
+
+        service.finalize_failed_execution(run_id).await;
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Cancelled);
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.active_session_id, None);
+        assert_eq!(task_after.status, TaskStatus::Completed);
+    }
+
+    /// A fresh session takes the current app-wide setting and persists it, so
+    /// every later spawn (retry, follow-up) of the chain reuses the same engine.
+    #[tokio::test]
+    async fn resolve_pins_global_mode_on_initial_run() {
+        let (service, _temp) = build_service().await;
+        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
+        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+
+        let mode = service.resolve_pinned_claude_mode(run_id, false).await;
+        assert_eq!(mode, ClaudeExecutionMode::Print);
+
+        let run = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.claude_execution_mode.as_deref(), Some("print"));
+    }
+
+    /// The core regression: a follow-up must resume under the engine its session
+    /// was born with, even after the app-wide default has since been flipped.
+    /// Resuming a PTY-born session headless corrupts the transcript.
+    #[tokio::test]
+    async fn resolve_follow_up_keeps_pinned_mode_ignoring_global() {
+        let (service, _temp) = build_service().await;
+        // App-wide default is now Print, but this session was born under PTY.
+        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
+        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+        TaskRun::set_claude_execution_mode(service.db.pool(), run_id, "pty")
+            .await
+            .unwrap();
+
+        let mode = service.resolve_pinned_claude_mode(run_id, true).await;
+        assert_eq!(mode, ClaudeExecutionMode::Pty);
+    }
+
+    /// A follow-up of a legacy run (no pinned mode) is always PTY-born, so it
+    /// resolves to PTY regardless of the live default rather than being resumed
+    /// headless.
+    #[tokio::test]
+    async fn resolve_legacy_follow_up_defaults_to_pty() {
+        let (service, _temp) = build_service().await;
+        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
+        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+
+        let mode = service.resolve_pinned_claude_mode(run_id, true).await;
+        assert_eq!(mode, ClaudeExecutionMode::Pty);
+
+        let run = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.claude_execution_mode.as_deref(), Some("pty"));
+    }
 
     #[test]
     fn cancelled_run_marks_task_completed() {

@@ -15,6 +15,7 @@ type SendTaskMessageOptions = {
   selectedSkillIds?: string[];
   useWorktree?: boolean;
   targetBranch?: string | null;
+  signal?: AbortSignal;
 };
 
 export async function sendTaskMessage(
@@ -25,6 +26,7 @@ export async function sendTaskMessage(
     `/rpc/tasks/${encodeURIComponent(taskId)}/messages`,
     {
       method: "POST",
+      signal: options.signal,
       headers: {
         "Content-Type": "application/json",
         ...(options.requestId

@@ -18,6 +18,7 @@ use crate::{ApiError, AppState};
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/developer/worktree-info", get(get_worktree_info))
+        .route("/developer/worktree-sizes", get(get_worktree_sizes))
         .route("/developer/worktree-cleanup", post(cleanup_worktrees))
 }
 
@@ -25,15 +26,20 @@ pub(super) fn router() -> Router<AppState> {
 struct WorktreeInfoResponse {
     base_dir: String,
     entries: Vec<WorktreeEntryInfo>,
-    total_size_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
 struct WorktreeEntryInfo {
     path: String,
     name: String,
-    size_bytes: u64,
     modified_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorktreeSizesResponse {
+    /// Map of worktree directory path -> total size in bytes on disk.
+    sizes: HashMap<String, u64>,
+    total_size_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,60 +56,30 @@ struct CleanupWorktreesResponse {
     freed_bytes: u64,
 }
 
+/// List worktree directories without computing their on-disk sizes.
+///
+/// Enumeration is cheap and returns immediately, so the UI can render the list
+/// the moment the developer tab opens. Sizes are resolved separately via
+/// [`get_worktree_sizes`] because they require a recursive walk of full
+/// repository checkouts (which can hold large `node_modules` / `target` trees)
+/// and must not gate the appearance of the list.
 async fn get_worktree_info(
     State(state): State<AppState>,
 ) -> Result<Json<WorktreeInfoResponse>, ApiError> {
     let worktree_manager = state.runtime().worktree();
     let base_dir = worktree_manager.base_dir().to_path_buf();
 
-    let (entries, total_size) = spawn_blocking(move || {
-        let mut entries = Vec::new();
-        let mut total_size = 0u64;
-
-        if let Ok(read_dir) = std::fs::read_dir(&base_dir) {
-            for prefix_entry in read_dir.flatten() {
-                let prefix_path = prefix_entry.path();
-                if !prefix_path.is_dir() {
-                    continue;
-                }
-
-                if let Ok(worktree_dir) = std::fs::read_dir(&prefix_path) {
-                    for entry in worktree_dir.flatten() {
-                        let path = entry.path();
-                        if !path.is_dir() {
-                            continue;
-                        }
-
-                        let prefix_name = prefix_entry.file_name().to_string_lossy().into_owned();
-                        let dir_name = entry.file_name().to_string_lossy().into_owned();
-                        let name = format!("{}/{}", prefix_name, dir_name);
-                        let size = dir_size(&path);
-                        total_size += size;
-
-                        let modified_at = entry
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .map(|t| {
-                                chrono::DateTime::<chrono::Utc>::from(t)
-                                    .format("%Y-%m-%dT%H:%M:%SZ")
-                                    .to_string()
-                            });
-
-                        entries.push(WorktreeEntryInfo {
-                            path: path.to_string_lossy().into_owned(),
-                            name,
-                            size_bytes: size,
-                            modified_at,
-                        });
-                    }
-                }
-            }
-        }
-
+    let entries = spawn_blocking(move || {
+        let mut entries: Vec<WorktreeEntryInfo> = list_worktree_dirs(&base_dir)
+            .into_iter()
+            .map(|dir| WorktreeEntryInfo {
+                path: dir.path.to_string_lossy().into_owned(),
+                name: dir.name,
+                modified_at: dir.modified_at,
+            })
+            .collect();
         entries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
-
-        (entries, total_size)
+        entries
     })
     .await
     .map_err(|e| RuntimeError::Other(anyhow::anyhow!("spawn_blocking error: {}", e)))?;
@@ -111,7 +87,34 @@ async fn get_worktree_info(
     Ok(Json(WorktreeInfoResponse {
         base_dir: worktree_manager.base_dir().to_string_lossy().into_owned(),
         entries,
-        total_size_bytes: total_size,
+    }))
+}
+
+/// Compute the on-disk size of every worktree directory.
+///
+/// This is the expensive half of the listing, split out from
+/// [`get_worktree_info`] so it can run after the list is already on screen.
+async fn get_worktree_sizes(
+    State(state): State<AppState>,
+) -> Result<Json<WorktreeSizesResponse>, ApiError> {
+    let base_dir = state.runtime().worktree().base_dir().to_path_buf();
+
+    let (sizes, total_size_bytes) = spawn_blocking(move || {
+        let mut sizes = HashMap::new();
+        let mut total = 0u64;
+        for dir in list_worktree_dirs(&base_dir) {
+            let size = dir_size(&dir.path);
+            total += size;
+            sizes.insert(dir.path.to_string_lossy().into_owned(), size);
+        }
+        (sizes, total)
+    })
+    .await
+    .map_err(|e| RuntimeError::Other(anyhow::anyhow!("spawn_blocking error: {}", e)))?;
+
+    Ok(Json(WorktreeSizesResponse {
+        sizes,
+        total_size_bytes,
     }))
 }
 
@@ -127,24 +130,10 @@ async fn cleanup_worktrees(
     let paths_to_delete: Vec<PathBuf> = match payload.paths {
         Some(paths) if !paths.is_empty() => paths.into_iter().map(PathBuf::from).collect(),
         _ => spawn_blocking(move || {
-            let mut paths = Vec::new();
-            if let Ok(read_dir) = std::fs::read_dir(&base_dir) {
-                for prefix_entry in read_dir.flatten() {
-                    let prefix_path = prefix_entry.path();
-                    if !prefix_path.is_dir() {
-                        continue;
-                    }
-                    if let Ok(worktree_dir) = std::fs::read_dir(&prefix_path) {
-                        for entry in worktree_dir.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() {
-                                paths.push(path);
-                            }
-                        }
-                    }
-                }
-            }
-            paths
+            list_worktree_dirs(&base_dir)
+                .into_iter()
+                .map(|dir| dir.path)
+                .collect()
         })
         .await
         .map_err(|e| RuntimeError::Other(anyhow::anyhow!("spawn_blocking error: {}", e)))?,
@@ -189,6 +178,58 @@ async fn cleanup_worktrees(
         deleted_paths,
         freed_bytes,
     }))
+}
+
+/// A worktree directory discovered under the base dir.
+///
+/// The base dir holds a two-level `<prefix>/<dir>` layout. Size is deliberately
+/// absent here: enumerating directories is cheap, while sizing them is not.
+struct WorktreeDir {
+    path: PathBuf,
+    name: String,
+    modified_at: Option<String>,
+}
+
+/// Enumerate every worktree directory under `base_dir` (cheap; no recursion
+/// into the directories themselves). Shared by the info, sizes, and cleanup
+/// paths so the traversal lives in exactly one place.
+fn list_worktree_dirs(base_dir: &Path) -> Vec<WorktreeDir> {
+    let mut dirs = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(base_dir) else {
+        return dirs;
+    };
+    for prefix_entry in read_dir.flatten() {
+        let prefix_path = prefix_entry.path();
+        if !prefix_path.is_dir() {
+            continue;
+        }
+        let prefix_name = prefix_entry.file_name().to_string_lossy().into_owned();
+        let Ok(worktree_dir) = std::fs::read_dir(&prefix_path) else {
+            continue;
+        };
+        for entry in worktree_dir.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            let modified_at = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    chrono::DateTime::<chrono::Utc>::from(t)
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string()
+                });
+            dirs.push(WorktreeDir {
+                path,
+                name: format!("{}/{}", prefix_name, dir_name),
+                modified_at,
+            });
+        }
+    }
+    dirs
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {

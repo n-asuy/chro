@@ -217,7 +217,8 @@ mod cli_path_tests {
 
     #[test]
     fn prepends_cli_dir_to_front() {
-        let out = prepend_path_entry(Some(join(&["/usr/bin", "/bin"])), OsStr::new("/opt/chro")).unwrap();
+        let out =
+            prepend_path_entry(Some(join(&["/usr/bin", "/bin"])), OsStr::new("/opt/chro")).unwrap();
         assert_eq!(
             split(&out),
             vec![
@@ -230,9 +231,11 @@ mod cli_path_tests {
 
     #[test]
     fn moves_existing_entry_to_front_without_duplicating() {
-        let out =
-            prepend_path_entry(Some(join(&["/usr/bin", "/opt/chro", "/bin"])), OsStr::new("/opt/chro"))
-                .unwrap();
+        let out = prepend_path_entry(
+            Some(join(&["/usr/bin", "/opt/chro", "/bin"])),
+            OsStr::new("/opt/chro"),
+        )
+        .unwrap();
         assert_eq!(
             split(&out),
             vec![
@@ -245,7 +248,11 @@ mod cli_path_tests {
 
     #[test]
     fn is_noop_when_already_first() {
-        assert!(prepend_path_entry(Some(join(&["/opt/chro", "/usr/bin"])), OsStr::new("/opt/chro")).is_none());
+        assert!(prepend_path_entry(
+            Some(join(&["/opt/chro", "/usr/bin"])),
+            OsStr::new("/opt/chro")
+        )
+        .is_none());
     }
 
     #[test]

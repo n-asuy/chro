@@ -1,0 +1,14 @@
+-- Pin the Claude execution engine (PTY vs headless `claude -p`) per run-chain.
+--
+-- The mode a session is born under must be reused for every follow-up. Resuming
+-- a PTY-born transcript with `claude --print` (or vice versa) replays control
+-- entries the other mode never writes -- e.g. the synthetic
+-- "Continue from where you left off." turn the PTY hook bridge leaves behind --
+-- which corrupts the conversation and makes the resumed run die immediately with
+-- `error_during_execution`. A live, app-wide toggle injected at every spawn
+-- broke exactly this on follow-ups when the default was flipped mid-session.
+--
+-- NULL means "not pinned": legacy runs predating this column. Those are always
+-- PTY-born (headless print mode never shipped before this), so they resolve to
+-- PTY at spawn rather than to the live global setting.
+ALTER TABLE task_runs ADD COLUMN claude_execution_mode TEXT;

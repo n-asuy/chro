@@ -14,7 +14,7 @@ import { TextShimmer } from "./text-shimmer";
 
 const SPRING_FAST = { type: "spring", duration: 0.08, bounce: 0 } as const;
 const SPRING_TOGGLE = { type: "spring", duration: 0.16, bounce: 0 } as const;
-const SPRING_STEP = { type: "spring", duration: 0.24, bounce: 0.15 } as const;
+const SPRING_STEP = { type: "spring", duration: 0.24, bounce: 0.1 } as const;
 
 type ThinkingStepsProps = {
   label: string;

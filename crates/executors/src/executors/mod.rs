@@ -4,6 +4,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod pi;
 
 use std::{path::Path, sync::Arc};
 
@@ -23,7 +24,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::CommandBuildError,
     env::ExecutionEnv,
-    executors::{claude::ClaudeCode, codex::Codex},
+    executors::{claude::ClaudeCode, codex::Codex, pi::Pi},
     mcp_config::McpConfig,
     process::ExecutionProcess,
     profile::ExecutorConfig,
@@ -100,6 +101,7 @@ pub enum ExecutorError {
 pub enum CodingAgent {
     ClaudeCode(ClaudeCode),
     Codex(Codex),
+    Pi(Pi),
 }
 
 impl Default for CodingAgent {
@@ -139,6 +141,7 @@ impl CodingAgent {
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
+            Self::Pi(_) => vec![BaseAgentCapability::SessionFork],
         }
     }
 

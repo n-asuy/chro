@@ -49,6 +49,13 @@ impl IntoResponse for ApiError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
             ApiError::Sqlx(err) => {
+                // A missing row is "resource not found", not a server fault. Map it
+                // to 404 so callers (and WebSocket handshakes for deleted/unknown
+                // ids) get the correct status instead of a 500, and so the server
+                // log isn't flooded with ERROR lines for routine not-found lookups.
+                if matches!(err, sqlx::Error::RowNotFound) {
+                    return (StatusCode::NOT_FOUND, "not found").into_response();
+                }
                 error!("sqlx error: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
             }

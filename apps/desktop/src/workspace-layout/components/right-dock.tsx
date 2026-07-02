@@ -133,7 +133,7 @@ export const RightDock = memo(function RightDock({
           onPointerMove={onResizeMove}
           onPointerUp={onResizeEnd}
           onPointerCancel={onResizeEnd}
-          className="absolute -left-px top-0 z-10 h-full w-1 cursor-col-resize hover:bg-primary/40"
+          className="absolute -left-px top-0 z-10 h-full w-0.5 cursor-col-resize bg-transparent transition-colors duration-150 ease-out before:absolute before:inset-y-0 before:-inset-x-[3px] before:content-[''] hover:bg-primary/70"
         />
         <div className="flex h-11 shrink-0 items-center px-2">
           <SegmentedControl

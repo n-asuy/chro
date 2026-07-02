@@ -11,6 +11,15 @@ interface ProjectTasksContextValue extends UseProjectTasksStreamResult {
   taskByKey: Map<string, StoredTask>;
   /** Number of tasks with an active session (currently running). */
   runningCount: number;
+  /**
+   * The raw stream tasks, WITHOUT the optimistic pending overlay applied.
+   * Consumers that decide pending-submission settlement must use this: settling
+   * against the overlaid `tasks` lets a pending settle against its own
+   * synthesized row, clearing it before the real task reaches the stream.
+   */
+  rawTasks: StoredTask[];
+  /** Raw stream tasks keyed by id (no optimistic overlay). */
+  rawTasksById: Record<string, StoredTask>;
 }
 
 const ProjectTasksContext = createContext<ProjectTasksContextValue | null>(
@@ -68,8 +77,14 @@ export function ProjectTasksProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<ProjectTasksContextValue>(
-    () => ({ ...stream, taskByKey, runningCount }),
-    [stream, taskByKey, runningCount],
+    () => ({
+      ...stream,
+      taskByKey,
+      runningCount,
+      rawTasks: rawStream.tasks,
+      rawTasksById: rawStream.tasksById,
+    }),
+    [stream, taskByKey, runningCount, rawStream.tasks, rawStream.tasksById],
   );
 
   return (

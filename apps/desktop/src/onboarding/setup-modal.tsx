@@ -1,4 +1,4 @@
-import { OpenAiLogo } from "@/components/agent-logo";
+import { OpenAiLogo, PiLogo } from "@/components/agent-logo";
 import { LoginTerminalDialog } from "@/components/dialogs/login-terminal-dialog";
 import { useLanguage } from "@/i18n";
 import {
@@ -33,6 +33,7 @@ const EXECUTOR_STORAGE_KEY = "chro:selected-executor";
 const DEFAULT_AUTH_STATUS: Record<BaseCodingAgent, AvailabilityInfo> = {
   CLAUDE_CODE: { type: "NOT_FOUND" },
   CODEX: { type: "NOT_FOUND" },
+  PI: { type: "NOT_FOUND" },
 };
 
 const DEFAULT_INSTALL_STATUS: Record<BaseCodingAgent, ExecutorInstallInfo> = {
@@ -45,6 +46,12 @@ const DEFAULT_INSTALL_STATUS: Record<BaseCodingAgent, ExecutorInstallInfo> = {
   CODEX: {
     installed: false,
     command: "codex",
+    resolved_path: null,
+    detected_version: null,
+  },
+  PI: {
+    installed: false,
+    command: "pi",
     resolved_path: null,
     detected_version: null,
   },
@@ -181,6 +188,7 @@ export function SetupModal() {
         ? {
             CLAUDE_CODE: authResult.value.claude_code,
             CODEX: authResult.value.codex,
+            PI: authResult.value.pi,
           }
         : DEFAULT_AUTH_STATUS;
 
@@ -189,6 +197,7 @@ export function SetupModal() {
         ? {
             CLAUDE_CODE: installResult.value.claude_code,
             CODEX: installResult.value.codex,
+            PI: installResult.value.pi,
           }
         : DEFAULT_INSTALL_STATUS;
 
@@ -298,6 +307,14 @@ export function SetupModal() {
     signingInExecutor,
     loading: availabilityLoading,
   });
+  const piCardState = getAgentCardState({
+    executor: "PI",
+    authStatus,
+    installStatus,
+    installingTool,
+    signingInExecutor,
+    loading: availabilityLoading,
+  });
   const gitCardState = getToolCardState({
     installed: gitInstallStatus.installed,
     installingTool,
@@ -307,7 +324,8 @@ export function SetupModal() {
 
   const canContinue =
     (selectedExecutor === "CLAUDE_CODE" && claudeCardState === "signed_in") ||
-    (selectedExecutor === "CODEX" && codexCardState === "signed_in");
+    (selectedExecutor === "CODEX" && codexCardState === "signed_in") ||
+    (selectedExecutor === "PI" && piCardState === "signed_in");
   const gitDescription = gitInstallStatus.detected_version
     ? t("authDetectedVersion", {
         version: gitInstallStatus.detected_version,
@@ -323,6 +341,11 @@ export function SetupModal() {
         version: installStatus.CODEX.detected_version,
       })
     : "OpenAI CLI agent";
+  const piDescription = installStatus.PI.detected_version
+    ? t("authDetectedVersion", {
+        version: installStatus.PI.detected_version,
+      })
+    : "pi CLI agent";
 
   const handleContinue = useCallback(async () => {
     if (!selectedExecutor) return;
@@ -401,6 +424,15 @@ export function SetupModal() {
                 selected={selectedExecutor === "CODEX"}
                 onSelect={() => setSelectedExecutor("CODEX")}
                 onPrimaryAction={() => void handleAgentPrimaryAction("CODEX")}
+              />
+              <AgentCard
+                icon={<PiLogo className="size-5 text-muted-foreground" />}
+                name="pi"
+                description={piDescription}
+                state={piCardState}
+                selected={selectedExecutor === "PI"}
+                onSelect={() => setSelectedExecutor("PI")}
+                onPrimaryAction={() => void handleAgentPrimaryAction("PI")}
               />
             </section>
           </div>

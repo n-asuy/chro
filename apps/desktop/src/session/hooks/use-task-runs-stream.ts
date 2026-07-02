@@ -1,11 +1,11 @@
+import { getBackendBaseUrl } from "@/lib/backend-client";
 /**
  * Hook for streaming task runs via WebSocket.
  *
  * Uses the new /streams/tasks/:task_id/runs endpoint with JSON Patch protocol.
  * Receives initial snapshot + live updates for all runs of a task.
  */
-import { useMemo, useCallback } from "react";
-import { getBackendBaseUrl } from "@/lib/backend-client";
+import { useCallback, useMemo } from "react";
 import type { TaskRunRecord } from "../types";
 import { useJsonPatchWsStream } from "./use-json-patch-ws-stream";
 
@@ -15,10 +15,6 @@ export interface UseTaskRunsStreamResult {
   isLoading: boolean;
   isConnected: boolean;
   error: string | null;
-  /** Get the ID of a cancelable run (running or pending) */
-  getCancelableRunId: () => string | null;
-  /** Check if task has an active run */
-  hasActiveRun: () => boolean;
 }
 
 interface UseTaskRunsStreamParams {
@@ -29,8 +25,6 @@ interface UseTaskRunsStreamParams {
 type TaskRunsState = {
   task_runs: Record<string, TaskRunRecord>;
 };
-
-const CANCELABLE_STATUSES = new Set(["running", "pending"]);
 
 /**
  * Stream task runs for a specific task via WebSocket.
@@ -51,25 +45,23 @@ export function useTaskRunsStream({
 
   const initialData = useCallback((): TaskRunsState => ({ task_runs: {} }), []);
 
+  const active = enabled && !!taskId;
   const { data, isConnected, error } = useJsonPatchWsStream<TaskRunsState>(
     endpoint,
-    enabled && !!taskId,
+    active,
     initialData,
   );
 
-  const runsById = useMemo(
-    (): Record<string, TaskRunRecord> => {
-      if (!taskId) {
-        return {};
-      }
-      const allRuns = data?.task_runs ?? {};
-      const filteredRuns = Object.entries(allRuns).filter(
-        ([, run]) => run.task_id === taskId,
-      );
-      return Object.fromEntries(filteredRuns);
-    },
-    [data?.task_runs, taskId],
-  );
+  const runsById = useMemo((): Record<string, TaskRunRecord> => {
+    if (!taskId) {
+      return {};
+    }
+    const allRuns = data?.task_runs ?? {};
+    const filteredRuns = Object.entries(allRuns).filter(
+      ([, run]) => run.task_id === taskId,
+    );
+    return Object.fromEntries(filteredRuns);
+  }, [data?.task_runs, taskId]);
 
   const runs = useMemo((): TaskRunRecord[] => {
     const values: TaskRunRecord[] = Object.values(runsById);
@@ -79,16 +71,11 @@ export function useTaskRunsStream({
     );
   }, [runsById]);
 
-  const getCancelableRunId = useCallback((): string | null => {
-    const match = runs.find((run) => CANCELABLE_STATUSES.has(run.status));
-    return match?.id ?? null;
-  }, [runs]);
-
-  const hasActiveRun = useCallback((): boolean => {
-    return getCancelableRunId() !== null;
-  }, [getCancelableRunId]);
-
-  const isLoading = !data && !error;
+  // A disabled stream (no task, or not enabled) has nothing to load, so it is
+  // never "loading". Reporting `true` here lets `isConversationLoading` —
+  // gated on this flag — sit spinning whenever `activeStreamTaskId` is null,
+  // which is masked only while the optimistic prompt overlay supplies an entry.
+  const isLoading = active && !data && !error;
 
   return {
     runs,
@@ -96,7 +83,5 @@ export function useTaskRunsStream({
     isLoading,
     isConnected,
     error,
-    getCancelableRunId,
-    hasActiveRun,
   };
 }

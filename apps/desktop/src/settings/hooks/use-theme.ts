@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
 import type { AppTheme } from "@/lib/preferences-client";
+import { useEffect, useState } from "react";
+import { applyAccentVars } from "../lib/accent-apply";
+import { deriveAccentVarsSafe } from "../lib/accent-derivation";
 import { useAppearanceConfigStore } from "../state/appearance-store";
 
 type ResolvedTheme = "light" | "dark";
@@ -29,6 +31,7 @@ function resolveDataTheme(
  */
 export function useTheme() {
   const theme = useAppearanceConfigStore((s) => s.config.theme);
+  const accent = useAppearanceConfigStore((s) => s.config.accent);
   const load = useAppearanceConfigStore((s) => s.load);
   const [prefersDark, setPrefersDark] = useState(systemPrefersDark);
 
@@ -57,8 +60,27 @@ export function useTheme() {
   const dataTheme = resolveDataTheme(theme, prefersDark);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", dataTheme);
-  }, [dataTheme]);
+    const root = document.documentElement;
+    // Suppress transitions across the flip so the whole UI repaints to the new
+    // theme in one frame (see the [data-theme-switching] rule in globals.css),
+    // then re-enable on the next frame once the new theme has painted.
+    root.setAttribute("data-theme-switching", "");
+    root.setAttribute("data-theme", dataTheme);
+    // Apply the accent in the same frame as the theme flip: the ramp is
+    // re-derived for the resolved mode so it stays legible, and an accent-only
+    // change snaps instead of crossfading. A null seed clears the overrides and
+    // falls back to the static globals.css brand defaults.
+    applyAccentVars(
+      root,
+      accent ? deriveAccentVarsSafe(accent, dataTheme) : null,
+    );
+    const raf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        root.removeAttribute("data-theme-switching");
+      });
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [dataTheme, accent]);
 
   return { theme, dataTheme };
 }

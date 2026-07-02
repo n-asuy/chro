@@ -118,4 +118,7 @@ export {
   DialogFooter,
   DialogTitle,
   DialogDescription,
+  // Raw Radix primitive, for callers that need fully custom-positioned content
+  // (e.g. a top-anchored command palette) instead of the centered modal chrome.
+  DialogPrimitive,
 };

@@ -36,6 +36,30 @@ export function ClaudeLogo({ className }: { className?: string }) {
   );
 }
 
+/** pi logomark (the π glyph). Monochrome, inherits the surrounding text color. */
+export function PiLogo({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <text
+        x="12"
+        y="18"
+        textAnchor="middle"
+        fontSize="19"
+        fontWeight="700"
+        fontFamily="Georgia, 'Times New Roman', serif"
+      >
+        π
+      </text>
+    </svg>
+  );
+}
+
 /**
  * Resolve the logo for an agent kind. Returns `null` for unknown / absent
  * agents so callers can fall back (e.g. render no icon on a fresh session
@@ -53,6 +77,8 @@ export function AgentLogo({
       return <ClaudeLogo className={className} />;
     case "CODEX":
       return <OpenAiLogo className={className} />;
+    case "PI":
+      return <PiLogo className={className} />;
     default:
       return null;
   }

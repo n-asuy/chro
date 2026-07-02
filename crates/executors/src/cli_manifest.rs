@@ -85,6 +85,23 @@ const CLAUDE_CANDIDATES: &[Candidate] = &[
     Candidate::InPath("claude"),
 ];
 
+#[cfg(not(windows))]
+const PI_CANDIDATES: &[Candidate] = &[
+    Candidate::UnderHome(".local/bin/pi"),
+    Candidate::Absolute("/usr/local/bin/pi"),
+    Candidate::Absolute("/opt/homebrew/bin/pi"),
+    Candidate::InPath("pi"),
+];
+
+#[cfg(windows)]
+const PI_CANDIDATES: &[Candidate] = &[
+    Candidate::UnderHome(r".local\bin\pi.exe"),
+    Candidate::UnderHome(r".local\bin\pi.cmd"),
+    Candidate::InPath("pi.exe"),
+    Candidate::InPath("pi.cmd"),
+    Candidate::InPath("pi"),
+];
+
 /// Manifest for the Codex CLI.
 pub const CODEX: CliManifest = CliManifest {
     name: "codex",
@@ -105,6 +122,20 @@ pub const CLAUDE: CliManifest = CliManifest {
     default_home: Some(".claude"),
     candidates: CLAUDE_CANDIDATES,
     install_hint: "Install Claude Code CLI: `curl -fsSL https://claude.ai/install.sh | bash` or `npm install -g @anthropic-ai/claude-code`.",
+};
+
+/// Manifest for the pi CLI.
+///
+/// pi stores its config under `~/.pi/agent` (not `~/.pi`); the `PI_CODING_AGENT_DIR`
+/// env var overrides that directory. Auth lives in `auth.json` under the same dir.
+pub const PI: CliManifest = CliManifest {
+    name: "pi",
+    command: "pi",
+    env_override: Some("PI_BIN"),
+    home_env: Some("PI_CODING_AGENT_DIR"),
+    default_home: Some(".pi/agent"),
+    candidates: PI_CANDIDATES,
+    install_hint: "Install pi: `npm install -g @earendil-works/pi-coding-agent`, then sign in with `/login` from Settings → Agents → pi.",
 };
 
 /// Return the parent directories of every `UnderHome` / `Absolute` candidate
@@ -176,8 +207,20 @@ mod tests {
             let found = CLAUDE.candidates.iter().any(|candidate| {
                 matches!(candidate, Candidate::UnderHome(path) if *path == ".claude/bin/claude")
             });
-            assert!(found, "claude manifest must probe the official installer path");
+            assert!(
+                found,
+                "claude manifest must probe the official installer path"
+            );
         }
+    }
+
+    #[test]
+    fn pi_manifest_resolves_nested_agent_home() {
+        // pi keeps its config under ~/.pi/agent, not ~/.pi.
+        assert_eq!(PI.default_home, Some(".pi/agent"));
+        assert_eq!(PI.home_env, Some("PI_CODING_AGENT_DIR"));
+        let last = PI.candidates.last().expect("pi candidates non-empty");
+        assert!(matches!(last, Candidate::InPath(_)));
     }
 
     #[test]

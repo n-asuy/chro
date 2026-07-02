@@ -15,9 +15,10 @@ use tokio_util::sync::CancellationToken;
 use super::{
     hook_server::{ClaudeHookServer, HookEvent, HookEventKind},
     log_sink::LogLineSink,
-    transcript::{TranscriptTailer, map_transcript_line},
+    transcript::{TranscriptTailer, api_error_line_text, map_transcript_line},
     types::{
-        MALFORMED_TOOL_CALL_ABORT_TEXT, MALFORMED_TOOL_CALL_MESSAGE, MALFORMED_TOOL_CALL_SUBTYPE,
+        API_ERROR_MESSAGE, API_ERROR_SUBTYPE, MALFORMED_TOOL_CALL_ABORT_TEXT,
+        MALFORMED_TOOL_CALL_MESSAGE, MALFORMED_TOOL_CALL_SUBTYPE,
     },
 };
 use crate::process::ProcessExit;
@@ -59,6 +60,10 @@ impl RunSupervisor {
         // `last_assistant_message` is not guaranteed to carry the CLI's
         // turn-ending failure text).
         let mut last_assistant_text: Option<String> = None;
+        // Set to the CLI's API-error text (rate limit, usage limit, ...) when the
+        // turn's last assistant line is one; cleared by any subsequent real
+        // assistant output. Drives the api-error abort outcome below.
+        let mut last_api_error: Option<String> = None;
         let mut stop: Option<StopDrain> = None;
         let mut poll = tokio::time::interval(TAIL_POLL_INTERVAL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -106,7 +111,8 @@ impl RunSupervisor {
                 exit = wait_for_exit(&mut self.child_exit) => {
                     // Flush whatever the transcript already holds, then decide.
                     if let Some(tailer) = tailer.as_mut() {
-                        self.pump_transcript(tailer, &mut last_assistant_text).await;
+                        self.pump_transcript(tailer, &mut last_assistant_text, &mut last_api_error)
+                            .await;
                     }
                     if stop.is_some() {
                         break RunOutcome::Completed;
@@ -117,7 +123,9 @@ impl RunSupervisor {
                 _ = poll.tick() => {
                     let mut wrote = false;
                     if let Some(tailer) = tailer.as_mut() {
-                        wrote = self.pump_transcript(tailer, &mut last_assistant_text).await;
+                        wrote = self
+                            .pump_transcript(tailer, &mut last_assistant_text, &mut last_api_error)
+                            .await;
                     }
                     if let Some(drain) = stop.as_mut() {
                         if drain.settled(wrote) {
@@ -156,6 +164,25 @@ impl RunSupervisor {
                         "duration_ms": started.elapsed().as_millis() as u64,
                         "session_id": session_id,
                         "result": MALFORMED_TOOL_CALL_MESSAGE,
+                    })
+                } else if let Some(api_error) = last_api_error.as_deref() {
+                    // The turn ended on a server-side API error (rate limit,
+                    // usage limit, ...) and did no work; surface it as a
+                    // recoverable error carrying the CLI's own text so the run is
+                    // marked failed with a retry instead of a silent success.
+                    let message = if api_error.is_empty() {
+                        API_ERROR_MESSAGE
+                    } else {
+                        api_error
+                    };
+                    json!({
+                        "type": "result",
+                        "subtype": API_ERROR_SUBTYPE,
+                        "is_error": true,
+                        "error": message,
+                        "duration_ms": started.elapsed().as_millis() as u64,
+                        "session_id": session_id,
+                        "result": message,
                     })
                 } else {
                     json!({
@@ -210,18 +237,33 @@ impl RunSupervisor {
     ///
     /// Records the most recent assistant text block in `last_assistant_text` so
     /// the turn outcome can detect a malformed-tool-call abort even when the
-    /// `Stop` hook payload omits the CLI's turn-ending failure message.
+    /// `Stop` hook payload omits the CLI's turn-ending failure message, and
+    /// captures any CLI API-error line in `last_api_error` so a rate-/usage-limit
+    /// turn fails with a retry instead of completing silently.
     async fn pump_transcript(
         &self,
         tailer: &mut TranscriptTailer,
         last_assistant_text: &mut Option<String>,
+        last_api_error: &mut Option<String>,
     ) -> bool {
         let mut wrote = false;
         for raw in tailer.read_new_lines().await {
+            // A CLI API-error line (rate limit, usage limit, ...) ends the turn
+            // and is not model output: capture its text for the run outcome and
+            // keep it out of the conversation stream (map_transcript_line also
+            // drops it). It still counts as activity so the post-Stop drain does
+            // not settle before it is read.
+            if let Some(text) = api_error_line_text(&raw) {
+                *last_api_error = Some(text);
+                wrote = true;
+                continue;
+            }
             if let Some(mapped) = map_transcript_line(&raw) {
                 wrote = true;
                 if let Some(text) = assistant_text(&mapped) {
                     *last_assistant_text = Some(text);
+                    // Real model output supersedes any earlier transient error.
+                    *last_api_error = None;
                 }
                 if !self.sink.write_line(&mapped).await {
                     break;
@@ -288,9 +330,7 @@ fn assistant_text(mapped: &str) -> Option<String> {
     }
 }
 
-async fn wait_for_exit(
-    rx: &mut watch::Receiver<Option<ProcessExit>>,
-) -> Option<ProcessExit> {
+async fn wait_for_exit(rx: &mut watch::Receiver<Option<ProcessExit>>) -> Option<ProcessExit> {
     loop {
         if let Some(exit) = rx.borrow_and_update().clone() {
             return Some(exit);
@@ -313,7 +353,8 @@ mod tests {
 
     #[test]
     fn assistant_text_skips_non_assistant_and_textless_lines() {
-        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let user =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(assistant_text(user), None);
 
         let tool_only = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#;

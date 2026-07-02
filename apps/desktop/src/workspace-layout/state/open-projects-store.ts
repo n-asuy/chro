@@ -14,25 +14,21 @@ export type OpenProjectTab = {
 };
 
 const STORAGE_KEY = "chro.openProjectTabs";
-const MAX_OPEN_PROJECTS = 30;
 
 function readFromStorage(): OpenProjectTab[] {
   const raw = getUiValue<OpenProjectTab[]>(STORAGE_KEY);
   if (!raw || !Array.isArray(raw)) return [];
-  return raw
-    .filter(
-      (entry): entry is OpenProjectTab =>
-        Boolean(entry) &&
-        typeof entry.id === "string" &&
-        typeof entry.name === "string",
-    )
-    .slice(0, MAX_OPEN_PROJECTS);
+  return raw.filter(
+    (entry): entry is OpenProjectTab =>
+      Boolean(entry) &&
+      typeof entry.id === "string" &&
+      typeof entry.name === "string",
+  );
 }
 
 function persist(entries: OpenProjectTab[]): OpenProjectTab[] {
-  const trimmed = entries.slice(0, MAX_OPEN_PROJECTS);
-  setUiValue(STORAGE_KEY, trimmed);
-  return trimmed;
+  setUiValue(STORAGE_KEY, entries);
+  return entries;
 }
 
 interface OpenProjectsStore {
@@ -88,7 +84,7 @@ export const useOpenProjectsStore = create<OpenProjectsStore>()((set, get) => ({
       next = current.slice();
       next[index] = merged;
     } else {
-      next = [...current, tab].slice(-MAX_OPEN_PROJECTS);
+      next = [...current, tab];
     }
     set({ projects: next });
     // Skip persistence until hydration completes — otherwise an eager write

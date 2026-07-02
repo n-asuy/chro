@@ -15,6 +15,12 @@ export type ConversationActions = {
    * replay), in which case the retry affordance is hidden.
    */
   onRetryMalformedToolCall?: () => void;
+  /**
+   * Re-prompt the agent to continue after a turn ended on a server-side API
+   * error (rate limit, usage limit, ...). Undefined when the surface cannot
+   * send follow-ups (e.g. read-only replay), hiding the retry affordance.
+   */
+  onRetryApiError?: () => void;
 };
 
 export const ConversationActionsContext = createContext<ConversationActions>(

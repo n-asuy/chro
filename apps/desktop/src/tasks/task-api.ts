@@ -44,6 +44,12 @@ export interface ProjectResponse {
   slug?: string | null;
   name: string;
   gitRepoPath: string;
+  /**
+   * True for the hidden "General" project that backs general-purpose
+   * ("scratch") chats. Drives hiding git affordances and showing the
+   * "Choose project" picker in the new-chat composer.
+   */
+  isGeneral: boolean;
 }
 
 interface RawProjectPayload {
@@ -51,21 +57,29 @@ interface RawProjectPayload {
   slug?: string | null;
   name: string;
   git_repo_path: string;
+  /** Present on the project-list response; flags the hidden "General" project. */
+  is_general?: boolean;
 }
 
 interface EnsureProjectResponse {
   project: RawProjectPayload;
+  is_general?: boolean;
 }
 
 interface GetProjectResponse {
   project: RawProjectPayload;
+  is_general?: boolean;
 }
 
-const toProjectResponse = (payload: RawProjectPayload): ProjectResponse => ({
+const toProjectResponse = (
+  payload: RawProjectPayload,
+  isGeneral = false,
+): ProjectResponse => ({
   id: payload.id,
   slug: payload.slug,
   name: payload.name,
   gitRepoPath: payload.git_repo_path,
+  isGeneral,
 });
 
 export const taskApi = {
@@ -80,7 +94,9 @@ export const taskApi = {
     const response = await desktopFetch<{ projects: RawProjectPayload[] }>(
       "/rpc/projects",
     );
-    return response.projects.map(toProjectResponse);
+    return response.projects.map((project) =>
+      toProjectResponse(project, project.is_general),
+    );
   },
 
   updateStatus: async (taskId: string, status: string): Promise<void> => {
@@ -88,6 +104,18 @@ export const taskApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
+    });
+  },
+
+  /**
+   * Cancel a task's active run. Forces the run to a terminal status and clears
+   * the task's `active_session_id`, so a session that is stuck "running" (e.g.
+   * an orphaned run whose process already exited) settles. A no-op (404) when
+   * there is no run to cancel.
+   */
+  cancel: async (taskId: string): Promise<void> => {
+    await desktopFetch(`/rpc/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
     });
   },
 
@@ -119,14 +147,27 @@ export const taskApi = {
         body: JSON.stringify({ git_repo_path: gitRepoPath }),
       },
     );
-    return toProjectResponse(response.project);
+    return toProjectResponse(response.project, response.is_general);
   },
 
   getProject: async (projectId: string): Promise<ProjectResponse> => {
     const response = await desktopFetch<GetProjectResponse>(
       `/rpc/projects/${encodeURIComponent(projectId)}`,
     );
-    return toProjectResponse(response.project);
+    return toProjectResponse(response.project, response.is_general);
+  },
+
+  /**
+   * Ensure the hidden "General" project that backs general-purpose ("scratch")
+   * chats and return it. Idempotent. Used by the left-panel "New chat" action
+   * to resolve the slug it navigates to without opening the project in the tree.
+   */
+  ensureGeneralProject: async (): Promise<ProjectResponse> => {
+    const response = await desktopFetch<EnsureProjectResponse>(
+      "/rpc/projects/general",
+      { method: "POST" },
+    );
+    return toProjectResponse(response.project, response.is_general);
   },
 };
 

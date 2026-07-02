@@ -4,6 +4,7 @@ import { desktopFetch } from "./backend-client";
 export const EXECUTOR_INSTALL_GUIDE_URLS: Record<BaseCodingAgent, string> = {
   CLAUDE_CODE: "https://docs.anthropic.com/en/docs/claude-code/overview",
   CODEX: "https://developers.openai.com/codex",
+  PI: "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
 };
 
 export const openExecutorInstallGuide = async (

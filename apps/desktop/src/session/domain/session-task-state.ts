@@ -17,6 +17,16 @@ export type PendingSessionSubmission = {
   tempRunId: string;
   startedWithoutTask: boolean;
   finishedAt: string | null;
+  /**
+   * Task ids already present in the project's task stream when this submission
+   * was made. A new-task submission has no server task id until its HTTP
+   * response returns, yet the task stream broadcasts the created task as soon as
+   * the backend inserts it — well before that response (worktree + agent spawn
+   * happen first). Snapshotting the pre-submission ids lets the optimistic row
+   * adopt the freshly-streamed task the instant it appears, so the sidebar never
+   * shows the optimistic and real rows side by side.
+   */
+  knownTaskIds: string[];
 };
 
 const normalizeText = (value: string): string =>
@@ -29,6 +39,7 @@ export function createPendingSessionSubmission(input: {
   createdAt: string;
   taskId: string | null;
   taskSlug: string | null;
+  knownTaskIds?: string[];
 }): PendingSessionSubmission {
   return {
     scopeId: input.scopeId,
@@ -44,6 +55,7 @@ export function createPendingSessionSubmission(input: {
     tempRunId: `${OPTIMISTIC_RUN_PREFIX}${input.requestId}`,
     startedWithoutTask: !input.taskId,
     finishedAt: null,
+    knownTaskIds: input.knownTaskIds ?? [],
   };
 }
 
@@ -87,32 +99,74 @@ export function derivePendingTaskTitle(prompt: string): string {
   return `${firstLine.slice(0, MAX_PENDING_TASK_TITLE_CHARS - 3).trimEnd()}...`;
 }
 
+/**
+ * For an unresolved new-task submission, find the streamed task it created: one
+ * that was absent when the submission was made (`knownTaskIds`) and not already
+ * claimed by an earlier pending in the same pass. Picks the most recently
+ * created candidate so the newest arrival wins when several are unknown.
+ */
+function findAdoptableStreamTask(
+  streamedTasks: StoredTask[],
+  pending: PendingSessionSubmission,
+  claimed: Set<string>,
+): StoredTask | null {
+  const known = new Set(pending.knownTaskIds);
+  let adopted: StoredTask | null = null;
+  for (const task of streamedTasks) {
+    if (known.has(task.id) || claimed.has(task.id)) {
+      continue;
+    }
+    if (
+      !adopted ||
+      new Date(task.created_at).getTime() >
+        new Date(adopted.created_at).getTime()
+    ) {
+      adopted = task;
+    }
+  }
+  return adopted;
+}
+
 export function applyPendingSubmissionToTasks(
   streamedTasks: StoredTask[],
   pending: PendingSessionSubmission | null,
   projectId: string | null,
+  claimed: Set<string> = new Set(),
 ): StoredTask[] {
   if (!pending) {
     return streamedTasks;
   }
 
-  const taskId = pending.taskId ?? pending.tempTaskId;
-  if (!taskId) {
+  // A follow-up overlays its existing task. A new-task submission renders an
+  // optimistic row keyed by `tempTaskId` until either the server response
+  // resolves a real `taskId`, or the task stream delivers the created task —
+  // whichever lands first. Adopting the streamed task collapses the optimistic
+  // and real rows into one the moment the stream catches up, instead of waiting
+  // for the (slower) HTTP response.
+  let targetId = pending.taskId ?? pending.tempTaskId;
+  if (!pending.taskId && pending.tempTaskId && !pending.finishedAt) {
+    const adopted = findAdoptableStreamTask(streamedTasks, pending, claimed);
+    if (adopted) {
+      targetId = adopted.id;
+    }
+  }
+  if (!targetId) {
     return streamedTasks;
   }
+  claimed.add(targetId);
 
   const title = derivePendingTaskTitle(pending.prompt);
   const byId = new Map(streamedTasks.map((task) => [task.id, task]));
-  const current = byId.get(taskId);
+  const current = byId.get(targetId);
   const isFinished = Boolean(pending.finishedAt);
   const pendingActiveSessionId = isFinished
     ? null
     : pending.runId ?? pending.tempRunId;
   const pendingUpdatedAt = pending.finishedAt ?? pending.createdAt;
 
-  byId.set(taskId, {
-    id: taskId,
-    slug: pending.taskSlug,
+  byId.set(targetId, {
+    id: targetId,
+    slug: current?.slug ?? pending.taskSlug,
     project_id: projectId ?? current?.project_id ?? "",
     title: current?.title?.trim() ? current.title : title,
     description: current?.description ?? null,
@@ -129,10 +183,6 @@ export function applyPendingSubmissionToTasks(
     sort_order: current?.sort_order ?? -1,
   });
 
-  if (pending.tempTaskId && pending.taskId) {
-    byId.delete(pending.tempTaskId);
-  }
-
   return Array.from(byId.values()).sort((a, b) => {
     const orderDiff = (a.sort_order ?? 0) - (b.sort_order ?? 0);
     if (orderDiff !== 0) return orderDiff;
@@ -145,6 +195,7 @@ export function applyPendingSubmissionsToTasks(
   pendingSubmissions: PendingSessionSubmission[],
   projectId: string | null,
 ): StoredTask[] {
+  const claimed = new Set<string>();
   return pendingSubmissions
     .slice()
     .sort(
@@ -153,9 +204,53 @@ export function applyPendingSubmissionsToTasks(
     )
     .reduce(
       (tasks, pending) =>
-        applyPendingSubmissionToTasks(tasks, pending, projectId),
+        applyPendingSubmissionToTasks(tasks, pending, projectId, claimed),
       streamedTasks,
     );
+}
+
+/**
+ * Overlay optimistic rows from several projects onto one cross-project task
+ * list. Each group's submissions are applied only against their own project's
+ * slice of the list, so a new-task submission can only adopt a freshly-streamed
+ * task from the same project — never another project's task or optimistic row
+ * (the single-project `applyPendingSubmissionToTasks` adopts any unknown task,
+ * which is safe only when the stream is already project-scoped). The result
+ * order is unspecified; callers that care must sort.
+ */
+export function applyPendingSubmissionGroupsToTasks(
+  streamedTasks: StoredTask[],
+  groups: readonly {
+    projectId: string | null;
+    submissions: PendingSessionSubmission[];
+  }[],
+): StoredTask[] {
+  if (groups.length === 0) return streamedTasks;
+
+  const byProject = new Map<string, StoredTask[]>();
+  for (const task of streamedTasks) {
+    const slice = byProject.get(task.project_id);
+    if (slice) slice.push(task);
+    else byProject.set(task.project_id, [task]);
+  }
+
+  const result: StoredTask[] = [];
+  const applied = new Set<string>();
+  for (const group of groups) {
+    const key = group.projectId ?? "";
+    applied.add(key);
+    result.push(
+      ...applyPendingSubmissionsToTasks(
+        byProject.get(key) ?? [],
+        group.submissions,
+        group.projectId,
+      ),
+    );
+  }
+  for (const [key, tasks] of byProject) {
+    if (!applied.has(key)) result.push(...tasks);
+  }
+  return result;
 }
 
 export function resolveActiveTaskId(

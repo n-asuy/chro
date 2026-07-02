@@ -25,7 +25,7 @@ import {
  * surface / icon contexts, just framer-motion, lucide and shadcn tokens.
  */
 
-const SPRING_MOVE = { type: "spring", duration: 0.22, bounce: 0.18 } as const;
+const SPRING_MOVE = { type: "spring", duration: 0.22, bounce: 0.1 } as const;
 const SPRING_FAST = { type: "spring", duration: 0.1, bounce: 0 } as const;
 
 export interface SegmentedItem<T extends string = string> {

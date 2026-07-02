@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const EXECUTOR_LABELS: Record<BaseCodingAgent, string> = {
   CLAUDE_CODE: "Claude Code",
   CODEX: "Codex",
+  PI: "pi",
 };
 
 type LoginTerminalDialogProps = {

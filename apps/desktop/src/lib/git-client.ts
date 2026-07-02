@@ -1,3 +1,4 @@
+import type { FileNode } from "@/files/types/file-tree";
 import type { DiffContent } from "@/session/hooks";
 import { desktopFetch } from "./backend-client";
 
@@ -25,6 +26,34 @@ export type GitStatus = {
 
 export type GitStatusResponse = {
   status: GitStatus;
+  currentBranch: string | null;
+  commitsAhead: number;
+  commitsBehind: number;
+};
+
+/** A change kind that can decorate a file or folder. Mirrors the Rust
+ * `DecorationStatus` enum (the single source of truth lives in `crates/git`). */
+export type DecorationStatus = FileChangeStatus | "untracked";
+
+/**
+ * Git status decorations as the backend serializes them: `relativePath -> status`
+ * for changed files, and the dominant status rolled up to every ancestor folder.
+ * Plain objects on the wire; the consuming hook converts them to `Map`s.
+ */
+export type GitDecorationMaps = {
+  files: Record<string, DecorationStatus>;
+  folders: Record<string, DecorationStatus>;
+};
+
+/**
+ * Working-tree status assembled into a renderer-ready shape by the backend: the
+ * raw status, the decoration maps, and the nested changed-files tree — all
+ * computed in Rust so the frontend renders without re-deriving any of it.
+ */
+export type DecoratedTreeResponse = {
+  status: GitStatus;
+  decorations: GitDecorationMaps;
+  changedFilesTree: FileNode[];
   currentBranch: string | null;
   commitsAhead: number;
   commitsBehind: number;
@@ -98,6 +127,18 @@ export const getGitStatus = async (
   scope: GitScope,
 ): Promise<GitStatusResponse> => {
   return desktopFetch<GitStatusResponse>(`${gitBasePath(scope)}/status`);
+};
+
+/**
+ * Fetch the working tree assembled for rendering: status plus the Rust-computed
+ * decoration maps and changed-files tree. One call hydrates the whole view.
+ */
+export const getDecoratedTree = async (
+  scope: GitScope,
+): Promise<DecoratedTreeResponse> => {
+  return desktopFetch<DecoratedTreeResponse>(
+    `${gitBasePath(scope)}/decorated-tree`,
+  );
 };
 
 export const listGitBranches = async (

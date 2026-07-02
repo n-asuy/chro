@@ -12,7 +12,10 @@ use axum::{
     Json, Router,
 };
 use db::models::{ProjectRecord, TaskRun};
-use git::{BranchInfo, DiffTarget, GitService, GitStatus};
+use git::{
+    build_changed_files_tree, build_git_decorations, BranchInfo, ChangedFileNode, DiffTarget,
+    GitDecorations, GitService, GitStatus,
+};
 use log_types::Diff;
 use serde::{Deserialize, Serialize};
 use std::path::{Path as StdPath, PathBuf};
@@ -26,6 +29,10 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         // Project (main checkout) scope.
         .route("/projects/:project_id/git/status", get(get_git_status))
+        .route(
+            "/projects/:project_id/git/decorated-tree",
+            get(get_decorated_tree),
+        )
         .route("/projects/:project_id/git/branches", get(list_branches))
         .route("/projects/:project_id/git/branch", get(get_current_branch))
         .route("/projects/:project_id/git/stage", post(stage_files))
@@ -42,6 +49,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/projects/:project_id/git/init", post(init_repository))
         // Task-run (worktree) scope — mirrors the project routes, minus init.
         .route("/task-runs/:id/git/status", get(run_git_status))
+        .route("/task-runs/:id/git/decorated-tree", get(run_decorated_tree))
         .route("/task-runs/:id/git/branches", get(run_list_branches))
         .route("/task-runs/:id/git/branch", get(run_current_branch))
         .route("/task-runs/:id/git/stage", post(run_stage_files))
@@ -58,6 +66,21 @@ pub(super) fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 struct GitStatusResponse {
     status: GitStatus,
+    current_branch: Option<String>,
+    commits_ahead: usize,
+    commits_behind: usize,
+}
+
+/// Working-tree status assembled into a renderer-ready shape: the raw status,
+/// the file/folder decoration maps, and the nested changed-files tree — all
+/// computed in Rust so the frontend renders directly without re-deriving any of
+/// it. Carries branch/ahead/behind so a single call hydrates the whole view.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecoratedTreeResponse {
+    status: GitStatus,
+    decorations: GitDecorations,
+    changed_files_tree: Vec<ChangedFileNode>,
     current_branch: Option<String>,
     commits_ahead: usize,
     commits_behind: usize,
@@ -196,6 +219,42 @@ fn status_response(
     })
 }
 
+/// Assemble the decorated tree from a working-tree status snapshot. The
+/// changed-files tree is built from every changed path (staged, unstaged, and
+/// untracked); decorations roll those statuses up to ancestor folders. Empty
+/// (but not an error) when the path is not a repository.
+fn decorated_tree_response(
+    git_service: &GitService,
+    path: &StdPath,
+) -> Result<DecoratedTreeResponse, ApiError> {
+    let status = git_service
+        .status(path)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let decorations = build_git_decorations(&status);
+
+    let changed_paths: Vec<String> = status
+        .staged
+        .iter()
+        .map(|change| change.path.clone())
+        .chain(status.modified.iter().map(|change| change.path.clone()))
+        .chain(status.untracked.iter().cloned())
+        .collect();
+    let changed_files_tree = build_changed_files_tree(&changed_paths);
+
+    let current_branch = git_service.get_current_branch(path).ok();
+    let (commits_ahead, commits_behind) = git_service.get_remote_status(path).unwrap_or((0, 0));
+
+    Ok(DecoratedTreeResponse {
+        status,
+        decorations,
+        changed_files_tree,
+        current_branch,
+        commits_ahead,
+        commits_behind,
+    })
+}
+
 fn branches_response(
     git_service: &GitService,
     path: &StdPath,
@@ -275,9 +334,9 @@ fn diff_response(
     }
 
     let merge_base = match (base, branch) {
-        (Some(base_ref), Some(branch_name)) => {
-            git_service.get_base_commit(path, branch_name, base_ref).ok()
-        }
+        (Some(base_ref), Some(branch_name)) => git_service
+            .get_base_commit(path, branch_name, base_ref)
+            .ok(),
         _ => None,
     };
     let base_commit = match merge_base.or_else(|| git_service.head_commit(path).ok()) {
@@ -304,20 +363,14 @@ fn diff_response(
     Ok(WorkingDiffResponse { diffs: entries })
 }
 
-fn push_response(
-    git_service: &GitService,
-    path: &StdPath,
-) -> Result<GitStatusResponse, ApiError> {
+fn push_response(git_service: &GitService, path: &StdPath) -> Result<GitStatusResponse, ApiError> {
     git_service
         .push(path)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     status_response(git_service, path)
 }
 
-fn pull_response(
-    git_service: &GitService,
-    path: &StdPath,
-) -> Result<GitStatusResponse, ApiError> {
+fn pull_response(git_service: &GitService, path: &StdPath) -> Result<GitStatusResponse, ApiError> {
     git_service
         .pull(path)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -352,7 +405,19 @@ async fn get_git_status(
     Path(project_id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
     let path = get_project_path(&state, &project_id).await?;
-    Ok(Json(blocking_git(move |git| status_response(&git, &path)).await?))
+    Ok(Json(
+        blocking_git(move |git| status_response(&git, &path)).await?,
+    ))
+}
+
+async fn get_decorated_tree(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<DecoratedTreeResponse>, ApiError> {
+    let path = get_project_path(&state, &project_id).await?;
+    Ok(Json(
+        blocking_git(move |git| decorated_tree_response(&git, &path)).await?,
+    ))
 }
 
 async fn list_branches(
@@ -491,7 +556,19 @@ async fn run_git_status(
     Path(id): Path<String>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
     let path = get_run_path(&state, &id).await?;
-    Ok(Json(blocking_git(move |git| status_response(&git, &path)).await?))
+    Ok(Json(
+        blocking_git(move |git| status_response(&git, &path)).await?,
+    ))
+}
+
+async fn run_decorated_tree(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DecoratedTreeResponse>, ApiError> {
+    let path = get_run_path(&state, &id).await?;
+    Ok(Json(
+        blocking_git(move |git| decorated_tree_response(&git, &path)).await?,
+    ))
 }
 
 async fn run_list_branches(
@@ -558,10 +635,8 @@ async fn run_get_diff(
     let (path, branch) = get_run_worktree(&state, &id).await?;
     let base = query.base;
     Ok(Json(
-        blocking_git(move |git| {
-            diff_response(&git, &path, branch.as_deref(), base.as_deref())
-        })
-        .await?,
+        blocking_git(move |git| diff_response(&git, &path, branch.as_deref(), base.as_deref()))
+            .await?,
     ))
 }
 

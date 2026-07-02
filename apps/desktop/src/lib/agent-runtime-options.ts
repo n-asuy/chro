@@ -18,19 +18,25 @@ export type ReasoningOption = { value: ReasoningEffort; label: string };
 /** Label shown for the current value when no explicit override is selected. */
 export const RUNTIME_DEFAULT_LABEL = "Default";
 
-// `value` is the Claude Code CLI `--model` alias and must stay stable; the CLI
-// resolves each alias to the current model snapshot. `label` carries the
-// human-facing version (Opus 4.8 / Sonnet 4.6 / Haiku 4.5) so the selector
-// shows which generation the alias points at.
+// `value` is passed to the Claude Code CLI via `--model`. The short aliases
+// (`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current model
+// snapshot, so `label` carries the human-facing generation (Opus 4.8 /
+// Sonnet 5 / Haiku 4.5) so the selector shows which model the alias points at.
+// Fable 5 has no short alias, so it uses its pinned model id directly.
 const CLAUDE_MODELS: ModelOption[] = [
+  {
+    value: "claude-fable-5",
+    label: "Fable 5",
+    description: "Most capable model for demanding, long-horizon work.",
+  },
   {
     value: "opus",
     label: "Opus 4.8",
-    description: "Most capable model for complex work.",
+    description: "Highly capable model for complex agentic coding.",
   },
   {
     value: "sonnet",
-    label: "Sonnet 4.6",
+    label: "Sonnet 5",
     description: "Balanced model for everyday coding.",
   },
   {
@@ -74,7 +80,17 @@ export const REASONING_OPTIONS: ReasoningOption[] = [
 
 /** Available models for the given runtime. */
 export function getModelOptions(executor: BaseCodingAgent): ModelOption[] {
-  return executor === "CODEX" ? CODEX_MODELS : CLAUDE_MODELS;
+  switch (executor) {
+    case "CODEX":
+      return CODEX_MODELS;
+    case "CLAUDE_CODE":
+      return CLAUDE_MODELS;
+    // pi's model list is provider-dependent (resolved from its own
+    // settings.json / `--provider`), so it has no static presets here; the
+    // selector shows "Default" and pi uses its configured model.
+    case "PI":
+      return [];
+  }
 }
 
 /** Display label for a selected model value, or null when unset. */

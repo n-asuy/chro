@@ -23,9 +23,9 @@ use sqlx::{Pool, Sqlite};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use worktree::{generate_attempt_branch_name, EnsureOptions};
+use worktree::{generate_attempt_branch_name, worktree_dir_name, EnsureOptions};
 
-use config::{render_merge_commit_template, DEFAULT_MERGE_COMMIT_TEMPLATE};
+use config::{chats_dir, render_merge_commit_template, DEFAULT_MERGE_COMMIT_TEMPLATE};
 
 use crate::{execution::ExecutionStartParams, Runtime, RuntimeError};
 
@@ -468,6 +468,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let repo_path = workspace_path.clone();
         let repo_path_str = repo_path.to_string_lossy().into_owned();
+        // A general-purpose ("scratch") chat runs under the shared chats root
+        // rather than a real repo: one hidden "General" project keyed on this
+        // path, with each chat isolated in its own per-task subfolder.
+        let is_scratch_chat = repo_path == chats_dir();
         let project =
             ProjectRecord::ensure_with_name_hint(self.pool(), &repo_path_str, None).await?;
         self.validate_context_refs_for_project(project.id, &context_refs)
@@ -625,6 +629,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .ensure_worktree(&repo_path, ensure_options)
                 .await?;
             let path = worktree_handle.path.clone();
+            let container = path.to_string_lossy().to_string();
+            (path, container)
+        } else if is_scratch_chat {
+            // Isolate each scratch chat in its own per-task subfolder so chats
+            // never collide on disk, while all of them stay under the single
+            // hidden "General" project keyed on the chats root.
+            let path = scratch_chat_dir(&workspace_path, &task.title, &task.id.to_string());
+            std::fs::create_dir_all(&path).map_err(|e| {
+                RuntimeError::Other(anyhow::anyhow!("failed to create scratch chat dir: {e}"))
+            })?;
             let container = path.to_string_lossy().to_string();
             (path, container)
         } else {
@@ -898,6 +912,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         new_run.container_ref = previous_run.container_ref.clone();
         new_run.workspace_path = previous_run.workspace_path.clone();
         new_run.resume_session_id = resume_session_id.clone();
+        // Inherit the Claude execution engine pinned at the session's birth so a
+        // PTY-born session is never resumed headless (or vice versa). The global
+        // setting seeds new sessions only; it must not leak into follow-ups.
+        new_run.claude_execution_mode = previous_run.claude_execution_mode.clone();
         new_run.status = RunStatus::Running;
         new_run.started_at = Some(Utc::now());
         new_run.insert(self.pool()).await?;
@@ -1760,6 +1778,13 @@ fn resolve_use_worktree_mode(is_git_repository: bool, requested: Option<bool>) -
     requested.unwrap_or(true)
 }
 
+/// Per-task working directory for a scratch chat, nested under the chats root.
+/// Keyed on the task id so every run of the same chat reuses one subfolder
+/// (resume lands in the same place), while distinct chats never collide.
+fn scratch_chat_dir(chats_root: &Path, task_title: &str, task_id: &str) -> PathBuf {
+    chats_root.join(worktree_dir_name(task_title, task_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,5 +1926,25 @@ mod tests {
     #[test]
     fn respects_explicit_local_mode_for_git_workspace() {
         assert!(!resolve_use_worktree_mode(true, Some(false)));
+    }
+
+    #[test]
+    fn scratch_chat_dir_nests_per_task_subfolder_under_root() {
+        let root = Path::new("/tmp/chats");
+        let dir = scratch_chat_dir(root, "Plan the launch", "1a2b3c4d");
+        assert!(dir.starts_with(root));
+        assert_ne!(dir, root);
+        // The subfolder carries the slugified title so it is human-scannable.
+        assert!(dir.to_string_lossy().contains("plan-the-launch"));
+    }
+
+    #[test]
+    fn scratch_chat_dir_is_stable_per_task_and_distinct_across_tasks() {
+        let root = Path::new("/tmp/chats");
+        let a1 = scratch_chat_dir(root, "Plan the launch", "1a2b3c4d");
+        let a2 = scratch_chat_dir(root, "Plan the launch", "1a2b3c4d");
+        let b = scratch_chat_dir(root, "Plan the launch", "ffeeddcc");
+        assert_eq!(a1, a2, "same task id must resolve to the same subfolder");
+        assert_ne!(a1, b, "distinct task ids must not collide");
     }
 }

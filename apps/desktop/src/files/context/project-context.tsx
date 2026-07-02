@@ -1,12 +1,12 @@
+import { type ProjectResponse, taskApi } from "@/tasks/task-api";
+import { useParams } from "@tanstack/react-router";
 import {
+  type ReactNode,
   createContext,
   useContext,
   useEffect,
   useState,
-  type ReactNode,
 } from "react";
-import { useParams } from "@tanstack/react-router";
-import { taskApi, type ProjectResponse } from "@/tasks/task-api";
 
 interface ProjectContextValue {
   /** Resolved UUID — use this for all API calls */
@@ -15,6 +15,12 @@ interface ProjectContextValue {
   projectSlug: string | null;
   project: ProjectResponse | null;
   workspacePath: string | null;
+  /**
+   * True when the active project is the hidden "General" project backing
+   * general-purpose ("scratch") chats. Drives the new-chat composer affordances
+   * (Choose project picker) and suppression of git UI.
+   */
+  isScratch: boolean;
   isLoading: boolean;
   error: string | null;
 }
@@ -69,6 +75,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     projectSlug: project?.slug ?? routeIdentifier,
     project,
     workspacePath: project?.gitRepoPath ?? null,
+    isScratch: project?.isGeneral ?? false,
     isLoading,
     error,
   };

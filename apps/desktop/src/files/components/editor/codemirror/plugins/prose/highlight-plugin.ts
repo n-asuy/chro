@@ -3,10 +3,10 @@
  * Renders ==highlighted== text with visual styling
  */
 
-import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
-import { StateField, RangeSet } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
-import type { EditorState, Range as EditorRange } from "@codemirror/state";
+import { RangeSet, StateField } from "@codemirror/state";
+import type { Range as EditorRange, EditorState } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 import {
   cursorSelectionCoveredNode,
   isNodeRangeActive,
@@ -51,6 +51,13 @@ function buildHighlightDecorations(
 
         const startContent = markers[0]?.to ?? 0;
         const endContent = markers[markers.length - 1]?.from ?? 0;
+
+        // An empty highlight such as "====" has no content between the
+        // markers, so startContent === endContent. CodeMirror's
+        // Decoration.mark() throws "Mark decorations may not be empty" for a
+        // zero-width range, which would crash the whole editor. Leave the raw
+        // text undecorated in that case.
+        if (endContent <= startContent) return;
 
         decorations.push(
           Decoration.mark({

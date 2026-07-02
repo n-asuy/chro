@@ -40,6 +40,14 @@ fn agent_spec(agent: BaseCodingAgent) -> AgentSpec {
             home_segments: &[".codex", "config.toml"],
             servers_path: &["mcp_servers"],
         },
+        // pi has no chro-writable MCP server config; this spec is only reached
+        // if MCP writing is ever invoked for pi (gated by `supports_mcp`).
+        BaseCodingAgent::Pi => AgentSpec {
+            format: ConfigFormat::Json,
+            env_var: Some("PI_CODING_AGENT_DIR"),
+            home_segments: &[".pi", "agent", "settings.json"],
+            servers_path: &["mcpServers"],
+        },
     }
 }
 

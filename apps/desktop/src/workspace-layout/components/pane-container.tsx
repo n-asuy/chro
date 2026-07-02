@@ -37,9 +37,7 @@ export const PaneContainer = memo(function PaneContainer({
   return (
     <div
       data-pane-leaf-id={leaf.id}
-      className={cn(
-        "relative flex h-full w-full min-h-0 min-w-0 flex-col",
-      )}
+      className={cn("relative flex h-full w-full min-h-0 min-w-0 flex-col")}
       onMouseDown={() => {
         if (!isFocused) setFocusedPane(leaf.id);
       }}
@@ -55,7 +53,7 @@ export const PaneContainer = memo(function PaneContainer({
        */}
       <div
         ref={droppable.setNodeRef}
-        className="relative z-0 -mt-px min-h-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-background"
+        className="relative z-0 -mt-px min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-background"
       >
         {activeTab ? (
           <PaneItemBody

@@ -83,6 +83,14 @@ pub(super) fn router() -> Router<AppState> {
             get(read_task_run_asset),
         )
         .route("/task-runs/:id/file", get(read_task_run_file))
+        .route(
+            "/task-runs/:id/absolute-path",
+            get(get_task_run_absolute_path),
+        )
+        .route(
+            "/task-runs/:id/reveal-in-finder",
+            post(reveal_task_run_in_finder),
+        )
         .route("/task-runs/:id/entries", get(list_task_run_entries))
         .route("/task-runs/:id/media", get(list_task_run_media))
         .route(
@@ -1235,6 +1243,82 @@ async fn read_task_run_file(
             modified_at: crate::format_system_time(file.modified),
         },
     }))
+}
+
+/// Resolve a worktree-relative path to its absolute location inside the run's
+/// worktree, rejecting paths that escape the worktree boundary. Mirrors the
+/// project-scoped boundary check in `projects::reveal_in_finder` so a session
+/// sandbox row resolves against its own checkout rather than the project root.
+async fn resolve_task_run_full_path(
+    state: &AppState,
+    run: &TaskRun,
+    relative_path: &str,
+) -> Result<PathBuf, ApiError> {
+    let (worktree, _candidates) = task_run_path_candidates(state, run).await?;
+    let worktree = PathBuf::from(worktree);
+    let full_path = worktree.join(relative_path.trim_start_matches('/'));
+    if !full_path.starts_with(&worktree) {
+        return Err(ApiError::BadRequest(
+            "path is outside worktree boundary".into(),
+        ));
+    }
+    Ok(full_path)
+}
+
+#[derive(Debug, Serialize)]
+struct TaskRunAbsolutePathResponse {
+    absolute_path: String,
+}
+
+/// Resolve a worktree-relative path to its absolute on-disk path. Powers the
+/// session-sandbox "Copy Absolute Path" action, where the client lacks the
+/// worktree root and so cannot join the path itself.
+async fn get_task_run_absolute_path(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TaskRunFileQuery>,
+) -> Result<Json<TaskRunAbsolutePathResponse>, ApiError> {
+    if query.relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter 'relative_path' is required".into(),
+        ));
+    }
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let full_path = resolve_task_run_full_path(&state, &run, &query.relative_path).await?;
+
+    Ok(Json(TaskRunAbsolutePathResponse {
+        absolute_path: full_path.to_string_lossy().into_owned(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskRunRevealRequest {
+    relative_path: String,
+}
+
+/// Reveal a worktree-relative path in the platform's file manager. The
+/// project-scoped `reveal_in_finder` resolves against the project root, which
+/// would point at the wrong checkout for a session sandbox, so this endpoint
+/// resolves against the run's worktree instead.
+async fn reveal_task_run_in_finder(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<TaskRunRevealRequest>,
+) -> Result<StatusCode, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let full_path = resolve_task_run_full_path(&state, &run, &payload.relative_path).await?;
+
+    let fs_service = filesystem::FilesystemService::new();
+    tokio::task::spawn_blocking(move || -> Result<(), filesystem::FilesystemError> {
+        fs_service.reveal_in_file_manager(&full_path)
+    })
+    .await
+    .map_err(|e| ApiError::BadRequest(format!("spawn failed: {e}")))?
+    .map_err(ApiError::Filesystem)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]

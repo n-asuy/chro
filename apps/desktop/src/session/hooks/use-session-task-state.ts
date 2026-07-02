@@ -74,14 +74,21 @@ export function useSessionTaskState({
     (state) => state.clearPendingSubmission,
   );
 
+  // The sidebar task list is project-global, so it overlays every in-flight
+  // submission for the project — not just the current scope's. Scoping this to
+  // `scopedPendingSubmissions` drops a just-submitted session's optimistic row
+  // the instant the route scope flips (`route:…:new:…` → `route:…:<new-slug>:…`)
+  // after creation; if the WS task stream has not delivered the real task yet,
+  // the row vanishes from the sidebar until a reload. Scope filtering still
+  // governs which submission is the *active* one (`pendingSubmission` below).
   const tasks = useMemo(
     () =>
       applyPendingSubmissionsToTasks(
         streamedTasks,
-        scopedPendingSubmissions,
+        pendingSubmissions,
         projectId,
       ),
-    [projectId, scopedPendingSubmissions, streamedTasks],
+    [projectId, pendingSubmissions, streamedTasks],
   );
 
   const tasksById = useMemo(
@@ -141,9 +148,16 @@ export function useSessionTaskState({
 
   const beginPendingSubmission = useCallback(
     (input: BeginPendingSessionSubmissionInput): PendingSessionSubmission => {
-      return beginStorePendingSubmission(projectId, { ...input, scopeId });
+      // Snapshot the project's current task ids so a new-task submission can
+      // tell its own freshly-streamed task apart from ones that already existed,
+      // and adopt it instead of rendering a duplicate optimistic row.
+      return beginStorePendingSubmission(projectId, {
+        ...input,
+        scopeId,
+        knownTaskIds: Object.keys(streamedTasksById),
+      });
     },
-    [beginStorePendingSubmission, projectId, scopeId],
+    [beginStorePendingSubmission, projectId, scopeId, streamedTasksById],
   );
 
   const resolvePendingSubmissionWithResponse = useCallback(

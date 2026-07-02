@@ -13,9 +13,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod cli;
+pub mod decorated_tree;
 
 pub use cli::GitCliError as CliError;
 use cli::{GitCli, GitCliError};
+pub use decorated_tree::{
+    build_changed_files_tree, build_decorations_from_entries, build_git_decorations,
+    collect_directory_paths, ChangedFileNode, DecorationStatus, GitDecorations, NodeKind,
+};
 
 #[derive(Debug, Error)]
 pub enum GitServiceError {
@@ -812,31 +817,22 @@ impl GitService {
         Ok(!self.status(repo_path)?.has_changes)
     }
 
-    /// Stage files for commit
+    /// Stage files (or whole directories) for commit.
+    ///
+    /// Routes through the killable `git add` subprocess rather than libgit2's
+    /// `Index::add_path`, which rejects directory pathspecs and aborts with
+    /// `invalid path: 'crates/'`. `git status` folds untracked directories into
+    /// a single entry so it stays instant on huge untracked trees (see
+    /// [`GitCli::status_porcelain`]), so the Source Control panel hands back
+    /// paths like `crates/`; `git add` recurses those and also stages
+    /// deletions, covering every case the per-file libgit2 loop handled plus
+    /// the directory case it could not.
     pub fn stage(
         &self,
         repo_path: impl AsRef<Path>,
         paths: &[String],
     ) -> Result<(), GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        let mut index = repo.index()?;
-        let workdir = repo.workdir().ok_or(GitServiceError::WorkdirMissing)?;
-
-        for path in paths {
-            let relative = Path::new(path);
-            let full_path = workdir.join(relative);
-            if full_path.exists() {
-                index.add_path(relative)?;
-            } else {
-                match index.remove_path(relative) {
-                    Ok(()) => {}
-                    Err(err) if err.code() == git2::ErrorCode::NotFound => {}
-                    Err(err) => return Err(err.into()),
-                }
-            }
-        }
-
-        index.write()?;
+        GitCli::new().add_paths(repo_path.as_ref(), paths)?;
         Ok(())
     }
 
@@ -1487,6 +1483,34 @@ mod tests {
         assert!(status.staged.is_empty());
         assert!(status.untracked.contains(&"unstaged.txt".to_string()));
         assert!(!status.untracked.contains(&"staged.txt".to_string()));
+    }
+
+    /// `git status` folds an untracked directory into a single `crates/` entry,
+    /// and the Source Control panel hands that path straight to `stage`. libgit2's
+    /// `Index::add_path` rejected it (`invalid path: 'crates/'`); staging via
+    /// `git add` recurses the directory so every file beneath it lands staged.
+    #[test]
+    fn stages_a_folded_untracked_directory() {
+        let (tmp, _repo) = init_repo();
+        let service = GitService::new();
+
+        write_file(tmp.path(), "crates/git/src/lib.rs", "// hi\n");
+        write_file(tmp.path(), "crates/git/Cargo.toml", "[package]\n");
+
+        let untracked = service.status(tmp.path()).unwrap().untracked;
+        assert_eq!(untracked, vec!["crates/".to_string()]);
+
+        service.stage(tmp.path(), &untracked).unwrap();
+
+        let staged: Vec<String> = service
+            .status(tmp.path())
+            .unwrap()
+            .staged
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert!(staged.contains(&"crates/git/src/lib.rs".to_string()));
+        assert!(staged.contains(&"crates/git/Cargo.toml".to_string()));
     }
 
     #[test]
