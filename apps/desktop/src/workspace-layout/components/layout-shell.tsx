@@ -5,13 +5,13 @@ import { useSessionReadSync } from "@/session/hooks";
 import { useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useCloseTabShortcut } from "../hooks/use-close-tab-shortcut";
+import { useGlobalShortcuts } from "../hooks/use-global-shortcuts";
 import { useLeaderKeyShortcuts } from "../hooks/use-leader-key-shortcuts";
 import { useOpenProjectsSync } from "../hooks/use-open-projects-sync";
 import {
   inferKindFromLocation,
   useRouteTabSync,
 } from "../hooks/use-route-tab-sync";
-import { useSearchShortcut } from "../hooks/use-search-shortcut";
 import { useSessionTabArchiveSync } from "../hooks/use-session-tab-archive-sync";
 import { useSessionTabTitleSync } from "../hooks/use-session-tab-title-sync";
 import { ensurePaneItemsRegistered } from "../registry";
@@ -27,6 +27,7 @@ import { PaneDndContext } from "./pane-dnd-context";
 import { PaneTreeView } from "./pane-tree-view";
 import { ProjectTabsHeader } from "./project-tabs-header";
 import { RightDock } from "./right-dock";
+import { SessionSearchPalette } from "./session-search-palette";
 
 /**
  * Top-level shell: ElectronTitlebar + LeftDock + Center pane tree. Mounts
@@ -81,7 +82,7 @@ function LayoutShellInner() {
   useSessionReadSync();
   useRouteTabSync();
   useLeaderKeyShortcuts();
-  useSearchShortcut();
+  useGlobalShortcuts();
   useCloseTabShortcut();
   useSessionTabTitleSync();
   useSessionTabArchiveSync();
@@ -109,6 +110,12 @@ function LayoutShellInner() {
           />
         </div>
       </PaneDndContext>
+      {/*
+       * Session-search command palette (⌘K / ⌘P). Mounted here, above the docks,
+       * so it opens as a centered modal regardless of which panels are open —
+       * and never nudges the layout when it does.
+       */}
+      <SessionSearchPalette />
     </div>
   );
 }

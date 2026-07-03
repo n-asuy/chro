@@ -7,6 +7,7 @@ use std::{
 pub mod container;
 pub mod execution;
 pub mod perf;
+pub mod session_context;
 pub mod tasks;
 pub mod workspace;
 

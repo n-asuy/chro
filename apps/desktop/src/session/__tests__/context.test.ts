@@ -106,13 +106,13 @@ describe("formatContextForPrompt", () => {
     );
   });
 
-  it("renders a session entry with the CLI hint inside <past_session>", () => {
+  it("renders a session entry with the escalation hint inside <past_session>", () => {
     const result = formatContextForPrompt([sessionEntry(TASK_ID)]);
     expect(result).toBe(
       [
         "<context>",
         `<past_session task_id="${TASK_ID}">`,
-        `Run \`chro task logs ${TASK_ID}\` to view the full transcript of this previous chro session.`,
+        `Referenced session. A summary is injected at execution time; run \`chro task logs ${TASK_ID}\` for the full transcript.`,
         "</past_session>",
         "</context>",
       ].join("\n"),
@@ -264,7 +264,7 @@ describe("parseContextFromContent", () => {
     const content = [
       "<context>",
       `<past_session task_id="${TASK_ID}">`,
-      `Run \`chro task logs ${TASK_ID}\` to view the full transcript of this previous chro session.`,
+      `Referenced session. A summary is injected at execution time; run \`chro task logs ${TASK_ID}\` for the full transcript.`,
       "</past_session>",
       "</context>",
       "continue please",

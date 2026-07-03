@@ -1,9 +1,17 @@
-
-import { Button } from "@chro/ui/button";
+import { isImagePath } from "@/files/media-types";
+import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
+import { getTaskRunBinaryFileUrl } from "@/lib/project-client";
+import { useTheme } from "@/settings/hooks/use-theme";
+import { Button } from "@chro/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@chro/ui/tooltip";
 import { generateDiffFile } from "@git-diff-view/file";
 import { DiffModeEnum, DiffView } from "@git-diff-view/react";
-import { useTheme } from "@/settings/hooks/use-theme";
 import {
   ChevronDown,
   ChevronRight,
@@ -14,9 +22,6 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useLanguage } from "@/i18n";
-import { isImagePath } from "@/files/media-types";
-import { getTaskRunBinaryFileUrl } from "@/lib/project-client";
 import type { DiffChangeKind, DiffContent } from "../hooks";
 import "@/styles/diff-style-overrides.css";
 
@@ -547,16 +552,25 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
           >
             {allCollapsed ? "Expand All" : "Collapse All"}
           </Button>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7"
-            onClick={onClose}
-            aria-label={t("closeDiffViewer")}
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  onClick={onClose}
+                  aria-label={t("closeDiffViewer")}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="center">
+                {t("closeDiffViewer")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </header>
 

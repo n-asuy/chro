@@ -362,7 +362,7 @@ fn with_session_context(prompt: &str, ref_sessions: &[String]) -> String {
         .iter()
         .map(|task| {
             format!(
-                "<past_session task_id=\"{}\">\nRun `chro task logs {}` to view the full transcript of this previous chro session.\n</past_session>",
+                "<past_session task_id=\"{}\">\nReferenced session. A summary is injected at execution time; run `chro task logs {}` for the full transcript.\n</past_session>",
                 escape_xml_attr(task),
                 task
             )
@@ -382,7 +382,18 @@ fn escape_xml_attr(value: &str) -> String {
 }
 
 fn logs(client: &ServerClient, id: &str) -> Result<(), client::ClientError> {
-    let resp = client.get(&format!("/rpc/task-runs/{id}/logs"))?;
+    // `id` may be a run id/slug (raw run logs) or a task id/slug; a task id is
+    // not resolvable as a run, so fall back to the task transcript endpoint.
+    let resp = match client.get(&format!("/rpc/task-runs/{id}/logs")) {
+        Ok(resp) => resp,
+        Err(client::ClientError::Api { status: 404, .. }) => {
+            let resp = client.get(&format!("/rpc/tasks/{id}/transcript"))?;
+            let markdown = resp.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
+            print!("{markdown}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     let entries = resp
         .get("entries")
         .and_then(|v| v.as_array())

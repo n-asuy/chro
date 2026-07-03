@@ -94,7 +94,7 @@ const renderSessionContextEntry = (e: SessionContextEntry): string => {
   const branchAttr = e.branch ? ` branch="${escapeXmlAttr(e.branch)}"` : "";
   return [
     `<past_session task_id="${escapeXmlAttr(e.taskId)}"${branchAttr}>`,
-    `Run \`chro task logs ${e.taskId}\` to view the full transcript of this previous chro session.`,
+    `Referenced session. A summary is injected at execution time; run \`chro task logs ${e.taskId}\` for the full transcript.`,
     "</past_session>",
   ].join("\n");
 };

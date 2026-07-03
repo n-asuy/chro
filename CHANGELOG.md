@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.40
+
+- Added server-side materialization for referenced sessions: sessions attached from the composer or `--ref-session` now inject a bounded digest into the executor prompt at run start and follow-up time, including the referenced session title, branch, latest status, last user/assistant exchange, and a `chro task logs <task_id>` pointer for the full transcript
+- Fixed the bundled `chro task logs` path so task IDs and slugs fall back to the task transcript endpoint when they are not run IDs, making referenced-session escalation links resolve instead of returning a run-log 404
+- Added global workspace shortcuts: Cmd/Ctrl+K and Cmd/Ctrl+P open the session-search palette, Cmd/Ctrl+Shift+F opens file search, and Cmd/Ctrl+N starts a new chat
+- Moved the session-search palette out of the projects dock so it opens from the same shared modal whether triggered by the sidebar button or a keyboard shortcut, including when the left dock is collapsed
+- Refined workspace chrome with keyboard shortcut hints, hover tooltips for icon-only controls, and quieter projects-panel hover and active states across search, new chat, side-panel toggles, Open in, diff close, and skill-folder actions
+- Documented the inter-session collaboration / Links roadmap and the session-ref materialization design, including the planned handoff, message/follow-up, and delegation rails
+
 ## 0.1.39
 
 - Fixed shell commands an agent runs (including git hooks) failing with "command not found" for tools installed through your login shell — Homebrew, nvm, bun, rbenv, cargo, and the like — when the app is launched from the GUI: the app now merges your login shell's `PATH` at startup so those tools resolve the same way they do in your terminal

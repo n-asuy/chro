@@ -27,7 +27,11 @@ use worktree::{generate_attempt_branch_name, worktree_dir_name, EnsureOptions};
 
 use config::{chats_dir, render_merge_commit_template, DEFAULT_MERGE_COMMIT_TEMPLATE};
 
-use crate::{execution::ExecutionStartParams, Runtime, RuntimeError};
+use crate::{
+    execution::ExecutionStartParams,
+    session_context::{apply_session_context, run_status_label, SessionContextDigest},
+    Runtime, RuntimeError,
+};
 
 const FOLLOW_UP_MISSING_SESSION_ID_ERROR: &str =
     "cannot follow up because the previous executor session id is not available yet";
@@ -181,6 +185,88 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             }
         }
         Ok(())
+    }
+
+    /// Resolve `kind = "session"` refs into digests for prompt materialization.
+    /// Best-effort: any per-ref failure degrades that digest to header-only and
+    /// must never block starting the run.
+    async fn collect_session_context_digests(
+        &self,
+        context_refs: &[TaskContextRefInput],
+    ) -> Vec<SessionContextDigest> {
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let mut digests = Vec::new();
+        for context_ref in context_refs {
+            if context_ref.kind != "session" {
+                continue;
+            }
+            let Some(target_task_id) = context_ref.target_task_id else {
+                continue;
+            };
+            if !seen.insert(target_task_id) {
+                continue;
+            }
+            digests.push(
+                self.session_context_digest(target_task_id, context_ref.branch.clone())
+                    .await,
+            );
+        }
+        digests
+    }
+
+    async fn session_context_digest(
+        &self,
+        target_task_id: Uuid,
+        ref_branch: Option<String>,
+    ) -> SessionContextDigest {
+        let mut digest = SessionContextDigest {
+            task_id: target_task_id.to_string(),
+            title: format!("Task {target_task_id}"),
+            branch: ref_branch,
+            ..Default::default()
+        };
+
+        match TaskRecord::get(self.pool(), target_task_id).await {
+            Ok(task) => digest.title = task.title,
+            Err(err) => {
+                warn!(
+                    target_task_id = %target_task_id,
+                    error = %err,
+                    "session context ref target task not found; emitting pointer-only digest"
+                );
+                return digest;
+            }
+        }
+
+        match TaskRun::list_by_task_id(self.pool(), target_task_id).await {
+            Ok(runs) => {
+                if let Some(latest) = runs.first() {
+                    digest.status = Some(run_status_label(latest.status).to_string());
+                    if digest.branch.is_none() {
+                        digest.branch = latest.branch_name.clone();
+                    }
+                }
+            }
+            Err(err) => warn!(
+                target_task_id = %target_task_id,
+                error = %err,
+                "failed to load runs for session context digest"
+            ),
+        }
+
+        match self.runtime().task_last_exchange(target_task_id).await {
+            Ok(exchange) => {
+                digest.last_user = exchange.user;
+                digest.last_assistant = exchange.assistant;
+            }
+            Err(err) => warn!(
+                target_task_id = %target_task_id,
+                error = %err,
+                "failed to load last exchange for session context digest"
+            ),
+        }
+
+        digest
     }
 
     pub async fn create_task(
@@ -654,6 +740,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let executor_user_prompt = strip_display_skill_context_blocks(&execution_prompt);
         let executor_prompt =
             apply_materialized_skills(&executor_user_prompt, materialized_skills.as_ref());
+        let session_digests = self.collect_session_context_digests(&context_refs).await;
+        let executor_prompt = apply_session_context(&executor_prompt, &session_digests);
 
         if let Err(err) = self
             .runtime()
@@ -872,6 +960,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let executor_user_prompt = strip_display_skill_context_blocks(&prompt);
         let executor_prompt =
             apply_materialized_skills(&executor_user_prompt, materialized_skills.as_ref());
+        let session_digests = self.collect_session_context_digests(&context_refs).await;
+        let executor_prompt = apply_session_context(&executor_prompt, &session_digests);
 
         if let Some(ids) = image_ids.as_ref().filter(|items| !items.is_empty()) {
             if let Err(err) = self

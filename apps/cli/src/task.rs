@@ -387,7 +387,7 @@ fn with_session_context(prompt: &str, ref_sessions: &[String]) -> String {
         .iter()
         .map(|task| {
             format!(
-                "<past_session task_id=\"{}\">\nRun `chro task logs {}` to view the full transcript of this previous chro session.\n</past_session>",
+                "<past_session task_id=\"{}\">\nReferenced session. A summary is injected at execution time; run `chro task logs {}` for the full transcript.\n</past_session>",
                 escape_xml_attr(task),
                 task
             )

@@ -30,7 +30,6 @@ import {
   SESSION_DRAG_DATA_TYPE,
   serializeSessionDragPayload,
 } from "@/session/utils/session-dnd";
-import { taskApi } from "@/tasks/task-api";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -52,7 +51,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
-import { useNavigate } from "@tanstack/react-router";
 import {
   Archive,
   ArrowDownUp,
@@ -78,18 +76,21 @@ import {
   useState,
 } from "react";
 import { useAllProjects } from "../../hooks/use-all-projects";
+import { useNewChat } from "../../hooks/use-new-chat";
+import { useOpenSession } from "../../hooks/use-open-session";
 import { useProjectNavigation } from "../../hooks/use-project-navigation";
+import { useCommandPaletteStore } from "../../state/command-palette-store";
 import { useLayoutStore } from "../../state/layout-store";
 import {
   type OpenProjectTab,
   useOpenProjectsStore,
 } from "../../state/open-projects-store";
-import { CommandPalette } from "../command-palette";
+import { KeyboardHint } from "../keyboard-hint";
 import { ProjectSwitcherDropdown } from "../project-switcher-dropdown";
 import { ViewFade } from "../view-fade";
 
 const ICON_BUTTON_CLASS =
-  "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-custom-sidebar-text-300 transition hover:bg-foreground/5 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
 
 interface ArchivedSessionSummary {
   id: string;
@@ -209,21 +210,7 @@ function sortTasks(tasks: StoredTask[], mode: SortMode): StoredTask[] {
  */
 export function ProjectsDockPanel() {
   const { t } = useLanguage();
-  const navigate = useNavigate();
-
-  /**
-   * Open a general-purpose ("scratch") chat: ensure the hidden "General"
-   * project and navigate to a fresh session under it. Deliberately does NOT
-   * register the project in the open-projects store, so it never appears in the
-   * list — its sessions still surface in the cross-project stream.
-   */
-  const handleNewChat = useCallback(async () => {
-    const general = await taskApi.ensureGeneralProject();
-    navigate({
-      to: "/projects/$projectId/session",
-      params: { projectId: general.slug ?? general.id },
-    });
-  }, [navigate]);
+  const handleNewChat = useNewChat();
 
   const [groupMode, setGroupMode] = usePersistedChoice(
     GROUP_MODE_STORAGE_KEY,
@@ -239,8 +226,10 @@ export function ProjectsDockPanel() {
     () => new Set(),
   );
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const openSession = useOpenSession();
+  // The session-search palette is mounted globally (see SessionSearchPalette);
+  // this button just flips its shared open state so ⌘K / ⌘P and the button
+  // open the very same modal.
+  const openPalette = useCommandPaletteStore((s) => s.openPalette);
 
   const openProjects = useOpenProjectsStore((s) => s.projects);
   const { tasks: streamTasks, isLoading } = useInboxTasksStream(true);
@@ -288,18 +277,6 @@ export function ProjectsDockPanel() {
     [merged, isArchived, sortMode, openProjectIds, scratchProjectIds],
   );
 
-  // Every non-archived session across all projects, most-recent-first. The
-  // command palette searches this superset (not just the open-project inbox) so
-  // any session is reachable from the search box.
-  const searchableSessions = useMemo(
-    () =>
-      sortTasks(
-        merged.filter((task) => !isArchived(task)),
-        "recent",
-      ),
-    [merged, isArchived],
-  );
-
   const archivedByProject = useMemo(() => {
     const byProject: Record<
       string,
@@ -326,11 +303,6 @@ export function ProjectsDockPanel() {
     }
     return names;
   }, [openProjects, projectsById]);
-
-  const resolveProjectName = useCallback(
-    (id: string) => projectNames[id] ?? null,
-    [projectNames],
-  );
 
   // Project sections render in sort order, latest-active first under `recent`.
   const pinnedProjects = useMemo(() => {
@@ -500,28 +472,39 @@ export function ProjectsDockPanel() {
                 <button
                   type="button"
                   aria-label={t("openCommandPalette")}
-                  onClick={() => setPaletteOpen(true)}
+                  onClick={openPalette}
                   className={ICON_BUTTON_CLASS}
                 >
                   <Search className="h-4 w-4" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" align="center">
-                {t("openCommandPalette")}
+              <TooltipContent
+                side="bottom"
+                align="center"
+                className="flex items-center gap-2"
+              >
+                <span>{t("openCommandPalette")}</span>
+                <KeyboardHint keys={["mod", "K"]} />
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
-        <button
-          type="button"
-          onClick={handleNewChat}
-          className="flex h-9 w-full shrink-0 items-center gap-2.5 px-3 text-[13px] text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
-        >
-          <SquarePen className="h-4 w-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate text-left">
-            {t("newChat")}
-          </span>
-        </button>
+        <div className="shrink-0 px-2 pb-1">
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className="group flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] text-custom-sidebar-text-300 transition hover:bg-foreground/5 hover:text-custom-sidebar-text-100"
+          >
+            <SquarePen className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-left">
+              {t("newChat")}
+            </span>
+            <KeyboardHint
+              keys={["mod", "N"]}
+              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+            />
+          </button>
+        </div>
         <ViewFade viewKey={groupMode} className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
             {isLoading && isEmpty ? (
@@ -557,15 +540,6 @@ export function ProjectsDockPanel() {
           </div>
         </ViewFade>
       </div>
-      <CommandPalette
-        open={paletteOpen}
-        onOpenChange={setPaletteOpen}
-        sessions={searchableSessions}
-        projectName={resolveProjectName}
-        onNewChat={handleNewChat}
-        onOpenSession={openSession}
-        t={t}
-      />
     </SessionPreviewProvider>
   );
 }
@@ -588,38 +562,53 @@ function ChoiceDropdown<T extends string>({
   onSelect,
 }: ChoiceDropdownProps<T>) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={ariaLabel}
-          className={ICON_BUTTON_CLASS}
-        >
-          {icon}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" className="w-48">
-        <DropdownMenuLabel className="-mx-1 -mt-1 mb-1 border-border/40 border-b px-3 py-1.5 font-normal text-[11px] text-muted-foreground">
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={ariaLabel}
+                  className={ICON_BUTTON_CLASS}
+                >
+                  {icon}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="bottom" className="w-48">
+                <DropdownMenuLabel className="-mx-1 -mt-1 mb-1 border-border/40 border-b px-3 py-1.5 font-normal text-[11px] text-muted-foreground">
+                  {title}
+                </DropdownMenuLabel>
+                {options.map((option) => {
+                  const isActive = option.value === current;
+                  return (
+                    <DropdownMenuItem
+                      key={option.value}
+                      onSelect={() => onSelect(option.value)}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-md px-2 py-1 text-[13px]",
+                        isActive && "bg-muted text-foreground",
+                      )}
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        {option.label}
+                      </span>
+                      {isActive ? (
+                        <Check className="h-3.5 w-3.5 shrink-0" />
+                      ) : null}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="center">
           {title}
-        </DropdownMenuLabel>
-        {options.map((option) => {
-          const isActive = option.value === current;
-          return (
-            <DropdownMenuItem
-              key={option.value}
-              onSelect={() => onSelect(option.value)}
-              className={cn(
-                "flex items-center gap-2.5 rounded-md px-2 py-1 text-[13px]",
-                isActive && "bg-muted text-foreground",
-              )}
-            >
-              <span className="min-w-0 flex-1 truncate">{option.label}</span>
-              {isActive ? <Check className="h-3.5 w-3.5 shrink-0" /> : null}
-            </DropdownMenuItem>
-          );
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -695,7 +684,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
       {collapsed ? null : (
         <div
           className={cn(
-            "flex flex-col",
+            "flex flex-col gap-0.5",
             headerless ? undefined : "tree-group-reveal mt-0.5",
           )}
         >
@@ -778,8 +767,8 @@ function GroupHeader({
       }}
       title={project?.workspacePath ?? group.label}
       className={cn(
-        "group flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5",
-        "text-custom-sidebar-text-200 hover:bg-custom-sidebar-background-80",
+        "group flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 transition-colors",
+        "text-custom-sidebar-text-200 hover:bg-foreground/5",
       )}
     >
       <button
@@ -959,11 +948,11 @@ function SessionRow({
         );
       }}
       className={cn(
-        "group/row flex cursor-pointer items-center justify-between gap-2 rounded-md py-1.5",
+        "group/row flex cursor-pointer items-center justify-between gap-2 rounded-md py-1.5 transition-colors",
         indented ? "pl-5 pr-2.5" : "px-2.5",
         isActive
-          ? "bg-custom-sidebar-background-80"
-          : "hover:bg-custom-sidebar-background-80",
+          ? "bg-foreground/5 text-custom-sidebar-text-100"
+          : "hover:bg-foreground/5",
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -1010,25 +999,6 @@ function SessionRow({
         </button>
       </span>
     </div>
-  );
-}
-
-/**
- * Navigate to a session's tab, resolving the project slug so the URL matches
- * the rest of the app. Shared by the session rows and the command palette.
- */
-function useOpenSession(): (task: StoredTask) => void {
-  const navigate = useNavigate();
-  const projectsById = useAllProjects(true);
-  return useCallback(
-    (task: StoredTask) => {
-      const projectId = projectsById[task.project_id]?.slug ?? task.project_id;
-      navigate({
-        to: "/projects/$projectId/session/$taskId",
-        params: { projectId, taskId: task.slug ?? task.id },
-      });
-    },
-    [navigate, projectsById],
   );
 }
 

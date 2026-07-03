@@ -14,6 +14,12 @@ import {
 } from "@chro/ui/dropdown-menu";
 import { toast } from "@chro/ui/hooks/use-toast";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@chro/ui/tooltip";
+import {
   Check,
   ChevronDown,
   Copy,
@@ -142,36 +148,54 @@ function OpenInMenu() {
 
   return (
     <div className="ml-1 inline-flex h-6 shrink-0 items-center overflow-hidden rounded-md">
-      <button
-        type="button"
-        title={`Open in ${selectedOption.label}`}
-        aria-label={`Open project in ${selectedOption.label}`}
-        disabled={!canOpen}
-        onClick={() => {
-          void openIn(selectedOption);
-        }}
-        className={cn(
-          "inline-flex h-6 w-7 shrink-0 items-center justify-center rounded-l-md",
-          "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-          "disabled:pointer-events-none disabled:opacity-40",
-        )}
-      >
-        <OpenInAppIcon id={selectedOption.icon} className="h-4 w-4" />
-      </button>
+      <TooltipProvider delayDuration={120}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label={`Open project in ${selectedOption.label}`}
+              disabled={!canOpen}
+              onClick={() => {
+                void openIn(selectedOption);
+              }}
+              className={cn(
+                "inline-flex h-6 w-7 shrink-0 items-center justify-center rounded-l-md",
+                "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+                "disabled:pointer-events-none disabled:opacity-40",
+              )}
+            >
+              <OpenInAppIcon id={selectedOption.icon} className="h-4 w-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" align="center">
+            {`Open in ${selectedOption.label}`}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            title="Choose Open in app"
-            aria-label="Choose Open in app"
-            className={cn(
-              "inline-flex h-6 w-5 shrink-0 items-center justify-center rounded-r-md border-l border-foreground/10",
-              "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-            )}
-          >
-            <ChevronDown className="h-3 w-3 opacity-70" />
-          </button>
-        </DropdownMenuTrigger>
+        <TooltipProvider delayDuration={120}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Choose Open in app"
+                    className={cn(
+                      "inline-flex h-6 w-5 shrink-0 items-center justify-center rounded-r-md border-l border-foreground/10",
+                      "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+                    )}
+                  >
+                    <ChevronDown className="h-3 w-3 opacity-70" />
+                  </button>
+                </DropdownMenuTrigger>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" align="center">
+              Choose Open in app
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         <DropdownMenuContent align="end" sideOffset={6} className="w-48">
           <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium text-muted-foreground">
             Open in
@@ -230,51 +254,67 @@ function LeftSidebarToggle() {
   const label = open ? t("closeSidebar") : t("openSidebar");
 
   return (
-    <button
-      type="button"
-      onClick={toggleCollapsed}
-      title={label}
-      aria-label={label}
-      aria-pressed={open}
-      className={cn(
-        "relative ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
-        "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-        open && "text-foreground",
-      )}
-    >
-      <PanelLeft className="h-3.5 w-3.5" />
-      {!open && runningCount > 0 ? (
-        <span
-          aria-label={`${runningCount} running`}
-          className={cn(
-            "pointer-events-none absolute -right-0.5 -top-0.5 inline-flex h-3.5 min-w-3.5",
-            "items-center justify-center rounded-full bg-primary px-1",
-            "text-[9px] font-medium leading-none text-primary-foreground",
-            "ring-2 ring-background",
-          )}
-        >
-          {runningCount > 99 ? "99+" : runningCount}
-        </span>
-      ) : null}
-    </button>
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            aria-label={label}
+            aria-pressed={open}
+            className={cn(
+              "relative ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+              "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+              open && "text-foreground",
+            )}
+          >
+            <PanelLeft className="h-3.5 w-3.5" />
+            {!open && runningCount > 0 ? (
+              <span
+                aria-label={`${runningCount} running`}
+                className={cn(
+                  "pointer-events-none absolute -right-0.5 -top-0.5 inline-flex h-3.5 min-w-3.5",
+                  "items-center justify-center rounded-full bg-primary px-1",
+                  "text-[9px] font-medium leading-none text-primary-foreground",
+                  "ring-2 ring-background",
+                )}
+              >
+                {runningCount > 99 ? "99+" : runningCount}
+              </span>
+            ) : null}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="center">
+          {label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
 function SettingsToggle() {
   const settings = useSettingsModal();
   return (
-    <button
-      type="button"
-      onClick={settings.open}
-      title="Settings"
-      aria-label="Settings"
-      className={cn(
-        "ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
-        "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-      )}
-    >
-      <Settings className="h-3.5 w-3.5" />
-    </button>
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={settings.open}
+            aria-label="Settings"
+            className={cn(
+              "ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+              "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+            )}
+          >
+            <Settings className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="center">
+          Settings
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -303,20 +343,30 @@ function RightSidebarToggle() {
     }
   }, [open, activePanel, setActivePanel, setCollapsed]);
 
+  const label = open ? "Close right panel" : "Open right panel";
+
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      title={open ? "Close right panel" : "Open right panel"}
-      aria-label={open ? "Close right panel" : "Open right panel"}
-      aria-pressed={open}
-      className={cn(
-        "ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
-        "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-        open && "text-foreground",
-      )}
-    >
-      <PanelRight className="h-3.5 w-3.5" />
-    </button>
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={handleClick}
+            aria-label={label}
+            aria-pressed={open}
+            className={cn(
+              "ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+              "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+              open && "text-foreground",
+            )}
+          >
+            <PanelRight className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="center">
+          {label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
