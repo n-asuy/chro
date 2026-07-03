@@ -10,12 +10,12 @@ use config::{
     TerminalConfig, DEFAULT_MERGE_COMMIT_TEMPLATE,
 };
 use executors::{
-    check_mcp_status, delete_pi_credential, detect_claude_version,
-    get_auth_status_all, get_install_status_all, install_tool, list_pi_credentials, list_pi_models,
-    load_mcp_config, save_mcp_config, set_pi_api_key, AuthStatusResult, BaseCodingAgent,
-    ClaudeExecutionMode, ClaudeVersionResult, ExecutorConfigs, ExecutorInstallStatusResult,
-    ExecutorProfileId, InstallableTool, LoadedMcpConfig, McpConfigPayload, McpStatusResult,
-    PiCredentialInfo, PiModelOption, SavedMcpConfig, ToolInstallResult,
+    check_mcp_status, delete_pi_credential, detect_claude_version, get_auth_status_all,
+    get_install_status_all, install_tool, list_pi_credentials, list_pi_models, load_mcp_config,
+    save_mcp_config, set_pi_api_key, AuthStatusResult, BaseCodingAgent, ClaudeExecutionMode,
+    ClaudeVersionResult, ExecutorConfigs, ExecutorInstallStatusResult, ExecutorProfileId,
+    InstallableTool, LoadedMcpConfig, McpConfigPayload, McpStatusResult, PiCredentialInfo,
+    PiModelOption, SavedMcpConfig, ToolInstallResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -707,11 +707,11 @@ mod tests {
 
     #[test]
     fn normalizes_valid_six_digit_hex() {
+        assert_eq!(normalize_accent_hex("#7C3AED").as_deref(), Some("#7c3aed"));
         assert_eq!(
-            normalize_accent_hex("#7C3AED").as_deref(),
-            Some("#7c3aed")
+            normalize_accent_hex("  #0c6cbe ").as_deref(),
+            Some("#0c6cbe")
         );
-        assert_eq!(normalize_accent_hex("  #0c6cbe ").as_deref(), Some("#0c6cbe"));
     }
 
     #[test]

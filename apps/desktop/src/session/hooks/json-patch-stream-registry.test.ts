@@ -276,4 +276,108 @@ describe("json-patch-stream-registry", () => {
     expect(ws.closed).toBe(false);
     expect(getStreamSnapshot(endpoint).error).toBeNull();
   });
+
+  // The backend emits entity patches from concurrently-scheduled DB hooks, so
+  // a freshly-inserted record's `replace` can reach the client before (or
+  // instead of) its `add`. RFC 6902 rejects `replace` on a missing member;
+  // dropping it silently desyncs the shared document forever (blank
+  // conversation pane for a task the stream never materialized).
+  describe("out-of-order entity patches", () => {
+    const patchMessage = (ops: unknown[]) => ({
+      type: "json_patch",
+      payload: ops,
+    });
+
+    it("creates a member from a replace that arrives without a prior add", () => {
+      const endpoint = uniqueEndpoint();
+      acquireStream(endpoint, initialData, makeSubscriber());
+      const ws = FakeWebSocket.last();
+      ws.driveOpen();
+      ws.driveMessage(snapshotReplace({}));
+      vi.advanceTimersByTime(0);
+
+      ws.driveMessage(
+        patchMessage([
+          { op: "replace", path: "/tasks/t9", value: { id: "t9" } },
+        ]),
+      );
+      vi.advanceTimersByTime(0);
+
+      expect(getStreamSnapshot(endpoint).data).toEqual({
+        tasks: { t9: { id: "t9" } },
+      });
+    });
+
+    it("survives replace→add→replace for one member batched into a single flush", () => {
+      const endpoint = uniqueEndpoint();
+      acquireStream(endpoint, initialData, makeSubscriber());
+      const ws = FakeWebSocket.last();
+      ws.driveOpen();
+      ws.driveMessage(snapshotReplace({}));
+      vi.advanceTimersByTime(0);
+
+      // All three frames land before the flush timer fires, mirroring the
+      // bursts observed on the wire when a task is created mid-run.
+      ws.driveMessage(
+        patchMessage([
+          { op: "replace", path: "/tasks/t9", value: { id: "t9", rev: 1 } },
+        ]),
+      );
+      ws.driveMessage(
+        patchMessage([
+          { op: "add", path: "/tasks/t9", value: { id: "t9", rev: 2 } },
+        ]),
+      );
+      ws.driveMessage(
+        patchMessage([
+          { op: "replace", path: "/tasks/t9", value: { id: "t9", rev: 3 } },
+        ]),
+      );
+      vi.advanceTimersByTime(0);
+
+      expect(getStreamSnapshot(endpoint).data).toEqual({
+        tasks: { t9: { id: "t9", rev: 3 } },
+      });
+    });
+
+    it("keeps applying later members when an earlier op in the batch fails", () => {
+      const endpoint = uniqueEndpoint();
+      acquireStream(endpoint, initialData, makeSubscriber());
+      const ws = FakeWebSocket.last();
+      ws.driveOpen();
+      ws.driveMessage(snapshotReplace({}));
+      vi.advanceTimersByTime(0);
+
+      ws.driveMessage(
+        patchMessage([
+          { op: "remove", path: "/tasks/ghost" },
+          { op: "add", path: "/tasks/t1", value: { id: "t1" } },
+        ]),
+      );
+      vi.advanceTimersByTime(0);
+
+      expect(getStreamSnapshot(endpoint).data).toEqual({
+        tasks: { t1: { id: "t1" } },
+      });
+    });
+
+    it("does not upsert array-index replaces (index ops stay strict)", () => {
+      const endpoint = uniqueEndpoint();
+      const arrayData = () => ({ entries: [] as unknown[] });
+      acquireStream(endpoint, arrayData, makeSubscriber());
+      const ws = FakeWebSocket.last();
+      ws.driveOpen();
+      ws.driveMessage(
+        patchMessage([{ op: "replace", path: "/entries", value: [] }]),
+      );
+      vi.advanceTimersByTime(0);
+
+      ws.driveMessage(
+        patchMessage([{ op: "replace", path: "/entries/0", value: "x" }]),
+      );
+      vi.advanceTimersByTime(0);
+
+      expect(getStreamSnapshot(endpoint).data).toEqual({ entries: [] });
+    });
+  });
 });

@@ -174,6 +174,56 @@ function publish(entry: StreamEntry): void {
   for (const sub of entry.subscribers) sub.notify();
 }
 
+/** JSON Pointer segment decoding per RFC 6901 (`~1` → `/`, `~0` → `~`). */
+function decodePointerSegment(segment: string): string {
+  return segment.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+/** Resolve the parent container of `path`'s target inside `doc`. */
+function resolveParent(doc: unknown, path: string): unknown {
+  const segments = path.split("/").slice(1, -1).map(decodePointerSegment);
+  let node: unknown = doc;
+  for (const segment of segments) {
+    if (typeof node !== "object" || node === null) return undefined;
+    node = (node as Record<string, unknown>)[segment];
+  }
+  return node;
+}
+
+/**
+ * The backend emits entity patches from concurrently-scheduled DB hooks, so a
+ * freshly-inserted record's `replace` can reach the client before (or instead
+ * of) its `add`. RFC 6902 rejects `replace` on a missing member and rfc6902
+ * reports that as a per-op error without applying it — silently desyncing the
+ * shared document for the record's whole lifetime (every later patch for it is
+ * also a `replace`, so it never materializes). For plain-object parents both
+ * ops mean "this member now has this value", so retry the failed `replace` as
+ * an `add` upsert. Array indices stay strict: `add` inserts there, which is
+ * not equivalent.
+ */
+function applyPatchWithUpsert(doc: object, ops: Operation[]): void {
+  const results = applyPatch(doc, ops);
+  results.forEach((failure, index) => {
+    if (failure == null) return;
+    const op = ops[index];
+    if (op?.op === "replace") {
+      const parent = resolveParent(doc, op.path);
+      if (
+        typeof parent === "object" &&
+        parent !== null &&
+        !Array.isArray(parent)
+      ) {
+        const [retry] = applyPatch(doc, [{ ...op, op: "add" }]);
+        if (retry == null) return;
+      }
+    }
+    console.warn(
+      `[json-patch-stream] dropped unapplicable ${op?.op ?? "?"} op at ${op?.path ?? "?"}`,
+      failure,
+    );
+  });
+}
+
 /** Apply buffered patches as one batch, then publish if anything changed. */
 function flush(entry: StreamEntry): void {
   entry.flushTimer = null;
@@ -181,7 +231,7 @@ function flush(entry: StreamEntry): void {
   entry.pendingOps = [];
   if (!patches.length) return;
   const next = structuredClone(entry.document);
-  applyPatch(next, patches);
+  applyPatchWithUpsert(next, patches);
   entry.document = next;
   entry.exposed = next;
   publish(entry);
@@ -286,7 +336,10 @@ function openSocket(entry: StreamEntry): void {
     // failure (handshake rejected: deleted/unknown id, refused). Stop after a
     // bounded number of attempts so it can't storm the server. A socket that
     // connected at least once keeps retrying forever (transient-drop recovery).
-    if (!entry.everConnected && entry.retryCount > MAX_INITIAL_CONNECT_ATTEMPTS) {
+    if (
+      !entry.everConnected &&
+      entry.retryCount > MAX_INITIAL_CONNECT_ATTEMPTS
+    ) {
       entry.error = "Unable to connect";
       publish(entry);
       return;

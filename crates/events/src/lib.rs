@@ -681,6 +681,73 @@ impl TaskDraftEventValue {
     }
 }
 
+/// Parse a hub entry as a single-op JSON Patch targeting `/{collection}/{id}`
+/// and return the parsed op + id. Multi-op patches and non-matching paths
+/// return `None`.
+fn parse_collection_patch(entry: &LogEntry, collection: &str) -> Option<(PatchOperation, Uuid)> {
+    let LogEntry::JsonPatch(patch_value) = entry else {
+        return None;
+    };
+    let patch = serde_json::from_value::<Patch>(patch_value.clone()).ok()?;
+    let op = patch.0.first()?;
+    let rest = get_patch_path(op)
+        .strip_prefix("/")?
+        .strip_prefix(collection)?
+        .strip_prefix("/")?;
+    let uuid_str = rest.split('/').next().unwrap_or("");
+    let id = Uuid::parse_str(uuid_str).ok()?;
+    Some((op.clone(), id))
+}
+
+/// Live tail of the shared event hub for one snapshot+patch stream.
+///
+/// Two correctness guarantees the naive `BroadcastStream + filter_map` chain
+/// did not provide:
+/// - The receiver must be created *before* the caller reads its snapshot
+///   (callers do this; the receiver is passed in), so no event can fall into
+///   the gap between the snapshot read and the subscription.
+/// - When this receiver falls behind the broadcast buffer (`Lagged`), the
+///   missed events are unrecoverable — silently continuing desyncs every
+///   client on this socket until reconnect. Instead, drop the stale backlog
+///   (`resubscribe` points at the tail) and emit a fresh full snapshot, which
+///   supersedes whatever was lost.
+fn live_stream_with_resync<F, S, Fut>(
+    rx: tokio::sync::broadcast::Receiver<LogEntry>,
+    filter: F,
+    resnapshot: S,
+) -> futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>
+where
+    F: Fn(&LogEntry) -> bool + Send + 'static,
+    S: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<LogEntry, EventError>> + Send,
+{
+    use futures::StreamExt;
+    use tokio::sync::broadcast::error::RecvError;
+
+    futures::stream::unfold(
+        (rx, filter, resnapshot),
+        |(mut rx, filter, resnapshot)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(entry) => {
+                        if filter(&entry) {
+                            return Some((Ok(entry), (rx, filter, resnapshot)));
+                        }
+                    }
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "event stream lagged; resyncing from snapshot");
+                        rx = rx.resubscribe();
+                        let snapshot = resnapshot().await.map_err(std::io::Error::other);
+                        return Some((snapshot, (rx, filter, resnapshot)));
+                    }
+                    Err(RecvError::Closed) => return None,
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
 impl EventService {
     /// Stream tasks for a specific project with initial snapshot + live updates
     pub async fn stream_tasks_raw(
@@ -689,60 +756,44 @@ impl EventService {
     ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
     {
         use futures::StreamExt;
-        use tokio_stream::wrappers::BroadcastStream;
 
-        let pool = self.db.pool();
-
-        let tasks = TaskRecord::list_by_project(pool, project_id).await?;
-        let mut tasks_map = serde_json::Map::new();
-        for task in &tasks {
-            tasks_map.insert(task.id.to_string(), serde_json::to_value(task)?);
-        }
-
-        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: "/tasks".to_string(),
-            value: Value::Object(tasks_map),
-        })]);
-        let initial_msg: LogEntry = initial_patch.into();
-
-        let msg_store = self.resources.msg_store.clone();
-        let indexes = self.resources.indexes.clone();
-
-        let filtered_stream =
-            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| {
-                let indexes = indexes.clone();
-                async move {
-                    match msg_result {
-                        Ok(LogEntry::JsonPatch(patch_value)) => {
-                            if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone())
-                            {
-                                if let Some(op) = patch.0.first() {
-                                    let path = get_patch_path(op);
-                                    if let Some(rest) = path.strip_prefix("/tasks/") {
-                                        let uuid_str: &str = rest.split('/').next().unwrap_or("");
-                                        if let Ok(task_id) = Uuid::parse_str(uuid_str) {
-                                            if matches!(op, PatchOperation::Remove(_)) {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                            if indexes.project_for_task(&task_id)
-                                                == Some(project_id)
-                                            {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None
-                        }
-                        Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
-                    }
+        let pool = self.db.pool().clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            async move {
+                let tasks = TaskRecord::list_by_project(&pool, project_id).await?;
+                let mut tasks_map = serde_json::Map::new();
+                for task in &tasks {
+                    tasks_map.insert(task.id.to_string(), serde_json::to_value(task)?);
                 }
-            });
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/tasks".to_string(),
+                        value: Value::Object(tasks_map),
+                    },
+                )])))
+            }
+        };
+
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
+
+        let indexes = self.resources.indexes.clone();
+        let filter = move |entry: &LogEntry| -> bool {
+            match parse_collection_patch(entry, "tasks") {
+                Some((op, task_id)) => {
+                    matches!(op, PatchOperation::Remove(_))
+                        || indexes.project_for_task(&task_id) == Some(project_id)
+                }
+                None => !matches!(entry, LogEntry::JsonPatch(_)),
+            }
+        };
 
         let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
-        Ok(initial_stream.chain(filtered_stream).boxed())
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
     }
 
     /// Stream tasks across all projects with initial snapshot + live updates.
@@ -756,44 +807,40 @@ impl EventService {
     ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
     {
         use futures::StreamExt;
-        use tokio_stream::wrappers::BroadcastStream;
 
-        let pool = self.db.pool();
-
-        let tasks = TaskRecord::list_all(pool).await?;
-        let mut tasks_map = serde_json::Map::new();
-        for task in &tasks {
-            tasks_map.insert(task.id.to_string(), serde_json::to_value(task)?);
-        }
-
-        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: "/tasks".to_string(),
-            value: Value::Object(tasks_map),
-        })]);
-        let initial_msg: LogEntry = initial_patch.into();
-
-        let msg_store = self.resources.msg_store.clone();
-
-        let filtered_stream =
-            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| async move {
-                match msg_result {
-                    Ok(LogEntry::JsonPatch(patch_value)) => {
-                        if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone()) {
-                            if let Some(op) = patch.0.first() {
-                                if get_patch_path(op).starts_with("/tasks/") {
-                                    return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                }
-                            }
-                        }
-                        None
-                    }
-                    Ok(other) => Some(Ok(other)),
-                    Err(_) => None,
+        let pool = self.db.pool().clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            async move {
+                let tasks = TaskRecord::list_all(&pool).await?;
+                let mut tasks_map = serde_json::Map::new();
+                for task in &tasks {
+                    tasks_map.insert(task.id.to_string(), serde_json::to_value(task)?);
                 }
-            });
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/tasks".to_string(),
+                        value: Value::Object(tasks_map),
+                    },
+                )])))
+            }
+        };
+
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
+
+        let filter = |entry: &LogEntry| -> bool {
+            match entry {
+                LogEntry::JsonPatch(_) => parse_collection_patch(entry, "tasks").is_some(),
+                _ => true,
+            }
+        };
 
         let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
-        Ok(initial_stream.chain(filtered_stream).boxed())
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
     }
 
     /// Stream task runs for a specific task with initial snapshot + live updates
@@ -803,72 +850,55 @@ impl EventService {
     ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
     {
         use futures::StreamExt;
-        use tokio_stream::wrappers::BroadcastStream;
 
-        let pool = self.db.pool();
+        let pool = self.db.pool().clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            async move {
+                let runs = TaskRun::list_by_task_id(&pool, task_id).await?;
+                let project_id = TaskRecord::find_by_id(&pool, task_id)
+                    .await?
+                    .map(|t| t.project_id);
 
-        let runs = TaskRun::list_by_task_id(pool, task_id).await?;
-
-        let project_id = TaskRecord::find_by_id(pool, task_id)
-            .await?
-            .map(|t| t.project_id);
-
-        let mut runs_map = serde_json::Map::new();
-        for run in &runs {
-            if let Some(project_id) = project_id {
-                let payload = TaskRunEventValue::new(run.clone(), project_id);
-                runs_map.insert(run.id.to_string(), serde_json::to_value(&payload)?);
-            }
-        }
-
-        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: "/task_runs".to_string(),
-            value: Value::Object(runs_map),
-        })]);
-        let initial_msg: LogEntry = initial_patch.into();
-
-        let msg_store = self.resources.msg_store.clone();
-        let indexes = self.resources.indexes.clone();
-
-        let filtered_stream =
-            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| {
-                let indexes = indexes.clone();
-                async move {
-                    match msg_result {
-                        Ok(LogEntry::JsonPatch(patch_value)) => {
-                            if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone())
-                            {
-                                if let Some(op) = patch.0.first() {
-                                    let path = get_patch_path(op);
-                                    if let Some(rest) = path.strip_prefix("/task_runs/") {
-                                        let uuid_str: &str = rest.split('/').next().unwrap_or("");
-                                        if let Ok(run_id) = Uuid::parse_str(uuid_str) {
-                                            if matches!(op, PatchOperation::Remove(_)) {
-                                                let run_task = indexes.task_for_run(&run_id);
-                                                if run_task.is_none() || run_task == Some(task_id) {
-                                                    return Some(Ok(LogEntry::JsonPatch(
-                                                        patch_value,
-                                                    )));
-                                                }
-                                                return None;
-                                            }
-                                            if indexes.task_for_run(&run_id) == Some(task_id) {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None
-                        }
-                        Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
+                let mut runs_map = serde_json::Map::new();
+                for run in &runs {
+                    if let Some(project_id) = project_id {
+                        let payload = TaskRunEventValue::new(run.clone(), project_id);
+                        runs_map.insert(run.id.to_string(), serde_json::to_value(&payload)?);
                     }
                 }
-            });
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/task_runs".to_string(),
+                        value: Value::Object(runs_map),
+                    },
+                )])))
+            }
+        };
+
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
+
+        let indexes = self.resources.indexes.clone();
+        let filter = move |entry: &LogEntry| -> bool {
+            match parse_collection_patch(entry, "task_runs") {
+                Some((op, run_id)) => {
+                    let run_task = indexes.task_for_run(&run_id);
+                    if matches!(op, PatchOperation::Remove(_)) {
+                        run_task.is_none() || run_task == Some(task_id)
+                    } else {
+                        run_task == Some(task_id)
+                    }
+                }
+                None => !matches!(entry, LogEntry::JsonPatch(_)),
+            }
+        };
 
         let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
-        Ok(initial_stream.chain(filtered_stream).boxed())
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
     }
 
     /// Stream task sessions for a specific task with initial snapshot + live updates
@@ -878,69 +908,48 @@ impl EventService {
     ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
     {
         use futures::StreamExt;
-        use tokio_stream::wrappers::BroadcastStream;
 
-        let pool = self.db.pool();
-        let sessions = TaskSession::list_by_task_id(pool, task_id).await?;
+        let pool = self.db.pool().clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            async move {
+                let sessions = TaskSession::list_by_task_id(&pool, task_id).await?;
+                let mut sessions_map = serde_json::Map::new();
+                for session in &sessions {
+                    sessions_map.insert(session.id.to_string(), serde_json::to_value(session)?);
+                }
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/task_sessions".to_string(),
+                        value: Value::Object(sessions_map),
+                    },
+                )])))
+            }
+        };
 
-        let mut sessions_map = serde_json::Map::new();
-        for session in &sessions {
-            sessions_map.insert(session.id.to_string(), serde_json::to_value(session)?);
-        }
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
 
-        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: "/task_sessions".to_string(),
-            value: Value::Object(sessions_map),
-        })]);
-        let initial_msg: LogEntry = initial_patch.into();
-
-        let msg_store = self.resources.msg_store.clone();
         let indexes = self.resources.indexes.clone();
-
-        let filtered_stream =
-            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| {
-                let indexes = indexes.clone();
-                async move {
-                    match msg_result {
-                        Ok(LogEntry::JsonPatch(patch_value)) => {
-                            if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone())
-                            {
-                                if let Some(op) = patch.0.first() {
-                                    let path = get_patch_path(op);
-                                    if let Some(rest) = path.strip_prefix("/task_sessions/") {
-                                        let uuid_str: &str = rest.split('/').next().unwrap_or("");
-                                        if let Ok(session_id) = Uuid::parse_str(uuid_str) {
-                                            if matches!(op, PatchOperation::Remove(_)) {
-                                                let session_task =
-                                                    indexes.task_for_session(&session_id);
-                                                if session_task.is_none()
-                                                    || session_task == Some(task_id)
-                                                {
-                                                    return Some(Ok(LogEntry::JsonPatch(
-                                                        patch_value,
-                                                    )));
-                                                }
-                                                return None;
-                                            }
-                                            if indexes.task_for_session(&session_id)
-                                                == Some(task_id)
-                                            {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None
-                        }
-                        Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
+        let filter = move |entry: &LogEntry| -> bool {
+            match parse_collection_patch(entry, "task_sessions") {
+                Some((op, session_id)) => {
+                    let session_task = indexes.task_for_session(&session_id);
+                    if matches!(op, PatchOperation::Remove(_)) {
+                        session_task.is_none() || session_task == Some(task_id)
+                    } else {
+                        session_task == Some(task_id)
                     }
                 }
-            });
+                None => !matches!(entry, LogEntry::JsonPatch(_)),
+            }
+        };
 
         let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
-        Ok(initial_stream.chain(filtered_stream).boxed())
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
     }
 
     /// Stream task drafts for a specific project with initial snapshot + live updates
@@ -950,65 +959,52 @@ impl EventService {
     ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
     {
         use futures::StreamExt;
-        use tokio_stream::wrappers::BroadcastStream;
 
-        let pool = self.db.pool();
-
-        let drafts = TaskDraft::list_all(pool).await?;
-        let mut drafts_map = serde_json::Map::new();
-        for draft in &drafts {
-            if let Some(proj_id) = self.resources.indexes.project_for_task(&draft.task_id) {
-                if proj_id == project_id {
-                    let payload = TaskDraftEventValue::new(draft.clone(), proj_id);
-                    drafts_map.insert(draft.id.to_string(), serde_json::to_value(&payload)?);
-                }
-            }
-        }
-
-        let initial_patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
-            path: "/task_drafts".to_string(),
-            value: Value::Object(drafts_map),
-        })]);
-        let initial_msg: LogEntry = initial_patch.into();
-
-        let msg_store = self.resources.msg_store.clone();
-        let indexes = self.resources.indexes.clone();
-
-        let filtered_stream =
-            BroadcastStream::new(msg_store.subscribe()).filter_map(move |msg_result| {
-                let indexes = indexes.clone();
-                async move {
-                    match msg_result {
-                        Ok(LogEntry::JsonPatch(patch_value)) => {
-                            if let Ok(patch) = serde_json::from_value::<Patch>(patch_value.clone())
-                            {
-                                if let Some(op) = patch.0.first() {
-                                    let path = get_patch_path(op);
-                                    if let Some(rest) = path.strip_prefix("/task_drafts/") {
-                                        let uuid_str: &str = rest.split('/').next().unwrap_or("");
-                                        if let Ok(draft_id) = Uuid::parse_str(uuid_str) {
-                                            if matches!(op, PatchOperation::Remove(_)) {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                            if indexes.draft_projects.read().get(&draft_id).copied()
-                                                == Some(project_id)
-                                            {
-                                                return Some(Ok(LogEntry::JsonPatch(patch_value)));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None
+        let pool = self.db.pool().clone();
+        let snapshot_indexes = self.resources.indexes.clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            let indexes = snapshot_indexes.clone();
+            async move {
+                let drafts = TaskDraft::list_all(&pool).await?;
+                let mut drafts_map = serde_json::Map::new();
+                for draft in &drafts {
+                    if let Some(proj_id) = indexes.project_for_task(&draft.task_id) {
+                        if proj_id == project_id {
+                            let payload = TaskDraftEventValue::new(draft.clone(), proj_id);
+                            drafts_map
+                                .insert(draft.id.to_string(), serde_json::to_value(&payload)?);
                         }
-                        Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
                     }
                 }
-            });
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/task_drafts".to_string(),
+                        value: Value::Object(drafts_map),
+                    },
+                )])))
+            }
+        };
+
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
+
+        let indexes = self.resources.indexes.clone();
+        let filter = move |entry: &LogEntry| -> bool {
+            match parse_collection_patch(entry, "task_drafts") {
+                Some((op, draft_id)) => {
+                    matches!(op, PatchOperation::Remove(_))
+                        || indexes.draft_projects.read().get(&draft_id).copied() == Some(project_id)
+                }
+                None => !matches!(entry, LogEntry::JsonPatch(_)),
+            }
+        };
 
         let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
-        Ok(initial_stream.chain(filtered_stream).boxed())
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
     }
 }
 

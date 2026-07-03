@@ -91,6 +91,27 @@ fn prepend_path_entry(
     std::env::join_paths(entries).ok()
 }
 
+/// Merge the user's login-shell `PATH` (Homebrew, NVM, Bun, rbenv, cargo, ...)
+/// into this process's `PATH` once at startup.
+///
+/// A GUI-launched desktop app only inherits the OS default `PATH`, not the
+/// entries a user's `.zshrc`/`.bashrc` adds. Executors derive the environment
+/// they hand to spawned agents (and, transitively, to every shell command an
+/// agent runs) from this process's `PATH`, so without this call any tool an
+/// agent invokes that isn't on the OS default `PATH` — e.g. a `bun`-based git
+/// hook — fails with "command not found" even though it's installed.
+///
+/// [`executors::cli_resolver::resolve_cli`] also triggers this refresh, but
+/// only as a fallback when a *manifest-tracked* binary (claude, codex, pi,
+/// git, ...) can't be found through its candidate list. That doesn't help
+/// arbitrary tools an agent's shell commands rely on, so this unconditional
+/// startup call ensures the general `PATH` is current before any agent runs.
+async fn refresh_login_shell_path() {
+    if executors::shell::refresh_login_shell_path().await {
+        info!("refreshed PATH from login shell");
+    }
+}
+
 pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -99,6 +120,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 
     raise_fd_limit();
     expose_cli_on_path();
+    refresh_login_shell_path().await;
 
     perf::set_perf_enabled(args.perf);
 

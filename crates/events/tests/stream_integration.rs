@@ -1001,10 +1001,7 @@ async fn stream_tasks_receives_concurrent_inserts_via_hook() {
                     other => panic!("expected Add operation, got {:?}", other),
                 }
             }
-            other => panic!(
-                "expected add patch for concurrent insert, got {:?}",
-                other
-            ),
+            other => panic!("expected add patch for concurrent insert, got {:?}", other),
         }
     }
 
@@ -1012,4 +1009,55 @@ async fn stream_tasks_receives_concurrent_inserts_via_hook() {
         received_ids, expected_ids,
         "all 3 concurrently inserted tasks must arrive via filtered stream"
     );
+}
+
+/// A subscriber that falls behind the broadcast buffer loses events with no
+/// way to know what they were. The stream must detect the lag and emit a
+/// fresh full snapshot instead of silently desyncing until reconnect.
+#[tokio::test]
+async fn stream_tasks_resyncs_with_full_snapshot_after_broadcast_lag() {
+    let (event_service, db, _temp_dir) = setup_event_service().await;
+    let project = create_project(&db, "lag-project").await;
+    create_task(&db, project.id, "Task before lag").await;
+
+    let mut stream = event_service.stream_tasks_raw(project.id).await.unwrap();
+    stream.next().await.expect("initial snapshot").unwrap();
+
+    // Created while the subscriber is not polling; no hook is wired in this
+    // setup, so only a snapshot re-read can ever surface it.
+    let task_during_lag = create_task(&db, project.id, "Task during lag").await;
+
+    // Overflow the hub (bounded broadcast buffer) without polling the stream.
+    for i in 0..2048 {
+        event_service
+            .msg_store()
+            .push_patch(Patch(vec![json_patch::PatchOperation::Replace(
+                json_patch::ReplaceOperation {
+                    path: format!("/noise/{i}"),
+                    value: serde_json::json!(i),
+                },
+            )]));
+    }
+
+    let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("stream should yield after lag")
+        .expect("stream should not end")
+        .expect("stream should not error");
+
+    let LogEntry::JsonPatch(patch_value) = received else {
+        panic!("expected a json patch resync, got {:?}", received);
+    };
+    let patch: Patch = serde_json::from_value(patch_value).unwrap();
+    match &patch.0[0] {
+        json_patch::PatchOperation::Replace(op) => {
+            assert_eq!(op.path, "/tasks", "resync must be a full snapshot");
+            let tasks = op.value.as_object().unwrap();
+            assert!(
+                tasks.contains_key(&task_during_lag.id.to_string()),
+                "resync snapshot must contain the task whose patch was lost"
+            );
+        }
+        other => panic!("expected full-snapshot replace, got {:?}", other),
+    }
 }

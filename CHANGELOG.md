@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.39
+
+- Fixed shell commands an agent runs (including git hooks) failing with "command not found" for tools installed through your login shell — Homebrew, nvm, bun, rbenv, cargo, and the like — when the app is launched from the GUI: the app now merges your login shell's `PATH` at startup so those tools resolve the same way they do in your terminal
+- Fixed live views such as the session list and conversations silently drifting out of date when their update stream briefly fell behind: the server now detects a backlogged stream and resends a fresh snapshot to catch the client back up, and subscribes before taking that snapshot so no update can slip through the gap at connect time
+- Fixed a record occasionally rendering blank or stale when an update for it arrived before the insert that created it, by applying such an early update as an insert instead of silently dropping it
+
 ## 0.1.38
 
 - Added support for the Pi coding agent alongside Claude Code and Codex: install it from the setup flow, sign in with provider API keys (OpenAI, Google, Anthropic, OpenRouter, and custom providers) managed in Settings or through the terminal login dialog, pick from its live model catalog, and run full multi-turn sessions with follow-ups, forks, and cancellation
