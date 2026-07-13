@@ -69,23 +69,9 @@ export const isVideoExtension = (extension?: string | null): boolean => {
   return ext != null && VIDEO_EXTENSIONS.has(ext);
 };
 
-export const isAudioExtension = (extension?: string | null): boolean => {
-  const ext = normalizeExtension(extension);
-  return ext != null && AUDIO_EXTENSIONS.has(ext);
-};
-
 export const isPdfExtension = (extension?: string | null): boolean => {
   const ext = normalizeExtension(extension);
   return ext != null && PDF_EXTENSIONS.has(ext);
-};
-
-/** Classify an extension into the gallery's media kind, or null if not media. */
-export const mediaKindOfExtension = (
-  extension?: string | null,
-): MediaKind | null => {
-  if (isImageExtension(extension)) return "image";
-  if (isVideoExtension(extension)) return "video";
-  return null;
 };
 
 /** Whether a path/filename points at a still image, judged by its extension. */

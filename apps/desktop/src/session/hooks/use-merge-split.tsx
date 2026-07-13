@@ -3,8 +3,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ItemRect } from "./use-proximity-hover";
 
 /**
- * Merge/split animation for contiguous selected-row backgrounds, ported from
- * fluidfunctionalism.com. Contiguous selected rows share one rounded
+ * Merge/split animation for contiguous selected-row backgrounds, adapted from
+ * a reference selection-animation pattern. Contiguous selected rows share one rounded
  * background block; toggling the row between two runs animates the blocks
  * converging into one (merge) or one block parting into two (split).
  */

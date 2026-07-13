@@ -98,10 +98,11 @@ export interface WorkspaceRoot {
 /**
  * How the file tree presents a task run's worktree. "changed" lists only the
  * files the agent touched (sourced from the run's diff); "all" lists the whole
- * worktree directory tree (the same entries RPC the project root uses). Only
+ * worktree directory tree (the same entries RPC the project root uses);
+ * "gallery" replaces the tree with a grid of the run's renderable media. Only
  * meaningful while a worktree scope is active.
  */
-export type WorktreeTreeView = "changed" | "all";
+export type WorktreeTreeView = "changed" | "all" | "gallery";
 
 interface FilesState {
   // Project context
@@ -128,6 +129,13 @@ interface FilesState {
   // (scroll the row into view) react even when the same path is revealed twice
   // in a row. Set by `revealPath`, e.g. from the Skills panel.
   revealRequest: { path: string; token: number } | null;
+
+  // A pending "scroll the open editor to this line" request. Distinct from
+  // `revealRequest` (which targets the file tree): this drives the CodeMirror
+  // editor of the matching file to scroll a 1-based line into view, e.g. when
+  // clicking a full-text search result. The bumped token re-triggers even when
+  // the same file+line is requested twice.
+  editorReveal: { path: string; line: number; token: number } | null;
 
   // File system data
   fileTree: FileNode[];
@@ -202,6 +210,10 @@ interface FilesActions {
 
   // Current file
   openFile: (path: string, taskRunId?: string) => void;
+  // Ask the open editor for `path` to scroll to a 1-based line (e.g. a
+  // content-search hit). Pure signal: it does not open the file, so the caller
+  // controls how the tab is opened (and in which scope). Bumps `editorReveal`.
+  requestEditorReveal: (path: string, line: number) => void;
   closeFile: () => void;
 
   // Inline editing
@@ -236,6 +248,7 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   rootPath: null,
   selectedPaths: [],
   revealRequest: null,
+  editorReveal: null,
   fileTree: [],
   currentFilePath: null,
   _onFilePathChange: null,
@@ -912,6 +925,16 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     // sandbox tree read from that run's worktree, not the project checkout.
     const effectiveRunId = taskRunId ?? state.scopeTaskRunId ?? undefined;
     state._onFilePathChange?.(path, effectiveRunId);
+  },
+  requestEditorReveal: (path, line) => {
+    if (!path) return;
+    set((state) => ({
+      editorReveal: {
+        path,
+        line,
+        token: (state.editorReveal?.token ?? 0) + 1,
+      },
+    }));
   },
   closeFile: () => {
     if (get().currentFilePath === null) return;

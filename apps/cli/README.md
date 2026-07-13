@@ -88,7 +88,7 @@ Rebase the run's branch onto a new base.
 |------|-------------|
 | `-w, --project <path>` | Git repository path (default: CWD's git root) |
 | `--help` | Show help |
-| `--version` | Show version |
+| `-v, --version` | Show version |
 
 ## How It Works
 

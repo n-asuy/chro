@@ -1,4 +1,4 @@
-type UpdatePopupView =
+export type UpdatePopupView =
   | { type: "hidden" }
   | { type: "available"; version: string; releaseNotes: string | null }
   | { type: "downloading"; version: string | null; percent: number }

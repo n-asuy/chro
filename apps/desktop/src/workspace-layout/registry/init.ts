@@ -10,7 +10,6 @@ import {
   SessionTabBody,
   SettingsTabBody,
   SkillsTabBody,
-  TerminalTabBody,
 } from "./tab-bodies";
 
 let initialized = false;
@@ -69,13 +68,6 @@ export function ensurePaneItemsRegistered(): void {
     iconName: "diff",
     Content: ProjectDiffTabBody,
     resolveTitle: () => "Working changes",
-  });
-
-  registerPaneItem({
-    type: "terminal",
-    iconName: "terminal",
-    Content: TerminalTabBody,
-    resolveTitle: () => "Terminal",
   });
 
   registerPaneItem({

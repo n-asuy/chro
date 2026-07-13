@@ -21,7 +21,7 @@ use ts_rs::TS;
 
 use crate::executors::codex::ReasoningEffort;
 use crate::executors::{
-    AvailabilityInfo, BaseCodingAgent, CodingAgent, ExecutorError, StandardCodingAgentExecutor,
+    AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
 };
 use crate::shell::resolve_executable_path;
 
@@ -360,35 +360,6 @@ pub fn to_default_variant(id: &ExecutorProfileId) -> ExecutorProfileId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PermissionMode {
-    Default,
-    Plan,
-    BypassPermissions,
-}
-
-impl PermissionMode {
-    pub fn as_cli_flag(&self) -> &'static str {
-        match self {
-            PermissionMode::Default => "default",
-            PermissionMode::Plan => "plan",
-            PermissionMode::BypassPermissions => "bypassPermissions",
-        }
-    }
-}
-
-/// Result of detecting Claude CLI version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeVersionResult {
-    pub ok: bool,
-    pub version: Option<String>,
-    pub command: Option<String>,
-    pub resolved_path: Option<String>,
-    pub error: Option<String>,
-    pub message: Option<String>,
-}
-
 /// Individual MCP server status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerStatus {
@@ -406,7 +377,7 @@ pub struct McpStatusResult {
     pub message: Option<String>,
 }
 
-fn add_parent_dir_to_path_env(command: &mut tokio::process::Command, executable: &std::path::Path) {
+fn add_parent_dir_to_path_env(command: &mut tokio::process::Command, executable: &Path) {
     let Some(parent) = executable.parent() else {
         return;
     };
@@ -418,69 +389,6 @@ fn add_parent_dir_to_path_env(command: &mut tokio::process::Command, executable:
 
     if let Ok(updated_path) = std::env::join_paths(path_entries) {
         command.env("PATH", updated_path);
-    }
-}
-
-/// Detect Claude CLI version.
-///
-/// Resolves the binary through the shared layered resolver so detection matches
-/// the path used to actually run Claude (login-shell PATH refresh, candidate
-/// locations, and the `CLAUDE_BIN` override all apply).
-pub async fn detect_claude_version() -> ClaudeVersionResult {
-    let resolved = crate::cli_resolver::resolve_cli(&crate::cli_manifest::CLAUDE).await;
-    let claude_path = resolved.as_ref().map(|r| r.path.clone());
-
-    let mut command = match &claude_path {
-        Some(path) => {
-            let mut command = tokio::process::Command::new(path);
-            add_parent_dir_to_path_env(&mut command, path);
-            command
-        }
-        None => tokio::process::Command::new(crate::cli_manifest::CLAUDE.command),
-    };
-
-    let result = command
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await;
-
-    let resolved_path = claude_path.map(|p| p.to_string_lossy().into_owned());
-
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                ClaudeVersionResult {
-                    ok: true,
-                    version: Some(version),
-                    command: Some("claude".to_string()),
-                    resolved_path,
-                    error: None,
-                    message: None,
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                ClaudeVersionResult {
-                    ok: false,
-                    version: None,
-                    command: Some("claude".to_string()),
-                    resolved_path,
-                    error: Some("COMMAND_FAILED".to_string()),
-                    message: Some(stderr),
-                }
-            }
-        }
-        Err(err) => ClaudeVersionResult {
-            ok: false,
-            version: None,
-            command: Some("claude".to_string()),
-            resolved_path,
-            error: Some("NOT_FOUND".to_string()),
-            message: Some(err.to_string()),
-        },
     }
 }
 
@@ -683,15 +591,7 @@ fn parse_mcp_list_output(output: &str) -> Vec<McpServerStatus> {
     servers
 }
 
-/// Aggregated auth status for all known executors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthStatusResult {
-    pub claude_code: AvailabilityInfo,
-    pub codex: AvailabilityInfo,
-    pub pi: AvailabilityInfo,
-}
-
-/// Installation info for executor CLIs required by onboarding and auth flows.
+/// Installation info for executor CLIs, used to report what is detected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorInstallInfo {
     pub installed: bool,
@@ -707,46 +607,6 @@ pub struct ExecutorInstallStatusResult {
     pub codex: ExecutorInstallInfo,
     pub pi: ExecutorInstallInfo,
     pub git: ExecutorInstallInfo,
-}
-
-/// A resolved interactive login command for an executor's CLI.
-///
-/// The PTY layer spawns this directly so the CLI's own device-code / token
-/// prompts render in the terminal. We deliberately pick callback-free flows
-/// (no `localhost` redirect) so one path serves both local and headless
-/// (remote server) installs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthLoginCommand {
-    /// Resolved absolute path to the CLI binary.
-    pub program: String,
-    /// Arguments that start the interactive login.
-    pub args: Vec<String>,
-    /// Keystrokes to type once the CLI has rendered, for agents whose login is
-    /// an in-REPL command rather than a subcommand (e.g. Claude's `/login`).
-    /// `None` when the launched command shows the prompt on its own.
-    pub initial_input: Option<String>,
-}
-
-/// Query auth status for all executors.
-///
-/// Uses cached executor profiles to obtain a `CodingAgent` for each
-/// `BaseCodingAgent` variant and calls `get_availability_info()` on it.
-pub fn get_auth_status_all() -> AuthStatusResult {
-    let configs = ExecutorConfigs::get_cached();
-
-    let availability_for = |agent: BaseCodingAgent| -> AvailabilityInfo {
-        let profile_id = ExecutorProfileId::new(agent);
-        configs
-            .get_coding_agent(&profile_id)
-            .map(|ca| ca.get_availability_info())
-            .unwrap_or(AvailabilityInfo::NotFound)
-    };
-
-    AuthStatusResult {
-        claude_code: availability_for(BaseCodingAgent::ClaudeCode),
-        codex: availability_for(BaseCodingAgent::Codex),
-        pi: availability_for(BaseCodingAgent::Pi),
-    }
 }
 
 async fn detect_install_info(command: &'static str) -> ExecutorInstallInfo {
@@ -834,215 +694,9 @@ pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
     }
 }
 
-/// Tools that can be installed via the onboarding install endpoint.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum InstallableTool {
-    ClaudeCode,
-    Codex,
-    Pi,
-    Git,
-}
-
-impl std::fmt::Display for InstallableTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ClaudeCode => write!(f, "CLAUDE_CODE"),
-            Self::Codex => write!(f, "CODEX"),
-            Self::Pi => write!(f, "PI"),
-            Self::Git => write!(f, "GIT"),
-        }
-    }
-}
-
-/// Result of attempting to install a tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolInstallResult {
-    pub ok: bool,
-    pub tool: InstallableTool,
-    pub command: String,
-    pub strategy: String,
-    pub stdout: String,
-    pub stderr: String,
-    pub message: String,
-}
-
-/// Determine the install command for the given tool.
-async fn get_install_strategy(
-    tool: InstallableTool,
-) -> Result<(&'static str, &'static str), String> {
-    match tool {
-        InstallableTool::ClaudeCode => {
-            if cfg!(target_os = "windows") {
-                if resolve_executable_path("npm").await.is_some() {
-                    return Ok(("npm", "npm install -g @anthropic-ai/claude-code"));
-                }
-                return Err("Automatic install requires npm on Windows.".into());
-            }
-            if resolve_executable_path("curl").await.is_some() {
-                return Ok((
-                    "official installer",
-                    "curl -fsSL https://claude.ai/install.sh | bash",
-                ));
-            }
-            if resolve_executable_path("npm").await.is_some() {
-                return Ok(("npm", "npm install -g @anthropic-ai/claude-code"));
-            }
-            Err("Automatic install requires curl or npm. Open the install guide to continue manually.".into())
-        }
-        InstallableTool::Codex => {
-            if cfg!(target_os = "macos") && resolve_executable_path("brew").await.is_some() {
-                return Ok(("Homebrew", "brew install --cask codex"));
-            }
-            if resolve_executable_path("npm").await.is_some() {
-                return Ok(("npm", "npm install -g @openai/codex"));
-            }
-            Err("Automatic install requires Homebrew or npm. Open the install guide to continue manually.".into())
-        }
-        InstallableTool::Pi => {
-            if resolve_executable_path("npm").await.is_some() {
-                return Ok(("npm", "npm install -g @earendil-works/pi-coding-agent"));
-            }
-            Err(
-                "Automatic install requires npm. Open the install guide to continue manually."
-                    .into(),
-            )
-        }
-        InstallableTool::Git => {
-            if cfg!(target_os = "macos") {
-                return Ok(("Xcode CLT", "xcode-select --install"));
-            }
-            if cfg!(target_os = "windows") {
-                if resolve_executable_path("winget").await.is_some() {
-                    return Ok(("winget", "winget install --id Git.Git -e --source winget"));
-                }
-                return Err(
-                    "Automatic install requires winget. Download Git from https://git-scm.com"
-                        .into(),
-                );
-            }
-            if resolve_executable_path("apt-get").await.is_some() {
-                return Ok(("apt", "sudo apt-get install -y git"));
-            }
-            if resolve_executable_path("brew").await.is_some() {
-                return Ok(("Homebrew", "brew install git"));
-            }
-            Err("Automatic install requires Xcode CLI Tools, apt, or Homebrew.".into())
-        }
-    }
-}
-
-/// Install a tool using the best available strategy.
-pub async fn install_tool(tool: InstallableTool) -> ToolInstallResult {
-    let (strategy_label, command) = match get_install_strategy(tool).await {
-        Ok(pair) => pair,
-        Err(msg) => {
-            return ToolInstallResult {
-                ok: false,
-                tool,
-                command: String::new(),
-                strategy: String::new(),
-                stdout: String::new(),
-                stderr: String::new(),
-                message: msg,
-            };
-        }
-    };
-
-    let label = tool.to_string();
-    let cwd = std::env::temp_dir();
-    match crate::shell::run_script_logged(&label, command, &cwd).await {
-        Ok(output) if output.status.success() => ToolInstallResult {
-            ok: true,
-            tool,
-            command: command.to_string(),
-            strategy: strategy_label.to_string(),
-            stdout: output.stdout.trim().to_string(),
-            stderr: output.stderr.trim().to_string(),
-            message: format!("Installed via {strategy_label}."),
-        },
-        Ok(output) => ToolInstallResult {
-            ok: false,
-            tool,
-            command: command.to_string(),
-            strategy: strategy_label.to_string(),
-            stdout: output.stdout.trim().to_string(),
-            stderr: output.stderr.trim().to_string(),
-            message: output
-                .stderr
-                .lines()
-                .last()
-                .unwrap_or("Installation failed.")
-                .trim()
-                .to_string(),
-        },
-        Err(err) => ToolInstallResult {
-            ok: false,
-            tool,
-            command: command.to_string(),
-            strategy: strategy_label.to_string(),
-            stdout: String::new(),
-            stderr: String::new(),
-            message: format!("Failed to run installer: {err}"),
-        },
-    }
-}
-
-/// How to launch each executor's interactive, callback-free login: the CLI
-/// arguments plus any keystrokes to type once the CLI has rendered.
-///
-/// Neither flow uses a `localhost` browser redirect, so both complete inside a
-/// terminal and work the same locally and on a headless server.
-fn auth_login_spec(executor: BaseCodingAgent) -> (&'static [&'static str], Option<&'static str>) {
-    match executor {
-        // Verified against codex 0.125: device authorization prints the URL and
-        // code on its own, no extra input needed.
-        BaseCodingAgent::Codex => (&["login", "--device-auth"], None),
-        // Claude has no login subcommand; sign-in is the in-REPL `/login`
-        // command, which prints the auth URL. Launch the interactive CLI and
-        // type `/login` once it has painted. (`setup-token` is for `claude -p`
-        // API usage and is not the subscription login.)
-        BaseCodingAgent::ClaudeCode => (&[], Some("/login\r")),
-        // pi likewise signs in via the in-REPL `/login` command (OAuth or API
-        // key). Launch the interactive TUI and type `/login` once it paints.
-        BaseCodingAgent::Pi => (&[], Some("/login\r")),
-    }
-}
-
-/// Resolve the interactive login command for an executor so the PTY layer can
-/// host it in a terminal.
-///
-/// Returns [`ExecutorError::ExecutableNotFound`] when the CLI is not installed,
-/// carrying the manifest's install hint.
-pub async fn resolve_auth_login_command(
-    executor: BaseCodingAgent,
-) -> Result<AuthLoginCommand, ExecutorError> {
-    let manifest: &'static crate::cli_manifest::CliManifest = match executor {
-        BaseCodingAgent::ClaudeCode => &crate::cli_manifest::CLAUDE,
-        BaseCodingAgent::Codex => &crate::cli_manifest::CODEX,
-        BaseCodingAgent::Pi => &crate::cli_manifest::PI,
-    };
-
-    let executable = crate::cli_resolver::resolve_cli(manifest)
-        .await
-        .map(|r| r.path)
-        .ok_or_else(|| ExecutorError::ExecutableNotFound {
-            program: manifest.command.to_string(),
-            install_hint: Some(manifest.install_hint.to_string()),
-        })?;
-
-    let (args, initial_input) = auth_login_spec(executor);
-    Ok(AuthLoginCommand {
-        program: executable.to_string_lossy().into_owned(),
-        args: args.iter().map(|s| (*s).to_string()).collect(),
-        initial_input: initial_input.map(str::to_string),
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{auth_login_spec, extract_detected_version};
-    use crate::executors::BaseCodingAgent;
+    use super::extract_detected_version;
 
     #[test]
     fn extract_detected_version_prefers_stdout() {
@@ -1056,24 +710,5 @@ mod tests {
         let version = extract_detected_version(b"", b"codex 0.1.0\n");
 
         assert_eq!(version.as_deref(), Some("codex 0.1.0"));
-    }
-
-    #[test]
-    fn codex_login_uses_callback_free_device_auth() {
-        // The browser-callback flow (plain `codex login`) binds localhost on
-        // the server and breaks for headless installs, so the login terminal
-        // must use device authorization instead. It needs no typed input.
-        let (args, initial_input) = auth_login_spec(BaseCodingAgent::Codex);
-        assert_eq!(args, &["login", "--device-auth"]);
-        assert_eq!(initial_input, None);
-    }
-
-    #[test]
-    fn claude_login_runs_in_repl_login_command() {
-        // Claude has no login subcommand; launch the interactive CLI and type
-        // `/login`. `setup-token` (claude -p / API) must not be used.
-        let (args, initial_input) = auth_login_spec(BaseCodingAgent::ClaudeCode);
-        assert!(args.is_empty());
-        assert_eq!(initial_input, Some("/login\r"));
     }
 }

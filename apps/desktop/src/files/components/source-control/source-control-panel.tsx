@@ -26,6 +26,8 @@ import {
   FilePlus,
   FileX,
   GitBranch,
+  List,
+  ListTree,
   Minus,
   Plus,
   RefreshCw,
@@ -35,6 +37,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
+import {
+  ChangeFileList,
+  type ChangeFileEntry,
+  type ChangeListViewMode,
+} from "./change-file-list";
 import { useActiveWorkspaceScope } from "../../hooks/use-active-workspace-scope";
 import { useGitStatus } from "../../hooks/use-git-status";
 import { useFilesStore } from "../../state/files-store";
@@ -70,6 +77,15 @@ type SourceControlScope = "all" | "uncommitted";
 /** Default base ref to compare a branch against in "all" scope. */
 const DEFAULT_BASE_REF = "main";
 
+/** Persist the flat/tree preference so it survives reloads (VSCode-style). */
+const FILE_VIEW_MODE_KEY = "chro.sourceControl.fileViewMode";
+
+const readFileViewMode = (): ChangeListViewMode =>
+  typeof window !== "undefined" &&
+  window.localStorage.getItem(FILE_VIEW_MODE_KEY) === "tree"
+    ? "tree"
+    : "list";
+
 const changeKindToStatus = (change: DiffChangeKind): FileChangeStatus =>
   change === "permission_change" ? "typechange" : change;
 
@@ -104,6 +120,8 @@ interface FileItemProps {
   onOpenFile?: () => void;
   onOpenDiff?: () => void;
   isStaged?: boolean;
+  /** Nesting depth in tree view; 0 keeps the flat-list indentation. */
+  indent?: number;
 }
 
 const FileItem = ({
@@ -118,6 +136,7 @@ const FileItem = ({
   onOpenFile,
   onOpenDiff,
   isStaged,
+  indent = 0,
 }: FileItemProps) => {
   // Display only the terminal path segment.
   // Handles edge cases: empty path, directory paths ending with "/"
@@ -136,7 +155,8 @@ const FileItem = ({
         type="button"
         onClick={onOpenDiff}
         disabled={!onOpenDiff}
-        className="flex min-w-0 flex-1 items-center gap-2 rounded py-1 pl-2 text-left disabled:cursor-default"
+        className="flex min-w-0 flex-1 items-center gap-2 rounded py-1 text-left disabled:cursor-default"
+        style={{ paddingLeft: 8 + indent * 12 }}
       >
         <span className="flex-shrink-0">
           {isUntracked ? (
@@ -344,6 +364,18 @@ export const SourceControlPanel = () => {
     }
     return map;
   }, [scopedDiffs]);
+
+  const [fileViewMode, setFileViewMode] =
+    useState<ChangeListViewMode>(readFileViewMode);
+  const toggleFileViewMode = useCallback(() => {
+    setFileViewMode((prev) => {
+      const next = prev === "tree" ? "list" : "tree";
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(FILE_VIEW_MODE_KEY, next);
+      }
+      return next;
+    });
+  }, []);
 
   const [commitMessage, setCommitMessage] = useState(getDefaultCommitMessage);
   const [isCommitting, setIsCommitting] = useState(false);
@@ -645,6 +677,30 @@ export const SourceControlPanel = () => {
             </Tooltip>
           </TooltipProvider>
         </div>
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={toggleFileViewMode}
+                className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-custom-text-300 transition hover:bg-custom-background-80 hover:text-custom-text-100"
+                aria-label={
+                  fileViewMode === "tree" ? "View as List" : "View as Tree"
+                }
+                aria-pressed={fileViewMode === "tree"}
+              >
+                {fileViewMode === "tree" ? (
+                  <ListTree className="size-4" />
+                ) : (
+                  <List className="size-4" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" align="center">
+              {fileViewMode === "tree" ? "View as List" : "View as Tree"}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
 
       {/* Scope toggle: all branch changes (vs base) ⇄ uncommitted only */}
@@ -788,17 +844,24 @@ export const SourceControlPanel = () => {
       {scope === "all" && (
         <div className="flex-1 overflow-y-auto p-2">
           <CollapsibleSection title="Changes" count={scopedDiffs.length}>
-            {scopedDiffs.map((entry) => (
-              <FileItem
-                key={entry.path}
-                path={entry.path}
-                status={changeKindToStatus(entry.diff.change)}
-                additions={entry.diff.additions}
-                deletions={entry.diff.deletions}
-                onOpenFile={() => handleOpenFile(entry.path)}
-                onOpenDiff={handleOpenDiff}
-              />
-            ))}
+            <ChangeFileList
+              viewMode={fileViewMode}
+              entries={scopedDiffs.map((entry) => ({
+                path: entry.path,
+                render: (depth) => (
+                  <FileItem
+                    key={entry.path}
+                    indent={depth}
+                    path={entry.path}
+                    status={changeKindToStatus(entry.diff.change)}
+                    additions={entry.diff.additions}
+                    deletions={entry.diff.deletions}
+                    onOpenFile={() => handleOpenFile(entry.path)}
+                    onOpenDiff={handleOpenDiff}
+                  />
+                ),
+              }))}
+            />
             {scopedDiffs.length === 0 && (
               <div className="px-2 py-4 text-center text-xs text-custom-text-300">
                 No changes vs {baseRef}
@@ -828,19 +891,26 @@ export const SourceControlPanel = () => {
               )
             }
           >
-            {status?.staged.map((file) => (
-              <FileItem
-                key={file.path}
-                path={file.path}
-                status={file.status}
-                additions={countsByPath.get(file.path)?.additions}
-                deletions={countsByPath.get(file.path)?.deletions}
-                isStaged
-                onUnstage={() => handleUnstageFile(file.path)}
-                onOpenFile={() => handleOpenFile(file.path)}
-                onOpenDiff={handleOpenDiff}
-              />
-            ))}
+            <ChangeFileList
+              viewMode={fileViewMode}
+              entries={(status?.staged ?? []).map((file) => ({
+                path: file.path,
+                render: (depth) => (
+                  <FileItem
+                    key={file.path}
+                    indent={depth}
+                    path={file.path}
+                    status={file.status}
+                    additions={countsByPath.get(file.path)?.additions}
+                    deletions={countsByPath.get(file.path)?.deletions}
+                    isStaged
+                    onUnstage={() => handleUnstageFile(file.path)}
+                    onOpenFile={() => handleOpenFile(file.path)}
+                    onOpenDiff={handleOpenDiff}
+                  />
+                ),
+              }))}
+            />
           </CollapsibleSection>
 
           {/* Changes */}
@@ -870,31 +940,44 @@ export const SourceControlPanel = () => {
               )
             }
           >
-            {status?.modified.map((file) => (
-              <FileItem
-                key={file.path}
-                path={file.path}
-                status={file.status}
-                additions={countsByPath.get(file.path)?.additions}
-                deletions={countsByPath.get(file.path)?.deletions}
-                onStage={() => handleStageFile(file.path)}
-                onDiscard={() => handleDiscardFile(file.path)}
-                onOpenFile={() => handleOpenFile(file.path)}
-                onOpenDiff={handleOpenDiff}
-              />
-            ))}
-            {status?.untracked.map((path) => (
-              <FileItem
-                key={path}
-                path={path}
-                isUntracked
-                additions={countsByPath.get(path)?.additions}
-                deletions={countsByPath.get(path)?.deletions}
-                onStage={() => handleStageFile(path)}
-                onOpenFile={() => handleOpenFile(path)}
-                onOpenDiff={handleOpenDiff}
-              />
-            ))}
+            <ChangeFileList
+              viewMode={fileViewMode}
+              entries={[
+                ...(status?.modified ?? []).map<ChangeFileEntry>((file) => ({
+                  path: file.path,
+                  render: (depth) => (
+                    <FileItem
+                      key={file.path}
+                      indent={depth}
+                      path={file.path}
+                      status={file.status}
+                      additions={countsByPath.get(file.path)?.additions}
+                      deletions={countsByPath.get(file.path)?.deletions}
+                      onStage={() => handleStageFile(file.path)}
+                      onDiscard={() => handleDiscardFile(file.path)}
+                      onOpenFile={() => handleOpenFile(file.path)}
+                      onOpenDiff={handleOpenDiff}
+                    />
+                  ),
+                })),
+                ...(status?.untracked ?? []).map<ChangeFileEntry>((path) => ({
+                  path,
+                  render: (depth) => (
+                    <FileItem
+                      key={path}
+                      indent={depth}
+                      path={path}
+                      isUntracked
+                      additions={countsByPath.get(path)?.additions}
+                      deletions={countsByPath.get(path)?.deletions}
+                      onStage={() => handleStageFile(path)}
+                      onOpenFile={() => handleOpenFile(path)}
+                      onOpenDiff={handleOpenDiff}
+                    />
+                  ),
+                })),
+              ]}
+            />
           </CollapsibleSection>
         </div>
       )}

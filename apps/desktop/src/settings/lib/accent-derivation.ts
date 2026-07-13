@@ -13,9 +13,8 @@
  * produce muddy, uneven steps for an arbitrary user hue. Lightness is clamped
  * into a per-mode band, chroma is floored (so the ring never vanishes on a
  * grey pick) and capped to the in-gamut maximum, and the text-on-accent
- * foreground is chosen by APCA luminance contrast.
+ * foreground is chosen by WCAG contrast ratio.
  */
-import { APCAcontrast, sRGBtoY } from "apca-w3";
 import {
   type Oklch,
   type Rgb,
@@ -23,6 +22,7 @@ import {
   converter,
   interpolate,
 } from "culori";
+import { contrastRatio } from "./contrast";
 
 export type ThemeMode = "light" | "dark";
 
@@ -49,7 +49,7 @@ export const CHROMA_FLOOR = 0.045;
 /** Fallback hue (cool blue) when the seed is achromatic and has no hue of its own. */
 const NEUTRAL_FALLBACK_HUE = 250;
 
-/** Foreground candidates placed on the accent fill; the higher-APCA one wins. */
+/** Foreground candidates placed on the accent fill; the higher-contrast one wins. */
 const FG_LIGHT: Rgb = { mode: "rgb", r: 1, g: 1, b: 1 };
 const FG_DARK: Rgb = {
   mode: "rgb",
@@ -106,11 +106,9 @@ function hslTriplet(color: Oklch | Rgb): string {
   return `${h} ${s}% ${l}%`;
 }
 
-/** APCA Lc magnitude of `text` placed on `bg` (both any culori-parsable color). */
-function apca(text: Oklch | Rgb, bg: Oklch | Rgb): number {
-  const textY = sRGBtoY(rgb255(toRgb(text)));
-  const bgY = sRGBtoY(rgb255(toRgb(bg)));
-  return Math.abs(Number(APCAcontrast(textY, bgY)));
+/** WCAG contrast ratio of `text` against `bg` (both any culori-parsable color). */
+function contrast(text: Oklch | Rgb, bg: Oklch | Rgb): number {
+  return contrastRatio(rgb255(toRgb(text)), rgb255(toRgb(bg)));
 }
 
 /** Normalize the seed into an in-gamut OKLCH base clamped to the mode's band. */
@@ -158,7 +156,8 @@ export function deriveAccentVars(
   }
 
   // Foreground: pick whichever candidate reads better on the accent fill.
-  const fg = apca(FG_LIGHT, base) >= apca(FG_DARK, base) ? FG_LIGHT : FG_DARK;
+  const fg =
+    contrast(FG_LIGHT, base) >= contrast(FG_DARK, base) ? FG_LIGHT : FG_DARK;
   const baseHsl = hslTriplet(base);
   const fgHsl = hslTriplet(fg);
 

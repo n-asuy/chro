@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::windows::WindowMode;
-
 /// Per-window metadata kept by the desktop runtime. The Tauri webview itself
 /// is looked up by label via `AppHandle::get_webview_window`, so we keep this
 /// struct purely descriptive.
@@ -14,7 +12,6 @@ pub struct WindowMeta {
     pub runtime_id: String,
     pub workspace_path: Option<String>,
     pub workspace_key: Option<String>,
-    pub mode: WindowMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +21,6 @@ pub struct TrayWorkspaceWindow {
     pub display_label: String,
     pub workspace_path: Option<String>,
     pub description: Option<String>,
-    pub mode: WindowMode,
     pub is_focused: bool,
 }
 
@@ -54,21 +50,6 @@ impl WindowPool {
                 .and_then(normalize_workspace_path_for_key);
             entry.workspace_path = workspace_path;
         }
-    }
-
-    /// Update the tracked mode for a window. Returns `true` only when the mode
-    /// actually changed, so callers can apply window geometry exclusively on a
-    /// genuine transition. Re-asserting the current mode (e.g. on every route
-    /// change) is a no-op and must never re-position a window the user moved.
-    pub async fn set_mode(&self, label: &str, mode: WindowMode) -> bool {
-        if let Some(entry) = self.windows.lock().await.get_mut(label) {
-            if entry.mode == mode {
-                return false;
-            }
-            entry.mode = mode;
-            return true;
-        }
-        false
     }
 
     pub async fn get(&self, label: &str) -> Option<WindowMeta> {
@@ -111,7 +92,6 @@ impl WindowPool {
         let map = self.windows.lock().await;
         let mut entries: Vec<TrayWorkspaceWindow> = map
             .values()
-            .filter(|meta| meta.mode == WindowMode::Session)
             .map(|meta| {
                 let display_label = meta
                     .workspace_path
@@ -129,7 +109,6 @@ impl WindowPool {
                     display_label,
                     workspace_path: meta.workspace_path.clone(),
                     description,
-                    mode: meta.mode,
                     is_focused,
                 }
             })
@@ -185,54 +164,5 @@ pub fn workspace_basename(workspace_path: &str) -> Option<String> {
         None
     } else {
         Some(last.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn meta(label: &str, mode: WindowMode) -> WindowMeta {
-        WindowMeta {
-            label: label.to_string(),
-            runtime_id: "runtime".to_string(),
-            workspace_path: None,
-            workspace_key: None,
-            mode,
-        }
-    }
-
-    #[tokio::test]
-    async fn set_mode_reports_true_only_on_genuine_transition() {
-        let pool = WindowPool::new();
-        pool.register(meta("w", WindowMode::Onboarding)).await;
-
-        // Onboarding -> Session is a real transition: geometry should apply.
-        assert!(pool.set_mode("w", WindowMode::Session).await);
-        assert_eq!(pool.get("w").await.unwrap().mode, WindowMode::Session);
-    }
-
-    #[tokio::test]
-    async fn set_mode_is_noop_when_already_in_session() {
-        // Regression: re-asserting Session on every route change used to return
-        // true and re-center the window, clobbering a position the user moved.
-        let pool = WindowPool::new();
-        pool.register(meta("w", WindowMode::Session)).await;
-
-        assert!(!pool.set_mode("w", WindowMode::Session).await);
-    }
-
-    #[tokio::test]
-    async fn set_mode_is_noop_when_already_in_onboarding() {
-        let pool = WindowPool::new();
-        pool.register(meta("w", WindowMode::Onboarding)).await;
-
-        assert!(!pool.set_mode("w", WindowMode::Onboarding).await);
-    }
-
-    #[tokio::test]
-    async fn set_mode_returns_false_for_unknown_window() {
-        let pool = WindowPool::new();
-        assert!(!pool.set_mode("missing", WindowMode::Session).await);
     }
 }

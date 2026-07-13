@@ -56,10 +56,3 @@ export function useResolvedRunId(): string | null {
   if (fromTab?.type === "diff") return fromTab.runId;
   return params.runId ?? null;
 }
-
-export function useResolvedFilePath(): string | null {
-  const fromTab = useOptionalTabKind();
-  if (fromTab?.type === "file") return fromTab.path;
-  if (fromTab?.type === "diff") return fromTab.path ?? null;
-  return null;
-}

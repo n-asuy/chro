@@ -139,8 +139,6 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
       );
     case "project-diff":
       return b.type === "project-diff" && a.projectId === b.projectId;
-    case "terminal":
-      return b.type === "terminal" && a.terminalId === b.terminalId;
     case "browser":
       return b.type === "browser" && a.browserId === b.browserId;
     case "cdp-browser":
@@ -149,8 +147,7 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
       return b.type === "skills";
     case "gallery":
       return (
-        b.type === "gallery" &&
-        (a.taskRunId ?? null) === (b.taskRunId ?? null)
+        b.type === "gallery" && (a.taskRunId ?? null) === (b.taskRunId ?? null)
       );
   }
 }
@@ -228,8 +225,6 @@ export function pathFromKind(
     case "diff":
       return null;
     case "project-diff":
-      return null;
-    case "terminal":
       return null;
     case "browser":
       return null;

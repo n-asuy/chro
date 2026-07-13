@@ -226,10 +226,7 @@ pub trait Runtime: Clone + Send + Sync + 'static {
     /// Return the most recent user prompt and assistant reply for a task, used
     /// by the sidebar to preview the last conversation turn on hover without
     /// opening the full conversation stream.
-    async fn task_last_exchange(
-        &self,
-        task_id: Uuid,
-    ) -> Result<LastExchange, RuntimeError>;
+    async fn task_last_exchange(&self, task_id: Uuid) -> Result<LastExchange, RuntimeError>;
 
     fn touch_session(&self, session_id: &str) {
         let _ = session_id;

@@ -1,4 +1,3 @@
-import { desktopFetch } from "@/lib/backend-client";
 import { useCallback, useState } from "react";
 import {
   type SessionRunState,
@@ -7,6 +6,7 @@ import {
 } from "../domain/session-run-state";
 import type { PendingSessionSubmission } from "../domain/session-task-state";
 import type { TaskRunRecord } from "../types/api";
+import { cancelTaskRun } from "../utils/task-message-api";
 
 type UseSessionRunControllerArgs = {
   /** Runs for the active task from the task-runs WebSocket stream. */
@@ -17,8 +17,13 @@ type UseSessionRunControllerArgs = {
   pendingSubmission: PendingSessionSubmission | null;
   /** The task's `active_session_id`, used only as a stream-loading hint. */
   activeSessionHint: string | null | undefined;
-  /** Abort an in-flight create request by its request id. */
-  abortSubmission: (requestId: string) => void;
+  /**
+   * Mark an in-flight create request so the run it produces is cancelled as
+   * soon as the create response returns its id. Creation is atomic on the
+   * server, so it cannot be torn down mid-flight; this is how Stop lands
+   * during the create window.
+   */
+  requestCancelSubmission: (requestId: string) => void;
   /** Drop an optimistic submission by its request id. */
   clearPendingSubmission: (requestId?: string) => void;
 };
@@ -28,15 +33,9 @@ export type UseSessionRunControllerResult = SessionRunState & {
   isSending: boolean;
   /** A cancel RPC is in flight. */
   isStopping: boolean;
-  /** Stop the active run, or abort the in-flight create when no run exists yet. */
+  /** Stop the active run, or mark the in-flight create for cancellation. */
   handleCancel: () => Promise<void>;
 };
-
-async function cancelTaskRun(runId: string): Promise<void> {
-  await desktopFetch(`/rpc/task-runs/${encodeURIComponent(runId)}/cancel`, {
-    method: "POST",
-  });
-}
 
 /**
  * Owns session run state and cancellation, derived from the task-runs stream as
@@ -49,7 +48,7 @@ export function useSessionRunController({
   isTaskRunsLoading,
   pendingSubmission,
   activeSessionHint,
-  abortSubmission,
+  requestCancelSubmission,
   clearPendingSubmission,
 }: UseSessionRunControllerArgs): UseSessionRunControllerResult {
   const [isStopping, setIsStopping] = useState(false);
@@ -81,8 +80,8 @@ export function useSessionRunController({
       return;
     }
 
-    if (action.type === "abort-create" && action.requestId) {
-      abortSubmission(action.requestId);
+    if (action.type === "cancel-create" && action.requestId) {
+      requestCancelSubmission(action.requestId);
       clearPendingSubmission(action.requestId);
     }
   }, [
@@ -90,7 +89,7 @@ export function useSessionRunController({
     isInCreateWindow,
     pendingSubmission,
     isStopping,
-    abortSubmission,
+    requestCancelSubmission,
     clearPendingSubmission,
   ]);
 

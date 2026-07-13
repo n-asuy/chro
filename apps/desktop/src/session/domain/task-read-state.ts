@@ -6,22 +6,30 @@ import type { StoredTask } from "../types";
  *   closed mid-session and the orphan run was recovered as `failed` on the
  *   next server start).
  * - "completed": the run finished successfully.
+ * - "cleaned": housekeeping reclaimed the worktree, so the session is
+ *   read-only — it can no longer be continued, merged or rebased.
  * `null` means no dot: the task is running (a spinner is shown instead), is
  * not in a terminal state, or the user has already seen its latest result.
  */
-export type TaskStatusDotKind = "failed" | "completed" | null;
+export type TaskStatusDotKind = "failed" | "completed" | "cleaned" | null;
 
 type TaskReadFields = Pick<
   StoredTask,
-  "status" | "active_session_id" | "updated_at"
+  "status" | "active_session_id" | "updated_at" | "worktree_deleted"
 >;
 
 /**
- * Derive the unread status dot for a task.
+ * Derive the status marker for a task.
  *
- * A dot appears only when a task reached a terminal state (`completed` /
- * `failed`) and the user has not viewed it since its last update. Opening the
- * task records a view (see {@link useSessionReadStore}), which clears the dot.
+ * "cleaned" is a structural fact rather than a notification: once the worktree
+ * is reclaimed the session can never be continued again, so it outranks the
+ * unread dots and stays visible after the result has been read. Without it the
+ * only hint is a failed send, which is what this marker exists to pre-empt.
+ *
+ * The unread dots below it appear only when a task reached a terminal state
+ * (`completed` / `failed`) and the user has not viewed it since its last
+ * update. Opening the task records a view (see {@link useSessionReadStore}),
+ * which clears the dot.
  *
  * `updated_at` is the read watermark: it advances when a run completes, so a
  * task that finishes after you last looked at it surfaces as unread again.
@@ -30,8 +38,10 @@ export function deriveTaskStatusDot(
   task: TaskReadFields,
   lastViewedAt: string | null | undefined,
 ): TaskStatusDotKind {
-  // A running task shows the spinner, never an unread dot.
+  // A running task shows the spinner, never a marker.
   if (task.active_session_id) return null;
+
+  if (task.worktree_deleted) return "cleaned";
 
   if (task.status !== "completed" && task.status !== "failed") return null;
 

@@ -10,13 +10,13 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use executors::{ClaudeExecutionMode, ExecutorProfileId};
+use executors::ExecutorProfileId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-const CURRENT_VERSION: u32 = 19;
+const CURRENT_VERSION: u32 = 20;
 
 pub const DEFAULT_MERGE_COMMIT_TEMPLATE: &str =
     "{{title}} (chro {{task_short_id}}){{description_block}}";
@@ -68,38 +68,6 @@ impl Default for AppearanceConfig {
         Self {
             theme: AppTheme::default(),
             accent: None,
-        }
-    }
-}
-
-/// Integrated-terminal typography. The renderer (canvas) owns colors and the
-/// cell grid; these control how glyphs are drawn and, indirectly, the grid size.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalConfig {
-    /// Font family stack. `None` falls back to the renderer's default mono stack.
-    #[serde(default)]
-    pub font_family: Option<String>,
-    #[serde(default = "TerminalConfig::default_font_size")]
-    pub font_size: u8,
-    #[serde(default = "TerminalConfig::default_line_height")]
-    pub line_height: f32,
-}
-
-impl TerminalConfig {
-    fn default_font_size() -> u8 {
-        13
-    }
-    fn default_line_height() -> f32 {
-        1.2
-    }
-}
-
-impl Default for TerminalConfig {
-    fn default() -> Self {
-        Self {
-            font_family: None,
-            font_size: Self::default_font_size(),
-            line_height: Self::default_line_height(),
         }
     }
 }
@@ -205,15 +173,9 @@ pub struct Config {
     #[serde(default)]
     pub appearance: AppearanceConfig,
     #[serde(default)]
-    pub terminal: TerminalConfig,
-    #[serde(default)]
     pub notifications: NotificationConfig,
     #[serde(default)]
     pub merge_commit_template: Option<String>,
-    /// How Claude Code runs: interactive PTY (default) or headless `claude -p`.
-    /// Applied globally to every Claude run at spawn time.
-    #[serde(default)]
-    pub claude_code_execution_mode: ClaudeExecutionMode,
     /// Opaque JSON blob for frontend UI state (panel widths, sidebar collapsed, etc.).
     #[serde(default)]
     pub ui_state: serde_json::Map<String, Value>,
@@ -238,10 +200,8 @@ impl Default for Config {
             show_hidden_entries: false,
             editor: EditorConfig::default(),
             appearance: AppearanceConfig::default(),
-            terminal: TerminalConfig::default(),
             notifications: NotificationConfig::default(),
             merge_commit_template: None,
-            claude_code_execution_mode: ClaudeExecutionMode::default(),
             ui_state: serde_json::Map::new(),
         }
     }
@@ -570,10 +530,6 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
         .unwrap_or(16)
         < 17
     {
-        if json.get("terminal").is_none() {
-            json["terminal"] = serde_json::to_value(TerminalConfig::default())
-                .unwrap_or_else(|_| serde_json::json!({}));
-        }
         json["version"] = Value::from(17);
     }
 
@@ -598,9 +554,21 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
         .unwrap_or(18)
         < 19
     {
-        // claude_code_execution_mode defaults to "pty" via serde; no data
-        // migration needed — existing installs keep the PTY behavior.
         json["version"] = Value::from(19);
+    }
+
+    if json
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(19)
+        < 20
+    {
+        if let Some(obj) = json.as_object_mut() {
+            obj.remove("terminal");
+            obj.remove("claude_code_execution_mode");
+        }
+        json["version"] = Value::from(20);
     }
 
     if json.get("language").is_none() {
@@ -746,28 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn execution_mode_defaults_to_pty_and_roundtrips() {
-        use executors::ClaudeExecutionMode;
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("chro.json");
-        let service = ConfigService::new(&path);
-
-        assert_eq!(
-            Config::default().claude_code_execution_mode,
-            ClaudeExecutionMode::Pty
-        );
-
-        let mut config = Config::default();
-        config.claude_code_execution_mode = ClaudeExecutionMode::Print;
-        service.save(config).unwrap();
-        let loaded = service.load().unwrap();
-        assert_eq!(
-            loaded.claude_code_execution_mode,
-            ClaudeExecutionMode::Print
-        );
-    }
-
-    #[test]
     fn appearance_accent_defaults_to_none_and_roundtrips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("chro.json");
@@ -811,8 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_from_v18_defaults_execution_mode_to_pty() {
-        use executors::ClaudeExecutionMode;
+    fn migration_removes_retired_execution_fields() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("chro.json");
         fs::write(
@@ -825,7 +770,13 @@ mod tests {
                 "analytics_enabled": false,
                 "telemetry_id": "test-telemetry-id",
                 "language": "en",
-                "show_hidden_entries": false
+                "show_hidden_entries": false,
+                "terminal": {
+                    "font_family": null,
+                    "font_size": 13,
+                    "line_height": 1.2
+                },
+                "claude_code_execution_mode": "legacy"
             })
             .to_string(),
         )
@@ -834,9 +785,10 @@ mod tests {
         let service = ConfigService::new(&path);
         let config = service.load().unwrap();
         assert_eq!(config.version, CURRENT_VERSION);
-        assert_eq!(
-            config.claude_code_execution_mode,
-            ClaudeExecutionMode::Pty
-        );
+        service.save(config).unwrap();
+
+        let migrated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(migrated.get("terminal").is_none());
+        assert!(migrated.get("claude_code_execution_mode").is_none());
     }
 }

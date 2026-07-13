@@ -9,8 +9,6 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use fst::{Map, MapBuilder};
 use git2::{Repository, Sort};
-use grep_regex::RegexMatcher;
-use grep_searcher::{sinks::UTF8, Searcher};
 use ignore::WalkBuilder;
 use moka::future::Cache;
 use notify::{RecursiveMode, Watcher};
@@ -20,6 +18,8 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+mod query;
+
 /// Search mode for different use cases
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -27,14 +27,6 @@ pub enum SearchMode {
     #[default]
     TaskForm, // Default: exclude ignored files (clean results)
     Settings, // Include ignored files (for project config like .env)
-}
-
-/// Search query parameters
-#[derive(Debug, Deserialize)]
-pub struct SearchQuery {
-    pub q: String,
-    #[serde(default)]
-    pub mode: SearchMode,
 }
 
 /// Search result returned to clients
@@ -146,19 +138,25 @@ impl FileSearchCache {
         }
     }
 
-    /// Search files in repository using cache
+    /// Search files by name/path in a repository using the cached index.
+    ///
+    /// This is a pure name/path search: it never falls back to scanning file
+    /// contents. Full-text search is a separate, explicit operation
+    /// (`search_content_grouped`) so that a known filename resolves instantly
+    /// without triggering an expensive repository-wide content scan.
     pub async fn search(
         &self,
         repo_path: &Path,
         query: &str,
         mode: SearchMode,
+        limit: usize,
     ) -> Result<Vec<SearchResult>, CacheError> {
         let repo_path_buf = repo_path.to_path_buf();
 
         if let Some(cached) = self.cache.get(&repo_path_buf).await {
             if let Ok(head_sha) = get_head_sha(&repo_path_buf) {
                 if head_sha == cached.head_sha {
-                    return Ok(self.search_in_cache(&cached, repo_path, query, mode, 10));
+                    return Ok(search_names_in_cache(&cached, query, mode, limit));
                 }
             }
         }
@@ -168,64 +166,6 @@ impl FileSearchCache {
         }
 
         Err(CacheError::Miss)
-    }
-
-    /// Search within cached index with mode-based filtering, including content search
-    fn search_in_cache(
-        &self,
-        cached: &CachedRepo,
-        repo_path: &Path,
-        query: &str,
-        mode: SearchMode,
-        limit: usize,
-    ) -> Vec<SearchResult> {
-        let query_lower = query.to_lowercase();
-        let mut results = Vec::new();
-        let mut seen_paths: HashSet<String> = HashSet::new();
-
-        for indexed_file in &cached.indexed_files {
-            if indexed_file.path_lowercase.contains(&query_lower) {
-                match mode {
-                    SearchMode::TaskForm => {
-                        if indexed_file.is_ignored {
-                            continue;
-                        }
-                    }
-                    SearchMode::Settings => {}
-                }
-
-                seen_paths.insert(indexed_file.path.clone());
-                results.push(SearchResult {
-                    path: indexed_file.path.clone(),
-                    is_file: indexed_file.is_file,
-                    match_type: indexed_file.match_type.clone(),
-                });
-            }
-        }
-
-        rerank(&mut results, &cached.stats);
-        results.truncate(limit);
-
-        if results.len() < limit {
-            let remaining = limit - results.len();
-            if let Ok(content_results) = search_content(repo_path, query, remaining * 2) {
-                for content_result in content_results {
-                    if results.len() >= limit {
-                        break;
-                    }
-                    if !seen_paths.contains(&content_result.path) {
-                        seen_paths.insert(content_result.path.clone());
-                        results.push(SearchResult {
-                            path: content_result.path,
-                            is_file: true,
-                            match_type: SearchMatchType::ContentMatch,
-                        });
-                    }
-                }
-            }
-        }
-
-        results
     }
 
     /// Pre-warm cache for given repository
@@ -557,30 +497,61 @@ fn calculate_score(result: &SearchResult, stats: &FileStats) -> i64 {
     }
 }
 
-/// Content match result with line information
+/// Longest snippet (in bytes) kept verbatim before a match window is applied.
+const MAX_SNIPPET_BYTES: usize = 240;
+/// Bytes of leading context kept before the first match when windowing.
+const SNIPPET_LEAD_BYTES: usize = 32;
+
+/// A single matching line within a file, with highlight ranges.
 #[derive(Debug, Clone, Serialize)]
-pub struct ContentSearchResult {
-    pub path: String,
+pub struct LineMatch {
+    /// 1-based line number.
     pub line_number: u64,
+    /// Display snippet for the line (trailing newline stripped, possibly windowed).
     pub line_content: String,
+    /// `[start, end)` match ranges as UTF-16 code-unit offsets into `line_content`,
+    /// so a JavaScript client can slice `line_content` directly for highlighting.
+    pub ranges: Vec<[u32; 2]>,
 }
 
-/// Search for content within files using ripgrep
-pub fn search_content(
+/// Content-search hit: one file with its matching lines grouped together.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileContentHit {
+    pub path: String,
+    pub matches: Vec<LineMatch>,
+}
+
+/// Full-text search across file contents using the boolean query language,
+/// grouped by file.
+///
+/// The query supports `AND`/`OR`/`-`/`()`, `"phrases"`, `/regex/`, the field
+/// prefixes `file:`/`path:`/`content:`/`tag:`, `line:(…)` scoping, and
+/// `match-case:`/`ignore-case:` (see [`query`]). `case_sensitive` sets the
+/// default when a term has no explicit case operator: `Some(true/false)` forces
+/// it, `None` applies smart-case. Each returned file carries up to
+/// `max_lines_per_file` matching lines; scanning stops after `max_files` files
+/// have matched. Queries that only test names/paths skip reading file contents.
+pub fn search_content_grouped(
     repo_path: &Path,
     pattern: &str,
-    limit: usize,
-) -> Result<Vec<ContentSearchResult>, FileSearchError> {
+    case_sensitive: Option<bool>,
+    max_files: usize,
+    max_lines_per_file: usize,
+) -> Result<Vec<FileContentHit>, FileSearchError> {
     if !repo_path.exists() {
         return Err(FileSearchError::RepoMissing(
             repo_path.display().to_string(),
         ));
     }
 
-    let matcher = RegexMatcher::new_line_matcher(&format!("(?i){}", regex::escape(pattern)))
-        .map_err(|e| FileSearchError::InvalidRepository(format!("Invalid pattern: {e}")))?;
+    let compiled = query::CompiledQuery::parse(pattern, case_sensitive)
+        .map_err(|e| FileSearchError::InvalidRepository(e.0))?;
 
-    let mut results = Vec::new();
+    if compiled.is_empty() || max_files == 0 || max_lines_per_file == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut hits: Vec<FileContentHit> = Vec::new();
 
     let walker = WalkBuilder::new(repo_path)
         .hidden(false)
@@ -597,44 +568,159 @@ pub fn search_content(
         .build();
 
     for entry in walker.flatten() {
-        if results.len() >= limit {
+        if hits.len() >= max_files {
             break;
         }
 
         let path = entry.path();
-        if !path.is_file() {
+        if !path.is_file() || is_likely_binary(path) {
             continue;
         }
 
-        if is_likely_binary(path) {
-            continue;
-        }
-
-        let mut searcher = Searcher::new();
         let relative_path = path
             .strip_prefix(repo_path)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
 
-        let relative_path_clone = relative_path.clone();
-        let _ = searcher.search_path(
-            &matcher,
-            path,
-            UTF8(|line_num, line| {
-                if results.len() < limit {
-                    results.push(ContentSearchResult {
-                        path: relative_path_clone.clone(),
-                        line_number: line_num,
-                        line_content: line.trim().to_string(),
-                    });
-                }
-                Ok(results.len() < limit)
-            }),
-        );
+        // Name/path-only queries never touch file contents.
+        if !compiled.reads_content {
+            if compiled.evaluate(&relative_path, &[]).is_some() {
+                hits.push(FileContentHit {
+                    path: relative_path,
+                    matches: Vec::new(),
+                });
+            }
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue, // unreadable or non-UTF-8: treat as no match
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let Some(highlights) = compiled.evaluate(&relative_path, &lines) else {
+            continue;
+        };
+
+        let mut matches: Vec<LineMatch> = Vec::new();
+        for (line_number, mut ranges) in highlights {
+            if matches.len() >= max_lines_per_file {
+                break;
+            }
+            let Some(line) = lines.get((line_number - 1) as usize) else {
+                continue;
+            };
+            merge_ranges(&mut ranges);
+            let (snippet, utf16_ranges) = build_snippet(line, &ranges);
+            matches.push(LineMatch {
+                line_number,
+                line_content: snippet,
+                ranges: utf16_ranges,
+            });
+        }
+
+        hits.push(FileContentHit {
+            path: relative_path,
+            matches,
+        });
     }
 
-    Ok(results)
+    Ok(hits)
+}
+
+/// Sort byte ranges by start and merge overlapping/adjacent ones, so the
+/// snippet builder and client highlighter can walk them with a single cursor.
+fn merge_ranges(ranges: &mut Vec<(usize, usize)>) {
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for &(s, e) in ranges.iter() {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    *ranges = merged;
+}
+
+/// Snap `index` down to the nearest UTF-8 char boundary of `s`.
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Snap `index` up to the nearest UTF-8 char boundary of `s`.
+fn ceil_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index < s.len() && !s.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// Count UTF-16 code units in `s` up to byte offset `end` (a char boundary).
+fn utf16_offset(s: &str, end: usize) -> u32 {
+    s[..end].encode_utf16().count() as u32
+}
+
+/// Build a display snippet from a raw matched line and its byte-range matches.
+///
+/// The trailing newline is stripped and leading whitespace trimmed. Long lines
+/// are windowed around the first match with ellipses, and every match range is
+/// converted to UTF-16 offsets relative to the final snippet string.
+fn build_snippet(line: &str, byte_ranges: &[(usize, usize)]) -> (String, Vec<[u32; 2]>) {
+    let line = line.trim_end_matches(['\n', '\r']);
+    let trimmed = line.trim_start();
+    let left_off = line.len() - trimmed.len();
+
+    // Shift ranges into the left-trimmed coordinate space, dropping any that the
+    // trim consumed entirely.
+    let shifted: Vec<(usize, usize)> = byte_ranges
+        .iter()
+        .filter_map(|&(s, e)| {
+            let s = s.saturating_sub(left_off);
+            let e = e.saturating_sub(left_off);
+            (e > s).then_some((s, e))
+        })
+        .collect();
+
+    let needs_window = trimmed.len() > MAX_SNIPPET_BYTES;
+    let (win_start, win_end) = if needs_window {
+        let first = shifted.first().map_or(0, |r| r.0);
+        let start = floor_char_boundary(trimmed, first.saturating_sub(SNIPPET_LEAD_BYTES));
+        let end = ceil_char_boundary(trimmed, start + MAX_SNIPPET_BYTES);
+        (start, end)
+    } else {
+        (0, trimmed.len())
+    };
+    let window = &trimmed[win_start..win_end];
+
+    let lead = if win_start > 0 { "…" } else { "" };
+    let trail = if win_end < trimmed.len() { "…" } else { "" };
+    // A leading ellipsis is one UTF-16 code unit (U+2026); shift ranges past it.
+    let lead_units = lead.encode_utf16().count() as u32;
+
+    let ranges: Vec<[u32; 2]> = shifted
+        .iter()
+        .filter_map(|&(s, e)| {
+            let s = s.max(win_start);
+            let e = e.min(win_end);
+            if e <= s {
+                return None;
+            }
+            let s = utf16_offset(window, s - win_start) + lead_units;
+            let e = utf16_offset(window, e - win_start) + lead_units;
+            Some([s, e])
+        })
+        .collect();
+
+    (format!("{lead}{window}{trail}"), ranges)
 }
 
 /// Check if a file is likely binary based on extension
@@ -651,7 +737,39 @@ fn is_likely_binary(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Combined search that checks both filenames and content
+/// Filter a cached repository index by name/path substring, ranked by relevance.
+fn search_names_in_cache(
+    cached: &CachedRepo,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+) -> Vec<SearchResult> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    for indexed_file in &cached.indexed_files {
+        if !indexed_file.path_lowercase.contains(&query_lower) {
+            continue;
+        }
+        if matches!(mode, SearchMode::TaskForm) && indexed_file.is_ignored {
+            continue;
+        }
+        results.push(SearchResult {
+            path: indexed_file.path.clone(),
+            is_file: indexed_file.is_file,
+            match_type: indexed_file.match_type.clone(),
+        });
+    }
+
+    rerank(&mut results, &cached.stats);
+    results.truncate(limit);
+    results
+}
+
+/// Name/path search by walking the filesystem, for use when no cache is warm.
+///
+/// Pure name search: it never scans file contents. Full-text search is the
+/// separate `search_content_grouped` operation.
 pub fn search_combined(
     repo_path: &Path,
     query: &str,
@@ -665,7 +783,6 @@ pub fn search_combined(
 
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
-    let mut seen_paths: HashSet<String> = HashSet::new();
 
     let walker = WalkBuilder::new(repo_path)
         .hidden(false)
@@ -714,10 +831,8 @@ pub fn search_combined(
                     SearchMatchType::FullPath
                 };
 
-                let path_str = rel_str.to_string();
-                seen_paths.insert(path_str.clone());
                 results.push(SearchResult {
-                    path: path_str,
+                    path: rel_str.to_string(),
                     is_file: path.is_file(),
                     match_type,
                 });
@@ -725,24 +840,134 @@ pub fn search_combined(
         }
     }
 
-    if results.len() < limit {
-        let remaining = limit - results.len();
-        if let Ok(content_results) = search_content(repo_path, query, remaining * 2) {
-            for content_result in content_results {
-                if results.len() >= limit {
-                    break;
-                }
-                if !seen_paths.contains(&content_result.path) {
-                    seen_paths.insert(content_result.path.clone());
-                    results.push(SearchResult {
-                        path: content_result.path,
-                        is_file: true,
-                        match_type: SearchMatchType::ContentMatch,
-                    });
-                }
-            }
-        }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Slice a snippet by a UTF-16 range the way a JavaScript client would, so
+    /// tests assert on what the client actually highlights.
+    fn highlight(snippet: &str, range: [u32; 2]) -> String {
+        let units: Vec<u16> = snippet.encode_utf16().collect();
+        String::from_utf16(&units[range[0] as usize..range[1] as usize]).unwrap()
     }
 
-    Ok(results)
+    #[test]
+    fn snippet_strips_newline_and_trims_leading_whitespace() {
+        // Raw line as the searcher yields it: leading indent + trailing newline.
+        let raw = "    let foo = 1;\n";
+        // "foo" occupies bytes 8..11 in the raw line.
+        let (snippet, ranges) = build_snippet(raw, &[(8, 11)]);
+        assert_eq!(snippet, "let foo = 1;");
+        assert_eq!(ranges, vec![[4, 7]]);
+        assert_eq!(highlight(&snippet, ranges[0]), "foo");
+    }
+
+    #[test]
+    fn snippet_ranges_are_utf16_offsets() {
+        // A 2-code-unit astral char precedes the match; JS slices by UTF-16.
+        let raw = "😀 foo bar";
+        // "foo" is at bytes 5..8 ('😀'=4 bytes, ' '=1).
+        let (snippet, ranges) = build_snippet(raw, &[(5, 8)]);
+        assert_eq!(snippet, "😀 foo bar");
+        assert_eq!(highlight(&snippet, ranges[0]), "foo");
+    }
+
+    #[test]
+    fn snippet_windows_long_lines_around_first_match() {
+        let prefix = "x".repeat(400);
+        let raw = format!("{prefix}NEEDLE tail");
+        let match_start = prefix.len();
+        let (snippet, ranges) = build_snippet(&raw, &[(match_start, match_start + 6)]);
+        assert!(snippet.starts_with('…'), "windowed snippet should lead with ellipsis");
+        assert!(snippet.len() < raw.len(), "snippet should be shorter than the raw line");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(highlight(&snippet, ranges[0]), "NEEDLE");
+    }
+
+    fn write(dir: &TempDir, rel: &str, contents: &str) {
+        let path = dir.path().join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn content_search_groups_lines_by_file() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a.rs", "fn alpha() {}\nlet needle = 1;\nneedle again\n");
+        write(&dir, "b.rs", "no match here\n");
+
+        let hits = search_content_grouped(dir.path(), "needle", None, 10, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "a.rs");
+        assert_eq!(hits[0].matches.len(), 2);
+        assert_eq!(hits[0].matches[0].line_number, 2);
+        assert_eq!(hits[0].matches[1].line_number, 3);
+    }
+
+    #[test]
+    fn content_search_is_smart_case() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a.rs", "Needle\nneedle\n");
+
+        // Lowercase query matches case-insensitively.
+        let lower = search_content_grouped(dir.path(), "needle", None, 10, 10).unwrap();
+        assert_eq!(lower[0].matches.len(), 2);
+
+        // A query with an uppercase letter becomes case-sensitive.
+        let upper = search_content_grouped(dir.path(), "Needle", None, 10, 10).unwrap();
+        assert_eq!(upper[0].matches.len(), 1);
+        assert_eq!(upper[0].matches[0].line_number, 1);
+    }
+
+    #[test]
+    fn content_search_case_override_beats_smart_case() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a.rs", "Needle\nneedle\n");
+
+        // Force case-sensitive on an all-lowercase query.
+        let sensitive =
+            search_content_grouped(dir.path(), "needle", Some(true), 10, 10).unwrap();
+        assert_eq!(sensitive[0].matches.len(), 1);
+        assert_eq!(sensitive[0].matches[0].line_number, 2);
+
+        // Force case-insensitive on a mixed-case query.
+        let insensitive =
+            search_content_grouped(dir.path(), "Needle", Some(false), 10, 10).unwrap();
+        assert_eq!(insensitive[0].matches.len(), 2);
+    }
+
+    #[test]
+    fn content_search_respects_caps() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a.rs", "hit\nhit\nhit\n");
+        write(&dir, "b.rs", "hit\n");
+        write(&dir, "c.rs", "hit\n");
+
+        let capped_files = search_content_grouped(dir.path(), "hit", None, 2, 10).unwrap();
+        assert_eq!(capped_files.len(), 2);
+
+        let capped_lines = search_content_grouped(dir.path(), "hit", None, 10, 2).unwrap();
+        let a = capped_lines.iter().find(|h| h.path == "a.rs").unwrap();
+        assert_eq!(a.matches.len(), 2);
+    }
+
+    #[test]
+    fn name_search_does_not_fall_back_to_content() {
+        let dir = TempDir::new().unwrap();
+        // File name has no "needle"; only its contents do.
+        write(&dir, "unrelated.rs", "the needle lives here\n");
+
+        let results = search_combined(dir.path(), "needle", 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "name search must not match on file contents, got {results:?}"
+        );
+    }
 }

@@ -18,6 +18,11 @@ const result = spawnSync(
     "--json",
     "--start",
     rootDir,
+    // Gate on the production (redistributed) dependency closure only. Dev-only
+    // build tooling (bundlers, linters, the license checker itself, browser-data
+    // packages) is never shipped, so its licenses carry no redistribution
+    // obligation; scanning it only produces attribution-license noise.
+    "--production",
     "--relativeLicensePath",
     "--unknown",
     "--excludePrivatePackages",

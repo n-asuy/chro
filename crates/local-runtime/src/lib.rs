@@ -324,7 +324,7 @@ impl Runtime for LocalRuntime {
 
         match self
             .file_search_cache
-            .search(repo_path, needle, SearchMode::TaskForm)
+            .search(repo_path, needle, SearchMode::TaskForm, limit)
             .await
         {
             Ok(hits) => Ok(hits

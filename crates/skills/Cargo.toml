@@ -1,0 +1,13 @@
+[package]
+name = "skills"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+dirs = "5"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3"

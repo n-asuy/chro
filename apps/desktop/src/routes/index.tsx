@@ -23,7 +23,7 @@ type Phase = "resolving" | "empty";
  *     the in-app folder browser (which flags git repos)
  *
  * The git/agent setup screen is no longer a route — it floats above everything
- * as `<SetupModal />` (see `routes/__root.tsx`).
+ * as `<OnboardingFlow />` (see `routes/__root.tsx`).
  */
 function HomePage() {
   const navigate = useNavigate();

@@ -14,7 +14,6 @@ pub(crate) mod frontend;
 pub(crate) mod rpc;
 pub(crate) mod streams;
 pub(crate) mod streams_browser;
-pub(crate) mod streams_terminal;
 
 pub(crate) fn rpc_router() -> Router<AppState> {
     rpc::router()
@@ -29,9 +28,7 @@ pub(crate) fn health_router() -> Router<AppState> {
 }
 
 pub(crate) fn streams_router() -> Router<AppState> {
-    streams::router()
-        .merge(streams_terminal::router())
-        .merge(streams_browser::router())
+    streams::router().merge(streams_browser::router())
 }
 
 async fn health() -> Json<serde_json::Value> {

@@ -1,14 +1,14 @@
-import { Dialog, Transition } from "@headlessui/react";
+import { useLanguage } from "@/i18n";
+import { SettingsPanel } from "@/settings/settings-panel";
+import { Dialog, DialogContent, DialogTitle } from "@chro/ui/dialog";
 import {
-  Fragment,
+  type ReactNode,
   createContext,
   useCallback,
   useContext,
   useMemo,
   useState,
-  type ReactNode,
 } from "react";
-import { SettingsPanel } from "@/settings/settings-panel";
 
 type SettingsModalContextValue = {
   isOpen: boolean;
@@ -48,7 +48,7 @@ export function SettingsModalProvider({
     <SettingsModalContext.Provider value={value}>
       {children}
       {hasInitialized ? (
-        <SettingsModal isOpen={isOpen} onClose={close} />
+        <SettingsModal isOpen={isOpen} onOpenChange={setIsOpen} />
       ) : null}
     </SettingsModalContext.Provider>
   );
@@ -56,52 +56,24 @@ export function SettingsModalProvider({
 
 type SettingsModalProps = {
   isOpen: boolean;
-  onClose: () => void;
+  onOpenChange: (open: boolean) => void;
 };
 
-function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+/**
+ * Settings modal chrome, sharing the app's single Radix dialog shell (light
+ * blurred overlay, soft shadow, built-in close) with every other modal. The
+ * panel fills a large, fixed-height content box; its own heading structure
+ * stands in for the visually-hidden dialog title kept here for accessibility.
+ */
+function SettingsModal({ isOpen, onOpenChange }: SettingsModalProps) {
+  const { t } = useLanguage();
   return (
-    <Transition.Root show={isOpen} as={Fragment} appear>
-      <Dialog as="div" className="relative z-[90]" onClose={onClose}>
-        <Transition.Child
-          as={Fragment}
-          enter="duration-75"
-          enterFrom="opacity-0"
-          enterTo="opacity-100"
-          leave="duration-75"
-          leaveFrom="opacity-100"
-          leaveTo="opacity-0"
-        >
-          <div
-            aria-hidden="true"
-            className="fixed inset-0 bg-custom-backdrop/70"
-            onClick={onClose}
-          />
-        </Transition.Child>
-
-        <div className="fixed inset-0 overflow-y-auto">
-          <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-6">
-            <Transition.Child
-              as={Fragment}
-              enter="duration-75"
-              enterFrom="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-              enterTo="opacity-100 translate-y-0 sm:scale-100"
-              leave="duration-75"
-              leaveFrom="opacity-100 translate-y-0 sm:scale-100"
-              leaveTo="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-            >
-              <Dialog.Panel className="relative flex h-[90vh] w-full transform flex-col overflow-hidden rounded-md border border-custom-border-200 bg-custom-background-100/90 text-left shadow-custom-shadow-lg transition-all sm:max-w-[1280px]">
-                <SettingsPanel
-                  variant="modal"
-                  onCloseRequest={onClose}
-                  className="h-full"
-                />
-              </Dialog.Panel>
-            </Transition.Child>
-          </div>
-        </div>
-      </Dialog>
-    </Transition.Root>
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[90vh] w-[calc(100vw-2rem)] max-w-[1280px] flex-col gap-0 overflow-hidden rounded-md bg-custom-background-100 p-0">
+        <DialogTitle className="sr-only">{t("settingsTitle")}</DialogTitle>
+        <SettingsPanel variant="modal" className="h-full" />
+      </DialogContent>
+    </Dialog>
   );
 }
 

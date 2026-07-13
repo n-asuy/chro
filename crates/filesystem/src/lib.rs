@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -281,28 +280,6 @@ impl FilesystemService {
 
         Ok(())
     }
-
-    /// Return the text preview for `path` limited to `max_bytes`.
-    pub fn read_preview(
-        &self,
-        path: impl AsRef<Path>,
-        max_bytes: usize,
-    ) -> Result<String, FilesystemError> {
-        let data = fs::read(path)?;
-        let preview = String::from_utf8_lossy(&data);
-        Ok(truncate_preview(&preview, max_bytes).into_owned())
-    }
-}
-
-fn truncate_preview<'a>(text: &'a Cow<'a, str>, max_bytes: usize) -> Cow<'a, str> {
-    if text.len() <= max_bytes {
-        return text.clone();
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    Cow::Owned(format!("{}…", &text[..end]))
 }
 
 fn contains_match(path: &Path, needle_lower: &str) -> Result<Option<String>, io::Error> {
@@ -349,12 +326,5 @@ mod tests {
         let matches = fs_service.search_files(dir.path(), "Chro", 5).unwrap();
         assert_eq!(matches.len(), 1);
         assert!(matches[0].snippet.as_ref().unwrap().contains("Chro"));
-    }
-
-    #[test]
-    fn preview_truncates() {
-        let data = Cow::from("abcdef");
-        let preview = truncate_preview(&data, 3);
-        assert_eq!(preview, "abc…");
     }
 }

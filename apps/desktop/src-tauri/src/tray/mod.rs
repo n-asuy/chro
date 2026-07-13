@@ -12,7 +12,6 @@ use tauri::{AppHandle, Manager, Runtime as TauriRuntime};
 use tracing::warn;
 
 use crate::error::DesktopResult;
-use crate::windows::WindowMode;
 
 pub use state::{TrayState, TrayStatus};
 
@@ -190,6 +189,3 @@ async fn focus_window_by_label<R: TauriRuntime>(app: &AppHandle<R>, label: &str)
     }
     refresh_menu(app).await;
 }
-
-// Helper used externally to update the tracked WindowMode.
-pub fn _force_window_mode_unused(_: WindowMode) {}

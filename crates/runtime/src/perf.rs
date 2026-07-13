@@ -75,10 +75,7 @@ pub fn record_event(name: &str, fields: serde_json::Value) {
 /// limit) from "the operation itself is slow" (high `work_ms`, e.g. git lock
 /// contention on a large worktree). The timing is unconditional and ~free; the
 /// event is only written when perf recording is enabled.
-pub async fn spawn_blocking_instrumented<F, T>(
-    label: &'static str,
-    f: F,
-) -> Result<T, JoinError>
+pub async fn spawn_blocking_instrumented<F, T>(label: &'static str, f: F) -> Result<T, JoinError>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,

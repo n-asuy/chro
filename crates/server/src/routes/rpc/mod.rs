@@ -15,6 +15,7 @@
 
 mod approvals;
 mod cbase;
+pub(crate) mod cli_status;
 mod config;
 mod context_refs;
 mod developer;
@@ -48,6 +49,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(config::router())
         .merge(events::router())
         .merge(developer::router())
+        .merge(cli_status::router())
         .merge(flags::router())
         .merge(images::router())
         .merge(merges::router())

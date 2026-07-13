@@ -7,36 +7,22 @@ const ja = {
   settingsTabsWorkspace: "ワークスペース",
   settingsTabsMcp: "MCP",
   settingsTabsAgents: "Agents",
+  agentsSettingsDescription: "タスクを実行・拡張するエージェントを選択します。",
   agentsDefaultExecutorTitle: "デフォルトエージェント",
   agentsDefaultExecutorDescription:
     "タスクを実行するデフォルトのコーディングエージェントを選択します。",
-  agentsClaudeCodeTitle: "Claude Code",
-  agentsClaudeCodeDescription: "Claude Code エージェントの設定を管理します。",
-  agentsCodexTitle: "Codex",
-  agentsCodexDescription: "Codex エージェントの設定を管理します。",
-  agentsPiTitle: "pi",
-  agentsPiDescription: "pi エージェントの設定を管理します。",
-  claudeModelLoadError: "エージェント設定を読み込めませんでした。",
-  claudeModelSaveError: "モデルの更新に失敗しました。",
-  claudeModelUnknown: "不明",
-  claudeExecutionModeCardTitle: "ヘッドレスモード (claude -p)",
-  claudeExecutionModeCardDescription:
-    "対話的な PTY ではなく `claude -p` で Claude を実行します。バッチや大量並列で安定しますが、承認と対話的な質問は無効になります。デフォルトはオフ（PTY）。",
-  claudeExecutionModeToggleLabel: "ヘッドレス claude -p モードの切り替え",
-  claudeVersionCardTitle: "Claude CLI",
-  claudeVersionCardDescription:
-    "インストールされている Claude CLI のバージョンと実行パスを確認します。",
-  claudeVersionLabel: "検出したバージョン",
-  claudeVersionNotDetected: "検出できませんでした",
-  claudeVersionCommandLabel: "実行コマンド",
-  claudeVersionPathLabel: "解決されたパス",
-  claudeVersionPathUnknown: "不明",
-  claudeVersionCheckedAt: "取得時刻: {timestamp}",
-  claudeVersionErrorTitle: "バージョン情報を取得できませんでした",
-  claudeVersionUnavailable:
-    "Claude CLI のバージョン情報 API にアクセスできませんでした。",
-  claudeVersionFetchError: "バージョン情報の取得に失敗しました。",
-  claudeVersionLoading: "バージョン情報を取得しています...",
+  agentsCliStatusTitle: "エージェント CLI",
+  agentsCliStatusRefresh: "再読み込み",
+  agentsCliStatusLoading: "エージェント CLI を検出中...",
+  agentsCliStatusLoadError: "エージェント CLI の状態を取得できませんでした。",
+  agentsCliVersionUnavailable: "バージョン不明",
+  agentsCliNotFound: "未検出",
+  agentsCliPathLabel: "パス",
+  agentsCliSourceLabel: "検出元",
+  agentsPiCredentialsTitle: "pi 認証情報",
+  agentProfileLoadError: "エージェント設定を読み込めませんでした。",
+  agentProfileSaveError: "エージェント設定の更新に失敗しました。",
+  agentProfileUnknown: "不明",
   languageFieldLabel: "言語",
   languageFieldHelp:
     "UI を英語または日本語に切り替えます。変更は即時に反映されます。",
@@ -125,6 +111,9 @@ const ja = {
   sessionUnresolved: "未確定セッション",
   sessionFailedUnread: "失敗（未読）",
   sessionCompletedUnread: "完了（未読）",
+  sessionWorktreeCleaned: "続行不可（作業ディレクトリは削除済み）",
+  sessionWorktreeCleanedNotice:
+    "このセッションの作業ディレクトリは削除されました。",
   sessionAwaitingInput: "回答待ち",
   sessionPreviewLoading: "返信を読み込み中…",
   sessionPreviewEmpty: "まだ返信はありません",
@@ -317,6 +306,10 @@ const ja = {
   updateDownloadError: "アップデートのダウンロードに失敗しました。",
   updateInstallError: "アップデートのインストールに失敗しました。",
   updateUnknownVersion: "最新バージョン",
+  releaseNotesTitle: "リリースノート",
+  releaseNotesCurrentBadge: "使用中",
+  releaseNotesEmpty: "リリースノートはまだありません。",
+  releaseCheckAction: "アップデートを確認",
   errorPrefix: "エラー: {message}",
   workspaceRequiredToSend:
     "コマンドを送信するにはワークスペースを選択してください。",
@@ -347,18 +340,6 @@ const ja = {
   appearanceAccentDescription:
     "アクセント色を選びます。UI全体がここから導出され、ライト/ダークどちらでも読みやすさを保ちます。",
   appearanceAccentReset: "リセット",
-  settingsTabsTerminal: "ターミナル",
-  terminalSettingsTitle: "ターミナル",
-  terminalSettingsDescription:
-    "統合ターミナルのフォント表示をカスタマイズします。",
-  terminalFontFamilyTitle: "フォントファミリー",
-  terminalFontFamilyDescription:
-    "ターミナルのフォントスタック。空欄でデフォルトの等幅フォントを使用します。",
-  terminalFontFamilyPlaceholder: "デフォルト等幅フォント",
-  terminalFontSizeTitle: "フォントサイズ",
-  terminalFontSizeDescription: "ターミナルの文字サイズ（ピクセル）。",
-  terminalLineHeightTitle: "行の高さ",
-  terminalLineHeightDescription: "ターミナル行の高さ（倍率）。",
   settingsTabsNotifications: "通知",
   notificationsSettingsTitle: "通知",
   notificationsSettingsDescription:
@@ -409,9 +390,14 @@ const ja = {
   closeSidebar: "サイドバーを閉じる",
   openSidebar: "サイドバーを開く",
   projects: "プロジェクト",
+  pinnedSection: "ピン留め",
+  chatsSection: "チャット",
+  noProjectsYet: "プロジェクトはまだありません",
+  pinSession: "ピン留め",
+  unpinSession: "ピン留めを解除",
+  archive: "アーカイブ",
   noChats: "チャットなし",
   newChat: "新規チャット",
-  chooseProject: "プロジェクトを選択",
   scratchChat: "スクラッチ",
   inbox: "インボックス",
   inboxEmpty: "セッションはまだありません",
@@ -434,11 +420,6 @@ const ja = {
   sortProjectsAsc: "名前 (A→Z)",
   sortProjectsDesc: "名前 (Z→A)",
   sortProjectsRecent: "最近の更新順",
-  groupBy: "グループ化",
-  groupByNone: "なし",
-  groupByProject: "プロジェクト",
-  groupByStatus: "ステータス",
-  groupByDate: "日付",
   unknownProject: "不明なプロジェクト",
   stateNeedsInput: "入力待ち",
   stateRunning: "実行中",
@@ -466,6 +447,7 @@ const ja = {
   sessionNoChanges: "変更はまだありません",
   worktreeChangedFiles: "変更のみ",
   worktreeAllFiles: "すべて",
+  worktreeGalleryTab: "ギャラリー",
   worktreeFileViewLabel: "ファイルツリー表示",
   copyFullPath: "フルパスをコピー",
   copyRelativePath: "相対パスをコピー",
@@ -482,56 +464,6 @@ const ja = {
   globalSearchSessions: "セッション",
   globalSearchFiles: "ファイル",
   globalSearchSelectProject: "プロジェクトを選択してください",
-  authSignedIn: "認証済み",
-  authInstall: "インストール",
-  authInstalling: "インストール中…",
-  authSignIn: "サインイン",
-  authSigningIn: "サインイン中...",
-  authReAuthenticate: "再認証",
-  authInstallDialogTitle: "{executor} をインストール",
-  authInstallDialogDescription:
-    "Chro は外部の {executor} CLI を使用し、自動でインストールや更新は行いません。",
-  authInstallDialogBody:
-    "公式インストールガイドをブラウザで開きます。CLI のインストール後、この画面に戻ってサインインしてください。",
-  authInstallDialogSafety:
-    "パッケージマネージャーのコマンド実行や PATH の変更は自動では行いません。",
-  authInstallDialogInstallingTitle: "{executor} をインストール中",
-  authInstallDialogInstallingDescription:
-    "Chro が {executor} の公式インストール手順を実行しています。完了まで少し時間がかかることがあります。",
-  authInstallDialogInstallingBody:
-    "インストールをバックグラウンドで実行しています。完了するまでこのウィンドウを閉じないでください。",
-  authInstallDialogSuccessTitle: "{executor} をインストールしました",
-  authInstallDialogSuccessDescription:
-    "CLI のインストールが正常に完了しました。",
-  authInstallDialogSuccessBody:
-    "Chro がインストールを検出し、この CLI を使える状態になりました。",
-  authInstallDialogSuccessNextStep:
-    "このダイアログを閉じて、続けてサインインしてください。",
-  authInstallDialogFailureTitle: "{executor} をインストールできませんでした",
-  authInstallDialogFailureDescription:
-    "自動インストールに失敗しました。下のエラーを確認するか、公式ガイドに進んでください。",
-  authInstallDialogFailureBody:
-    "自動インストールはベストエフォートです。追加セットアップが必要な環境では、公式ガイドを使ってください。",
-  authInstallDialogGuideLabel: "公式ガイド",
-  authInstallDialogMethodLabel: "インストール方法",
-  authInstallDialogCommandLabel: "想定コマンド",
-  authInstallDialogOpenGuide: "ガイドを開く",
-  authInstallDialogOpenGuideSecondary: "代わりにガイドを開く",
-  authInstallDialogCancel: "キャンセル",
-  authInstallDialogDone: "閉じる",
-  authInstallDialogErrorLabel: "インストーラー出力",
-  authClaudeInstallDescription:
-    "Claude CLI をインストールしてから、ここに戻ってサインインしてください。",
-  authCodexInstallDescription:
-    "Codex CLI をインストールしてから、ここに戻ってサインインしてください。",
-  authPiInstallDescription:
-    "pi CLI をインストールしてから、ここに戻ってサインインしてください。",
-  authClaudeDescription:
-    "Claude Code を使用するには Anthropic にサインインしてください。",
-  authCodexDescription:
-    "Codex を使用するには OpenAI にサインインしてください。",
-  authPiDescription:
-    "pi を使用するには pi の /login でサインインしてください。",
   agentsPiApiKeysTitle: "API キー",
   agentsPiApiKeysDescription:
     "pi のプロバイダ API キーを登録します。pi の auth ファイルに保存され、シェル設定なしで動作します。",
@@ -549,19 +481,6 @@ const ja = {
   piApiKeyKindApiKey: "API キー",
   piApiKeyKindOauth: "OAuth",
   piApiKeySaveError: "API キーの保存に失敗しました。",
-  authDetectedVersion: "検出したバージョン: {version}",
-  authNotSignedIn: "未認証",
-  authLoginDialogTitle: "{executor} にサインイン",
-  authLoginDialogDescription:
-    "下のターミナルの指示に従ってください。表示された URL を開き、コードを入力するとサインインが完了します。ブラウザのリダイレクトを使わないため、リモートサーバー上でも動作します。",
-  authLoginDialogConnecting: "ログインセッションを開始しています…",
-  authLoginDialogSuccess:
-    "サインインが完了しました。このウィンドウを閉じてください。",
-  authLoginDialogFailed:
-    "ログインセッションが終了しました (コード {code})。再試行してください。",
-  authLoginDialogError: "ログインセッションを開始できませんでした: {message}",
-  authLoginDialogClose: "閉じる",
-  authLoginDialogRetry: "再試行",
   copyMessage: "コピー",
   copied: "コピーしました",
   errorBoundaryTitle: "問題が発生しました",
@@ -573,6 +492,21 @@ const ja = {
   errorBoundaryDetails: "詳細",
   errorBoundaryRecurring:
     "繰り返し発生する場合は、再読み込みするか最初の画面に戻ってください。",
+  feedback: "フィードバック",
+  feedbackMenuGiveTitle: "フィードバックを送る",
+  feedbackMenuGiveDescription: "感想や気づきを共有する",
+  feedbackMenuBugTitle: "バグを報告する",
+  feedbackMenuBugDescription: "見つけた不具合で改善に協力する",
+  feedbackMenuFeatureTitle: "機能をリクエストする",
+  feedbackMenuFeatureDescription: "ほしい機能を教えてください",
+  feedbackComposePlaceholder: "ご意見をお聞かせください…",
+  feedbackComposeBack: "戻る",
+  feedbackComposeClose: "閉じる",
+  feedbackSend: "送信",
+  feedbackSending: "送信中…",
+  feedbackSuccess: "フィードバックありがとうございます！",
+  feedbackError: "送信できませんでした。もう一度お試しください。",
+  feedbackFollowX: "X でフォロー",
 } as const;
 
 type TranslationKeys = keyof typeof ja;

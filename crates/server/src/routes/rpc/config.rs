@@ -2,24 +2,21 @@
 
 use axum::{
     extract::{Query, State},
-    routing::{get, post, put},
+    routing::{get, put},
     Json, Router,
 };
 use config::{
     AppTheme, AppearanceConfig, EditorConfig, LanguagePreference, NotificationConfig,
-    TerminalConfig, DEFAULT_MERGE_COMMIT_TEMPLATE,
+    DEFAULT_MERGE_COMMIT_TEMPLATE,
 };
 use executors::{
-    check_mcp_status, delete_pi_credential, detect_claude_version, get_auth_status_all,
-    get_install_status_all, install_tool, list_pi_credentials, list_pi_models, load_mcp_config,
-    save_mcp_config, set_pi_api_key, AuthStatusResult, BaseCodingAgent, ClaudeExecutionMode,
-    ClaudeVersionResult, ExecutorConfigs, ExecutorInstallStatusResult, ExecutorProfileId,
-    InstallableTool, LoadedMcpConfig, McpConfigPayload, McpStatusResult, PiCredentialInfo,
-    PiModelOption, SavedMcpConfig, ToolInstallResult,
+    check_mcp_status, delete_pi_credential, get_install_status_all, list_pi_credentials,
+    list_pi_models, load_mcp_config, save_mcp_config, set_pi_api_key, BaseCodingAgent,
+    ExecutorConfigs, ExecutorInstallStatusResult, ExecutorProfileId, LoadedMcpConfig,
+    McpConfigPayload, McpStatusResult, PiCredentialInfo, PiModelOption, SavedMcpConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::task::spawn_blocking;
 
 use crate::{ApiError, AppState};
 
@@ -35,10 +32,6 @@ pub(super) fn router() -> Router<AppState> {
             get(get_appearance_config).put(update_appearance_config),
         )
         .route(
-            "/preferences/terminal",
-            get(get_terminal_config).put(update_terminal_config),
-        )
-        .route(
             "/preferences/notifications",
             get(get_notification_config).put(update_notification_config),
         )
@@ -51,11 +44,8 @@ pub(super) fn router() -> Router<AppState> {
             "/mcp-config",
             get(get_mcp_config_handler).put(update_mcp_config_handler),
         )
-        .route("/executor/detect", get(detect_executor_handler))
         .route("/executor/install-status", get(get_install_status_handler))
-        .route("/executor/install", post(install_executor_handler))
         .route("/executor/mcp-status", get(check_mcp_status_handler))
-        .route("/executor/auth-status", get(get_auth_status_handler))
         .route("/executor/pi/models", get(get_pi_models_handler))
         .route("/executor/pi/credentials", get(get_pi_credentials_handler))
         .route(
@@ -264,60 +254,6 @@ async fn update_appearance_config(
 }
 
 #[derive(Debug, Serialize)]
-struct TerminalConfigEnvelope {
-    terminal: TerminalConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateTerminalConfigRequest {
-    #[serde(default)]
-    font_family: Option<Option<String>>,
-    #[serde(default)]
-    font_size: Option<u8>,
-    #[serde(default)]
-    line_height: Option<f32>,
-}
-
-async fn get_terminal_config(
-    State(state): State<AppState>,
-) -> Result<Json<TerminalConfigEnvelope>, ApiError> {
-    let config = state.runtime().current_config().await;
-    Ok(Json(TerminalConfigEnvelope {
-        terminal: config.terminal,
-    }))
-}
-
-async fn update_terminal_config(
-    State(state): State<AppState>,
-    Json(payload): Json<UpdateTerminalConfigRequest>,
-) -> Result<Json<TerminalConfigEnvelope>, ApiError> {
-    let updated = state
-        .runtime()
-        .update_config(|config| {
-            if let Some(v) = payload.font_family {
-                config.terminal.font_family = v.and_then(|name| {
-                    let trimmed = name.trim().to_string();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                });
-            }
-            if let Some(v) = payload.font_size {
-                config.terminal.font_size = v.clamp(8, 32);
-            }
-            if let Some(v) = payload.line_height {
-                config.terminal.line_height = v.clamp(1.0, 3.0);
-            }
-        })
-        .await?;
-    Ok(Json(TerminalConfigEnvelope {
-        terminal: updated.terminal,
-    }))
-}
-
-#[derive(Debug, Serialize)]
 struct NotificationConfigEnvelope {
     notifications: NotificationConfig,
 }
@@ -415,15 +351,12 @@ async fn update_merge_settings(
 struct ExecutorProfileEnvelope {
     profile: ExecutorProfileId,
     profiles: ExecutorConfigs,
-    /// Global Claude execution mode (PTY vs headless `claude -p`). App-wide,
-    /// not part of the per-run profile.
-    claude_execution_mode: ClaudeExecutionMode,
 }
 
 /// Deserialize an optional field that distinguishes "key absent" (leave the
 /// value unchanged) from "key present and null" (clear it). Without this,
-/// serde maps both to `None` and an execution-mode-only update would silently
-/// reset the executor variant.
+/// serde maps both to `None` and an executor-only update would silently reset
+/// the variant.
 fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -437,13 +370,10 @@ struct UpdateExecutorProfileRequest {
     /// The executor to use (e.g., "CLAUDE_CODE", "CODEX")
     #[serde(default)]
     executor: Option<BaseCodingAgent>,
-    /// The variant to use (e.g., "DEFAULT", "PLAN", "APPROVALS"). Absent leaves
+    /// The variant to use (e.g., "DEFAULT"). Absent leaves
     /// the variant untouched; explicit `null` resets it to the default variant.
     #[serde(default, deserialize_with = "double_option")]
     variant: Option<Option<String>>,
-    /// Global Claude execution mode. Absent leaves it unchanged.
-    #[serde(default)]
-    claude_execution_mode: Option<ClaudeExecutionMode>,
 }
 
 async fn get_executor_profile(
@@ -453,7 +383,6 @@ async fn get_executor_profile(
     Ok(Json(ExecutorProfileEnvelope {
         profile: config.executor_profile,
         profiles: ExecutorConfigs::get_cached(),
-        claude_execution_mode: config.claude_code_execution_mode,
     }))
 }
 
@@ -461,11 +390,7 @@ async fn update_executor_profile(
     State(state): State<AppState>,
     Json(payload): Json<UpdateExecutorProfileRequest>,
 ) -> Result<Json<ExecutorProfileEnvelope>, ApiError> {
-    let UpdateExecutorProfileRequest {
-        executor,
-        variant,
-        claude_execution_mode,
-    } = payload;
+    let UpdateExecutorProfileRequest { executor, variant } = payload;
 
     let updated = state
         .runtime()
@@ -476,16 +401,12 @@ async fn update_executor_profile(
             if let Some(new_variant) = variant {
                 config.executor_profile.variant = new_variant;
             }
-            if let Some(mode) = claude_execution_mode {
-                config.claude_code_execution_mode = mode;
-            }
         })
         .await?;
 
     Ok(Json(ExecutorProfileEnvelope {
         profile: updated.executor_profile,
         profiles: ExecutorConfigs::get_cached(),
-        claude_execution_mode: updated.claude_code_execution_mode,
     }))
 }
 
@@ -563,10 +484,6 @@ async fn update_mcp_config_handler(
     }))
 }
 
-async fn detect_executor_handler() -> Json<ClaudeVersionResult> {
-    Json(detect_claude_version().await)
-}
-
 #[derive(Debug, Deserialize)]
 struct CheckMcpStatusQuery {
     executor: Option<BaseCodingAgent>,
@@ -577,17 +494,6 @@ async fn check_mcp_status_handler(
 ) -> Json<McpStatusResult> {
     let executor = query.executor.unwrap_or(BaseCodingAgent::ClaudeCode);
     Json(check_mcp_status(executor).await)
-}
-
-async fn get_auth_status_handler() -> Json<AuthStatusResult> {
-    let result = spawn_blocking(get_auth_status_all)
-        .await
-        .unwrap_or_else(|_| AuthStatusResult {
-            claude_code: executors::AvailabilityInfo::NotFound,
-            codex: executors::AvailabilityInfo::NotFound,
-            pi: executors::AvailabilityInfo::NotFound,
-        });
-    Json(result)
 }
 
 /// Configured pi models for the runtime picker. Empty when pi is unconfigured or
@@ -653,17 +559,6 @@ async fn delete_pi_credential_handler(
 
 async fn get_install_status_handler() -> Json<ExecutorInstallStatusResult> {
     Json(get_install_status_all().await)
-}
-
-#[derive(Debug, Deserialize)]
-struct InstallToolRequest {
-    tool: InstallableTool,
-}
-
-async fn install_executor_handler(
-    Json(payload): Json<InstallToolRequest>,
-) -> Json<ToolInstallResult> {
-    Json(install_tool(payload.tool).await)
 }
 
 // -- UI State (replaces localStorage) --

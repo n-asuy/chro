@@ -25,7 +25,6 @@ use crate::{
     command::CommandBuildError,
     env::ExecutionEnv,
     executors::{claude::ClaudeCode, codex::Codex, pi::Pi},
-    mcp_config::McpConfig,
     process::ExecutionProcess,
     profile::ExecutorConfig,
 };
@@ -111,25 +110,6 @@ impl Default for CodingAgent {
 }
 
 impl CodingAgent {
-    pub fn get_mcp_config(&self) -> McpConfig {
-        match self {
-            Self::Codex(_) => McpConfig::new(
-                vec!["mcp_servers".to_string()],
-                serde_json::json!({
-                    "mcp_servers": {}
-                }),
-                true,
-            ),
-            _ => McpConfig::new(
-                vec!["mcpServers".to_string()],
-                serde_json::json!({
-                    "mcpServers": {}
-                }),
-                false,
-            ),
-        }
-    }
-
     pub fn supports_mcp(&self) -> bool {
         self.default_mcp_config_path().is_some()
     }
@@ -188,7 +168,7 @@ pub struct SpawnedChild {
 impl From<AsyncGroupChild> for SpawnedChild {
     fn from(child: AsyncGroupChild) -> Self {
         Self {
-            child: ExecutionProcess::Group(child),
+            child: child.into(),
             exit_signal: None,
             cancel: None,
         }

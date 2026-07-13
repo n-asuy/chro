@@ -48,21 +48,25 @@ const CLAUDE_MODELS: ModelOption[] = [
 
 const CODEX_MODELS: ModelOption[] = [
   {
+    value: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    description:
+      "Frontier model tuned for detail and polish on complex coding and research.",
+  },
+  {
+    value: "gpt-5.6-terra",
+    label: "GPT-5.6 Terra",
+    description: "Everyday workhorse for general coding.",
+  },
+  {
+    value: "gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    description: "Fast, efficient model for clear, repeatable work.",
+  },
+  {
     value: "gpt-5.5",
     label: "GPT-5.5",
-    description:
-      "Frontier model for complex coding, research, and real-world work.",
-  },
-  {
-    value: "gpt-5.4",
-    label: "GPT-5.4",
-    description: "Strong model for everyday coding.",
-  },
-  {
-    value: "gpt-5.4-mini",
-    label: "GPT-5.4-Mini",
-    description:
-      "Small, fast, and cost-efficient model for simpler coding tasks.",
+    description: "Previous-generation frontier model for complex coding.",
   },
   {
     value: "gpt-5.3-codex-spark",

@@ -83,10 +83,6 @@ impl ImageService {
         &self.pool
     }
 
-    pub fn set_max_size_bytes(&mut self, bytes: u64) {
-        self.max_size_bytes = bytes.max(1);
-    }
-
     pub async fn store_image(
         &self,
         data: &[u8],
@@ -148,11 +144,6 @@ impl ImageService {
         image_ids: &[Uuid],
     ) -> Result<(), ImageError> {
         TaskImageLink::associate_many_dedup(&self.pool, task_id, image_ids).await?;
-        Ok(())
-    }
-
-    pub async fn unlink_task_images(&self, task_id: Uuid) -> Result<(), ImageError> {
-        TaskImageLink::delete_by_task_id(&self.pool, task_id).await?;
         Ok(())
     }
 

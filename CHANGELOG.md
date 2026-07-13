@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.1.45
+
+- Rotated the key that signs automatic updates, which every installation from 0.1.44 and earlier will refuse: the matching public key is compiled into each build, so those versions cannot verify this update or any later one and have to be reinstalled once by hand from the releases page. Installs from 0.1.45 onward carry the new key and update automatically as before. The previous key's password had been lost, which left no way to sign an update at all, so replacing it was the only way to keep automatic updates working
+- Changed releases to verify before they publish rather than after: a tagged release now runs the export sanitization and third-party provenance checks first and only builds, signs, and publishes if they pass, so a failing check stops the release instead of surfacing once the installers and packages are already out
+- Fixed the released source tree missing the `skills` crate and the skills panel, which made it impossible to build from a clean checkout: the rule that keeps the top-level `skills/` directory out of the published tree was not anchored to the repository root, so it also stripped `crates/skills` (a dependency of the server) and `apps/desktop/src/skills`
+
+## 0.1.44
+
+- Fixed the Windows app failing to reach its own server on every request and websocket, surfacing as an opaque "Failed to fetch" on actions such as picking a project folder: the packaged Windows webview serves the app from `http://tauri.localhost` instead of the `tauri://` custom scheme used on macOS and Linux, and that origin was missing from the server's allowlist
+- Added file changes to the Codex conversation: patches Codex applies now stream in as a per-file edit card with a unified diff for edits, the full content for new files, and delete/rename markers, instead of being applied invisibly while only the surrounding messages showed
+- Fixed Codex tool calls rendering as several stacked cards: a streaming command no longer leaves an ever-growing copy of its card behind for every chunk of output, MCP calls and web searches no longer show one card for the start and another for the result, and a call that Codex reports on both of its event streams now collapses into a single card
+- Fixed a Codex approval prompt piling up into three separate entries (the pending prompt, the tool call itself, and a "user feedback" message when denied); the prompt now becomes the tool card and turns into a denied or timed-out result in place
+- Fixed two Codex messages streaming at the same time being merged into one bubble, by tracking assistant replies and reasoning per message so interleaved output stays separate
+- Fixed reopening a Codex session after a restart losing its entire tool history (commands and their output, MCP calls, web searches), so a restored conversation now matches what was shown live
+- Fixed Codex follow-ups failing outright when a newer Codex CLI reported a thread item this version does not know about
+- Moved execution logs fully out of the SQLite database into per-run JSONL files: any logs still held in the old table are exported once at first launch (atomically, never overwriting newer files, and rolled back for a retry if anything fails) before the table is dropped, keeping session resume working on pre-upgrade runs and shrinking the database file for anyone with a long log history
+- Fixed replacing a session's context references and reordering the task list applying only partially when a write failed midway, by running each as a single transaction
+- Added a marker for sessions whose worktree has been reclaimed by housekeeping: the sidebar shows a struck-through bullet with a tooltip, the session itself explains that its workspace is gone, and the composer is disabled rather than letting a follow-up fail in the backend
+
+## 0.1.43
+
+- Fixed the model picker becoming unavailable after a Codex or Pi session started, so completed turns can select a different model for the next follow-up while keeping the session's runtime fixed
+- Updated the Codex model picker to the GPT-5.6 family: GPT-5.6 Sol (frontier model tuned for detail and polish on complex coding and research), GPT-5.6 Terra (everyday workhorse for general coding), and GPT-5.6 Luna (fast, efficient model for repeatable work), with GPT-5.5 kept as the previous-generation frontier option and the older GPT-5.4 and GPT-5.4-Mini entries removed
+- Added `-v` / `--version` to the `chro` CLI so it prints the version and exits immediately instead of starting the server, wired the same flag into the bundled server binary, and fixed the launcher error to name Chro when a start fails
+- Simplified the CLI status menu's source labels to the plain locator (for example `$CLAUDE_BIN`, `~/.local/bin/claude`, or `pi`) instead of wrapping it in `env override (…)` or `PATH (…)` text
+
+## 0.1.42
+
+- Moved the session Media Gallery into the Files panel's worktree view switcher, so a session worktree now toggles directly between Changed, All files, and Gallery while the Environment popover stays focused on execution, branch, rebase, and merge controls
+- Added Windows release signing through SSL.com eSigner: tagged desktop releases now refuse to publish unsigned Windows installers, sign the NSIS installer when signing secrets are present, and include a manual "Verify Code Signing" workflow to catch credential problems before a full release build
+- Added a Windows PE import-table check to the desktop packager that verifies bundled sidecars do not import the VC++ redistributable CRT, preventing release builds that would fail on clean Windows machines with a missing `VCRUNTIME140.dll`
+- Synced desktop, server, CLI, Tauri, and Rust lockfile version metadata after the 0.1.41 release bump, so packaged builds and release artifacts report the same product version
+- Documented the inter-session messaging design from first principles, added a session-persistence storage-model note comparing JSONL event logs with Chro's SQLite index, and added a Reveal.js slide deck for the messaging design
+
+## 0.1.41
+
+- Reworked first-run setup into a single full-screen onboarding wizard (Welcome → Agent → Theme → Open project) with a step progress indicator and Continue/Back plus Cmd+Enter/Esc navigation, replacing the old standalone setup dialog and the separate "Open a workspace" empty state so setup and opening your first project are now one guided flow
+- Reworked the onboarding agent step to detect installed CLI agents (Claude Code, Codex, pi) and pick a default: a missing agent now shows its install command with a guide link and a Retry instead of a dead end, and the step re-detects automatically when you return to the window after installing in a terminal
+- Removed the silent background installs and sign-in from onboarding (no more hidden `npm install -g` that could fail without telling you); agents now prompt for sign-in on first run and re-authenticate only when their token actually expires, and the manual "Reauthenticate" button next to an already signed-in agent in Settings is gone
+- Added a theme step to onboarding to pick Light, Dark, or System with an immediate live preview, skippable at any time
+- Reworked the left panel into three fixed sections — Pinned, Projects, and Chats — replacing the group-by dropdown; Projects still expand per repository into their sessions, and each section keeps the recent/name sort
+- Added pinning for individual sessions and chats: right-click a row to Pin or Unpin, and pinned items lift to a Pinned section at the top (labeled with their originating project or "Chats"), ordered by urgency then most-recently pinned so awaiting-input and failed sessions still surface first
+- Gave non-development work a first-class Chats section that lists chats directly in the sidebar, replacing the previous nameless "General" bucket, and turned the project Home header into a searchable switcher that jumps to any open project or back to Chats
+- Reworked the file-search pane into a full-text search with a real query grammar: implicit AND between terms, explicit `OR`, `-` to exclude, `()` grouping, `"exact phrases"`, `/regex/`, field operators (`file:`, `path:`, `content:`, `tag:`, and `line:(…)` to require words on the same line), and `match-case:` control, defaulting to smart-case (case-sensitive only when you type an uppercase letter)
+- Changed search results so files matched by content expand into collapsible, highlighted line matches while name-only matches stay a single row, with a results sort menu (file name or path, A–Z or Z–A) and a match-case toggle in the box
+- Added a search helper that appears when you focus the empty search box: a clickable reference of the available operators, your last 10 recent searches (de-duplicated and remembered across restarts) to re-run or clear, and inline file-name/path autocomplete while typing a `path:` or `file:` operator
+- Added an in-app feedback button to the project tab bar that opens a popover to send general feedback, a bug report, or a feature request straight to the maintainers, with a success toast, a retry prompt on failure, and a "Follow on X" link
+- Replaced the top-bar update button with an always-visible version chip that opens a Release notes modal listing the app's changelog newest-first with your running version marked "Current"; the update prompt is now a separate button that appears only when an update is actually available (download and install, restart-to-install, or retry), and the modal also carries a "Check for updates" action
+- Added a CLI status menu to the title bar showing each coding-agent CLI and chro's own CLI — whether it was found on PATH, the resolved path and source, and the version it reports — plus the latest published chro release, with an amber warning dot and a click-to-copy `npm install -g` command when a newer release is available or a stale binary is shadowing the intended one on PATH
+- Added a list/tree toggle to the Source Control panel's changed-file lists, nesting files under their folders with single-child folder chains collapsed into one row, remembered across reloads
+- Fixed sessions getting stuck forever on a running spinner when a run's setup was interrupted (navigating away or the app crashing mid-provisioning): session creation now finishes on the server independent of the request, a failed setup step marks the run failed and releases the session, and any leftover half-created sessions are finalized at startup instead of lingering as zombies
+- Fixed pressing Stop during the brief window before a run appears silently doing nothing; it now cancels the run as soon as it exists
+- Fixed opening a different session while a new one was still being created yanking your view back to the just-created session
+
 ## 0.1.40
 
 - Added server-side materialization for referenced sessions: sessions attached from the composer or `--ref-session` now inject a bounded digest into the executor prompt at run start and follow-up time, including the referenced session title, branch, latest status, last user/assistant exchange, and a `chro task logs <task_id>` pointer for the full transcript

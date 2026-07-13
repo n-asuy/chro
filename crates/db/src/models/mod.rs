@@ -12,7 +12,7 @@ pub mod task_template;
 pub use agent_profile::AgentProfile;
 pub use asset_image::{AssetImage, CreateAssetImage, TaskImageLink};
 pub use project::ProjectRecord;
-pub use task::{TaskRecord, TaskRun, TaskRunLog};
+pub use task::{TaskRecord, TaskRun};
 pub use task_context_ref::{TaskContextRef, TaskContextRefInput};
 pub use task_draft::TaskDraft;
 pub use task_merge::TaskMerge;

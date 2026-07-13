@@ -30,10 +30,6 @@ function FilesPage() {
   useDocumentTitle(fileName);
 
   useEffect(() => {
-    window.desktop?.setWindowMode?.("session");
-  }, []);
-
-  useEffect(() => {
     if (search.path) {
       openTab({ type: "file", path: search.path }, { activate: true });
     }

@@ -19,13 +19,6 @@ impl RepoContext {
             repo_names,
         }
     }
-
-    pub fn repo_paths(&self) -> Vec<PathBuf> {
-        self.repo_names
-            .iter()
-            .map(|name| self.workspace_root.join(name))
-            .collect()
-    }
 }
 
 /// Environment variables and runtime context injected into executor processes.

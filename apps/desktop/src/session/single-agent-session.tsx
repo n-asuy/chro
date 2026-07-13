@@ -35,7 +35,6 @@ import { useSettingsModal } from "@/settings/components/settings-modal-provider"
 import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
 import { updateTaskTitle } from "@/tasks/task-api";
 import { ProjectOverview } from "@/workspace-layout/components/project-overview";
-import { ProjectSwitcherDropdown } from "@/workspace-layout/components/project-switcher-dropdown";
 import {
   useOptionalTab,
   useOptionalTabKind,
@@ -47,7 +46,6 @@ import {
   getSelectedOpenInOption,
   openWorkspaceWithOption,
 } from "@/workspace-layout/lib/open-in";
-import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import { Button, buttonVariants } from "@chro/ui/button";
 import {
   DropdownMenu,
@@ -71,6 +69,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleSlash,
   FolderOpen,
   Image as ImageIcon,
   MessageSquare,
@@ -115,6 +114,7 @@ import {
   isWorktreeExecutionPath,
   resolveUseWorktreeForRun,
 } from "./domain/execution-mode";
+import { resolveExecutorSettingLocks } from "./domain/executor-setting-locks";
 import { selectTargetTaskRun } from "./domain/task-run-selection";
 import {
   useArchivedSessions,
@@ -237,10 +237,6 @@ export function SingleAgentSessionView({
   const navigateToWikilink = useFilesStore((state) => state.navigateToWikilink);
   const openFilePath = useFilesStore((state) => state.openFilePath);
   const navigate = useNavigate();
-  // Whether the new-chat "Choose project" picker is open. Local UI state only,
-  // so it is immune to WebSocket-patch object churn.
-  const [chooseProjectOpen, setChooseProjectOpen] = useState(false);
-
   // Route params — may contain slugs or UUIDs (backward compat).
   // Resolver hooks unify "rendered at /session/:taskId" and "rendered as a
   // session tab inside the workspace layout"; outside a tab they fall back
@@ -265,14 +261,16 @@ export function SingleAgentSessionView({
   void tabKind;
   const isSessionMountedRef = useRef(true);
   const latestRouteProjectIdRef = useRef<string | null>(routeProjectId);
-  // Tracks in-flight send requests so a Stop pressed during the create window
-  // (before the run exists) can abort the POST, and so every in-flight request
-  // is aborted on reset/unmount.
+  const latestRouteTaskSlugRef = useRef<string | null>(routeTaskSlug ?? null);
+  // Tracks in-flight send requests so every one is aborted on reset/unmount
+  // (only the response is discarded; the server finishes the create either
+  // way), and so a Stop pressed during the create window marks the run for
+  // cancellation as soon as its id comes back.
   const abortRegistryRef = useRef<AbortControllerRegistry | null>(null);
   abortRegistryRef.current ??= new AbortControllerRegistry();
   const abortRegistry = abortRegistryRef.current;
-  const abortSubmission = useCallback(
-    (requestId: string) => abortRegistry.abort(requestId),
+  const requestCancelSubmission = useCallback(
+    (requestId: string) => abortRegistry.requestCancel(requestId),
     [abortRegistry],
   );
   const promptScopeId = useMemo(() => {
@@ -310,7 +308,6 @@ export function SingleAgentSessionView({
     },
     [editor, setPromptPopover],
   );
-  const openLayoutTab = useLayoutStore((s) => s.openTab);
   const referencesPopoverEnabled = useFlag("session_references_popover");
   const [environmentPopoverOpen, setEnvironmentPopoverOpen] = useState(false);
   const [isMergingDiffs, setIsMergingDiffs] = useState(false);
@@ -331,6 +328,10 @@ export function SingleAgentSessionView({
   useEffect(() => {
     latestRouteProjectIdRef.current = routeProjectId;
   }, [routeProjectId]);
+
+  useEffect(() => {
+    latestRouteTaskSlugRef.current = routeTaskSlug ?? null;
+  }, [routeTaskSlug]);
 
   useEffect(() => {
     // Keep this ref in sync with actual mount state.
@@ -411,7 +412,7 @@ export function SingleAgentSessionView({
   const sessionExecutorSelection = sessionExecutorProfile ?? executorProfileId;
   const executorDisplayLabel = useMemo(() => {
     if (!sessionExecutorSelection) {
-      return t("claudeModelUnknown");
+      return t("agentProfileUnknown");
     }
     return (
       executorLabels[sessionExecutorSelection.executor] ??
@@ -564,19 +565,26 @@ export function SingleAgentSessionView({
     isTaskRunsLoading,
     pendingSubmission,
     activeSessionHint: activeTask?.active_session_id ?? null,
-    abortSubmission,
+    requestCancelSubmission,
     clearPendingSubmission,
   });
-  const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
-  const isExecutorLocked = Boolean(taskRunId) || isSending;
-  // The runtime (Claude↔Codex) can't change mid-session — that needs handoff,
-  // since resume ids are executor-specific. The model can change on a Claude
-  // Code follow-up though: the backend applies it to the next run. Codex resume
-  // doesn't honor a model override yet, so its model stays locked.
-  const isModelLocked =
-    isSending ||
-    (Boolean(taskRunId) &&
-      sessionExecutorSelection?.executor !== "CLAUDE_CODE");
+  // Housekeeping reclaims expired worktrees, which nulls the run's workspace
+  // path. Every follow-up then dies in the backend with "workspace path missing
+  // on task run", so close the composer up front and say why, rather than
+  // letting the user type a prompt that can only fail.
+  const isWorktreeCleanedUp = Boolean(activeRunRecord?.worktree_deleted);
+  const canSend =
+    Boolean(activeStreamTaskId || workspace) &&
+    !isSending &&
+    !isWorktreeCleanedUp;
+  // The runtime (Claude↔Codex↔Pi) can't change mid-session because resume
+  // ids are executor-specific. Model overrides are applied to the next run;
+  // Codex carries them through thread/fork and Pi/Claude pass them on resume.
+  const { runtimeLocked: isExecutorLocked, modelLocked: isModelLocked } =
+    resolveExecutorSettingLocks({
+      hasTaskRun: Boolean(taskRunId),
+      isSending,
+    });
 
   useEffect(() => {
     if (!activeRunRecord) {
@@ -966,6 +974,7 @@ export function SingleAgentSessionView({
     editor,
     isSessionMountedRef,
     latestRouteProjectIdRef,
+    latestRouteTaskSlugRef,
     abortRegistry,
     addErrorMessage,
     navigateToSession,
@@ -1676,6 +1685,15 @@ export function SingleAgentSessionView({
               : "border-custom-border-200",
           )}
         >
+          {isWorktreeCleanedUp ? (
+            <div
+              role="status"
+              className="-mt-1 flex items-center gap-2 rounded-lg bg-custom-background-90 px-3 py-2 text-xs text-custom-text-300"
+            >
+              <CircleSlash className="size-3.5 shrink-0" />
+              <span>{t("sessionWorktreeCleanedNotice")}</span>
+            </div>
+          ) : null}
           <ImageUploadPreviewList
             items={uploadItems}
             t={t}
@@ -1691,7 +1709,9 @@ export function SingleAgentSessionView({
             tasks={sortedTasks}
             atActiveIndex={atActiveIndex}
             onActiveIndexChange={setAtActiveIndex}
-            disabled={!workspace && !activeStreamTaskId}
+            disabled={
+              (!workspace && !activeStreamTaskId) || isWorktreeCleanedUp
+            }
             dropActive={fileDrag.isDragActive}
             onSubmit={handleSend}
             onDrop={handleDropFiles}
@@ -2101,20 +2121,6 @@ export function SingleAgentSessionView({
                     additions={diffAdditions}
                     deletions={diffDeletions}
                     hasDiffs={hasDiffs}
-                    onOpenDiffViewer={() => {
-                      if (!taskRunId) return;
-                      openLayoutTab(
-                        { type: "diff", runId: taskRunId },
-                        { returnFocusOnClose: true },
-                      );
-                    }}
-                    onOpenGallery={() => {
-                      if (!taskRunId) return;
-                      openLayoutTab(
-                        { type: "gallery", taskRunId },
-                        { returnFocusOnClose: true },
-                      );
-                    }}
                     useWorktree={useWorktree}
                     onUseWorktreeChange={setUseWorktree}
                     baseBranch={baseBranch}
@@ -2165,26 +2171,6 @@ export function SingleAgentSessionView({
                 </div>
               </div>
             </main>
-            {isScratch && !activeTaskId && !pendingSubmission ? (
-              <div className="flex shrink-0 justify-center pt-1">
-                <ProjectSwitcherDropdown
-                  open={chooseProjectOpen}
-                  onOpenChange={setChooseProjectOpen}
-                  align="center"
-                  side="top"
-                  trigger={
-                    <button
-                      type="button"
-                      onClick={() => setChooseProjectOpen(true)}
-                      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" />
-                      {t("chooseProject")}
-                    </button>
-                  }
-                />
-              </div>
-            ) : null}
             {renderGlobalPrompt()}
           </div>
         </div>

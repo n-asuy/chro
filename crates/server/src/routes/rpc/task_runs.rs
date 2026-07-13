@@ -23,7 +23,7 @@ use filesystem::WorkspaceEntryDetail;
 use futures::{SinkExt, StreamExt};
 use log_types::LogEntry;
 use runtime::{
-    ProjectFileService, Runtime, SendTaskMessageParams, StartExecutionProcessParams,
+    ProjectFileService, Runtime, RuntimeError, SendTaskMessageParams, StartExecutionProcessParams,
     StartExecutionSessionParams, TaskMessageMode, TaskService,
 };
 use serde::{Deserialize, Serialize};
@@ -239,6 +239,26 @@ struct SendTaskMessageRequest {
     context_refs: Vec<ContextRefRequest>,
 }
 
+/// Run an execution-start flow on its own task, detached from the HTTP
+/// request. When the client aborts the request mid-flight (navigating away or
+/// pressing Stop during the create window closes the fetch), axum drops the
+/// handler future; without detachment that drop cancels provisioning halfway
+/// through (task row inserted, worktree missing, executor never spawned) and
+/// strands the session as a zombie. Spawned here, the work always reaches a
+/// terminal state; an aborted request only loses the response.
+async fn run_detached<T, F>(work: F) -> Result<T, RuntimeError>
+where
+    F: std::future::Future<Output = Result<T, RuntimeError>> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(result) => result,
+        Err(join_error) => Err(RuntimeError::Other(anyhow::anyhow!(
+            "execution start task did not complete: {join_error}"
+        ))),
+    }
+}
+
 fn start_execution_response(
     result: &runtime::ExecutionSessionStart,
 ) -> StartExecutionSessionResponse {
@@ -259,16 +279,18 @@ async fn start_execution_process(
     Json(payload): Json<StartExecutionProcessRequest>,
 ) -> Result<Json<ExecutionEnvelope>, ApiError> {
     let id = resolve_task_run_id(state.pool(), &id).await?;
-    let run = TaskService::new(state.runtime())
-        .start_execution_process(
-            id,
-            StartExecutionProcessParams {
-                run_reason: payload.run_reason.clone(),
-                executor: payload.executor.clone(),
-                resume_session_id: payload.resume_session_id.clone(),
-            },
-        )
-        .await?;
+    let runtime = state.runtime().clone();
+    let params = StartExecutionProcessParams {
+        run_reason: payload.run_reason.clone(),
+        executor: payload.executor.clone(),
+        resume_session_id: payload.resume_session_id.clone(),
+    };
+    let run = run_detached(async move {
+        TaskService::new(&runtime)
+            .start_execution_process(id, params)
+            .await
+    })
+    .await?;
     Ok(Json(ExecutionEnvelope {
         execution: ExecutionProcessRecord::from_run(&run, payload.task_attempt_id),
     }))
@@ -303,21 +325,26 @@ async fn start_execution_session(
 
     let context_refs =
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let result = TaskService::new(state.runtime())
-        .start_execution_session(StartExecutionSessionParams {
-            prompt: Some(payload.prompt.clone()),
-            workspace_path: PathBuf::from(&payload.workspace_path),
-            resume_session_id: payload.resume_session_id.clone(),
-            force_new_attempt: payload.force_new_attempt,
-            task_id: payload.task_id,
-            executor_profile_id: payload.executor_profile_id,
-            image_ids: payload.image_ids.clone(),
-            use_worktree: payload.use_worktree,
-            target_branch: payload.target_branch.clone(),
-            selected_skill_ids: payload.selected_skill_ids.clone(),
-            context_refs,
-        })
-        .await;
+    let runtime = state.runtime().clone();
+    let params = StartExecutionSessionParams {
+        prompt: Some(payload.prompt.clone()),
+        workspace_path: PathBuf::from(&payload.workspace_path),
+        resume_session_id: payload.resume_session_id.clone(),
+        force_new_attempt: payload.force_new_attempt,
+        task_id: payload.task_id,
+        executor_profile_id: payload.executor_profile_id.clone(),
+        image_ids: payload.image_ids.clone(),
+        use_worktree: payload.use_worktree,
+        target_branch: payload.target_branch.clone(),
+        selected_skill_ids: payload.selected_skill_ids.clone(),
+        context_refs,
+    };
+    let result = run_detached(async move {
+        TaskService::new(&runtime)
+            .start_execution_session(params)
+            .await
+    })
+    .await;
 
     let result = match result {
         Ok(result) => result,
@@ -602,14 +629,15 @@ async fn follow_up_execution(
 
     let context_refs =
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let result = TaskService::new(state.runtime())
-        .follow_up_execution_with_context_refs(
-            id,
-            payload.prompt.clone(),
-            payload.selected_skill_ids.clone(),
-            context_refs,
-        )
-        .await;
+    let runtime = state.runtime().clone();
+    let prompt = payload.prompt.clone();
+    let selected_skill_ids = payload.selected_skill_ids.clone();
+    let result = run_detached(async move {
+        TaskService::new(&runtime)
+            .follow_up_execution_with_context_refs(id, prompt, selected_skill_ids, context_refs)
+            .await
+    })
+    .await;
 
     let result = match result {
         Ok(result) => result,
@@ -684,19 +712,21 @@ async fn send_task_message(
 
     let context_refs =
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let result = TaskService::new(state.runtime())
-        .send_task_message(SendTaskMessageParams {
-            task_id,
-            prompt: payload.prompt.clone(),
-            mode: requested_mode.into(),
-            executor_profile_id: payload.executor_profile_id,
-            image_ids: payload.image_ids.clone(),
-            use_worktree: payload.use_worktree,
-            target_branch: payload.target_branch.clone(),
-            selected_skill_ids: payload.selected_skill_ids.clone(),
-            context_refs,
-        })
-        .await;
+    let runtime = state.runtime().clone();
+    let params = SendTaskMessageParams {
+        task_id,
+        prompt: payload.prompt.clone(),
+        mode: requested_mode.into(),
+        executor_profile_id: payload.executor_profile_id.clone(),
+        image_ids: payload.image_ids.clone(),
+        use_worktree: payload.use_worktree,
+        target_branch: payload.target_branch.clone(),
+        selected_skill_ids: payload.selected_skill_ids.clone(),
+        context_refs,
+    };
+    let result =
+        run_detached(async move { TaskService::new(&runtime).send_task_message(params).await })
+            .await;
 
     let result = match result {
         Ok(result) => result,
@@ -770,19 +800,21 @@ async fn follow_up_by_task(
 
     let context_refs =
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let result = TaskService::new(state.runtime())
-        .send_task_message(SendTaskMessageParams {
-            task_id,
-            prompt: payload.prompt.clone(),
-            mode: TaskMessageMode::Auto,
-            executor_profile_id: None,
-            image_ids: None,
-            use_worktree: None,
-            target_branch: None,
-            selected_skill_ids: payload.selected_skill_ids.clone(),
-            context_refs,
-        })
-        .await;
+    let runtime = state.runtime().clone();
+    let params = SendTaskMessageParams {
+        task_id,
+        prompt: payload.prompt.clone(),
+        mode: TaskMessageMode::Auto,
+        executor_profile_id: None,
+        image_ids: None,
+        use_worktree: None,
+        target_branch: None,
+        selected_skill_ids: payload.selected_skill_ids.clone(),
+        context_refs,
+    };
+    let result =
+        run_detached(async move { TaskService::new(&runtime).send_task_message(params).await })
+            .await;
 
     let result = match result {
         Ok(result) => result,

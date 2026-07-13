@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "chro", about = "Chro — AI-powered productivity tool")]
+#[command(name = "chro", version, about = "Chro — AI-powered productivity tool")]
 pub struct Cli {
     #[command(flatten)]
     pub server: ServerArgs,

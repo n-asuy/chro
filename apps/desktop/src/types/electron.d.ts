@@ -23,8 +23,6 @@ declare global {
     updated_at: string;
   };
 
-  type WindowMode = "onboarding" | "session";
-
   type UpdateStatus =
     | { type: "checking" }
     | { type: "available"; version: string; releaseNotes?: string | null }
@@ -32,18 +30,6 @@ declare global {
     | { type: "downloading"; percent: number }
     | { type: "downloaded"; version: string }
     | { type: "error"; message: string };
-
-  type DesktopExecutor = "CLAUDE_CODE" | "CODEX" | "PI";
-
-  type ExecutorInstallResult = {
-    ok: boolean;
-    executor: DesktopExecutor;
-    command: string;
-    strategy: string;
-    stdout: string;
-    stderr: string;
-    message: string;
-  };
 
   type OpenProjectWindowResult = {
     action: "current" | "focused" | "opened";
@@ -66,7 +52,6 @@ declare global {
         path: string;
         name: string;
       }) => Promise<{ action: string; confirmed?: boolean } | null>;
-      setWindowMode?: (mode: WindowMode) => Promise<void>;
       showNotification?: (payload: {
         title: string;
         body?: string;
@@ -75,9 +60,6 @@ declare global {
       openExternalUrl?: (url: string) => Promise<void>;
       openPath?: (path: string, app?: string) => Promise<void>;
       openInCmux?: (path: string) => Promise<void>;
-      installExecutor?: (
-        executor: DesktopExecutor,
-      ) => Promise<ExecutorInstallResult>;
       update?: {
         check: () => Promise<{
           status: string;

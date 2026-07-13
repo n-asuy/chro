@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,31 +14,74 @@ const reportDir = path.join(rootDir, "artifacts/licenses/rust");
 const maxBuffer = 128 * 1024 * 1024;
 const allowedLicenses = new Set(
   Array.from(
-    readFileSync(path.join(rootDir, "deny.toml"), "utf8").matchAll(/"([^"]+)"/gu),
+    readFileSync(path.join(rootDir, "deny.toml"), "utf8").matchAll(
+      /"([^"]+)"/gu,
+    ),
     (match) => match[1],
   ),
 );
 
 mkdirSync(reportDir, { recursive: true });
 
-const manifestsResult = spawnSync(
-  "rg",
-  ["--files", "-g", "Cargo.toml", "apps", "crates"],
-  {
+// Directories that never hold a first-party manifest we own but do hold many
+// nested Cargo.toml files (build artifacts, vendored deps). Skipping them keeps
+// the walk fast and the manifest set to crates we actually ship.
+const SKIP_DIRS = new Set(["target", "node_modules", ".git"]);
+
+// Discover Cargo manifests with a plain filesystem walk rather than shelling out
+// to ripgrep: the CI runner installs cargo-deny but not necessarily `rg`, and a
+// missing tool used to surface as an opaque write() crash further down.
+function findCargoManifests(searchDirs) {
+  const manifests = [];
+  const walk = (absDir) => {
+    let entries;
+    try {
+      entries = readdirSync(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) {
+          walk(path.join(absDir, entry.name));
+        }
+      } else if (entry.isFile() && entry.name === "Cargo.toml") {
+        manifests.push(path.relative(rootDir, path.join(absDir, entry.name)));
+      }
+    }
+  };
+  for (const searchDir of searchDirs) {
+    walk(path.join(rootDir, searchDir));
+  }
+  return manifests;
+}
+
+// Run cargo-deny and fail loudly if the process never launched. spawnSync
+// returns null stdout/stderr when the binary is missing or the process is
+// killed; writing that null downstream throws an opaque "write() expects a
+// string" error that hides the real cause (a missing cargo-deny on PATH). A
+// non-zero exit with real output is a genuine license finding, not a launch
+// failure, so it passes through to the summary logic below.
+function runCargoDeny(args, manifestPath) {
+  const result = spawnSync("cargo", args, {
     cwd: rootDir,
     encoding: "utf8",
     maxBuffer,
-  },
-);
-
-if (manifestsResult.status !== 0) {
-  process.stderr.write(manifestsResult.stderr || manifestsResult.stdout);
-  process.exit(manifestsResult.status ?? 1);
+  });
+  if (result.error || result.stdout === null) {
+    const reason = result.error ? result.error.message : "no output captured";
+    console.error(
+      `Failed to run \`cargo ${args.join(" ")}\` for ${manifestPath}: ${reason}`,
+    );
+    console.error(
+      "Ensure cargo-deny is installed (cargo install cargo-deny) and on PATH.",
+    );
+    process.exit(1);
+  }
+  return result;
 }
 
-const manifestPaths = manifestsResult.stdout
-  .split(/\r?\n/u)
-  .filter(Boolean)
+const manifestPaths = findCargoManifests(["apps", "crates"])
   .filter((manifestPath) =>
     existsSync(path.join(rootDir, path.dirname(manifestPath), "Cargo.lock")),
   )
@@ -46,23 +95,29 @@ for (const manifestPath of manifestPaths) {
   const manifestReportDir = path.join(reportDir, manifestKey);
   mkdirSync(manifestReportDir, { recursive: true });
 
-  const listResult = spawnSync(
-    "cargo",
-    ["deny", "--manifest-path", manifestPath, "list", "-c", "deny.toml", "-f", "json"],
-    {
-      cwd: rootDir,
-      encoding: "utf8",
-      maxBuffer,
-    },
+  const listResult = runCargoDeny(
+    [
+      "deny",
+      "--manifest-path",
+      manifestPath,
+      "list",
+      "-c",
+      "deny.toml",
+      "-f",
+      "json",
+    ],
+    manifestPath,
   );
 
   writeFileSync(path.join(manifestReportDir, "list.json"), listResult.stdout);
   if (listResult.stderr) {
-    writeFileSync(path.join(manifestReportDir, "list.stderr.log"), listResult.stderr);
+    writeFileSync(
+      path.join(manifestReportDir, "list.stderr.log"),
+      listResult.stderr,
+    );
   }
 
-  const checkResult = spawnSync(
-    "cargo",
+  const checkResult = runCargoDeny(
     [
       "deny",
       "--manifest-path",
@@ -73,11 +128,7 @@ for (const manifestPath of manifestPaths) {
       "--hide-inclusion-graph",
       "licenses",
     ],
-    {
-      cwd: rootDir,
-      encoding: "utf8",
-      maxBuffer,
-    },
+    manifestPath,
   );
 
   const combinedCheckLog = [checkResult.stdout, checkResult.stderr]
@@ -93,14 +144,18 @@ for (const manifestPath of manifestPaths) {
     const parsed = JSON.parse(listResult.stdout);
     licenses = parsed.licenses.map(([license]) => license).sort();
     unlicensed = parsed.unlicensed ?? [];
-    blockedLicenses = licenses.filter((license) => !allowedLicenses.has(license));
+    // Informational only: flat token list ignores SPDX OR/AND, so a dual-licensed
+    // crate (e.g. "MIT OR Apache-2.0 OR LGPL-2.1") surfaces its copyleft arm here
+    // even though a permissive arm satisfies the policy. Never gate on this.
+    blockedLicenses = licenses.filter(
+      (license) => !allowedLicenses.has(license),
+    );
   }
 
-  const manifestOk =
-    listResult.status === 0 &&
-    checkResult.status === 0 &&
-    blockedLicenses.length === 0 &&
-    unlicensed.length === 0;
+  // cargo-deny is authoritative: it evaluates each crate's full SPDX expression
+  // against deny.toml (OR/AND/WITH aware). Trust its verdict rather than the
+  // naive token list, otherwise permissively-satisfiable crates false-fail.
+  const manifestOk = listResult.status === 0 && checkResult.status === 0;
 
   summary.push({
     manifest: manifestPath,

@@ -16,7 +16,7 @@ use crate::runtime::server::{launch_runtime, LaunchOptions, ServerState};
 use crate::runtime::{
     migrate_legacy_user_data, shared_user_data_dir, user_data_dir_overridden, WindowPool,
 };
-use crate::windows::{create_renderer_window, RendererWindowOptions, WindowMode};
+use crate::windows::{create_renderer_window, RendererWindowOptions};
 
 pub fn run() {
     init_tracing();
@@ -74,12 +74,10 @@ pub fn run() {
             commands::select_workspace,
             commands::open_project_window,
             commands::show_file_context_menu,
-            commands::set_window_mode,
             commands::show_notification,
             commands::open_external_url,
             commands::open_path,
             commands::open_in_cmux,
-            commands::install_executor,
             commands::update_check,
             commands::update_download,
             commands::update_install,
@@ -188,7 +186,6 @@ async fn bootstrap_runtime<R: TauriRuntime>(
         &app,
         &runtime,
         RendererWindowOptions {
-            initial_mode: WindowMode::Session,
             route_path: None,
             workspace_path: None,
         },

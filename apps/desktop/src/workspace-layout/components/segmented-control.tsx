@@ -17,8 +17,8 @@ import {
 } from "react";
 
 /**
- * Icon-only segmented control ported from fluidfunctionalism.com's Tabs /
- * TabsSubtle. A single muted track holds the segments; the selected segment is
+ * Icon-only segmented control adapted from a reference segmented-tabs pattern.
+ * A single muted track holds the segments; the selected segment is
  * a raised pill that springs between positions, and a fainter pill follows the
  * pointer via proximity hover (the nearest segment activates, so the indicator
  * morphs instead of snapping per-segment). Adapted to chro's stack — no shape /

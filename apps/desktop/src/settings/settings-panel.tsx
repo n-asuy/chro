@@ -1,4 +1,3 @@
-import { LoginTerminalDialog } from "@/components/dialogs/login-terminal-dialog";
 import {
   type SupportedLanguage,
   type TranslationFunction,
@@ -7,14 +6,7 @@ import {
 } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { getVersion } from "@/lib/desktop-bridge";
-import {
-  type AvailabilityInfo,
-  type BaseCodingAgent,
-  type ExecutorInstallInfo,
-  fetchAuthStatus,
-  fetchExecutorInstallStatus,
-} from "@/lib/executor-client";
-import { installTool } from "@/lib/executor-install";
+import type { BaseCodingAgent } from "@/lib/executor-client";
 import { setUiValue } from "@/lib/ui-state-client";
 import { Alert, AlertDescription, AlertTitle } from "@chro/ui/alert";
 import { Badge } from "@chro/ui/badge";
@@ -40,6 +32,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
+  CheckCircle2,
   ChevronDown,
   FolderOpen,
   Loader2,
@@ -47,6 +40,7 @@ import {
   Save,
   Trash2,
   X,
+  XCircle,
 } from "lucide-react";
 import {
   Suspense,
@@ -58,7 +52,7 @@ import {
 } from "react";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
-import { PiApiKeysControl } from "./pi-api-keys-control";
+import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
 import { useMcpSettings } from "./hooks/use-mcp-settings";
 import { useMergeSettings } from "./hooks/use-merge-settings";
@@ -66,7 +60,7 @@ import { usePreferencesSettings } from "./hooks/use-preferences-settings";
 import { useWorktreeSettings } from "./hooks/use-worktree-settings";
 import { AppearancePane } from "./panes/appearance-pane";
 import { NotificationsPane } from "./panes/notifications-pane";
-import { TerminalPane } from "./panes/terminal-pane";
+import { PiApiKeysControl } from "./pi-api-keys-control";
 import { useEditorConfigStore } from "./state/editor-config-store";
 
 type LanguageOption = SupportedLanguage;
@@ -91,12 +85,18 @@ const MCP_EXECUTOR_LABEL_KEYS: Record<BaseCodingAgent, TranslationKey> = {
   PI: "mcpExecutorOptionPi",
 };
 
+const AGENT_CLI_ORDER: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX", "PI"];
+const AGENT_CLI_NAMES: Record<BaseCodingAgent, string> = {
+  CLAUDE_CODE: "claude",
+  CODEX: "codex",
+  PI: "pi",
+};
+
 type SettingsTabKey =
   | "general"
   | "appearance"
   | "workspace"
   | "editor"
-  | "terminal"
   | "notifications"
   | "mcp"
   | "agents"
@@ -111,7 +111,6 @@ type SettingsPanelVariant = "page" | "modal";
 
 type SettingsPanelProps = {
   variant?: SettingsPanelVariant;
-  onCloseRequest?: () => void;
   className?: string;
 };
 
@@ -121,101 +120,6 @@ type AppVersionStatus = "loading" | "ready" | "unavailable" | "error";
 
 const formatAppVersion = (version: string) =>
   version.startsWith("v") ? version : `v${version}`;
-
-const formatDetectedVersion = (
-  t: TranslationFunction,
-  installInfo: ExecutorInstallInfo | null,
-) => {
-  if (!installInfo?.detected_version) {
-    return null;
-  }
-
-  return t("authDetectedVersion", { version: installInfo.detected_version });
-};
-
-function AuthStatusControl({
-  t,
-  info,
-  installInfo,
-  loading,
-  installing,
-  triggering,
-  onTrigger,
-  onInstall,
-}: {
-  t: TranslationFunction;
-  info: AvailabilityInfo | null;
-  installInfo: ExecutorInstallInfo | null;
-  loading: boolean;
-  installing: boolean;
-  triggering: boolean;
-  onTrigger: () => void;
-  onInstall: () => void;
-}) {
-  if (loading || !info || !installInfo) {
-    return (
-      <div className="flex items-center gap-2">
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (!installInfo.installed) {
-    return (
-      <Button
-        variant="outline"
-        size="sm"
-        className="font-workspace h-8 px-3 text-[12px]"
-        onClick={onInstall}
-        disabled={installing}
-      >
-        {installing ? (
-          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-        ) : null}
-        {installing ? t("authInstalling") : t("authInstall")}
-      </Button>
-    );
-  }
-
-  if (info.type === "LOGIN_DETECTED") {
-    return (
-      <div className="flex items-center gap-2">
-        <Badge className="font-workspace text-[11px] bg-emerald-500/20 text-emerald-600 border-emerald-500/40">
-          {t("authSignedIn")}
-        </Badge>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="font-workspace h-7 px-2 text-[11px] text-muted-foreground"
-          onClick={onTrigger}
-          disabled={triggering}
-        >
-          {triggering ? (
-            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-          ) : (
-            <RefreshCcw className="mr-1 h-3 w-3" />
-          )}
-          {t("authReAuthenticate")}
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      className="font-workspace h-8 px-3 text-[12px]"
-      onClick={onTrigger}
-      disabled={triggering}
-    >
-      {triggering ? (
-        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-      ) : null}
-      {triggering ? t("authSigningIn") : t("authSignIn")}
-    </Button>
-  );
-}
 
 export function SettingsPanel({
   variant = "page",
@@ -248,20 +152,19 @@ export function SettingsPanel({
     t,
   });
   const {
-    claudeVersionInfo,
-    claudeVersionLoading,
-    claudeVersionError,
-    claudeVersionFetchedAtLabel,
     executorProfileId,
     executorProfileLoading,
     executorProfileError,
     profileSaving,
     availableExecutors,
-    claudeExecutionMode,
     handleExecutorSelect,
-    handleClaudeExecutionModeSelect,
-    handleClaudeVersionReload,
   } = useExecutorProfileSettings({ t });
+  const {
+    statuses: agentCliStatuses,
+    loading: agentCliStatusesLoading,
+    error: agentCliStatusesError,
+    reload: reloadAgentCliStatuses,
+  } = useAgentCliStatus(activeTab === "agents");
   const {
     configPath,
     configContent,
@@ -325,96 +228,6 @@ export function SettingsPanel({
     clearSelection,
     formatBytes,
   } = useWorktreeSettings({ t });
-
-  // Auth status state
-  const [authStatus, setAuthStatus] = useState<Record<
-    BaseCodingAgent,
-    AvailabilityInfo
-  > | null>(null);
-  const [installStatus, setInstallStatus] = useState<Record<
-    BaseCodingAgent,
-    ExecutorInstallInfo
-  > | null>(null);
-  const [authLoading, setAuthLoading] = useState(false);
-  // Agent whose login terminal is currently open (null when closed).
-  const [authDialogAgent, setAuthDialogAgent] =
-    useState<BaseCodingAgent | null>(null);
-  const [installingExecutor, setInstallingExecutor] =
-    useState<BaseCodingAgent | null>(null);
-
-  const loadAgentAvailability = useCallback(async () => {
-    setAuthLoading(true);
-    try {
-      const [authResult, installResult] = await Promise.all([
-        fetchAuthStatus(),
-        fetchExecutorInstallStatus(),
-      ]);
-      setAuthStatus({
-        CLAUDE_CODE: authResult.claude_code,
-        CODEX: authResult.codex,
-        PI: authResult.pi,
-      });
-      setInstallStatus({
-        CLAUDE_CODE: installResult.claude_code,
-        CODEX: installResult.codex,
-        PI: installResult.pi,
-      });
-    } catch {
-      // Silently fail — status will show as unknown
-    } finally {
-      setAuthLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === "agents") {
-      void loadAgentAvailability();
-      handleClaudeVersionReload();
-    }
-  }, [activeTab, handleClaudeVersionReload, loadAgentAvailability]);
-
-  useEffect(() => {
-    if (activeTab !== "agents") {
-      return undefined;
-    }
-
-    const handleFocus = () => {
-      void loadAgentAvailability();
-      handleClaudeVersionReload();
-    };
-
-    window.addEventListener("focus", handleFocus);
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [activeTab, handleClaudeVersionReload, loadAgentAvailability]);
-
-  // Open the login terminal for an executor. The dialog hosts the agent's
-  // own login CLI in a PTY, so device-code / token prompts complete in-app
-  // without a browser redirect (works for headless/remote installs too).
-  const handleTriggerAuth = useCallback((executor: BaseCodingAgent) => {
-    setAuthDialogAgent(executor);
-  }, []);
-
-  const handleInstall = useCallback(
-    async (executor: BaseCodingAgent) => {
-      setInstallingExecutor(executor);
-      try {
-        const result = await installTool(executor);
-        if (result.ok) {
-          await loadAgentAvailability();
-          if (executor === "CLAUDE_CODE") {
-            handleClaudeVersionReload();
-          }
-        }
-      } catch {
-        /* install failed */
-      } finally {
-        setInstallingExecutor(null);
-      }
-    },
-    [handleClaudeVersionReload, loadAgentAvailability],
-  );
 
   const languageLabelId = "display-language-label";
   const selectedLanguageOption = useMemo(
@@ -526,10 +339,6 @@ export function SettingsPanel({
       {
         key: "editor" as const,
         label: t("settingsTabsEditor"),
-      },
-      {
-        key: "terminal" as const,
-        label: t("settingsTabsTerminal"),
       },
       {
         key: "notifications" as const,
@@ -1052,10 +861,15 @@ export function SettingsPanel({
   }, [availableExecutors]);
   const defaultExecutorLabel = useMemo(() => {
     if (!executorProfileId) {
-      return t("claudeModelUnknown");
+      return t("agentProfileUnknown");
     }
     return t(MCP_EXECUTOR_LABEL_KEYS[executorProfileId.executor]);
   }, [executorProfileId, t]);
+  const agentCliStatusByName = useMemo(
+    () =>
+      new Map((agentCliStatuses ?? []).map((status) => [status.name, status])),
+    [agentCliStatuses],
+  );
 
   const agentsSection = (
     <section className="flex flex-col gap-6">
@@ -1064,13 +878,13 @@ export function SettingsPanel({
           {t("settingsTabsAgents")}
         </h2>
         <p className="font-workspace text-[13px] text-muted-foreground mt-1">
-          {t("agentsClaudeCodeDescription")}
+          {t("agentsSettingsDescription")}
         </p>
       </div>
 
       {executorProfileError ? (
         <Alert variant="destructive">
-          <AlertTitle>{t("claudeModelLoadError")}</AlertTitle>
+          <AlertTitle>{t("agentProfileLoadError")}</AlertTitle>
           <AlertDescription>{executorProfileError}</AlertDescription>
         </Alert>
       ) : null}
@@ -1125,162 +939,104 @@ export function SettingsPanel({
         />
       </SettingsSection>
 
-      {/* Claude Code */}
-      <SettingsSection heading={t("agentsClaudeCodeTitle")}>
-        <SettingsRow
-          title={t("claudeExecutionModeCardTitle")}
-          description={t("claudeExecutionModeCardDescription")}
-          disabled={executorProfileLoading || profileSaving}
-          control={
-            <Switch
-              checked={claudeExecutionMode === "print"}
-              onCheckedChange={(checked) =>
-                void handleClaudeExecutionModeSelect(checked ? "print" : "pty")
-              }
-              disabled={executorProfileLoading || profileSaving}
-              aria-label={t("claudeExecutionModeToggleLabel")}
-            />
-          }
-        />
-        <SettingsRow
-          title="Authentication"
-          description={
-            installStatus?.CLAUDE_CODE?.installed
-              ? [
-                  t("authClaudeDescription"),
-                  formatDetectedVersion(t, installStatus?.CLAUDE_CODE ?? null),
-                ]
-                  .filter(Boolean)
-                  .join(" ")
-              : t("authClaudeInstallDescription")
-          }
-          control={
-            <AuthStatusControl
-              t={t}
-              info={authStatus?.CLAUDE_CODE ?? null}
-              installInfo={installStatus?.CLAUDE_CODE ?? null}
-              loading={authLoading}
-              installing={installingExecutor === "CLAUDE_CODE"}
-              triggering={authDialogAgent === "CLAUDE_CODE"}
-              onTrigger={() => handleTriggerAuth("CLAUDE_CODE")}
-              onInstall={() => void handleInstall("CLAUDE_CODE")}
-            />
-          }
-        />
-        <SettingsRow
-          title={t("claudeVersionCardTitle")}
-          description={t("claudeVersionCardDescription")}
-        >
-          {claudeVersionLoading ? (
-            <div className="font-workspace flex items-center gap-2 text-[13px] text-muted-foreground">
+      <SettingsSection
+        heading={t("agentsCliStatusTitle")}
+        action={
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void reloadAgentCliStatuses()}
+            disabled={agentCliStatusesLoading}
+            className="font-workspace gap-1.5 text-[13px] text-muted-foreground hover:text-foreground"
+          >
+            {agentCliStatusesLoading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {t("loadingMessage")}
-            </div>
-          ) : claudeVersionInfo ? (
-            <dl className="space-y-2 font-workspace text-[13px]">
-              <div className="flex flex-col gap-0.5">
-                <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  {t("claudeVersionLabel")}
-                </dt>
-                <dd className="font-mono text-[12px] text-foreground">
-                  {claudeVersionInfo.version ?? t("claudeVersionNotDetected")}
-                </dd>
-              </div>
-              {claudeVersionInfo.command ? (
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    {t("claudeVersionCommandLabel")}
-                  </dt>
-                  <dd className="font-mono text-[11px] text-foreground">
-                    {claudeVersionInfo.command}
-                  </dd>
-                </div>
-              ) : null}
-              {claudeVersionInfo.resolvedPath ? (
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    {t("claudeVersionPathLabel")}
-                  </dt>
-                  <dd className="font-mono text-[11px] text-foreground">
-                    {claudeVersionInfo.resolvedPath}
-                  </dd>
-                </div>
-              ) : null}
-            </dl>
-          ) : null}
+            ) : (
+              <RefreshCcw className="h-3.5 w-3.5" />
+            )}
+            {t("agentsCliStatusRefresh")}
+          </Button>
+        }
+      >
+        {agentCliStatusesError ? (
+          <div className="px-5 py-4">
+            <Alert
+              variant="destructive"
+              className="border-destructive/40 bg-destructive/10"
+            >
+              <AlertDescription className="text-[12px]">
+                {t("agentsCliStatusLoadError")}
+              </AlertDescription>
+            </Alert>
+          </div>
+        ) : null}
 
-          {claudeVersionError ? (
-            <p className="font-workspace text-[12px] text-destructive">
-              {claudeVersionError}
-            </p>
-          ) : null}
+        {agentCliStatuses === null && agentCliStatusesLoading ? (
+          <div className="flex items-center gap-2 px-5 py-4 font-workspace text-[12px] text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {t("agentsCliStatusLoading")}
+          </div>
+        ) : null}
 
-          {claudeVersionFetchedAtLabel ? (
-            <p className="font-workspace text-[11px] text-muted-foreground mt-2">
-              {t("claudeVersionCheckedAt", {
-                timestamp: claudeVersionFetchedAtLabel,
-              })}
-            </p>
-          ) : null}
-        </SettingsRow>
+        {agentCliStatuses !== null
+          ? AGENT_CLI_ORDER.map((executor) => {
+              const status = agentCliStatusByName.get(
+                AGENT_CLI_NAMES[executor],
+              );
+              if (!status) return null;
+
+              return (
+                <SettingsRow
+                  key={executor}
+                  title={t(MCP_EXECUTOR_LABEL_KEYS[executor])}
+                  description={status.found ? undefined : status.install_hint}
+                  control={
+                    <div className="flex items-center gap-1.5 font-workspace text-[12px] tabular-nums text-muted-foreground">
+                      {status.found ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      ) : (
+                        <XCircle className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {status.version ??
+                          (status.found
+                            ? t("agentsCliVersionUnavailable")
+                            : t("agentsCliNotFound"))}
+                      </span>
+                    </div>
+                  }
+                >
+                  {status.found && (status.path || status.source) ? (
+                    <div className="space-y-1 rounded-md bg-muted/20 px-3 py-2 font-workspace text-[11px] text-muted-foreground">
+                      {status.path ? (
+                        <p className="truncate" title={status.path}>
+                          <span className="text-muted-foreground/70">
+                            {t("agentsCliPathLabel")}:{" "}
+                          </span>
+                          <span className="text-foreground/80">
+                            {status.path}
+                          </span>
+                        </p>
+                      ) : null}
+                      {status.source ? (
+                        <p className="truncate" title={status.source}>
+                          <span className="text-muted-foreground/70">
+                            {t("agentsCliSourceLabel")}:{" "}
+                          </span>
+                          <span className="text-foreground/80">
+                            {status.source}
+                          </span>
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </SettingsRow>
+              );
+            })
+          : null}
       </SettingsSection>
 
-      {/* Codex */}
-      <SettingsSection heading={t("agentsCodexTitle")}>
-        <SettingsRow
-          title="Authentication"
-          description={
-            installStatus?.CODEX?.installed
-              ? [
-                  t("authCodexDescription"),
-                  formatDetectedVersion(t, installStatus?.CODEX ?? null),
-                ]
-                  .filter(Boolean)
-                  .join(" ")
-              : t("authCodexInstallDescription")
-          }
-          control={
-            <AuthStatusControl
-              t={t}
-              info={authStatus?.CODEX ?? null}
-              installInfo={installStatus?.CODEX ?? null}
-              loading={authLoading}
-              installing={installingExecutor === "CODEX"}
-              triggering={authDialogAgent === "CODEX"}
-              onTrigger={() => handleTriggerAuth("CODEX")}
-              onInstall={() => void handleInstall("CODEX")}
-            />
-          }
-        />
-      </SettingsSection>
-
-      {/* pi */}
-      <SettingsSection heading={t("agentsPiTitle")}>
-        <SettingsRow
-          title="Authentication"
-          description={
-            installStatus?.PI?.installed
-              ? [
-                  t("authPiDescription"),
-                  formatDetectedVersion(t, installStatus?.PI ?? null),
-                ]
-                  .filter(Boolean)
-                  .join(" ")
-              : t("authPiInstallDescription")
-          }
-          control={
-            <AuthStatusControl
-              t={t}
-              info={authStatus?.PI ?? null}
-              installInfo={installStatus?.PI ?? null}
-              loading={authLoading}
-              installing={installingExecutor === "PI"}
-              triggering={authDialogAgent === "PI"}
-              onTrigger={() => handleTriggerAuth("PI")}
-              onInstall={() => void handleInstall("PI")}
-            />
-          }
-        />
+      <SettingsSection heading={t("agentsPiCredentialsTitle")}>
         <SettingsRow
           title={t("agentsPiApiKeysTitle")}
           description={t("agentsPiApiKeysDescription")}
@@ -1621,14 +1377,7 @@ export function SettingsPanel({
         className,
       )}
     >
-      <div
-        className={cn(
-          "flex h-full w-full overflow-hidden bg-custom-background-100",
-          isModal
-            ? "rounded border border-border/60 shadow-[0_18px_72px_rgba(0,0,0,0.3)]"
-            : undefined,
-        )}
-      >
+      <div className="flex h-full w-full overflow-hidden bg-custom-background-100">
         <aside className="hidden h-full w-[220px] flex-col border-r border-border/60 bg-custom-sidebar-background-100 p-3 text-sm md:flex">
           <div className="flex flex-1 flex-col gap-1 overflow-y-auto pr-1">
             {navItems.map((item) => {
@@ -1681,7 +1430,6 @@ export function SettingsPanel({
             {activeTab === "appearance" ? <AppearancePane /> : null}
             {activeTab === "workspace" ? workspaceSection : null}
             {activeTab === "editor" ? editorSection : null}
-            {activeTab === "terminal" ? <TerminalPane /> : null}
             {activeTab === "notifications" ? <NotificationsPane /> : null}
             {activeTab === "mcp" ? mcpSection : null}
             {activeTab === "agents" ? agentsSection : null}
@@ -1689,16 +1437,6 @@ export function SettingsPanel({
           </main>
         </div>
       </div>
-      <LoginTerminalDialog
-        agent={authDialogAgent}
-        open={authDialogAgent !== null}
-        onOpenChange={(next) => {
-          if (!next) setAuthDialogAgent(null);
-        }}
-        onAuthenticated={() => {
-          void loadAgentAvailability();
-        }}
-      />
     </div>
   );
 }

@@ -1,8 +1,8 @@
 //! CDP transport: one WebSocket to Chrome, request/response correlation, and a
 //! fan-out of unsolicited events.
 //!
-//! This is the Rust analog of browser-harness's `cdp_use.client.CDPClient`
-//! plus the daemon's event `tap`. A single reader task owns the socket read
+//! This is the Rust analog of a reference Python CDP client plus its daemon's
+//! event `tap`. A single reader task owns the socket read
 //! half: messages carrying an `id` resolve the matching pending request; every
 //! other message is a CDP event and is broadcast to subscribers. A writer task
 //! owns the socket write half and drains an mpsc queue, so `send` is callable
@@ -119,7 +119,7 @@ impl CdpClient {
     ///
     /// `session_id` selects the flat session (`None` for browser-level calls).
     /// Browser-level `Target.*` commands MUST pass `None` — Chrome otherwise
-    /// silently routes them to the browser target (browser-harness daemon.py).
+    /// silently routes them to the browser target (as the reference daemon documents).
     pub async fn send(
         &self,
         method: &str,

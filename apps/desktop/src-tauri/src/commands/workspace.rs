@@ -7,9 +7,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use crate::error::{DesktopError, DesktopResult};
 use crate::runtime::pool::WindowPool;
 use crate::runtime::server::primary_runtime;
-use crate::windows::{
-    create_renderer_window, normalize_route_path, RendererWindowOptions, WindowMode,
-};
+use crate::windows::{create_renderer_window, normalize_route_path, RendererWindowOptions};
 
 #[tauri::command]
 pub async fn select_workspace<R: TauriRuntime>(
@@ -119,9 +117,6 @@ pub async fn open_project_window<R: TauriRuntime>(
                 if let Some(window) = app.get_webview_window(&source_label) {
                     pool.set_workspace_path(&source_label, Some(workspace_path.clone()))
                         .await;
-                    if pool.set_mode(&source_label, WindowMode::Session).await {
-                        crate::windows::set_window_mode(&app, &window, WindowMode::Session);
-                    }
                     window.show().ok();
                     window.unminimize().ok();
                     window.set_focus().ok();
@@ -142,7 +137,6 @@ pub async fn open_project_window<R: TauriRuntime>(
         &app,
         &runtime,
         RendererWindowOptions {
-            initial_mode: WindowMode::Session,
             route_path: Some(route_path),
             workspace_path: Some(workspace_path),
         },

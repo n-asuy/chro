@@ -67,6 +67,10 @@ fn fork_params_from(thread_id: String, params: ThreadStartParams) -> ThreadForkP
         base_instructions: params.base_instructions,
         developer_instructions: params.developer_instructions,
         service_tier: params.service_tier,
+        // Chro only needs the forked thread id before starting the next turn.
+        // Omitting history also keeps newly-added ThreadItem variants in a newer
+        // app-server from breaking an older client's response decoder.
+        exclude_turns: true,
         ..Default::default()
     }
 }
@@ -499,5 +503,24 @@ impl StandardCodingAgentExecutor for Codex {
         } else {
             AvailabilityInfo::NotFound
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_params_preserve_model_override() {
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-terra".to_string()),
+            ..Default::default()
+        };
+
+        let fork = fork_params_from("thread-1".to_string(), params);
+
+        assert_eq!(fork.thread_id, "thread-1");
+        assert_eq!(fork.model.as_deref(), Some("gpt-5.6-terra"));
+        assert!(fork.exclude_turns);
     }
 }

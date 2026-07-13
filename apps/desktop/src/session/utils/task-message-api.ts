@@ -18,6 +18,12 @@ type SendTaskMessageOptions = {
   signal?: AbortSignal;
 };
 
+export async function cancelTaskRun(runId: string): Promise<void> {
+  await desktopFetch(`/rpc/task-runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
+
 export async function sendTaskMessage(
   taskId: string,
   options: SendTaskMessageOptions,

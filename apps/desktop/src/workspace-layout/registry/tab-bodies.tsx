@@ -1,8 +1,8 @@
 import { FilesEditor } from "@/files/components/editor/files-editor";
-import { GalleryPanel } from "@/gallery/gallery-panel";
 import { useFileTreeStore } from "@/files/state/file-tree-store";
 import { useFilesStore } from "@/files/state/files-store";
 import { useWorkingDiffs } from "@/files/state/working-diffs-store";
+import { GalleryPanel } from "@/gallery/gallery-panel";
 import { DiffViewerPanel } from "@/session/components/diff-viewer-panel";
 import { useDiffStream } from "@/session/hooks/use-diff-stream";
 import { SingleAgentSessionView } from "@/session/single-agent-session";
@@ -11,7 +11,6 @@ import { SkillsPanel } from "@/skills/skills-panel";
 import { useEffect, useMemo } from "react";
 import { BrowserPane } from "../components/browser-pane";
 import { NativeBrowserPane } from "../components/native-browser-pane";
-import { TerminalPane } from "../components/terminal-pane";
 import { useLayoutStore } from "../state/layout-store";
 import type { PaneItemRenderProps } from "./registry";
 
@@ -92,10 +91,6 @@ export function SkillsTabBody() {
 export function GalleryTabBody({ kind }: PaneItemRenderProps) {
   if (kind.type !== "gallery") return null;
   return <GalleryPanel taskRunId={kind.taskRunId} />;
-}
-
-export function TerminalTabBody({ tab }: PaneItemRenderProps) {
-  return <TerminalPane tabId={tab.id} />;
 }
 
 export function InBrowserTabBody({ tab, kind }: PaneItemRenderProps) {

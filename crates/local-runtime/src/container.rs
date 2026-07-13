@@ -10,16 +10,16 @@ use approvals::Approvals;
 use async_trait::async_trait;
 use config::Config;
 use db::{
-    models::{ProjectRecord, TaskMerge, TaskRecord, TaskRun, TaskRunLog},
+    models::{ProjectRecord, TaskMerge, TaskRecord, TaskRun},
     types::{RunStatus, TaskStatus},
     DBService,
 };
 use diff_stream;
 use events::MsgStore;
 use executors::{
-    BaseCodingAgent, ClaudeExecutionMode, CodingAgent, ExecutionEnv, ExecutionProcess,
-    ExecutorApprovalService, ExecutorConfigs, ExecutorExitResult, ExecutorProfileId,
-    NoopExecutorApprovalService, RepoContext, StandardCodingAgentExecutor,
+    BaseCodingAgent, CodingAgent, ExecutionEnv, ExecutionProcess, ExecutorApprovalService,
+    ExecutorConfigs, ExecutorExitResult, ExecutorProfileId, NoopExecutorApprovalService,
+    RepoContext, StandardCodingAgentExecutor,
 };
 use futures::{
     stream::{self, BoxStream},
@@ -184,14 +184,9 @@ impl LocalContainerService {
         Ok(())
     }
 
-    /// Read log entries from JSONL file, with SQLite fallback for legacy data.
+    /// Read log entries from the per-run JSONL file.
     pub async fn fetch_logs(&self, task_run_id: Uuid) -> Result<Vec<LogEntry>, ContainerError> {
-        let entries = log_writer::read_log_entries(&self.logs_dir, task_run_id).await?;
-        if !entries.is_empty() {
-            return Ok(entries);
-        }
-        // Fallback: read from SQLite for runs persisted before the migration.
-        Ok(TaskRunLog::fetch_entries(self.db.pool(), task_run_id).await?)
+        Ok(log_writer::read_log_entries(&self.logs_dir, task_run_id).await?)
     }
 
     pub async fn append_stdout(
@@ -410,48 +405,6 @@ impl LocalContainerService {
         self.drop_execution_registry(run_id).await;
     }
 
-    /// Resolve the Claude execution engine for a run, pinning it at session
-    /// birth so the whole follow-up chain shares one engine.
-    ///
-    /// - Already pinned (set on a prior spawn, or inherited from the parent run
-    ///   at follow-up creation): reuse it verbatim.
-    /// - Unpinned initial run: take the current app-wide setting and persist it.
-    /// - Unpinned follow-up: a legacy session predating the pin column, always
-    ///   PTY-born. Resolve to PTY (never resume it headless) and persist.
-    async fn resolve_pinned_claude_mode(
-        &self,
-        run_id: Uuid,
-        is_follow_up: bool,
-    ) -> ClaudeExecutionMode {
-        if let Ok(Some(run)) = TaskRun::find_by_id(self.db.pool(), run_id).await {
-            if let Some(pinned) = run
-                .claude_execution_mode
-                .as_deref()
-                .and_then(ClaudeExecutionMode::from_db_str)
-            {
-                return pinned;
-            }
-        }
-
-        let mode = if is_follow_up {
-            ClaudeExecutionMode::Pty
-        } else {
-            self.config.read().await.claude_code_execution_mode
-        };
-
-        if let Err(err) =
-            TaskRun::set_claude_execution_mode(self.db.pool(), run_id, mode.as_db_str()).await
-        {
-            warn!(
-                %run_id,
-                error = %err,
-                "[resolve_pinned_claude_mode] failed to persist pinned execution mode"
-            );
-        }
-
-        mode
-    }
-
     async fn run_execution_process(
         &self,
         params: ExecutionStartParams,
@@ -474,17 +427,6 @@ impl LocalContainerService {
             agent_kind = ?agent_kind,
             "[run_execution_process] using coding agent"
         );
-
-        // Pin the Claude execution engine (PTY vs headless `claude -p`) to the
-        // mode the session was born under and reuse it for every follow-up. The
-        // app-wide setting seeds NEW sessions only: resuming a PTY-born
-        // transcript headless (or vice versa) replays control entries the other
-        // engine never writes and corrupts the conversation. See
-        // `resolve_pinned_claude_mode`.
-        if let CodingAgent::ClaudeCode(claude) = &mut agent {
-            let execution_mode = self.resolve_pinned_claude_mode(run_id, is_follow_up).await;
-            claude.set_execution_mode(execution_mode);
-        }
 
         let approvals_service: Arc<dyn ExecutorApprovalService> = if matches!(
             agent_kind,
@@ -1220,11 +1162,16 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn cleanup_orphan_executions(&self) -> Result<(), ContainerError> {
+        // Local executions die with the server, and a Pending run only exists
+        // inside the create window of a start request, so any run still
+        // running or pending at startup is an orphan (e.g. a create request
+        // whose provisioning was cut short by a crash).
         let affected = sqlx::query(
-            "UPDATE task_runs SET status = ?, completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') WHERE status = ?",
+            "UPDATE task_runs SET status = ?, completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') WHERE status IN (?, ?)",
         )
         .bind(RunStatus::Failed)
         .bind(RunStatus::Running)
+        .bind(RunStatus::Pending)
         .execute(self.db.pool())
         .await?;
         if affected.rows_affected() > 0 {
@@ -1252,6 +1199,23 @@ impl ContainerService for LocalContainerService {
             tracing::info!(
                 count = task_affected.rows_affected(),
                 "finalized orphaned tasks: status set to Failed and active_session_id cleared"
+            );
+        }
+
+        // A task can also be stranded in-progress with no session pointer at
+        // all (a create that never reached the session insert). Nothing is
+        // running at startup, so every remaining in-progress task is stale.
+        let stranded_tasks = sqlx::query(
+            "UPDATE task_records SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now') WHERE status = ?",
+        )
+        .bind(TaskStatus::Failed)
+        .bind(TaskStatus::InProgress)
+        .execute(self.db.pool())
+        .await?;
+        if stranded_tasks.rows_affected() > 0 {
+            tracing::info!(
+                count = stranded_tasks.rows_affected(),
+                "finalized stranded in-progress tasks with no running execution"
             );
         }
 
@@ -1613,58 +1577,112 @@ mod tests {
         assert_eq!(task_after.status, TaskStatus::Completed);
     }
 
-    /// A fresh session takes the current app-wide setting and persists it, so
-    /// every later spawn (retry, follow-up) of the chain reuses the same engine.
+    /// Seed a project + task + run with the given statuses and NO session row,
+    /// mirroring a create request that was cancelled mid-provisioning (task
+    /// inserted, run never launched). Returns `(task_id, run_id)`.
+    async fn seed_task_without_session(
+        service: &LocalContainerService,
+        task_status: TaskStatus,
+        run_status: RunStatus,
+    ) -> (Uuid, Uuid) {
+        let pool = service.db.pool();
+
+        let project = ProjectRecord::new("orphan-test", "/tmp/orphan-test");
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path, created_at, updated_at)
+             VALUES (?, ?, ?, datetime('now'), datetime('now'))",
+        )
+        .bind(project.id)
+        .bind(&project.name)
+        .bind(&project.git_repo_path)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let task = TaskRecord::new(project.id, "aborted create", None);
+        task.insert(pool).await.unwrap();
+        TaskRecord::update_status(pool, task.id, task_status)
+            .await
+            .unwrap();
+
+        let mut run = TaskRun::new_local(task.id, None);
+        run.status = run_status;
+        run.insert(pool).await.unwrap();
+
+        (task.id, run.id)
+    }
+
+    /// The zombie-session regression: a create request aborted mid-provisioning
+    /// (client navigated away before detached handlers existed) left a Pending
+    /// run and an in-progress task with no session. Startup cleanup must
+    /// finalize both, or the session stays a spinner forever across restarts.
     #[tokio::test]
-    async fn resolve_pins_global_mode_on_initial_run() {
+    async fn cleanup_finalizes_pending_orphan_run_and_stranded_task() {
         let (service, _temp) = build_service().await;
-        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
-        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+        let (task_id, run_id) =
+            seed_task_without_session(&service, TaskStatus::InProgress, RunStatus::Pending).await;
 
-        let mode = service.resolve_pinned_claude_mode(run_id, false).await;
-        assert_eq!(mode, ClaudeExecutionMode::Print);
+        service.cleanup_orphan_executions().await.unwrap();
 
-        let run = TaskRun::find_by_id(service.db.pool(), run_id)
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(run.claude_execution_mode.as_deref(), Some("print"));
-    }
+        assert_eq!(run_after.status, RunStatus::Failed);
+        assert!(run_after.completed_at.is_some());
 
-    /// The core regression: a follow-up must resume under the engine its session
-    /// was born with, even after the app-wide default has since been flipped.
-    /// Resuming a PTY-born session headless corrupts the transcript.
-    #[tokio::test]
-    async fn resolve_follow_up_keeps_pinned_mode_ignoring_global() {
-        let (service, _temp) = build_service().await;
-        // App-wide default is now Print, but this session was born under PTY.
-        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
-        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
-        TaskRun::set_claude_execution_mode(service.db.pool(), run_id, "pty")
-            .await
-            .unwrap();
-
-        let mode = service.resolve_pinned_claude_mode(run_id, true).await;
-        assert_eq!(mode, ClaudeExecutionMode::Pty);
-    }
-
-    /// A follow-up of a legacy run (no pinned mode) is always PTY-born, so it
-    /// resolves to PTY regardless of the live default rather than being resumed
-    /// headless.
-    #[tokio::test]
-    async fn resolve_legacy_follow_up_defaults_to_pty() {
-        let (service, _temp) = build_service().await;
-        service.config.write().await.claude_code_execution_mode = ClaudeExecutionMode::Print;
-        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
-
-        let mode = service.resolve_pinned_claude_mode(run_id, true).await;
-        assert_eq!(mode, ClaudeExecutionMode::Pty);
-
-        let run = TaskRun::find_by_id(service.db.pool(), run_id)
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(run.claude_execution_mode.as_deref(), Some("pty"));
+        assert_eq!(task_after.status, TaskStatus::Failed);
+        assert_eq!(task_after.active_session_id, None);
+        assert!(!task_after.awaiting_input);
+    }
+
+    /// Running orphans keep being swept (pre-existing behavior).
+    #[tokio::test]
+    async fn cleanup_still_fails_running_orphan_runs() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+
+        service.cleanup_orphan_executions().await.unwrap();
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Failed);
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.status, TaskStatus::Failed);
+        assert_eq!(task_after.active_session_id, None);
+    }
+
+    /// Terminal state is untouched: completed work must not be rewritten as
+    /// failed by the startup sweep.
+    #[tokio::test]
+    async fn cleanup_leaves_completed_runs_and_tasks_alone() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) =
+            seed_task_without_session(&service, TaskStatus::Completed, RunStatus::Completed).await;
+
+        service.cleanup_orphan_executions().await.unwrap();
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Completed);
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.status, TaskStatus::Completed);
     }
 
     #[test]

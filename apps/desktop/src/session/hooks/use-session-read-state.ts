@@ -8,7 +8,7 @@ import type { StoredTask } from "../types";
 
 type TaskDotFields = Pick<
   StoredTask,
-  "id" | "status" | "active_session_id" | "updated_at"
+  "id" | "status" | "active_session_id" | "updated_at" | "worktree_deleted"
 >;
 
 /**

@@ -8,21 +8,8 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@chro/ui/context-menu";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@chro/ui/dropdown-menu";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
-import {
-  Loader2,
-  MessagesSquare,
-  PinIcon,
-  Plus,
-  Terminal,
-  X,
-} from "lucide-react";
+import { Loader2, MessagesSquare, PinIcon, Plus, X } from "lucide-react";
 import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -324,30 +311,17 @@ function NewTabButton({ leafId }: { leafId: string }) {
   };
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          title="New tab"
-          className={cn(
-            "ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground",
-            "hover:text-foreground data-[state=open]:text-foreground",
-          )}
-        >
-          <Plus className="h-4 w-4" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44 text-xs">
-        <DropdownMenuItem onSelect={() => open({ type: "session" })}>
-          <MessagesSquare className="mr-2 h-3.5 w-3.5 opacity-70" />
-          New session
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => open({ type: "terminal" })}>
-          <Terminal className="mr-2 h-3.5 w-3.5 opacity-70" />
-          Terminal
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <button
+      type="button"
+      title="New session"
+      onClick={() => open({ type: "session" })}
+      className={cn(
+        "ml-1 inline-flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground",
+        "hover:text-foreground",
+      )}
+    >
+      <Plus className="h-4 w-4" />
+    </button>
   );
 }
 

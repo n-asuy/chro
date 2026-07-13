@@ -5,9 +5,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-type WindowMode = "onboarding" | "session";
-type DesktopExecutor = "CLAUDE_CODE" | "CODEX" | "PI";
-
 type UpdateStatus =
   | { type: "checking" }
   | { type: "available"; version: string; releaseNotes?: string | null }
@@ -35,16 +32,6 @@ type OpenProjectWindowResult = {
   // labels. Pass the label through verbatim so existing consumers can still
   // pattern-match on the action and treat the id as opaque.
   windowLabel: string;
-};
-
-type ExecutorInstallResult = {
-  ok: boolean;
-  executor: DesktopExecutor;
-  command: string;
-  strategy: string;
-  stdout: string;
-  stderr: string;
-  message: string;
 };
 
 const isTauri =
@@ -95,8 +82,6 @@ function installDesktopBridge() {
         "show_file_context_menu",
         { payload },
       ),
-    setWindowMode: (mode: WindowMode) =>
-      invoke<void>("set_window_mode", { mode }),
     showNotification: (payload: {
       title: string;
       body?: string;
@@ -109,8 +94,6 @@ function installDesktopBridge() {
     openPath: (path: string, app?: string) =>
       invoke<void>("open_path", { path, with: app ?? null }),
     openInCmux: (path: string) => invoke<void>("open_in_cmux", { path }),
-    installExecutor: (executor: DesktopExecutor) =>
-      invoke<ExecutorInstallResult>("install_executor", { executor }),
     update: {
       check: () =>
         invoke<{ status: string; updateInfo?: unknown; error?: string }>(

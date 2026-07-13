@@ -9,7 +9,6 @@ import {
   MessagesSquare,
   MonitorPlay,
   Settings,
-  Terminal,
 } from "lucide-react";
 import { getPaneItem } from "../registry/registry";
 import type { Tab } from "../types";
@@ -28,8 +27,6 @@ export function iconForKind(tab: Tab): LucideIcon | null {
       return FileDiff;
     case "settings":
       return Settings;
-    case "terminal":
-      return Terminal;
     case "globe":
       return Globe;
     case "monitor-play":
@@ -57,8 +54,6 @@ function defaultIconForKind(tab: Tab): LucideIcon | null {
       return FileDiff;
     case "settings":
       return Settings;
-    case "terminal":
-      return Terminal;
     case "browser":
       return Globe;
     case "cdp-browser":

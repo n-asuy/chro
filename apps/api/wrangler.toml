@@ -4,13 +4,20 @@ compatibility_date = "2025-03-10"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
+# Custom domain. Attaches api.chro-ai.com to this Worker on `wrangler deploy`
+# (Cloudflare provisions the proxied DNS record + edge cert). Requires the
+# deploy token to have Zone:DNS:Edit on the chro-ai.com zone.
+routes = [{ pattern = "api.chro-ai.com", custom_domain = true }]
+
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+# Pin worker-build to the crate's worker 0.7 line (newer worker-build releases
+# require worker >= 0.8 and fail the build otherwise).
+command = "cargo install -q worker-build@^0.7 && worker-build --release"
 
 [observability]
 enabled = true
 
 [[d1_databases]]
 binding = "APP_DB"
-database_name = "dev-chro"
+database_name = "dev-chronist"
 database_id = "47a3ea40-027e-4186-b53f-2b2dc18f2ff3"

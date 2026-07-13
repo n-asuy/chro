@@ -1,9 +1,11 @@
+import { FeedbackToggle } from "@/feedback/feedback-popover";
 import { useOptionalProjectContext } from "@/files/context/project-context";
 import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
-import { UpdateButton } from "@/system/update-button";
+import { ReleaseButton } from "@/system/release-button";
+import { CliStatusMenu } from "./cli-status-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,9 +50,10 @@ const isDarwin = (): boolean => runtimePlatform() === "darwin";
 /**
  * Slim window chrome bar. Project switching lives in the left-dock project tree
  * (see ProjectsDockPanel), so this bar carries the left-dock toggle (just past
- * the traffic lights), the update affordance (visible only when an update is
- * available), the global Settings entry, and the right-dock toggle. It reserves
- * the macOS traffic-light inset and serves as the window drag region.
+ * the traffic lights), the release/version chip (which opens the release-notes
+ * modal and doubles as the update prompt), the global Settings entry, and the
+ * right-dock toggle. It reserves the macOS traffic-light inset and serves as the
+ * window drag region.
  *
  * Dragging is driven by Tauri's `data-tauri-drag-region` attribute: Tauri only
  * starts a window drag when the moused-down element *itself* carries the
@@ -72,8 +75,10 @@ export function ProjectTabsHeader() {
     >
       <LeftSidebarToggle />
       <div data-tauri-drag-region className="min-w-0 flex-1" />
-      <UpdateButton />
+      <ReleaseButton />
       <OpenInMenu />
+      <CliStatusMenu />
+      <FeedbackToggle />
       <SettingsToggle />
       <RightSidebarToggle />
       {/* Trailing drag handle so the window can still be moved on macOS

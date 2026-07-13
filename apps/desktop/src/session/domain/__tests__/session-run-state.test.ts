@@ -169,13 +169,13 @@ describe("resolveCancelAction", () => {
     expect(action).toEqual({ type: "cancel-run", runId: "run-3" });
   });
 
-  it("aborts the in-flight create when no run exists yet", () => {
+  it("marks the in-flight create for cancellation when no run exists yet", () => {
     const action = resolveCancelAction(
       { cancelTargetRunId: null, isInCreateWindow: true },
       makePending(),
       false,
     );
-    expect(action).toEqual({ type: "abort-create", requestId: "req-1" });
+    expect(action).toEqual({ type: "cancel-create", requestId: "req-1" });
   });
 
   it("does nothing when nothing is cancelable", () => {

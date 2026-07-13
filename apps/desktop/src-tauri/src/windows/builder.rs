@@ -1,32 +1,21 @@
 use anyhow::{Context, Result};
 use serde_json::json;
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Runtime as TauriRuntime, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder,
+    AppHandle, LogicalSize, Manager, Runtime as TauriRuntime, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 use tracing::warn;
 use uuid::Uuid;
 
-use super::presets::{normalize_route_path, preset_for, WindowMode, WindowPreset};
+use super::presets::{normalize_route_path, WindowPreset};
 use crate::runtime::pool::WindowMeta;
 use crate::runtime::server::{platform_string, RuntimeContext};
 use crate::runtime::WindowPool;
 
 /// Options for spawning a new renderer window.
 pub struct RendererWindowOptions {
-    pub initial_mode: WindowMode,
     pub route_path: Option<String>,
     pub workspace_path: Option<String>,
-}
-
-impl Default for RendererWindowOptions {
-    fn default() -> Self {
-        Self {
-            initial_mode: WindowMode::Onboarding,
-            route_path: None,
-            workspace_path: None,
-        }
-    }
 }
 
 /// Create a new webview window backed by `runtime`. The renderer is loaded
@@ -39,7 +28,7 @@ pub async fn create_renderer_window<R: TauriRuntime>(
 ) -> Result<WebviewWindow<R>> {
     let label = format!("window-{}", Uuid::new_v4().simple());
     let route = normalize_route_path(options.route_path.as_deref());
-    let preset = preset_for(options.initial_mode);
+    let preset = WindowPreset::SESSION;
 
     let runtime_info = json!({
         "runtimeId": runtime.id,
@@ -56,7 +45,7 @@ pub async fn create_renderer_window<R: TauriRuntime>(
     let mut builder = WebviewWindowBuilder::new(app, label.clone(), url)
         .title("Chro")
         .visible(false)
-        .resizable(preset.fixed_size.is_none())
+        .resizable(true)
         .min_inner_size(preset.min_window_width as f64, preset.min_window_height as f64)
         // Tauri's native OS-level drag-drop handler is enabled by default and
         // swallows drag events before they reach the webview's DOM, so HTML5
@@ -90,10 +79,6 @@ pub async fn create_renderer_window<R: TauriRuntime>(
     let window = builder.build().context("build webview window")?;
     apply_constraints(&window, preset);
 
-    if preset.fixed_size.is_some() {
-        let _ = window.set_resizable(false);
-    }
-
     // Show after the renderer finishes its initial layout so the first paint
     // doesn't flash an empty frame.
     window.show().ok();
@@ -108,7 +93,6 @@ pub async fn create_renderer_window<R: TauriRuntime>(
             .workspace_path
             .as_deref()
             .and_then(crate::runtime::pool::normalize_workspace_path_for_key),
-        mode: options.initial_mode,
     })
     .await;
 
@@ -151,16 +135,6 @@ fn calculate_window_bounds<R: TauriRuntime>(
         None => (0, 0, 1440, 900),
     };
 
-    if let Some((fw, fh)) = preset.fixed_size {
-        let cx = work_x + (work_w - fw as i32) / 2;
-        let cy = work_y + (work_h - fh as i32) / 2;
-        return WindowBounds {
-            width: fw,
-            height: fh,
-            position: Some((cx, cy)),
-        };
-    }
-
     let ideal_w = (work_w as f64 * preset.width_ratio) as i32;
     let ideal_h = (work_h as f64 * preset.height_ratio) as i32;
     let w = ideal_w
@@ -180,44 +154,12 @@ fn calculate_window_bounds<R: TauriRuntime>(
     }
 }
 
-pub fn apply_constraints<R: TauriRuntime>(window: &WebviewWindow<R>, preset: WindowPreset) {
+fn apply_constraints<R: TauriRuntime>(window: &WebviewWindow<R>, preset: WindowPreset) {
     if let Err(err) = window.set_min_size(Some(LogicalSize::new(
         preset.min_window_width as f64,
         preset.min_window_height as f64,
     ))) {
         warn!("[windows] set_min_size failed: {err}");
     }
-
-    if let Some((fw, fh)) = preset.fixed_size {
-        if let Err(err) = window.set_size(LogicalSize::new(fw as f64, fh as f64)) {
-            warn!("[windows] set_size failed: {err}");
-        }
-        let _ = window.set_resizable(false);
-    } else {
-        let _ = window.set_resizable(true);
-    }
-
-    // Helper to silence unused warnings for the LogicalPosition import that we
-    // may or may not use depending on call site.
-    let _ = LogicalPosition::<f64>::new(0.0, 0.0);
-}
-
-/// Apply mode change to an existing window (recalculates bounds + constraints).
-pub fn set_window_mode<R: TauriRuntime>(
-    app: &AppHandle<R>,
-    window: &WebviewWindow<R>,
-    mode: WindowMode,
-) {
-    let preset = preset_for(mode);
-    apply_constraints(window, preset);
-    let bounds = calculate_window_bounds(app, preset);
-    if let Err(err) = window.set_size(LogicalSize::new(
-        bounds.width as f64,
-        bounds.height as f64,
-    )) {
-        warn!("[windows] set_size failed: {err}");
-    }
-    if let Some((x, y)) = bounds.position {
-        let _ = window.set_position(LogicalPosition::new(x as f64, y as f64));
-    }
+    let _ = window.set_resizable(true);
 }

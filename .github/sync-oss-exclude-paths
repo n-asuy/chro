@@ -4,9 +4,11 @@ docs/
 .claude/
 skills/
 skills-lock.json
-.github/workflows/desktop-release.yml
-.github/workflows/cli-release.yml
 .github/workflows/oss-sanitization.yml
 .github/workflows/sync-oss.yml
+.github/workflows/release-gate.yml
 .github/public-oss-ignore-rules.json
 tooling/scripts/check-oss-sanitization.mjs
+tooling/scripts/check-provenance.mjs
+tooling/scripts/check-provenance.test.mjs
+tooling/provenance/

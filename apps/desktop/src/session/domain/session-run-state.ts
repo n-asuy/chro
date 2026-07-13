@@ -32,8 +32,9 @@ export interface SessionRunState {
   isRunning: boolean;
   /**
    * A submission was sent but its real run has not appeared in the stream yet,
-   * so no cancelable run id exists. Cancelling here aborts the in-flight create
-   * request instead of calling the cancel RPC.
+   * so no cancelable run id exists. Cancelling here records a cancel intent on
+   * the in-flight create; the run is cancelled via RPC as soon as the create
+   * response returns its id.
    */
   isInCreateWindow: boolean;
   /** The run id to cancel, taken from the stream. Null in the create window. */
@@ -78,12 +79,13 @@ export function deriveSessionRunState({
 export type CancelAction =
   | { type: "none" }
   | { type: "cancel-run"; runId: string }
-  | { type: "abort-create"; requestId: string | null };
+  | { type: "cancel-create"; requestId: string | null };
 
 /**
  * Decide what cancelling should do, given the derived run state. A real run is
- * cancelled via its id; otherwise an in-flight create is aborted. Anything else
- * (already finished, or already stopping) is a no-op.
+ * cancelled via its id; otherwise the in-flight create is marked for
+ * cancellation once its run exists. Anything else (already finished, or
+ * already stopping) is a no-op.
  */
 export function resolveCancelAction(
   state: Pick<SessionRunState, "cancelTargetRunId" | "isInCreateWindow">,
@@ -98,7 +100,7 @@ export function resolveCancelAction(
   }
   if (state.isInCreateWindow) {
     return {
-      type: "abort-create",
+      type: "cancel-create",
       requestId: pendingSubmission?.requestId ?? null,
     };
   }

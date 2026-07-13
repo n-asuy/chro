@@ -1,5 +1,5 @@
 import { LanguageProvider } from "@/i18n";
-import { SetupModal } from "@/onboarding/setup-modal";
+import { OnboardingFlow } from "@/onboarding/onboarding-flow";
 import { SettingsModalProvider } from "@/settings/components/settings-modal-provider";
 import { useNotificationActivation } from "@/settings/hooks/use-notification-activation";
 import { useTaskCompletionNotifications } from "@/settings/hooks/use-task-completion-notifications";
@@ -37,7 +37,7 @@ function RootLayout() {
         <SettingsModalProvider>
           <Outlet />
         </SettingsModalProvider>
-        <SetupModal />
+        <OnboardingFlow />
       </LanguageProvider>
       <Toaster
         viewportClassName="bottom-4 right-4 top-auto left-auto w-auto items-end p-3"

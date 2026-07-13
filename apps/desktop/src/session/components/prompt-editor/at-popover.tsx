@@ -246,6 +246,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
               path: e.relativePath,
               is_file: true,
               match_type: "FileName",
+              line_matches: [],
             }));
           setDefaultFiles(files);
         })

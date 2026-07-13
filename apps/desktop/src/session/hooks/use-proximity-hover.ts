@@ -10,7 +10,7 @@ import {
 
 /**
  * Proximity-based hover tracking for a vertical (or horizontal) list of rows,
- * ported from fluidfunctionalism.com. Instead of per-row :hover, the container
+ * adapted from a reference proximity-hover pattern. Instead of per-row :hover, the container
  * tracks the pointer and activates the row whose center is closest, so a
  * single absolutely-positioned indicator can morph between rows.
  */

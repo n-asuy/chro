@@ -75,6 +75,8 @@ export interface CodeMirrorEditorHandle {
   findNext: () => void;
   findPrevious: () => void;
   clearSearch: () => void;
+  /** Scroll a 1-based line to the center of the viewport and place the cursor there. */
+  scrollToLine: (line: number) => void;
 }
 
 interface CodeMirrorEditorProps {
@@ -288,6 +290,17 @@ export const CodeMirrorEditor = forwardRef<
         effects: setSearchQuery.of(new SearchQuery({ search: "" })),
       });
       closeSearchPanel(view);
+    },
+    scrollToLine: (line: number) => {
+      const view = viewRef.current;
+      if (!view) return;
+      const clamped = Math.max(1, Math.min(line, view.state.doc.lines));
+      const info = view.state.doc.line(clamped);
+      view.dispatch({
+        selection: { anchor: info.from },
+        effects: EditorView.scrollIntoView(info.from, { y: "center" }),
+      });
+      view.focus();
     },
   }));
 

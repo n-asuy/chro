@@ -1,18 +1,16 @@
 //! Headless browser engine: a thin, native CDP layer over a real Chrome.
 //!
-//! This is the browser counterpart to the [`terminal`] crate. Where `terminal`
-//! owns VTE emulation and emits grid snapshots, this crate owns one CDP
-//! WebSocket to Chrome and emits the recipes the renderer/agent drive the page
-//! with — navigation, coordinate input, tab management, and a screencast frame
-//! stream. It performs no broadcasting and holds no session registry; that
-//! lifecycle lives one layer up (the server's `browser_session`), exactly as
-//! `pty` wraps `terminal`.
+//! This crate owns one CDP WebSocket to Chrome and emits the recipes the
+//! renderer/agent use to drive the page — navigation, coordinate input, tab
+//! management, and a screencast frame stream. It performs no broadcasting and
+//! holds no session registry; that lifecycle lives one layer up in the server's
+//! `browser_session` module.
 //!
 //! The CDP know-how (WS discovery across Chrome 136/144/147, real-page
 //! selection, per-session domain enablement, stale-session re-attach, the key
-//! descriptor table) is ported from browser-use/browser-harness; the harness
-//! itself — its Python CLI, Unix-socket daemon, and self-editing helpers — is
-//! deliberately not.
+//! descriptor table) is ported from a reference Python CDP automation daemon;
+//! that daemon's own surface — a Python CLI, a Unix-socket layer, and
+//! self-editing helpers — is deliberately not.
 
 mod discovery;
 mod error;
@@ -198,8 +196,8 @@ impl Browser {
 
     // --- input (coordinates in CSS pixels) ---
 
-    /// Click at viewport coordinates: a pressed/released pair, matching
-    /// browser-harness `click_at_xy`.
+    /// Click at viewport coordinates: a pressed/released pair, matching the
+    /// reference daemon's coordinate click.
     pub async fn click(&self, x: f64, y: f64, button: MouseButton, clicks: u32) -> Result<()> {
         let base = json!({
             "x": x, "y": y, "button": button.as_cdp(), "clickCount": clicks,
@@ -313,8 +311,8 @@ impl Browser {
         Ok(())
     }
 
-    /// Open a new tab. Created blank then navigated, mirroring browser-harness:
-    /// passing the URL to `createTarget` races attach.
+    /// Open a new tab. Created blank then navigated, mirroring the reference
+    /// daemon: passing the URL to `createTarget` races attach.
     pub async fn new_tab(&self, url: &str) -> Result<String> {
         let result = self
             .cdp

@@ -42,10 +42,6 @@ export type AskUserQuestion = {
   multiSelect: boolean;
 };
 
-export type AskUserQuestionInput = {
-  questions: AskUserQuestion[];
-};
-
 export type ToolResultValueType = "markdown" | "json";
 
 export type ToolResult = {

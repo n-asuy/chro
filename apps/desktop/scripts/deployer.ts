@@ -18,6 +18,8 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { redistCrtImports } from "./pe-imports";
+
 // Tauri replacement for the old electron-builder-driven deployer. The high
 // level shape (parseArgs / package / release / tag / upload) is preserved so
 // CI calling conventions stay the same. The interior switches to running
@@ -549,6 +551,8 @@ function detectBuildContexts(runArgs: string[]): TauriBuildContext[] {
   ];
 }
 
+const WINDOWS_MSVC_TRIPLE = "x86_64-pc-windows-msvc";
+
 // The chro-server sidecar links libsqlite3-sys, which compiles SQLite's C code
 // against the dynamic VC++ runtime by default. That binds the binary to
 // VCRUNTIME140.dll, which is absent on clean Windows machines (it ships with the
@@ -564,13 +568,45 @@ function detectBuildContexts(runArgs: string[]): TauriBuildContext[] {
 // CARGO_TARGET_<triple>_RUSTFLAGS is target-gated, so macOS/Linux builds are
 // untouched.
 function rustServerBuildEnv(triple: string): NodeJS.ProcessEnv | undefined {
-  if (triple !== "x86_64-pc-windows-msvc") {
+  if (triple !== WINDOWS_MSVC_TRIPLE) {
     return undefined;
   }
   return {
     CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS:
       "-C target-feature=+crt-static",
   };
+}
+
+// Fail the release if a Windows sidecar still depends on the redistributable
+// CRT. The static-CRT rustflag only reaches the `cc`-compiled C dependencies
+// (libsqlite3-sys, ring, …) if cargo propagates `crt-static` into
+// `CARGO_CFG_TARGET_FEATURE`; asserting the invariant on the shipped artifact
+// means a silently dynamic build can never ship as an unlaunchable app.
+//
+// The gate only blocks on a *positive* detection. If the PE cannot be parsed we
+// warn and continue rather than brick the Windows pipeline on our own tooling
+// gap — an unverifiable build is no worse off than before this check existed.
+function assertStaticCrt(exePath: string, label: string) {
+  let dynamicCrt: string[];
+  try {
+    dynamicCrt = redistCrtImports(readFileSync(exePath));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `WARNING: could not verify CRT linkage of ${label} sidecar ` +
+        `(${relativeToRepo(exePath)}): ${detail}. Confirm it is statically linked.`,
+    );
+    return;
+  }
+  if (dynamicCrt.length > 0) {
+    throw new Error(
+      `${label} sidecar ${relativeToRepo(exePath)} dynamically imports the VC++ ` +
+        `redistributable CRT (${dynamicCrt.join(", ")}); it must be statically ` +
+        `linked or it fails to launch on clean Windows machines with ` +
+        `"VCRUNTIME140.dll was not found".`,
+    );
+  }
+  console.log(`Verified ${label} sidecar is statically linked (no VC++ redist).`);
 }
 
 interface StandaloneBinarySpec {
@@ -628,6 +664,10 @@ function buildAndStageStandaloneBinary(spec: StandaloneBinarySpec) {
     rmSync(destinationPath, { force: true });
   }
   copyFileSync(sourcePath, destinationPath);
+
+  if (spec.triple === WINDOWS_MSVC_TRIPLE) {
+    assertStaticCrt(destinationPath, `${spec.baseName} (${spec.label})`);
+  }
 }
 
 // Stage every sidecar the bundle ships: the local server and the terminal CLI.

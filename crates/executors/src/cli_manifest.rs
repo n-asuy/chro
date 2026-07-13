@@ -110,7 +110,7 @@ pub const CODEX: CliManifest = CliManifest {
     home_env: Some("CODEX_HOME"),
     default_home: Some(".codex"),
     candidates: CODEX_CANDIDATES,
-    install_hint: "Install Codex CLI: `brew install --cask codex` or `npm install -g @openai/codex`, then sign in from Settings → Agents → Codex.",
+    install_hint: "Install Codex CLI: `npm install -g @openai/codex` (macOS: `brew install --cask codex`), then run `codex login` in a terminal.",
 };
 
 /// Manifest for the Claude Code CLI.
@@ -121,7 +121,7 @@ pub const CLAUDE: CliManifest = CliManifest {
     home_env: Some("CLAUDE_HOME"),
     default_home: Some(".claude"),
     candidates: CLAUDE_CANDIDATES,
-    install_hint: "Install Claude Code CLI: `curl -fsSL https://claude.ai/install.sh | bash` or `npm install -g @anthropic-ai/claude-code`.",
+    install_hint: "Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code` (macOS/Linux: `curl -fsSL https://claude.ai/install.sh | bash`), then run `claude` in a terminal and sign in with `/login`.",
 };
 
 /// Manifest for the pi CLI.
@@ -135,7 +135,7 @@ pub const PI: CliManifest = CliManifest {
     home_env: Some("PI_CODING_AGENT_DIR"),
     default_home: Some(".pi/agent"),
     candidates: PI_CANDIDATES,
-    install_hint: "Install pi: `npm install -g @earendil-works/pi-coding-agent`, then sign in with `/login` from Settings → Agents → pi.",
+    install_hint: "Install pi: `npm install -g @earendil-works/pi-coding-agent`, then run `pi` in a terminal and sign in with `/login`.",
 };
 
 /// Return the parent directories of every `UnderHome` / `Absolute` candidate

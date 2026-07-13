@@ -8,7 +8,7 @@ use chrono::Utc;
 use db::{
     models::{
         AgentProfile, ProjectRecord, TaskContextRef, TaskContextRefInput, TaskMerge, TaskRecord,
-        TaskRun, TaskRunLog, TaskSession,
+        TaskRun, TaskSession,
     },
     types::{RunStatus, TaskStatus},
 };
@@ -622,12 +622,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         // Cache the agent this task ran with so the session tab can show its
         // logo. Stored as the bare agent kind ("CLAUDE_CODE" / "CODEX").
-        TaskRecord::set_last_executor(
-            self.pool(),
-            task.id,
-            &executor_profile.executor.to_string(),
-        )
-        .await?;
+        TaskRecord::set_last_executor(self.pool(), task.id, &executor_profile.executor.to_string())
+            .await?;
 
         if reused_existing_run {
             let execution_prompt = provided_prompt.clone().unwrap_or_else(|| task.to_prompt());
@@ -647,6 +643,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .await;
         }
 
+        // Everything past this point provisions a run row that already exists
+        // (worktree creation, session insert, executor spawn). If any step
+        // fails, the run must still reach a terminal state: a run left Pending
+        // here is a zombie session with no executor, no logs, and an
+        // in-progress task that survives restarts.
+        let run_id = run.id;
+        let owning_task_id = task.id;
+        let provision: Result<ExecutionSessionStart, RuntimeError> = async {
         self.lifecycle().mark_in_progress(&task).await?;
 
         let execution_prompt = provided_prompt.unwrap_or_else(|| task.to_prompt());
@@ -867,6 +871,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             project,
             executor_session_id: session.id,
         })
+        }
+        .await;
+
+        match provision {
+            Ok(start) => Ok(start),
+            Err(err) => {
+                self.fail_unlaunched_run(run_id, owning_task_id, &err).await;
+                Err(err)
+            }
+        }
     }
 
     /// Follow up on an existing execution with a new message.
@@ -1002,14 +1016,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         new_run.container_ref = previous_run.container_ref.clone();
         new_run.workspace_path = previous_run.workspace_path.clone();
         new_run.resume_session_id = resume_session_id.clone();
-        // Inherit the Claude execution engine pinned at the session's birth so a
-        // PTY-born session is never resumed headless (or vice versa). The global
-        // setting seeds new sessions only; it must not leak into follow-ups.
-        new_run.claude_execution_mode = previous_run.claude_execution_mode.clone();
         new_run.status = RunStatus::Running;
         new_run.started_at = Some(Utc::now());
         new_run.insert(self.pool()).await?;
 
+        // As in start_execution_session: once the run row exists, any
+        // provisioning failure must land the run in a terminal state instead
+        // of leaving a Running row with no executor behind it.
+        let run_id = new_run.id;
+        let owning_task_id = task.id;
+        let provision: Result<ExecutionSessionStart, RuntimeError> = async {
         info!(
             new_task_run_id = %new_run.id,
             previous_task_run_id = %run_id,
@@ -1087,6 +1103,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             project,
             executor_session_id: session.id,
         })
+        }
+        .await;
+
+        match provision {
+            Ok(start) => Ok(start),
+            Err(err) => {
+                self.fail_unlaunched_run(run_id, owning_task_id, &err).await;
+                Err(err)
+            }
+        }
     }
 
     async fn resolve_resume_session_id_for_follow_up(
@@ -1118,7 +1144,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         // Last resort: recover session_id from persisted run logs.
-        let entries = TaskRunLog::fetch_entries(self.pool(), previous_run.id).await?;
+        let entries = self.runtime().fetch_logs(previous_run.id).await?;
         if let Some(session_id) = extract_session_id_from_entries(&entries) {
             if let Err(err) = sqlx::query(
                 "UPDATE task_sessions SET external_session_id = ?, updated_at = datetime('now') WHERE task_run_id = ?",
@@ -1282,6 +1308,43 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         })
         .await
         .map(|result| result.execution)
+    }
+
+    /// Best-effort terminal transition for a run whose provisioning failed
+    /// before the executor launched. Marks the run Failed (which also settles
+    /// the task status) and clears the task's live-session pointer so the
+    /// sidebar never shows a forever-running session for a run that has no
+    /// executor behind it.
+    async fn fail_unlaunched_run(&self, run_id: Uuid, task_id: Uuid, err: &RuntimeError) {
+        warn!(
+            task_run_id = %run_id,
+            task_id = %task_id,
+            error = %err,
+            "execution provisioning failed; marking run as failed"
+        );
+        if let Err(mark_err) = self
+            .update_execution_status(run_id, RunStatus::Failed, None)
+            .await
+        {
+            warn!(
+                task_run_id = %run_id,
+                error = %mark_err,
+                "failed to mark unlaunched run as failed"
+            );
+        }
+        if let Err(clear_err) = sqlx::query(
+            "UPDATE task_records SET active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(task_id)
+        .execute(self.pool())
+        .await
+        {
+            warn!(
+                task_id = %task_id,
+                error = %clear_err,
+                "failed to clear active session pointer for unlaunched run"
+            );
+        }
     }
 
     pub async fn update_execution_status(
@@ -1449,13 +1512,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         // polled endpoint never blocks an async worker thread.
         let git = self.runtime().git().clone();
         let repo_path = project.git_repo_path.clone();
-        let branches =
-            crate::perf::spawn_blocking_instrumented("git.list_branches", move || {
-                git.list_branches(&repo_path)
-            })
-            .await
-            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git list-branches task failed: {e}")))?
-            .map_err(RuntimeError::from)?;
+        let branches = crate::perf::spawn_blocking_instrumented("git.list_branches", move || {
+            git.list_branches(&repo_path)
+        })
+        .await
+        .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git list-branches task failed: {e}")))?
+        .map_err(RuntimeError::from)?;
         Ok(branches)
     }
 
@@ -1535,7 +1597,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 (in_rebase, conflicts, op, status)
             })
             .await
-            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git branch-status task failed: {e}")))?;
+            .map_err(|e| {
+                RuntimeError::Other(anyhow::anyhow!("git branch-status task failed: {e}"))
+            })?;
 
         match status {
             Ok((ahead, behind)) => Ok(TaskRunBranchStatus {

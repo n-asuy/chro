@@ -29,7 +29,7 @@ Chro はローカルファーストの AI コーディングエージェント�
 
 ### 主要ワークフロー(=絶対に壊せない体験)
 1. プロジェクト(Gitリポジトリ)を開く → ワークスペースとしてファイルツリー表示
-2. タスク作成 → エージェント割当て → worktree 生成 → PTY でエージェント実行
+2. タスク作成 → エージェント割当て → worktree 生成 → 構造化プロトコルでエージェント実行
 3. ライブストリーミング: ログ(JSON Patch over WebSocket)、diff、ターミナルスナップショット(canvas描画)
 4. 承認ゲート(センシティブ操作の approval)
 5. diff レビュー → マージ/破棄
@@ -47,13 +47,12 @@ apps/api/          Cloudflare Workers (Rust→WASM, D1)。waitlist/invite/Clerk 
                    ローカルサーバとはコード共有なし(別ドメイン)
 apps/mobile/       React Native プレースホルダ(実装ほぼなし)
 packages/ui/       Radix + Tailwind 4 の共有コンポーネント(18個)
-crates/ (20)       Cargo ワークスペースなし。各クレート独立
+crates/ (19)       Cargo ワークスペースなし。各クレート独立
   server/  (~9.0k LOC)  Axum。routes/rpc/ に12ドメインルータ(~110 エンドポイント)
   db/      (~3.5k LOC)  SQLx + SQLite。migrations 6本。journal_mode=DELETE(意図的)
-  executors/ (~11.1k)   Claude Code (PTY + hooks + transcript tail) / Codex (process group)
+  executors/ (~11.1k)   Claude Code (headless stream-json) / Codex・pi (structured process protocol)
   local-runtime/ (~3.2k) 実行コンテナ、ログ捕捉、housekeeping
   runtime/ (~2.3k)      Runtime trait 抽象
-  terminal/             alacritty_terminal によるヘッドレス端末エミュレーション(スナップショット生成)
   log-types/            ワイヤ型 (LogEntry: Stdout/Stderr/JsonPatch/SessionId/UiEvent/...)
   他: events, git, worktree, diff-stream, filesystem, napi-filesystem, approvals,
       config, analytics, image, file-search-cache, skills, browser
@@ -62,7 +61,6 @@ crates/ (20)       Cargo ワークスペースなし。各クレート独立
 ### データフロー
 - フロント → `desktopFetch()` (`apps/desktop/src/lib/backend-client.ts:19-33`) → 11個の `*-client.ts` → `/rpc/*`
 - ライブ更新: `/streams/*` WebSocket → RFC 6902 JSON Patch → `use-json-patch-ws-stream.ts` ほか複数フック
-- ターミナル: Rust `crates/terminal` がセルグリッドスナップショット → `canvas-terminal.ts` (811行) が canvas 描画
 - バックエンドポートは動的。`/tmp/chro/chro.port` 経由で解決
 - Rust↔TS のワイヤ型は手動同期(codegen なし)
 
@@ -76,10 +74,9 @@ crates/ (20)       Cargo ワークスペースなし。各クレート独立
 4. sidecar 起動シーケンス: ポート探索 → `CHRO_PARENT_PID` → `/health` ポーリング → port ファイル書込(`apps/desktop/src-tauri/src/runtime/server.rs`)
 5. SQLite スキーマと migration 履歴(`crates/db/migrations/`)・保存済みデータ互換性
 6. `CLAUDECODE` / `CLAUDE_CODE_*` 環境変数のフィルタリング(`crates/executors/src/executors/claude.rs:353`)— 子プロセス起動の必須要件
-7. ターミナル描画の見た目(ANSI 16/256/RGB パレット、フラグ処理 — `canvas-terminal.ts`)
-8. WebSocket 再接続の指数バックオフと、ウィンドウ非表示時の `setTimeout(0)` バッチング(`use-json-patch-ws-stream.ts` — rAF 停止対策として意図的)
-9. UI 原則: ユーザー操作なしに viewport がスクロール・ジャンプ・シフトしない(プロジェクト原則)
-10. i18n: en / ja の文言は必ず同時に更新(片方だけの変更禁止)
+7. WebSocket 再接続の指数バックオフと、ウィンドウ非表示時の `setTimeout(0)` バッチング(`use-json-patch-ws-stream.ts` — rAF 停止対策として意図的)
+8. UI 原則: ユーザー操作なしに viewport がスクロール・ジャンプ・シフトしない(プロジェクト原則)
+9. i18n: en / ja の文言は必ず同時に更新(片方だけの変更禁止)
 
 ## 既知の誤検出リスト(削除・修正してはならないもの)
 
@@ -239,7 +236,7 @@ CI (`.github/workflows/check.yml`) は **lint + typecheck のみ**。テスト�
 - 可否: **提案のみ**。統合案を報告書に書くこと。実装しない
 
 ### Debt-10: Rust↔TS 契約の手動同期 【テスト追加のみ実装可】
-- 根拠: `crates/log-types/src/lib.rs:23-53` の `LogEntry`、`crates/terminal` の `TerminalSnapshot` を TS 側(`use-task-log-stream.ts`、`canvas-terminal.ts:9-35`)が手書きミラー。codegen・契約テストなし
+- 根拠: `crates/log-types/src/lib.rs:23-53` の `LogEntry` を TS 側(`use-task-log-stream.ts`)が手書きミラー。codegen・契約テストなし
 - なぜ負債か: 型のズレがコンパイルで検知できない
 - 改善案: Rust 側でシリアライズした JSON fixture を生成し、TS 側テストが同じ fixture をパースする「契約フィクスチャテスト」を追加(ワイヤ形式は一切変えない)。**codegen(ts-rs 等)の導入は設計判断 → 提案のみ**
 - 検証: 新規テストが両側で通る

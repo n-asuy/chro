@@ -9,9 +9,20 @@ import {
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useArchivedSessions } from "@/session/hooks";
 import type { StoredTask } from "@/session/types";
+import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import { useNavigate } from "@tanstack/react-router";
-import { BookOpen, Images, Plus, Search } from "lucide-react";
-import { useMemo } from "react";
+import {
+  BookOpen,
+  ChevronDown,
+  Images,
+  MessageSquare,
+  Plus,
+  Search,
+} from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { useNewChat } from "../hooks/use-new-chat";
+import { useProjectNavigation } from "../hooks/use-project-navigation";
+import { useOpenProjectsStore } from "../state/open-projects-store";
 import { useRightDockStore } from "../state/right-dock-store";
 import { QuickAction } from "./quick-action";
 
@@ -75,11 +86,31 @@ const RECENT_LIMIT = 8;
  * dropping straight into the last open tab.
  */
 export function ProjectOverview() {
-  const { project, projectSlug } = useProjectContext();
+  const { project, projectSlug, isScratch } = useProjectContext();
   const navigate = useNavigate();
   const focusSearchPanel = useRightDockStore((s) => s.focusSearchPanel);
   const projectTasks = useOptionalProjectTasks();
   const { isArchived } = useArchivedSessions();
+  const openProjects = useOpenProjectsStore((s) => s.projects);
+  const { activateProject } = useProjectNavigation();
+  const openChats = useNewChat();
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [switcherQuery, setSwitcherQuery] = useState("");
+
+  const handleSwitcherOpenChange = useCallback((next: boolean) => {
+    setSwitcherOpen(next);
+    if (!next) setSwitcherQuery("");
+  }, []);
+
+  const filteredProjects = useMemo(() => {
+    const q = switcherQuery.trim().toLowerCase();
+    if (!q) return openProjects;
+    return openProjects.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.workspacePath ?? "").toLowerCase().includes(q),
+    );
+  }, [openProjects, switcherQuery]);
 
   const recentSessions = useMemo(() => {
     const tasks = (projectTasks?.tasks ?? []).filter(
@@ -139,13 +170,92 @@ export function ProjectOverview() {
             edges, instead of cutting them off under `justify-center`. */}
         <div className="flex min-h-full min-w-max items-center justify-center px-6 py-10">
           <div className="flex w-72 shrink-0 flex-col gap-6 text-sm">
-            {projectName ? (
-              <div className="flex items-center gap-2">
-                <FolderSolidIcon className="h-4 w-4 shrink-0 opacity-70" />
-                <h1 className="min-w-0 truncate text-base font-medium">
-                  {projectName}
-                </h1>
-              </div>
+            {isScratch || projectName ? (
+              // The header is always a searchable switcher: pick any project
+              // open in the left panel, or jump back to Chats. Scratch keeps the
+              // "General" project nameless by showing "Chats" as its label.
+              <Popover
+                open={switcherOpen}
+                onOpenChange={handleSwitcherOpenChange}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="-mx-1 flex items-center gap-2 rounded-md px-1 py-0.5 text-left transition hover:bg-muted"
+                  >
+                    <FolderSolidIcon className="h-4 w-4 shrink-0 opacity-70" />
+                    <h1 className="min-w-0 truncate text-base font-medium">
+                      {isScratch ? "Chats" : projectName}
+                    </h1>
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  side="bottom"
+                  sideOffset={6}
+                  className="w-64 rounded-xl border border-border bg-popover p-0 shadow-sm"
+                >
+                  <div className="flex items-center gap-2 border-border border-b px-2.5 py-2">
+                    <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    {/* Radix PopoverContent focuses its first focusable child
+                        on open, so this input receives focus automatically. */}
+                    <input
+                      value={switcherQuery}
+                      onChange={(event) => setSwitcherQuery(event.target.value)}
+                      placeholder="Switch to project…"
+                      className="w-full bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none"
+                    />
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-1">
+                    {/* Jump back to the general Chats overview. Hidden when
+                        already there. */}
+                    {!isScratch ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSwitcherOpenChange(false);
+                          openChats();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-foreground transition hover:bg-muted"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate">Chats</span>
+                      </button>
+                    ) : null}
+                    {filteredProjects.map((openProject) => (
+                      <button
+                        key={openProject.id}
+                        type="button"
+                        onClick={() => {
+                          activateProject(openProject);
+                          handleSwitcherOpenChange(false);
+                        }}
+                        className="flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition hover:bg-muted"
+                      >
+                        <span className="w-full truncate text-[13px] text-foreground">
+                          {openProject.name}
+                        </span>
+                        {openProject.workspacePath ? (
+                          <span
+                            className="w-full truncate text-[10px] text-muted-foreground"
+                            title={openProject.workspacePath}
+                          >
+                            {openProject.workspacePath}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                    {filteredProjects.length === 0 && isScratch ? (
+                      <div className="px-2 py-2 text-center text-[12px] text-muted-foreground">
+                        {openProjects.length === 0
+                          ? "No open projects"
+                          : "No matches"}
+                      </div>
+                    ) : null}
+                  </div>
+                </PopoverContent>
+              </Popover>
             ) : null}
             <section className="flex flex-col gap-3">
               <div className="text-xs uppercase tracking-wider opacity-60">

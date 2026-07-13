@@ -1,4 +1,3 @@
-import { APCAcontrast, sRGBtoY } from "apca-w3";
 import { type Rgb, converter } from "culori";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -9,6 +8,7 @@ import {
   deriveAccentVars,
   deriveAccentVarsSafe,
 } from "./accent-derivation";
+import { contrastRatio } from "./contrast";
 
 const toRgb = converter("rgb");
 const toOklch = converter("oklch");
@@ -47,12 +47,8 @@ function seedHue(seed: string): number {
   return oklch?.h ?? 0;
 }
 
-function apca(text: string | Rgb, bg: string | Rgb): number {
-  return Math.abs(
-    Number(
-      APCAcontrast(sRGBtoY(rgb255(asRgb(text))), sRGBtoY(rgb255(asRgb(bg)))),
-    ),
-  );
+function contrast(text: string | Rgb, bg: string | Rgb): number {
+  return contrastRatio(rgb255(asRgb(text)), rgb255(asRgb(bg)));
 }
 
 const SEEDS = {
@@ -127,14 +123,14 @@ describe("deriveAccentVars", () => {
         const fg = toRgb(hslTripletToColor(vars["--primary-foreground"]));
         const primaryOklch = toOklch(primary);
 
-        it("keeps the text-on-accent foreground readable (APCA Lc >= 45)", () => {
-          expect(apca(fg, primary)).toBeGreaterThanOrEqual(45);
+        it("keeps the text-on-accent foreground readable (WCAG contrast >= 3)", () => {
+          expect(contrast(fg, primary)).toBeGreaterThanOrEqual(3);
         });
 
-        it("keeps the accent distinguishable from the surface (APCA Lc >= 20)", () => {
-          expect(apca(primary, MODE_ANCHORS[mode].bg)).toBeGreaterThanOrEqual(
-            20,
-          );
+        it("keeps the accent distinguishable from the surface (WCAG contrast >= 1.5)", () => {
+          expect(
+            contrast(primary, MODE_ANCHORS[mode].bg),
+          ).toBeGreaterThanOrEqual(1.5);
         });
 
         it("floors chroma so the ring never vanishes on neutral surfaces", () => {

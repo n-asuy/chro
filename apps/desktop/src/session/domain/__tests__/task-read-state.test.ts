@@ -71,4 +71,34 @@ describe("deriveTaskStatusDot", () => {
     const task = makeTask({ status: "failed" });
     expect(deriveTaskStatusDot(task, "not-a-date")).toBe("failed");
   });
+
+  it("marks a worktree-cleaned-up session regardless of read state", () => {
+    // The reclaimed worktree is a structural fact: it must be visible whether
+    // or not the terminal result was already viewed.
+    const unviewed = makeTask({ status: "completed", worktree_deleted: true });
+    expect(deriveTaskStatusDot(unviewed, null)).toBe("cleaned");
+
+    const viewed = makeTask({
+      status: "completed",
+      worktree_deleted: true,
+      updated_at: "2025-01-01T00:00:00.000Z",
+    });
+    expect(deriveTaskStatusDot(viewed, "2025-01-02T00:00:00.000Z")).toBe(
+      "cleaned",
+    );
+  });
+
+  it("takes precedence over an unread failure", () => {
+    const task = makeTask({ status: "failed", worktree_deleted: true });
+    expect(deriveTaskStatusDot(task, null)).toBe("cleaned");
+  });
+
+  it("still shows the spinner (no dot) when a cleaned task is somehow running", () => {
+    const task = makeTask({
+      status: "in_progress",
+      worktree_deleted: true,
+      active_session_id: "run-1",
+    });
+    expect(deriveTaskStatusDot(task, null)).toBeNull();
+  });
 });

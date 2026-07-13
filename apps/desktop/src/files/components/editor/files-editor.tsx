@@ -169,6 +169,7 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     openFile,
     selectNode,
     fileContentVersion,
+    editorReveal,
   } = useFilesStore();
   const { expandToPath } = useFileTreeStore();
   const editorFilePath = path ?? currentFilePath;
@@ -215,6 +216,32 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   const [titleDraft, setTitleDraft] = useState("");
   const [titleError, setTitleError] = useState<string | null>(null);
   const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+
+  // Scroll the editor to a requested line (e.g. a full-text search hit) once the
+  // matching file's content has loaded. Handled-token tracking prevents
+  // re-scrolling as unrelated state (content reloads) settles.
+  const handledRevealTokenRef = useRef(0);
+  useEffect(() => {
+    if (!editorReveal) return;
+    if (editorReveal.token === handledRevealTokenRef.current) return;
+    const target = editorFilePath;
+    if (!target) return;
+    const stripSlash = (p: string) => p.replace(/^\/+/, "");
+    if (stripSlash(editorReveal.path) !== stripSlash(target)) return;
+    // Wait until the loaded content belongs to this file, so CodeMirror has the
+    // document to scroll within.
+    if (!loadedFilePath || stripSlash(loadedFilePath) !== stripSlash(target)) {
+      return;
+    }
+    handledRevealTokenRef.current = editorReveal.token;
+    const line = editorReveal.line;
+    // Defer one frame so the CodeMirror view has rebuilt for freshly loaded
+    // content before we scroll it.
+    const raf = requestAnimationFrame(() => {
+      editorRef.current?.scrollToLine(line);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [editorReveal, editorFilePath, loadedFilePath]);
 
   // Frontmatter state - parsed from content
   const [frontmatter, setFrontmatter] = useState<Frontmatter>({});

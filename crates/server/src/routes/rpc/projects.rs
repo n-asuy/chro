@@ -647,7 +647,20 @@ struct ProjectSearchQuery {
     q: String,
     #[serde(default)]
     mode: Option<String>,
+    /// "name" (default) searches file names/paths; "content" runs full-text search.
+    #[serde(default)]
+    kind: Option<String>,
+    /// "sensitive" / "insensitive" overrides content-search smart-case; absent = smart.
+    #[serde(default)]
+    case: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectLineMatch {
+    line_number: u64,
+    line_content: String,
+    ranges: Vec<[u32; 2]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -655,12 +668,17 @@ struct ProjectSearchResult {
     path: String,
     is_file: bool,
     match_type: String,
+    /// Matching lines for content search; empty for name/path results.
+    line_matches: Vec<ProjectLineMatch>,
 }
 
 #[derive(Debug, Serialize)]
 struct ProjectSearchResponse {
     results: Vec<ProjectSearchResult>,
 }
+
+/// Matching lines kept per file in a content search.
+const CONTENT_MAX_LINES_PER_FILE: usize = 20;
 
 async fn search_project_files(
     State(state): State<AppState>,
@@ -669,7 +687,8 @@ async fn search_project_files(
 ) -> Result<Json<ProjectSearchResponse>, ApiError> {
     use file_search_cache::{CacheError, SearchMatchType, SearchMode};
 
-    if query.q.trim().is_empty() {
+    let needle = query.q.trim();
+    if needle.is_empty() {
         return Err(ApiError::BadRequest(
             "query parameter 'q' is required".into(),
         ));
@@ -677,6 +696,46 @@ async fn search_project_files(
 
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
+
+    // Full-text content search: grouped line matches with highlight ranges.
+    // This is stateless (a fresh repository walk), independent of the name cache.
+    if query.kind.as_deref() == Some("content") {
+        let case_sensitive = match query.case.as_deref() {
+            Some("sensitive") => Some(true),
+            Some("insensitive") => Some(false),
+            _ => None,
+        };
+        let hits = file_search_cache::search_content_grouped(
+            &project_path,
+            needle,
+            case_sensitive,
+            limit,
+            CONTENT_MAX_LINES_PER_FILE,
+        )?;
+
+        let results = hits
+            .into_iter()
+            .map(|hit| ProjectSearchResult {
+                path: hit.path,
+                is_file: true,
+                match_type: "ContentMatch".to_string(),
+                line_matches: hit
+                    .matches
+                    .into_iter()
+                    .map(|m| ProjectLineMatch {
+                        line_number: m.line_number,
+                        line_content: m.line_content,
+                        ranges: m.ranges,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        return Ok(Json(ProjectSearchResponse { results }));
+    }
+
+    // Name/path search (default): resolves a known filename without scanning
+    // file contents.
     let mode = match query.mode.as_deref() {
         Some("settings") => SearchMode::Settings,
         _ => SearchMode::TaskForm,
@@ -684,13 +743,11 @@ async fn search_project_files(
 
     let file_search_cache = state.runtime().file_search_cache();
     let search_results = match file_search_cache
-        .search(&project_path, query.q.trim(), mode)
+        .search(&project_path, needle, mode, limit)
         .await
     {
         Ok(results) => results,
-        Err(CacheError::Miss) => {
-            file_search_cache.search_fallback(&project_path, query.q.trim(), limit)?
-        }
+        Err(CacheError::Miss) => file_search_cache.search_fallback(&project_path, needle, limit)?,
         Err(CacheError::BuildError(e)) => {
             return Err(ApiError::Runtime(RuntimeError::Other(anyhow::anyhow!(
                 "Search cache build error: {}",
@@ -711,6 +768,7 @@ async fn search_project_files(
                 SearchMatchType::FullPath => "FullPath".to_string(),
                 SearchMatchType::ContentMatch => "ContentMatch".to_string(),
             },
+            line_matches: Vec::new(),
         })
         .collect();
 

@@ -12,13 +12,6 @@ import type { StoredTask } from "../types";
  */
 export type SessionGroupMode = "none" | "project" | "status" | "date";
 
-export const SESSION_GROUP_MODES: readonly SessionGroupMode[] = [
-  "none",
-  "project",
-  "status",
-  "date",
-];
-
 export const isSessionGroupMode = (value: unknown): value is SessionGroupMode =>
   value === "none" ||
   value === "project" ||
@@ -137,6 +130,35 @@ export interface GroupSessionsInput {
   /** Reference "now" (ms) for `date` bucketing. */
   now: number;
   labels: GroupLabels;
+}
+
+/**
+ * Order the Pinned section. Pinning is manual, but an urgent pinned item must
+ * not stay frozen at its pin-time slot, so sessions waiting on the user float to
+ * the top, then failures, then everything else by most-recently-pinned. `pins`
+ * maps a task id to its ISO pin time.
+ */
+export function sortPinnedSessions(
+  tasks: readonly StoredTask[],
+  pins: Record<string, string>,
+): StoredTask[] {
+  const urgencyRank = (task: StoredTask): number => {
+    const state = deriveSessionState(task);
+    if (state === "needs_input") return 0;
+    if (state === "failed") return 1;
+    return 2;
+  };
+  const pinnedAt = (id: string): number => {
+    const at = pins[id];
+    if (!at) return 0;
+    const ms = new Date(at).getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  };
+  return [...tasks].sort((a, b) => {
+    const rank = urgencyRank(a) - urgencyRank(b);
+    if (rank !== 0) return rank;
+    return pinnedAt(b.id) - pinnedAt(a.id);
+  });
 }
 
 /**

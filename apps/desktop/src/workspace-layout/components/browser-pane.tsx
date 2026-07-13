@@ -488,7 +488,7 @@ const collectTabIds = (node: PaneNode, out: Set<string>) => {
 };
 
 /** Dispose browser sessions whose tab no longer exists in the layout, killing
- * the backing Chrome. Mirrors the terminal pane's reaper. */
+ * the backing Chrome. */
 const reapClosedSessions = (layout: PaneLayout | null) => {
   if (!layout) return;
   const live = new Set<string>();

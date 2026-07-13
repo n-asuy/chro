@@ -8,7 +8,6 @@ use std::{
 
 use chrono::Local;
 use codex_protocol::protocol::SessionSource;
-use regex::Regex;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -32,29 +31,6 @@ pub enum SessionError {
 pub struct SessionHandler;
 
 impl SessionHandler {
-    pub fn extract_session_id_from_rollout_path(
-        rollout_path: PathBuf,
-    ) -> Result<String, SessionError> {
-        let filename = rollout_path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .ok_or_else(|| SessionError::Format("Invalid rollout path".to_string()))?;
-
-        let re = Regex::new(
-            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$",
-        )
-        .map_err(|e| SessionError::Format(format!("Regex error: {e}")))?;
-
-        re.captures(filename)
-            .and_then(|caps| caps.get(1))
-            .map(|uuid| uuid.as_str().to_string())
-            .ok_or_else(|| {
-                SessionError::Format(format!(
-                    "Could not extract session id from filename: {filename}"
-                ))
-            })
-    }
-
     /// Find codex rollout file path for given session_id. Used during follow-up execution.
     pub fn find_rollout_file_path(session_id: &str) -> Result<PathBuf, SessionError> {
         let sessions_dir = Self::sessions_root()?;

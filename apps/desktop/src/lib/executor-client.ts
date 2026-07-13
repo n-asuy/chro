@@ -6,10 +6,6 @@ export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX" | "PI";
 // Reasoning effort (Codex only; matches ReasoningEffort enum in Rust, kebab-case)
 export type ReasoningEffort = "low" | "medium" | "high" | "x-high";
 
-// How Claude Code runs (matches ClaudeExecutionMode enum in Rust, snake_case).
-// "pty" hosts the interactive TUI; "print" runs headless `claude -p`.
-export type ClaudeExecutionMode = "pty" | "print";
-
 // Current executor profile selection
 export type ExecutorProfileId = {
   executor: BaseCodingAgent;
@@ -30,32 +26,11 @@ export type ExecutorConfigs = {
 type ExecutorProfileResponse = {
   profile: ExecutorProfileId;
   profiles: ExecutorConfigs;
-  claude_execution_mode: ClaudeExecutionMode;
 };
 
 export type UpdateExecutorProfileRequest = {
   executor?: BaseCodingAgent;
   variant?: string | null;
-  claude_execution_mode?: ClaudeExecutionMode;
-};
-
-type ClaudeVersionResult =
-  | {
-      ok: true;
-      version: string;
-      command: string;
-      resolved_path: string | null;
-    }
-  | {
-      ok: false;
-      error: "COMMAND_NOT_FOUND" | "EXECUTION_FAILED" | "UNEXPECTED_ERROR";
-      message: string;
-      command: string | null;
-      resolved_path: string | null;
-    };
-
-export const detectClaudeVersion = async (): Promise<ClaudeVersionResult> => {
-  return desktopFetch<ClaudeVersionResult>("/rpc/executor/detect");
 };
 
 export const fetchExecutorProfile =
@@ -96,18 +71,6 @@ export const checkMcpStatus = async (
   );
 };
 
-// Auth status types (matches AvailabilityInfo enum in Rust)
-export type AvailabilityInfo =
-  | { type: "LOGIN_DETECTED"; last_auth_timestamp: number }
-  | { type: "INSTALLATION_FOUND" }
-  | { type: "NOT_FOUND" };
-
-export type AuthStatusResult = {
-  claude_code: AvailabilityInfo;
-  codex: AvailabilityInfo;
-  pi: AvailabilityInfo;
-};
-
 export type ExecutorInstallInfo = {
   installed: boolean;
   command: string;
@@ -122,11 +85,8 @@ export type ExecutorInstallStatusResult = {
   git: ExecutorInstallInfo;
 };
 
-export type InstallableTool = BaseCodingAgent | "GIT";
-
-export const fetchAuthStatus = async (): Promise<AuthStatusResult> => {
-  return desktopFetch<AuthStatusResult>("/rpc/executor/auth-status");
-};
+/** Tools whose presence onboarding reports. Chro detects, it does not install. */
+export type DetectableTool = BaseCodingAgent | "GIT";
 
 // A pi model the user can select. `value` is pi's `provider/id` form, passed
 // verbatim as `--model`; `label` is the human-facing name.

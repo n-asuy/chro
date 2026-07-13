@@ -29,8 +29,7 @@ pub fn create_stdout_pipe_writer<'b>(
 
 /// Create a standalone pipe shaped like a child's stdout: the read end can be
 /// presented to the container as `ChildStdout`, the write end is an async
-/// writer the executor pushes structured log lines into. Used by executors
-/// whose real process has no useful stdout (PTY-hosted agents).
+/// writer the executor pushes structured protocol lines into.
 pub fn create_log_line_pipe()
 -> Result<(tokio::process::ChildStdout, tokio::fs::File), ExecutorError> {
     let (pipe_reader, pipe_writer) = os_pipe::pipe().map_err(|e| {

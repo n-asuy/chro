@@ -5,8 +5,8 @@ import type { ReactNode } from "react";
 import { TextShimmer } from "./text-shimmer";
 
 /**
- * Chain-of-thought timeline for agent working steps, ported from
- * fluidfunctionalism.com's thinking-steps component: a collapsible header
+ * Chain-of-thought timeline for agent working steps, adapted from a
+ * reference collapsible-timeline UI pattern: a collapsible header
  * followed by steps connected with a vertical line in the icon column.
  * Adapted to chro's stack — framer-motion only (no Radix accordion), lucide
  * icons passed directly, and TextShimmer for the active state.

@@ -102,7 +102,11 @@ fn render_block(digest: &SessionContextDigest, with_body: bool) -> String {
 }
 
 fn render_last_exchange(digest: &SessionContextDigest, budget_chars: usize) -> String {
-    let user = digest.last_user.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let user = digest
+        .last_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let assistant = digest
         .last_assistant
         .as_deref()
@@ -233,7 +237,10 @@ mod tests {
             .unwrap();
         assert!(!last_block.contains("## Last exchange"));
         assert!(last_block.contains(&format!("chro task logs {last_id}")));
-        assert_eq!(out.matches("## Last exchange").count(), SESSION_CONTEXT_MAX_FULL_REFS);
+        assert_eq!(
+            out.matches("## Last exchange").count(),
+            SESSION_CONTEXT_MAX_FULL_REFS
+        );
     }
 
     #[test]

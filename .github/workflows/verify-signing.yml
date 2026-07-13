@@ -1,0 +1,58 @@
+name: Verify Code Signing
+
+# Fast, standalone check of the SSL.com eSigner credentials. Signs a throwaway
+# executable so an auth/config problem surfaces in ~1-2 minutes instead of after
+# the full ~30-minute desktop Rust build. Manual-trigger only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify SSL.com eSigner auth
+    runs-on: windows-latest
+    env:
+      ES_USERNAME: ${{ secrets.ES_USERNAME }}
+    steps:
+      - name: Require eSigner secrets
+        if: env.ES_USERNAME == ''
+        shell: bash
+        run: |
+          echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET)." >&2
+          exit 1
+
+      # A minimal real PE the signer can operate on. Windows PowerShell 5.1's
+      # CodeDOM compiler emits a standalone unsigned exe; PowerShell 7 (pwsh)
+      # cannot ("assembly type ConsoleApplication not supported"), so pin the
+      # shell to `powershell`.
+      - name: Create throwaway executable
+        shell: powershell
+        run: |
+          Add-Type -TypeDefinition 'public class P { public static void Main() { } }' `
+            -OutputAssembly test.exe -OutputType ConsoleApplication
+          if (-not (Test-Path test.exe)) { throw 'test.exe was not created' }
+
+      - name: Sign with SSL.com eSigner
+        uses: sslcom/esigner-codesign@v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/test.exe
+          output_path: ${{ runner.temp }}/signed
+          environment_name: PROD
+
+      - name: Confirm the signature was applied
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "$env:RUNNER_TEMP\signed\test.exe"
+          Write-Host "Status:" $sig.Status
+          if ($sig.SignerCertificate) {
+            Write-Host "Signer:" $sig.SignerCertificate.Subject
+          } else {
+            throw "No signer certificate found; signing did not apply."
+          }

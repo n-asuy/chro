@@ -29,7 +29,6 @@ export type TabKind =
   // stacked as a diff (changed regions only), navigated via its file tree.
   // One tab per project — `projectId` is the identity.
   | { type: "project-diff"; projectId: string }
-  | { type: "terminal"; terminalId?: string }
   // In-app browser: the page renders directly in an iframe inside the pane.
   | { type: "browser"; browserId?: string; url?: string }
   // CDP browser: a real Chrome driven over CDP, streamed in as screencast
@@ -86,8 +85,6 @@ export function tabKey(kind: TabKind): TabKey {
       return `diff:${kind.runId}:${kind.path ?? ""}`;
     case "project-diff":
       return `project-diff:${kind.projectId}`;
-    case "terminal":
-      return `terminal:${kind.terminalId ?? "new"}`;
     case "browser":
       return `browser:${kind.browserId ?? "new"}`;
     case "cdp-browser":
@@ -105,11 +102,9 @@ export function tabKey(kind: TabKind): TabKey {
 
 /**
  * Whether a kind allows multiple instances of the same payload to coexist as
- * separate tabs. Per `docs/20260419_tab-pane-layout-design.md`, only
- * `terminal` is a duplicable resource — everything else focuses an existing
- * tab on duplicate open. `browser` joins it: each browser tab owns its own
- * Chrome session, so the plus button must always be able to open a fresh one.
+ * separate tabs. Browser tabs own their own sessions, so the plus button must
+ * always be able to open a fresh one.
  */
 export function isDuplicableKind(type: TabKindType): boolean {
-  return type === "terminal" || type === "browser" || type === "cdp-browser";
+  return type === "browser" || type === "cdp-browser";
 }

@@ -21,7 +21,6 @@ pub(crate) mod identifiers;
 mod parent_watch;
 mod perf;
 mod port_file;
-mod pty;
 mod routes;
 mod shutdown;
 
@@ -151,7 +150,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .await
         .context("failed to cleanup executions")?;
     let state = AppState::new(runtime.clone());
-    let state_pty_handle = state.pty().clone();
     let state_browser_handle = state.browser().clone();
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
     let actual_port = listener.local_addr()?.port();
@@ -204,7 +202,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
             "watching owner process; will shut down if it exits"
         );
     }
-    let pty_for_shutdown = state_pty_handle.clone();
     let browser_for_shutdown = state_browser_handle.clone();
     let shutdown = async move {
         tokio::select! {
@@ -213,7 +210,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
                 info!(parent_pid = ?parent_pid, "owner process exited; shutting down chro-server");
             }
         }
-        pty_for_shutdown.shutdown_all().await;
         browser_for_shutdown.shutdown_all().await;
     };
     axum::serve(listener, app.into_make_service())

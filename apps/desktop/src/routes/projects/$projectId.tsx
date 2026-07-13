@@ -1,17 +1,12 @@
 import { ProjectProvider } from "@/files/context/project-context";
 import { LayoutShell } from "@/workspace-layout/components/layout-shell";
 import { Outlet, createFileRoute } from "@tanstack/react-router";
-import { useEffect } from "react";
 
 export const Route = createFileRoute("/projects/$projectId")({
   component: ProjectLayout,
 });
 
 function ProjectLayout() {
-  useEffect(() => {
-    window.desktop?.setWindowMode?.("session");
-  }, []);
-
   return (
     <ProjectProvider>
       <LayoutShell />

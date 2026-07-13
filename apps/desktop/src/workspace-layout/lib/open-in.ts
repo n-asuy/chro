@@ -189,17 +189,6 @@ export const openWorkspaceWithOption = async (
   await openPath(workspacePath, option.with);
 };
 
-export const openWorkspaceInSelectedApp = async (
-  workspacePath: string,
-): Promise<OpenInOption> => {
-  const option = getSelectedOpenInOption();
-  if (!option) {
-    throw new Error("No Open in app is available.");
-  }
-  await openWorkspaceWithOption(workspacePath, option);
-  return option;
-};
-
 export const getOpenInErrorDescription = (
   appLabel: string,
   error: unknown,

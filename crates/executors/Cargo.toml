@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 async-trait = "0.1"
-axum = { version = "0.7", default-features = true }
 chrono = { version = "0.4", features = ["serde"] }
 codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", rev = "637f7dd6d737f3961e6bf32fbb3861c4953269c5" }
 codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", rev = "637f7dd6d737f3961e6bf32fbb3861c4953269c5" }
@@ -22,7 +21,6 @@ json-patch = "1.4"
 lazy_static = "1.5"
 log-types = { path = "../log-types" }
 os_pipe = "1.2"
-portable-pty = "0.8"
 regex = "1.11"
 schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }

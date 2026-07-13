@@ -22,7 +22,6 @@ ts-rs = { version = "10", features = ["chrono-impl", "uuid-impl", "serde-compat"
 thiserror = "2.0"
 async-trait = "0.1"
 tracing = "0.1"
-log-types = { path = "../log-types" }
 
 nanoid = "0.4"
 rand = "0.8"

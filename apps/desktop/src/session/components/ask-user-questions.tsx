@@ -22,8 +22,8 @@ import {
 import { useProximityHover } from "../hooks/use-proximity-hover";
 
 /**
- * Stepped question flow for agent-initiated user intake, ported from
- * fluidfunctionalism.com's ask-user-questions component: one question at a
+ * Stepped question flow for agent-initiated user intake, adapted from a
+ * reference stepped-intake UI pattern: one question at a
  * time with numbered option rows, a morphing hover indicator, merged selected
  * backgrounds, a free-form "Other" row, and Back/Skip/Continue navigation.
  * Adapted to chro's stack — framer-motion only, lucide icons, shadcn tokens.

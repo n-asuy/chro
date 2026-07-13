@@ -17,13 +17,12 @@ This crate provides:
 This design eliminates the legacy "Attempt" layer, consolidating execution context into:
 - `TaskRecord`: The core entity representing a task
 - `TaskRun`: Execution history (multiple runs per task)
-- `TaskRunLog`: Local-only log storage (chunked NDJSON)
 
 ### Execution Modes
 
 **Phase 1 (Current): Local Execution**
 - Uses git worktree for task isolation
-- Logs stored in `task_run_logs` table (NDJSON format)
+- Logs stored as per-run JSONL files outside SQLite
 - `worktree_path` field used
 
 **Phase 2 (Future): Remote Execution**
@@ -43,7 +42,7 @@ src/
     ├── core/           # Task-related models (tightly coupled)
     │   ├── project.rs
     │   ├── agent.rs
-    │   └── task.rs     # TaskRecord, TaskRun, TaskRunLog
+    │   └── task.rs     # TaskRecord, TaskRun
     ├── collab/         # Session, merge, draft
     │   ├── session.rs
     │   ├── merge.rs
@@ -57,7 +56,7 @@ src/
 
 ### Rationale
 
-- **core/task.rs**: Task, TaskRun, and TaskRunLog are密結合 (tightly coupled) and grouped together
+- **core/task.rs**: Task and TaskRun are tightly coupled and grouped together
 - **Modular separation**: Session/merge/draft grouped by collaboration concerns
 - **Clear boundaries**: Automation and assets isolated for independent evolution
 
@@ -142,7 +141,7 @@ Access via `DBService::schema_version()`:
 
 ```rust
 let version = db.schema_version().await?;
-assert_eq!(version, 2); // as of schema v2 (2025-11-20)
+assert_eq!(version, 5);
 ```
 
 ## Migration Guidelines
@@ -240,4 +239,4 @@ async fn main() -> Result<(), sqlx::Error> {
 
 ---
 
-**Last updated**: 2025-11-20
+**Last updated**: 2026-07-12

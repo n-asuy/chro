@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// URL schemes that are not real user pages. Ported from browser-harness
-/// `INTERNAL`; used to skip the omnibox popup and devtools targets when
-/// choosing a page to attach to.
+/// URL schemes that are not real user pages. Ported from a reference CDP
+/// daemon's internal-scheme list; used to skip the omnibox popup and devtools
+/// targets when choosing a page to attach to.
 pub const INTERNAL_PREFIXES: &[&str] = &[
     "chrome://",
     "chrome-untrusted://",
@@ -51,9 +51,9 @@ fn one() -> f64 {
     1.0
 }
 
-/// A keyboard key resolved to the CDP fields listeners inspect. Ported from
-/// browser-harness `_KEYS`: special keys carry their Windows virtual key code
-/// and a DOM `code` so `e.key` / `e.keyCode` / `e.code` all fire correctly,
+/// A keyboard key resolved to the CDP fields listeners inspect. Ported from a
+/// reference CDP daemon's key table: special keys carry their Windows virtual
+/// key code and a DOM `code` so `e.key` / `e.keyCode` / `e.code` all fire correctly,
 /// and only printable single characters emit a `char` event with text.
 pub struct KeyDescriptor {
     pub key: String,

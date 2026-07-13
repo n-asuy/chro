@@ -24,15 +24,8 @@ export type StoredTask = {
   sort_order: number;
   /** Bare agent kind the task last ran with (e.g. "CLAUDE_CODE", "CODEX"). */
   last_executor?: string | null;
-};
-
-/**
- * UI event message from realtime stream
- */
-export type UiEventMessage = {
-  type: "ui_event";
-  payload?: {
-    kind: string;
-    data?: unknown;
-  };
+  /** True once housekeeping has reclaimed the run's isolated worktree. The
+   * session turns read-only: its workspace path is gone, so it can no longer be
+   * continued, merged or rebased — only its history remains readable. */
+  worktree_deleted?: boolean;
 };

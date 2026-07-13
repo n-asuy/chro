@@ -46,6 +46,46 @@ pub async fn notify_login(webhook_url: &str, info: &LoginInfo<'_>) {
     }
 }
 
+pub struct FeedbackInfo<'a> {
+    pub category: &'a str,
+    pub message: &'a str,
+    pub email: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub app_version: Option<&'a str>,
+    pub platform: Option<&'a str>,
+}
+
+pub async fn notify_feedback(webhook_url: &str, info: &FeedbackInfo<'_>) {
+    let mut lines = vec![format!("New {}", info.category)];
+
+    if let Some(who) = info.name.or(info.email) {
+        lines.push(format!("From: {}", who));
+    }
+
+    lines.push(String::new());
+    lines.push(info.message.to_string());
+
+    let mut meta = Vec::new();
+    if let Some(version) = info.app_version {
+        meta.push(format!("v{}", version));
+    }
+    if let Some(platform) = info.platform {
+        meta.push(platform.to_string());
+    }
+    if !meta.is_empty() {
+        lines.push(String::new());
+        lines.push(meta.join(" · "));
+    }
+
+    let message = SlackMessage {
+        text: lines.join("\n"),
+    };
+
+    if let Err(err) = send_slack_message(webhook_url, &message).await {
+        console_log!("[slack] Failed to send feedback notification: {:?}", err);
+    }
+}
+
 fn parse_user_agent(ua: &str) -> String {
     let browser = if ua.contains("Chrome") && !ua.contains("Edg") {
         "Chrome"

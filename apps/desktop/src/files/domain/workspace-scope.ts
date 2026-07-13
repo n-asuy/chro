@@ -12,7 +12,7 @@ import type { TabKind } from "@/workspace-layout/types";
  * - diff tab → its `runId`;
  * - session tab → the session's active run, unless that run is "local" (it
  *   executes on the project checkout itself), in which case null;
- * - new session / project file / terminal / settings / no tab → null.
+ * - new session / project file / settings / no tab → null.
  */
 export const resolveScopeTaskRunId = (
   focusedKind: TabKind | null,

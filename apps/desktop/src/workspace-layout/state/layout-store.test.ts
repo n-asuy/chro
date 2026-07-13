@@ -56,7 +56,7 @@ describe("useLayoutStore", () => {
     const store = useLayoutStore.getState();
     const sessionId = store.openTab({ type: "session", taskId: "task-1" });
     const diffId = store.openTab({ type: "diff", runId: "run-1" });
-    store.openTab({ type: "terminal" });
+    store.openTab({ type: "browser" });
 
     const leafId = useLayoutStore.getState().layout.focusedPaneId;
     useLayoutStore.getState().setActiveTab(leafId, sessionId);

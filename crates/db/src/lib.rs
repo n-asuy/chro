@@ -1,9 +1,11 @@
-use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, io, path::Path, pin::Pin, sync::Arc, time::Duration};
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions},
     Error, Pool, Sqlite,
 };
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 const RECLAIM_MIN_FREE_PAGES: i64 = 512;
 const RECLAIM_MIN_FREE_BYTES: i64 = 8 * 1024 * 1024;
@@ -106,30 +108,6 @@ impl DBService {
         data_dir.join("chro").join("db.sqlite")
     }
 
-    /// Execute a function within a transaction
-    ///
-    /// # Example
-    /// ```ignore
-    /// db.with_transaction(|tx| async move {
-    ///     // Your transactional operations here
-    ///     sqlx::query("INSERT INTO ...").execute(tx).await?;
-    ///     Ok(())
-    /// }).await?;
-    /// ```
-    pub async fn with_transaction<F, T>(&self, f: F) -> Result<T, Error>
-    where
-        F: for<'a> FnOnce(
-            &'a mut sqlx::Transaction<'_, Sqlite>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<T, Error>> + Send + 'a>,
-        >,
-    {
-        let mut tx = self.pool.begin().await?;
-        let result = f(&mut tx).await?;
-        tx.commit().await?;
-        Ok(result)
-    }
-
     /// Run lightweight SQLite maintenance and compact the DB file only when a
     /// meaningful amount of space is sitting in the freelist.
     pub async fn reclaim_space_if_needed(&self) -> Result<bool, Error> {
@@ -203,14 +181,173 @@ impl DBService {
                 .await?
         };
 
+        migrate_legacy_task_run_logs(&pool, db_path).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(pool)
+    }
+}
+
+/// Move logs written by pre-JSONL versions out of SQLite before the schema
+/// migration drops `task_run_logs`.
+///
+/// The DB transaction is committed only after every missing run file has been
+/// atomically installed. If file I/O fails, the table remains available for a
+/// later retry. A non-empty JSONL file is already the canonical source for that
+/// run and is therefore never overwritten with older DB chunks.
+async fn migrate_legacy_task_run_logs(pool: &Pool<Sqlite>, db_path: &Path) -> Result<u64, Error> {
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_run_logs')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !table_exists {
+        return Ok(0);
+    }
+
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result = async {
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_run_logs')",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+
+        if !table_exists {
+            return Ok(0);
+        }
+
+        let run_ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT DISTINCT task_run_id FROM task_run_logs ORDER BY task_run_id")
+                .fetch_all(&mut *conn)
+                .await?;
+        let runs_dir = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("logs")
+            .join("runs");
+        tokio::fs::create_dir_all(&runs_dir)
+            .await
+            .map_err(Error::Io)?;
+
+        let mut exported = 0_u64;
+        for run_id in run_ids {
+            let target = runs_dir.join(format!("{run_id}.jsonl"));
+            match tokio::fs::metadata(&target).await {
+                Ok(metadata) if metadata.len() > 0 => continue,
+                Ok(_) => tokio::fs::remove_file(&target).await.map_err(Error::Io)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Error::Io(error)),
+            }
+
+            let temporary = runs_dir.join(format!(".{run_id}.jsonl.migrating"));
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temporary)
+                .await
+                .map_err(Error::Io)?;
+
+            let mut last_sequence = -1_i64;
+            loop {
+                let chunk: Option<(i64, String)> = sqlx::query_as(
+                    "SELECT sequence_number, logs_jsonl
+                     FROM task_run_logs
+                     WHERE task_run_id = ? AND sequence_number > ?
+                     ORDER BY sequence_number ASC
+                     LIMIT 1",
+                )
+                .bind(run_id)
+                .bind(last_sequence)
+                .fetch_optional(&mut *conn)
+                .await?;
+
+                let Some((sequence, logs_jsonl)) = chunk else {
+                    break;
+                };
+                file.write_all(logs_jsonl.as_bytes())
+                    .await
+                    .map_err(Error::Io)?;
+                if !logs_jsonl.is_empty() && !logs_jsonl.ends_with('\n') {
+                    file.write_all(b"\n").await.map_err(Error::Io)?;
+                }
+                last_sequence = sequence;
+            }
+
+            file.flush().await.map_err(Error::Io)?;
+            file.sync_all().await.map_err(Error::Io)?;
+            drop(file);
+            tokio::fs::rename(&temporary, &target)
+                .await
+                .map_err(Error::Io)?;
+            exported += 1;
+        }
+
+        sqlx::query("DROP TABLE task_run_logs")
+            .execute(&mut *conn)
+            .await?;
+        Ok(exported)
+    }
+    .await;
+
+    match result {
+        Ok(exported) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            if exported > 0 {
+                tracing::info!(exported, "migrated legacy task run logs to JSONL");
+            }
+            Ok(exported)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(error)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn create_legacy_log_db(db_path: &Path, run_id: Uuid, chunks: &[&str]) {
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE task_run_logs (
+                task_run_id TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                logs_jsonl TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                inserted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (task_run_id, sequence_number)
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (sequence, chunk) in chunks.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO task_run_logs (task_run_id, sequence_number, logs_jsonl, byte_size)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(run_id)
+            .bind(sequence as i64)
+            .bind(chunk)
+            .bind(chunk.len() as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn test_db_creation() {
@@ -222,7 +359,7 @@ mod tests {
 
         // Verify schema version
         let version = db.schema_version().await.unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[tokio::test]
@@ -234,6 +371,86 @@ mod tests {
         let _db = DBService::new_with_path(&db_path).await.unwrap();
         assert!(db_path.exists());
         assert!(db_path.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_task_run_logs_are_exported_before_table_is_dropped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("legacy.db");
+        let run_id = Uuid::new_v4();
+        create_legacy_log_db(
+            &db_path,
+            run_id,
+            &[
+                r#"{"type":"stdout","payload":"one"}"#,
+                r#"{"type":"finished"}"#,
+            ],
+        )
+        .await;
+
+        let db = DBService::new_with_path(&db_path).await.unwrap();
+        let log_path = temp_dir
+            .path()
+            .join("logs")
+            .join("runs")
+            .join(format!("{run_id}.jsonl"));
+        let migrated = tokio::fs::read_to_string(log_path).await.unwrap();
+        assert_eq!(
+            migrated,
+            "{\"type\":\"stdout\",\"payload\":\"one\"}\n{\"type\":\"finished\"}\n"
+        );
+
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_run_logs')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert!(!table_exists);
+    }
+
+    #[tokio::test]
+    async fn legacy_log_export_keeps_an_existing_canonical_jsonl() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("existing.db");
+        let run_id = Uuid::new_v4();
+        create_legacy_log_db(&db_path, run_id, &["legacy"]).await;
+        let runs_dir = temp_dir.path().join("logs").join("runs");
+        tokio::fs::create_dir_all(&runs_dir).await.unwrap();
+        let log_path = runs_dir.join(format!("{run_id}.jsonl"));
+        tokio::fs::write(&log_path, "canonical\n").await.unwrap();
+
+        DBService::new_with_path(&db_path).await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(log_path).await.unwrap(),
+            "canonical\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_log_table_survives_when_jsonl_export_fails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("failed.db");
+        let run_id = Uuid::new_v4();
+        create_legacy_log_db(&db_path, run_id, &["legacy"]).await;
+        tokio::fs::write(temp_dir.path().join("logs"), "not a directory")
+            .await
+            .unwrap();
+
+        assert!(DBService::new_with_path(&db_path).await.is_err());
+
+        let options = SqliteConnectOptions::new().filename(&db_path);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_run_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[tokio::test]

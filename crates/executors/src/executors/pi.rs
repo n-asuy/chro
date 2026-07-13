@@ -4,8 +4,7 @@
 //! on stdin and pi streams responses plus `AgentSessionEvent`s on stdout. A
 //! reader task ([`client::PiClient`]) mirrors every line into the synthetic log
 //! stream for normalization and watches for the terminal `agent_end` event. The
-//! data plane mirrors the Codex executor (JSON over pipes) rather than the
-//! Claude executor (PTY + transcript tail), because pi exposes a first-class
+//! data plane mirrors the Codex executor because pi exposes a first-class
 //! embedding protocol.
 
 pub mod auth;

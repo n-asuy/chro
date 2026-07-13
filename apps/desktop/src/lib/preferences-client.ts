@@ -45,22 +45,6 @@ export const DEFAULT_APPEARANCE_CONFIG: AppearanceConfig = {
   theme: "system",
 };
 
-export type TerminalConfig = {
-  font_family: string | null;
-  font_size: number;
-  line_height: number;
-};
-
-type TerminalConfigResponse = {
-  terminal: TerminalConfig;
-};
-
-export const DEFAULT_TERMINAL_CONFIG: TerminalConfig = {
-  font_family: null,
-  font_size: 13,
-  line_height: 1.2,
-};
-
 export type NotificationConfig = {
   enabled: boolean;
   on_task_complete: boolean;
@@ -140,23 +124,6 @@ export const saveAppearanceConfig = async (
   payload: Partial<AppearanceConfig>,
 ): Promise<AppearanceConfigResponse> => {
   return desktopFetch<AppearanceConfigResponse>("/rpc/preferences/appearance", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-};
-
-export const fetchTerminalConfig =
-  async (): Promise<TerminalConfigResponse> => {
-    return desktopFetch<TerminalConfigResponse>("/rpc/preferences/terminal");
-  };
-
-export const saveTerminalConfig = async (
-  payload: Partial<TerminalConfig>,
-): Promise<TerminalConfigResponse> => {
-  return desktopFetch<TerminalConfigResponse>("/rpc/preferences/terminal", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",

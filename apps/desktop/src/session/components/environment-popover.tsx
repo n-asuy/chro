@@ -4,11 +4,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import {
   ChevronDown,
   ChevronRight,
-  FileDiff,
   GitBranch as GitBranchIcon,
   GitMerge,
   GitPullRequestArrow,
-  Images,
   Laptop,
   Loader2,
   Plus,
@@ -41,13 +39,10 @@ type EnvironmentPopoverProps = {
   /** Locks execution-config rows (worktree, base branch) while a run is active. */
   isExecutorLocked: boolean;
 
-  /** Aggregate diff stats for the Changes / Review row. */
+  /** Aggregate diff stats surfaced in the trigger pill. */
   additions: number;
   deletions: number;
   hasDiffs: boolean;
-  onOpenDiffViewer: () => void;
-  /** Open the media gallery for this run's worktree. */
-  onOpenGallery: () => void;
 
   /** Worktree vs Local execution toggle. */
   useWorktree: boolean;
@@ -106,8 +101,6 @@ export function EnvironmentPopover({
   additions,
   deletions,
   hasDiffs,
-  onOpenDiffViewer,
-  onOpenGallery,
   useWorktree,
   onUseWorktreeChange,
   baseBranch,
@@ -171,16 +164,6 @@ export function EnvironmentPopover({
     });
     handleOpenChange(false);
   }, [targetBranch, upstreamBranch, onRebaseConfirm, handleOpenChange]);
-
-  const handleReview = useCallback(() => {
-    onOpenDiffViewer();
-    handleOpenChange(false);
-  }, [onOpenDiffViewer, handleOpenChange]);
-
-  const handleGallery = useCallback(() => {
-    onOpenGallery();
-    handleOpenChange(false);
-  }, [onOpenGallery, handleOpenChange]);
 
   const handleMerge = useCallback(() => {
     onMergeDiffs();
@@ -249,41 +232,6 @@ export function EnvironmentPopover({
 
         {isGitRepository ? (
           <div className="flex flex-col gap-0.5 px-1.5 pb-1.5">
-            {/* Changes / Review */}
-            <button
-              type="button"
-              className={ROW_CLASS}
-              onClick={handleReview}
-              disabled={!hasDiffs}
-            >
-              <FileDiff className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="flex-1 text-left">
-                {t("environmentChangesLabel")}
-              </span>
-              {hasDiffs ? (
-                <span className="font-mono text-[12px] tabular-nums">
-                  <span className="text-emerald-600 dark:text-emerald-500">
-                    +{additions.toLocaleString()}
-                  </span>{" "}
-                  <span className="text-red-500">
-                    -{deletions.toLocaleString()}
-                  </span>
-                </span>
-              ) : (
-                <span className="text-[12px] text-muted-foreground">
-                  {t("environmentNoChangesLabel")}
-                </span>
-              )}
-            </button>
-
-            {/* Gallery */}
-            <button type="button" className={ROW_CLASS} onClick={handleGallery}>
-              <Images className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="flex-1 text-left">
-                {t("environmentGalleryLabel")}
-              </span>
-            </button>
-
             {/* Worktree / Local */}
             <WorktreeModeDropdown
               useWorktree={useWorktree}

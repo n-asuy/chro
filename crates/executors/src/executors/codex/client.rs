@@ -15,11 +15,11 @@ use codex_app_server_protocol::{
     ExecCommandApprovalResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAuthStatusParams, GetAuthStatusResponse, InitializeCapabilities, InitializeParams,
     InitializeResponse, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    RequestId, ServerRequest, ThreadForkParams, ThreadForkResponse, ThreadStartParams,
-    ThreadStartResponse, TurnStartParams, TurnStartResponse, UserInput,
+    RequestId, ServerRequest, ThreadForkParams, ThreadStartParams, ThreadStartResponse,
+    TurnStartParams, TurnStartResponse, UserInput,
 };
-use codex_protocol::protocol::ReviewDecision;
-use serde::{Serialize, de::DeserializeOwned};
+use codex_protocol::{openai_models::ReasoningEffort, protocol::ReviewDecision};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{self, Value};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
@@ -43,6 +43,27 @@ pub struct AppServerClient {
     pending_feedback: Mutex<VecDeque<String>>,
     auto_approve: bool,
     cancel: CancellationToken,
+}
+
+/// The subset of `ThreadForkResponse` that Chro consumes.
+///
+/// A fork response includes the forked thread's complete turn history by
+/// default. Deserializing that history through the protocol crate makes Chro
+/// fail when a newer Codex app-server adds a `ThreadItem` variant. Keeping the
+/// response shape deliberately narrow lets serde ignore those items while we
+/// retain the metadata required by the executor and log normalizer.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibleThreadForkResponse {
+    pub thread: ForkedThread,
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForkedThread {
+    pub id: String,
 }
 
 impl AppServerClient {
@@ -106,7 +127,7 @@ impl AppServerClient {
     pub async fn fork_conversation(
         &self,
         params: ThreadForkParams,
-    ) -> Result<ThreadForkResponse, ExecutorError> {
+    ) -> Result<CompatibleThreadForkResponse, ExecutorError> {
         let request = ClientRequest::ThreadFork {
             request_id: self.next_request_id(),
             params,
@@ -151,7 +172,9 @@ impl AppServerClient {
     ) -> Result<(), ExecutorError> {
         match request {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
-                let tool_call_id = params.approval_id.as_deref().unwrap_or(&params.item_id);
+                // Keep the conversation lifecycle keyed by the item id used by
+                // item/started and item/completed; approval_id is request-scoped.
+                let tool_call_id = &params.item_id;
                 let status = match self
                     .request_tool_approval("bash", "codex.exec_command", tool_call_id)
                     .await
@@ -452,6 +475,35 @@ impl AppServerClient {
                 tracing::error!("failed to send feedback follow-up message: {err}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_response_ignores_unknown_thread_items() {
+        let response = serde_json::from_value::<CompatibleThreadForkResponse>(serde_json::json!({
+            "thread": {
+                "id": "forked-thread",
+                "turns": [{
+                    "id": "turn-1",
+                    "items": [{
+                        "type": "subAgentActivity",
+                        "id": "sub-agent-1",
+                        "status": "completed"
+                    }]
+                }]
+            },
+            "model": "gpt-5.4",
+            "reasoningEffort": "high"
+        }))
+        .expect("unknown thread items should not prevent decoding fork metadata");
+
+        assert_eq!(response.thread.id, "forked-thread");
+        assert_eq!(response.model, "gpt-5.4");
+        assert_eq!(response.reasoning_effort, Some(ReasoningEffort::High));
     }
 }
 

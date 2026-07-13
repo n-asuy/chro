@@ -96,10 +96,7 @@ describe("resolveScopeTaskRunId", () => {
     expect(resolveScopeTaskRunId(kind, [], WORKSPACE)).toBe("run-7");
   });
 
-  it("returns null for non-session surfaces (terminal, settings)", () => {
-    expect(
-      resolveScopeTaskRunId({ type: "terminal" }, [], WORKSPACE),
-    ).toBeNull();
+  it("returns null for non-session surfaces", () => {
     expect(
       resolveScopeTaskRunId({ type: "settings" }, [], WORKSPACE),
     ).toBeNull();

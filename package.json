@@ -23,6 +23,7 @@
     "lint:repo": "bunx sherif@latest -i tailwindcss",
     "lint:repo:fix": "bunx sherif@latest -i tailwindcss --fix",
     "oss:check": "bun tooling/scripts/check-oss-sanitization.mjs",
+    "provenance:check": "bun tooling/scripts/check-provenance.mjs",
     "licenses": "bun run licenses:js && bun run licenses:rust",
     "licenses:js": "bun tooling/scripts/check-js-licenses.mjs",
     "licenses:rust": "bun tooling/scripts/check-rust-licenses.mjs",

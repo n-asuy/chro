@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DockState } from "../types";
+import type { DockState, PaneLayout } from "../types";
 
 const uiStateMock = vi.hoisted(() => {
   const values = new Map<string, unknown>();
@@ -20,13 +20,25 @@ vi.mock("@/lib/ui-state-client", () => ({
 
 import {
   loadDock,
+  loadLayout,
   loadRightDock,
   saveDock,
+  saveLayout,
   saveRightDock,
 } from "./persistence";
 
 const GLOBAL_DOCK_KEY = "workspace-layout:dock:v1";
 const GLOBAL_RIGHT_DOCK_KEY = "workspace-layout:right-dock:v1";
+
+const layout: PaneLayout = {
+  root: {
+    type: "leaf",
+    id: "leaf-a",
+    tabs: [],
+    activeTabId: null,
+  },
+  focusedPaneId: "leaf-a",
+};
 
 function dock(width: number): DockState {
   return {
@@ -62,6 +74,24 @@ describe("workspace layout persistence", () => {
   beforeEach(() => {
     uiStateMock.values.clear();
     uiStateMock.setUiValue.mockClear();
+  });
+
+  it("uses the terminal-free layout schema without invalidating dock state", () => {
+    saveLayout("project-a", layout);
+
+    expect(
+      uiStateMock.values.get("workspace-layout:layout:v2:project-a"),
+    ).toEqual({ version: 2, layout });
+    expect(loadLayout("project-a")).toEqual(layout);
+  });
+
+  it("ignores layouts from the schema that allowed terminal tabs", () => {
+    uiStateMock.values.set("workspace-layout:layout:v1:project-a", {
+      version: 1,
+      layout,
+    });
+
+    expect(loadLayout("project-a")).toBeNull();
   });
 
   it("persists left dock state without scoping it to a project", () => {

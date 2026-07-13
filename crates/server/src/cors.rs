@@ -12,11 +12,19 @@ use tracing::warn;
 
 pub(crate) const ALLOWED_ORIGINS_ENV: &str = "CHRO_ALLOWED_ORIGINS";
 
+/// Origins the renderer can legitimately talk to us from. The packaged app's
+/// origin depends on how the platform's webview serves the custom protocol:
+/// macOS and Linux keep the custom scheme (`tauri://localhost`), while the
+/// Windows and Android webviews have no custom-scheme support and serve it over
+/// `http://<scheme>.localhost` instead (`https://` when the webview opts into
+/// the secure scheme). Every packaged origin must be listed, or that platform's
+/// renderer is refused on every API call and websocket.
 const DEFAULT_ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:3400",
     "http://127.0.0.1:3400",
-    "app://.",
     "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
 ];
 
 #[derive(Clone, Debug)]
@@ -135,5 +143,36 @@ mod tests {
         let origins = AllowedOrigins::load(4410).expect("load allowed origins");
 
         assert!(origins.values().contains(&"tauri://localhost".to_string()));
+    }
+
+    /// The packaged renderer's origin is platform-dependent. Missing one locks
+    /// that platform out of every API call and websocket with an opaque
+    /// "Failed to fetch", because the origin guard rejects the request before
+    /// the CORS layer can attach `Access-Control-Allow-Origin`.
+    #[test]
+    fn default_origins_cover_every_packaged_webview_origin() {
+        std::env::remove_var(ALLOWED_ORIGINS_ENV);
+
+        let origins = AllowedOrigins::load(4410).expect("load allowed origins");
+
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+        ] {
+            assert!(
+                origins.contains(origin),
+                "packaged webview origin {origin} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_origin_is_not_allowed() {
+        std::env::remove_var(ALLOWED_ORIGINS_ENV);
+
+        let origins = AllowedOrigins::load(4410).expect("load allowed origins");
+
+        assert!(!origins.contains("https://evil.example"));
     }
 }

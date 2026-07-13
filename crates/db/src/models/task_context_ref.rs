@@ -118,11 +118,12 @@ impl TaskContextRef {
         task_run_id: Option<Uuid>,
         refs: &[TaskContextRefInput],
     ) -> Result<Vec<Self>, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
         match (task_session_id, task_run_id) {
             (Some(session_id), _) => {
                 sqlx::query("DELETE FROM task_context_refs WHERE task_session_id = ?")
                     .bind(session_id)
-                    .execute(pool)
+                    .execute(&mut *transaction)
                     .await?;
             }
             (None, Some(run_id)) => {
@@ -130,7 +131,7 @@ impl TaskContextRef {
                     "DELETE FROM task_context_refs WHERE task_session_id IS NULL AND task_run_id = ?",
                 )
                 .bind(run_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await?;
             }
             (None, None) => {
@@ -138,25 +139,66 @@ impl TaskContextRef {
                     "DELETE FROM task_context_refs WHERE task_id = ? AND task_session_id IS NULL AND task_run_id IS NULL",
                 )
                 .bind(task_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await?;
             }
         }
 
         let mut inserted = Vec::with_capacity(refs.len());
         for (index, input) in refs.iter().enumerate() {
-            inserted.push(
-                Self::insert_for_task(
-                    pool,
-                    task_id,
-                    task_session_id,
-                    task_run_id,
-                    input,
-                    index as i32,
-                )
-                .await?,
-            );
+            let id = Uuid::new_v4();
+            let mode = input
+                .mode
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(default_mode_for_kind(&input.kind))
+                .to_string();
+            let now = Utc::now();
+            let record = Self {
+                id,
+                task_id,
+                task_session_id,
+                task_run_id,
+                kind: input.kind.clone(),
+                target_task_id: input.target_task_id,
+                target_session_id: input.target_session_id,
+                path: input.path.clone(),
+                branch: input.branch.clone(),
+                mode,
+                label: input.label.clone(),
+                metadata_json: input.metadata_json.clone(),
+                sort_order: index as i32,
+                created_at: now,
+                updated_at: now,
+            };
+
+            sqlx::query(
+                "INSERT INTO task_context_refs (
+                    id, task_id, task_session_id, task_run_id, kind, target_task_id,
+                    target_session_id, path, branch, mode, label, metadata_json,
+                    sort_order, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(record.id)
+            .bind(record.task_id)
+            .bind(record.task_session_id)
+            .bind(record.task_run_id)
+            .bind(&record.kind)
+            .bind(record.target_task_id)
+            .bind(record.target_session_id)
+            .bind(&record.path)
+            .bind(&record.branch)
+            .bind(&record.mode)
+            .bind(&record.label)
+            .bind(&record.metadata_json)
+            .bind(record.sort_order)
+            .bind(record.created_at)
+            .bind(record.updated_at)
+            .execute(&mut *transaction)
+            .await?;
+            inserted.push(record);
         }
+        transaction.commit().await?;
         Ok(inserted)
     }
 
@@ -187,18 +229,6 @@ impl TaskContextRef {
             "SELECT * FROM task_context_refs WHERE target_task_id = ? ORDER BY created_at DESC",
         )
         .bind(target_task_id)
-        .fetch_all(pool)
-        .await
-    }
-
-    pub async fn list_by_session_id(
-        pool: &Pool<Sqlite>,
-        task_session_id: Uuid,
-    ) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>(
-            "SELECT * FROM task_context_refs WHERE task_session_id = ? ORDER BY sort_order ASC, created_at ASC",
-        )
-        .bind(task_session_id)
         .fetch_all(pool)
         .await
     }
@@ -265,5 +295,55 @@ mod tests {
             .unwrap();
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].task_id, task_id);
+    }
+
+    #[tokio::test]
+    async fn replace_for_task_scope_restores_old_refs_when_insert_fails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = DBService::new_with_path(temp_dir.path().join("refs-rollback.db"))
+            .await
+            .unwrap();
+        let pool = service.pool();
+        let project_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path) VALUES (?, 'proj', '/tmp/refs-rollback')",
+        )
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO task_records (id, project_id, title) VALUES (?, ?, 'task')")
+            .bind(task_id)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let old = TaskContextRefInput::file("old.rs", true, None);
+        TaskContextRef::insert_for_task(pool, task_id, None, None, &old, 0)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_bad_ref BEFORE INSERT ON task_context_refs
+             WHEN NEW.path = 'bad.rs' BEGIN SELECT RAISE(ABORT, 'forced ref failure'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let replacement = vec![
+            TaskContextRefInput::file("new.rs", true, None),
+            TaskContextRefInput::file("bad.rs", true, None),
+        ];
+        let result =
+            TaskContextRef::replace_for_task_scope(pool, task_id, None, None, &replacement).await;
+        assert!(result.is_err());
+
+        let stored = TaskContextRef::list_by_task_id(pool, task_id)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].path.as_deref(), Some("old.rs"));
     }
 }

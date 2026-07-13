@@ -1,5 +1,6 @@
 mod auth;
 mod error;
+mod feedback;
 mod invites;
 mod slack;
 mod users;
@@ -7,12 +8,13 @@ mod waitlist;
 
 use auth::{require_admin_secret, require_user, AuthenticatedUser};
 use error::{ApiError, ApiResult};
+use feedback::{store_feedback, FeedbackInput};
 use invites::{
     claim_invite_code, create_invite_code, list_invite_codes, verify_invite_code,
     CreateInviteCodeInput, InviteCodeRecord,
 };
 use serde::Serialize;
-use slack::LoginInfo;
+use slack::{FeedbackInfo, LoginInfo};
 use users::upsert_user_and_get_login_count;
 use waitlist::{
     join_waitlist, list_waitlist_entries, update_waitlist_entry, waitlist_summary, WaitlistEntry,
@@ -61,6 +63,9 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .post_async("/waitlist", |mut req, ctx| async move {
             handle_join_waitlist(&mut req, ctx).await
+        })
+        .post_async("/feedback", |mut req, ctx| async move {
+            handle_submit_feedback(&mut req, ctx).await
         })
         .get_async("/waitlist", |req, ctx| async move {
             handle_list_waitlist(req, ctx).await
@@ -127,6 +132,35 @@ async fn handle_session(req: Request, ctx: RouteContext<()>) -> Result<Response>
         email: synced.user.email,
         name: synced.user.name,
     })
+}
+
+async fn handle_submit_feedback(req: &mut Request, ctx: RouteContext<()>) -> Result<Response> {
+    let payload: FeedbackInput = match req.json().await {
+        Ok(body) => body,
+        Err(err) => return bad_request(format!("invalid JSON: {}", err)),
+    };
+
+    let user_agent = req.headers().get("User-Agent").ok().flatten();
+
+    let db = ctx.env.d1("APP_DB")?;
+    let stored = match store_feedback(&db, payload, user_agent.as_deref()).await {
+        Ok(stored) => stored,
+        Err(err) => return err.into_response(),
+    };
+
+    if let Ok(webhook_url) = ctx.env.secret("SLACK_WEBHOOK_URL") {
+        let info = FeedbackInfo {
+            category: stored.record.category.label(),
+            message: &stored.record.message,
+            email: stored.email.as_deref(),
+            name: stored.name.as_deref(),
+            app_version: stored.app_version.as_deref(),
+            platform: stored.platform.as_deref(),
+        };
+        slack::notify_feedback(&webhook_url.to_string(), &info).await;
+    }
+
+    json_response(&stored.record)
 }
 
 async fn handle_join_waitlist(req: &mut Request, ctx: RouteContext<()>) -> Result<Response> {

@@ -1,0 +1,325 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_os:
+        description: "Target platform to build"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - macos
+          - windows
+  push:
+    tags:
+      - "v*"
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+  RELEASE_REPO: ${{ vars.RELEASE_REPO || 'n-asuy/chro' }}
+
+permissions:
+  contents: write
+
+jobs:
+  # This workflow is mirrored to the public repo, which is where releases are
+  # actually built. On the private source repo every job is a no-op.
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: >
+      github.repository == (vars.RELEASE_REPO || 'n-asuy/chro') &&
+      startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag annotation
+        id: tag_message
+        run: |
+          TAG_MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }} | head -c 10000)
+          if [ -n "$TAG_MESSAGE" ]; then
+            echo "has_message=true" >> $GITHUB_OUTPUT
+            echo "message<<EOF" >> $GITHUB_OUTPUT
+            echo "$TAG_MESSAGE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has_message=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ steps.tag_message.outputs.has_message }}" = "true" ]; then
+            gh release create ${{ github.ref_name }} --repo ${{ env.RELEASE_REPO }} --title "Chro ${{ github.ref_name }}" --notes "${{ steps.tag_message.outputs.message }}"
+          else
+            gh release create ${{ github.ref_name }} --repo ${{ env.RELEASE_REPO }} --title "Chro ${{ github.ref_name }}" --generate-notes
+          fi
+
+  macos:
+    name: Build macOS (${{ matrix.arch }})
+    needs: create-release
+    if: >
+      always() &&
+      github.repository == (vars.RELEASE_REPO || 'n-asuy/chro') &&
+      (needs.create-release.result == 'success' || !startsWith(github.ref, 'refs/tags/')) &&
+      (!startsWith(github.ref, 'refs/tags/') || !contains(github.ref_name, '-')) &&
+      (github.event_name != 'workflow_dispatch' ||
+       github.event.inputs.target_os == 'all' ||
+       github.event.inputs.target_os == 'macos')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            arch: x64
+            triple: x86_64-apple-darwin
+            artifact_name: desktop-macos-x64
+          - os: macos-15
+            arch: arm64
+            triple: aarch64-apple-darwin
+            artifact_name: desktop-macos-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.26
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/src-tauri
+            crates/server
+          shared-key: desktop-${{ matrix.arch }}
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Tauri icons
+        run: bun run --filter=@chro/desktop tauri:icons
+
+      - name: Read desktop version
+        id: desktop_version
+        run: |
+          VERSION=$(node -p "require('./apps/desktop/package.json').version")
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Package desktop (${{ matrix.arch }})
+        env:
+          NODE_ENV: production
+          # Tauri 2 picks these env vars up to sign + notarize the .app /
+          # .dmg automatically; the legacy CSC_* secrets are remapped to the
+          # Tauri-native names so we can reuse the same .p12 unchanged.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE || secrets.CSC_LINK }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD || secrets.CSC_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun ./apps/desktop/scripts/deployer.ts package --project desktop -- --mac --${{ matrix.arch }}
+
+      - name: Verify mac app signature
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          VERSION="${{ steps.desktop_version.outputs.value }}"
+          # Tauri produces both .app.tar.gz (updater bundle) and .dmg per arch.
+          # We check the latter so any signing regression surfaces inside CI.
+          DMG_PATH=$(find "apps/desktop/release/${VERSION}" -maxdepth 1 -name "*.dmg" | head -n 1)
+          if [ -z "${DMG_PATH}" ]; then
+            echo "No DMG produced in apps/desktop/release/${VERSION}"
+            exit 1
+          fi
+          TMP_DIR=$(mktemp -d)
+          hdiutil attach -nobrowse -mountpoint "${TMP_DIR}/mnt" "${DMG_PATH}"
+          APP_PATH=$(find "${TMP_DIR}/mnt" -maxdepth 2 -name "*.app" | head -n 1)
+          if [ -z "${APP_PATH}" ]; then
+            echo "No .app found inside ${DMG_PATH}"
+            hdiutil detach "${TMP_DIR}/mnt" || true
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          if [ -n "${APPLE_TEAM_ID}" ]; then
+            TEAM_ID=$(codesign -dv --verbose=4 "${APP_PATH}" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')
+            if [ "${TEAM_ID}" != "${APPLE_TEAM_ID}" ]; then
+              echo "Code signing team mismatch: expected ${APPLE_TEAM_ID}, got ${TEAM_ID}"
+              hdiutil detach "${TMP_DIR}/mnt" || true
+              exit 1
+            fi
+          fi
+          hdiutil detach "${TMP_DIR}/mnt" || true
+          rm -rf "${TMP_DIR}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.dmg
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.app.tar.gz
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.app.tar.gz.sig
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/latest-darwin.json
+          retention-days: 7
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
+        run: bun ./apps/desktop/scripts/deployer.ts upload --tag ${{ github.ref_name }}
+
+  windows:
+    name: Build Windows (x64)
+    needs: create-release
+    if: >
+      always() &&
+      github.repository == (vars.RELEASE_REPO || 'n-asuy/chro') &&
+      (needs.create-release.result == 'success' || !startsWith(github.ref, 'refs/tags/')) &&
+      (!startsWith(github.ref, 'refs/tags/') || !contains(github.ref_name, '-')) &&
+      (github.event_name != 'workflow_dispatch' ||
+       github.event.inputs.target_os == 'all' ||
+       github.event.inputs.target_os == 'windows')
+    runs-on: windows-latest
+    # SSL.com eSigner (cloud code signing) credentials. Exposed as env so step
+    # `if:` guards can detect their presence; the signing action reads them from
+    # `secrets` directly. Absent on forks/PRs, so those builds stay unsigned.
+    env:
+      ES_USERNAME: ${{ secrets.ES_USERNAME }}
+      ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+      ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+      ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A tagged release that ships an unsigned Windows build is blocked by Smart
+      # App Control on end-user machines, so refuse to publish one. Manual
+      # (workflow_dispatch) builds may stay unsigned for internal testing.
+      - name: Require code-signing for tagged releases
+        if: startsWith(github.ref, 'refs/tags/') && env.ES_USERNAME == ''
+        shell: bash
+        run: |
+          echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET). Refusing to publish an unsigned Windows release that Smart App Control will block." >&2
+          exit 1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.26
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop/src-tauri
+            crates/server
+          shared-key: desktop-windows
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Tauri icons
+        run: bun run --filter=@chro/desktop tauri:icons
+
+      - name: Read desktop version
+        id: desktop_version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./apps/desktop/package.json').version")
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Package desktop (Windows x64)
+        env:
+          NODE_ENV: production
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun ./apps/desktop/scripts/deployer.ts package --project desktop --skip-sign -- --win --x64
+
+      # Sign the NSIS installer with SSL.com eSigner (cloud). The Windows build
+      # runs with --skip-sign, which disables Tauri updater artifacts, so there
+      # is no updater hash/signature to invalidate by signing the installer
+      # post-build. Skipped entirely when eSigner secrets are absent, so
+      # unsigned test builds keep working unchanged.
+      #
+      # NOTE: this signs the downloaded installer (the artifact Smart App Control
+      # inspects at install time). Signing the inner app binaries so the
+      # installed chro.exe also clears SAC at launch requires build-time signing
+      # via Tauri `bundle.windows.signCommand`; tracked as a follow-up.
+      - name: Locate Windows installer
+        id: win_installer
+        if: env.ES_USERNAME != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="$(ls apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*-setup.exe | head -1)"
+          echo "path=$exe" >> "$GITHUB_OUTPUT"
+
+      - name: Sign Windows installer (SSL.com eSigner)
+        if: env.ES_USERNAME != ''
+        uses: sslcom/esigner-codesign@v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ steps.win_installer.outputs.path }}
+          output_path: ${{ runner.temp }}/esigner-signed
+          environment_name: PROD
+
+      - name: Replace installer with signed copy
+        if: env.ES_USERNAME != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed="${{ runner.temp }}/esigner-signed/$(basename '${{ steps.win_installer.outputs.path }}')"
+          test -f "$signed"
+          cp "$signed" "${{ steps.win_installer.outputs.path }}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: |
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.exe
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.msi
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.zip
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.zip.sig
+            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/latest-windows.json
+          retention-days: 7
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
+        run: bun ./apps/desktop/scripts/deployer.ts upload --tag ${{ github.ref_name }}

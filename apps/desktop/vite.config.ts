@@ -409,6 +409,41 @@ function nativeFilesystemPlugin(): Plugin {
   };
 }
 
+/**
+ * Exposes the repo-root CHANGELOG.md to the renderer as `virtual:chro-changelog`.
+ *
+ * The changelog belongs to the build: shipping its text through a virtual module
+ * bakes the exact release history for *this* binary into the bundle, so the
+ * in-app release notes can never drift from what was installed, and no runtime
+ * file read or server round-trip is needed. Editing the changelog in dev
+ * triggers a reload via the watched-file registration below.
+ */
+const CHANGELOG_VIRTUAL_ID = "virtual:chro-changelog";
+const CHANGELOG_SOURCE_PATH = path.resolve(__dirname, "../../CHANGELOG.md");
+
+function changelogPlugin(): Plugin {
+  const resolvedId = `\0${CHANGELOG_VIRTUAL_ID}`;
+  return {
+    name: "chro-changelog",
+    resolveId(id) {
+      return id === CHANGELOG_VIRTUAL_ID ? resolvedId : null;
+    },
+    load(id) {
+      if (id !== resolvedId) return null;
+      this.addWatchFile(CHANGELOG_SOURCE_PATH);
+      let source = "";
+      try {
+        source = fs.readFileSync(CHANGELOG_SOURCE_PATH, "utf-8");
+      } catch (error) {
+        this.warn(
+          `[chro-changelog] Could not read ${CHANGELOG_SOURCE_PATH}: ${String(error)}`,
+        );
+      }
+      return `export default ${JSON.stringify(source)};`;
+    },
+  };
+}
+
 function perfLogDir(): string {
   if (process.env.CHRO_PERF_DIR) {
     return path.resolve(__dirname, process.env.CHRO_PERF_DIR);
@@ -494,6 +529,7 @@ export default defineConfig({
   clearScreen: false,
   envPrefix: ["VITE_", "TAURI_ENV_"],
   plugins: [
+    changelogPlugin(),
     nativeFilesystemPlugin(),
     TanStackRouterVite({
       routesDirectory: "./src/routes",

@@ -8,16 +8,15 @@ import {
   SessionPreviewProvider,
   useSessionPreviewTrigger,
 } from "@/session/components/session-preview";
-import type { TaskStatusDotKind } from "@/session/domain/task-read-state";
 import {
   type GroupLabels,
   type SessionGroup,
-  type SessionGroupMode,
   groupSessions,
   isInboxSession,
-  isSessionGroupMode,
+  sortPinnedSessions,
 } from "@/session/domain/session-grouping";
 import { applyPendingSubmissionGroupsToTasks } from "@/session/domain/session-task-state";
+import type { TaskStatusDotKind } from "@/session/domain/task-read-state";
 import {
   useArchivedSessions,
   useInboxTasksStream,
@@ -58,8 +57,10 @@ import {
   ChevronRight,
   ChevronsDownUp,
   Circle,
+  CircleSlash,
   ExternalLink,
-  Group,
+  Pin,
+  PinOff,
   Plus,
   Search,
   SquarePen,
@@ -78,6 +79,7 @@ import {
 import { useAllProjects } from "../../hooks/use-all-projects";
 import { useNewChat } from "../../hooks/use-new-chat";
 import { useOpenSession } from "../../hooks/use-open-session";
+import { usePinnedSessions } from "../../hooks/use-pinned-sessions";
 import { useProjectNavigation } from "../../hooks/use-project-navigation";
 import { useCommandPaletteStore } from "../../state/command-palette-store";
 import { useLayoutStore } from "../../state/layout-store";
@@ -87,7 +89,6 @@ import {
 } from "../../state/open-projects-store";
 import { KeyboardHint } from "../keyboard-hint";
 import { ProjectSwitcherDropdown } from "../project-switcher-dropdown";
-import { ViewFade } from "../view-fade";
 
 const ICON_BUTTON_CLASS =
   "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-custom-sidebar-text-300 transition hover:bg-foreground/5 hover:text-custom-sidebar-text-100 disabled:pointer-events-none disabled:opacity-40";
@@ -116,15 +117,13 @@ const formatRelativeTime = (input: Date | string): string => {
 
 /**
  * How sessions are ordered inside each group. `name-asc`/`name-desc` order by
- * title; `recent` orders by most-recent activity (and, in project grouping,
- * orders the project sections by their latest session too).
+ * title; `recent` orders by most-recent activity (and orders the project
+ * sections by their latest session too).
  */
 type SortMode = "name-asc" | "name-desc" | "recent";
 
 const DEFAULT_SORT_MODE: SortMode = "recent";
 const SORT_MODE_STORAGE_KEY = "workspace-layout:projects-sort-mode:v1";
-const GROUP_MODE_STORAGE_KEY = "workspace-layout:session-group-mode:v1";
-const DEFAULT_GROUP_MODE: SessionGroupMode = "project";
 
 const SORT_OPTIONS: readonly {
   mode: SortMode;
@@ -133,16 +132,6 @@ const SORT_OPTIONS: readonly {
   { mode: "recent", labelKey: "sortProjectsRecent" },
   { mode: "name-asc", labelKey: "sortProjectsAsc" },
   { mode: "name-desc", labelKey: "sortProjectsDesc" },
-];
-
-const GROUP_OPTIONS: readonly {
-  mode: SessionGroupMode;
-  labelKey: "groupByNone" | "groupByProject" | "groupByStatus" | "groupByDate";
-}[] = [
-  { mode: "none", labelKey: "groupByNone" },
-  { mode: "project", labelKey: "groupByProject" },
-  { mode: "status", labelKey: "groupByStatus" },
-  { mode: "date", labelKey: "groupByDate" },
 ];
 
 const isSortMode = (value: unknown): value is SortMode =>
@@ -203,20 +192,22 @@ function sortTasks(tasks: StoredTask[], mode: SortMode): StoredTask[] {
 }
 
 /**
- * Left-dock panel: one flat, cross-project session list folded into collapsible
- * sections by a chosen axis (none / project / status / date). Project is just
- * one grouping option rather than a structural container — the former "inbox"
- * is simply "group by none", and the former project tree is "group by project".
+ * Left-dock panel with a fixed three-section information architecture:
+ *
+ * - **Pinned** (top): sessions the user pinned, lifted out of their home
+ *   section and floated by urgency. Only rendered when non-empty.
+ * - **Projects** (middle): git-repo projects, each a collapsible section with
+ *   its sessions nested underneath.
+ * - **Chats** (bottom): non-project, folder-backed general chats, listed flat
+ *   directly under the section. The backing project stays nameless in the UI.
+ *
+ * A single cross-project stream feeds all three; membership is decided by the
+ * owning project (scratch -> Chats, otherwise -> Projects) and by the pin set.
  */
 export function ProjectsDockPanel() {
   const { t } = useLanguage();
   const handleNewChat = useNewChat();
 
-  const [groupMode, setGroupMode] = usePersistedChoice(
-    GROUP_MODE_STORAGE_KEY,
-    DEFAULT_GROUP_MODE,
-    isSessionGroupMode,
-  );
   const [sortMode, setSortMode] = usePersistedChoice(
     SORT_MODE_STORAGE_KEY,
     DEFAULT_SORT_MODE,
@@ -235,11 +226,14 @@ export function ProjectsDockPanel() {
   const { tasks: streamTasks, isLoading } = useInboxTasksStream(true);
   const pendingGroups = useAllPendingSessionSubmissions();
   const projectsById = useAllProjects(true);
-  const { isArchived } = useArchivedSessions();
+  const { isArchived, archiveSession } = useArchivedSessions();
+  const { pins, isPinned, togglePin } = usePinnedSessions();
+  const openSession = useOpenSession();
+  const activeTaskKey = useFocusedSessionTaskKey();
 
-  // One source of truth for every mode: the cross-project stream with optimistic
-  // rows overlaid. Archived sessions are split off (hidden from the list but
-  // still restorable from their project's archive popover).
+  // One source of truth: the cross-project stream with optimistic rows overlaid.
+  // Archived sessions are split off (hidden from the list but still restorable
+  // from their project's archive popover).
   const merged = useMemo(
     () => applyPendingSubmissionGroupsToTasks(streamTasks, pendingGroups),
     [streamTasks, pendingGroups],
@@ -250,9 +244,9 @@ export function ProjectsDockPanel() {
     [openProjects],
   );
 
-  // The hidden "General" project(s) backing scratch chats: their sessions stay
-  // visible without the project being open, so removing a real project from the
-  // sidebar can hide its sessions without also dropping general-purpose chats.
+  // The hidden project(s) backing scratch chats: their sessions stay visible
+  // without the project being open, and they surface under the Chats section
+  // rather than as a named project.
   const scratchProjectIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [id, project] of Object.entries(projectsById)) {
@@ -262,8 +256,7 @@ export function ProjectsDockPanel() {
   }, [projectsById]);
 
   // Scope the inbox to sessions whose project is open or scratch. Sessions from
-  // projects the user removed from the sidebar drop out instead of resurfacing
-  // in a catch-all section at the bottom of the list.
+  // projects the user removed from the sidebar drop out instead of resurfacing.
   const visibleSorted = useMemo(
     () =>
       sortTasks(
@@ -275,6 +268,33 @@ export function ProjectsDockPanel() {
         sortMode,
       ),
     [merged, isArchived, sortMode, openProjectIds, scratchProjectIds],
+  );
+
+  // Pinned lifts sessions out of their home section, so the Projects and Chats
+  // partitions below both exclude pinned ids.
+  const pinnedTasks = useMemo(
+    () =>
+      sortPinnedSessions(
+        visibleSorted.filter((t) => isPinned(t.id)),
+        pins,
+      ),
+    [visibleSorted, isPinned, pins],
+  );
+
+  const chatTasks = useMemo(
+    () =>
+      visibleSorted.filter(
+        (task) => scratchProjectIds.has(task.project_id) && !isPinned(task.id),
+      ),
+    [visibleSorted, scratchProjectIds, isPinned],
+  );
+
+  const projectTasks = useMemo(
+    () =>
+      visibleSorted.filter(
+        (task) => !scratchProjectIds.has(task.project_id) && !isPinned(task.id),
+      ),
+    [visibleSorted, scratchProjectIds, isPinned],
   );
 
   const archivedByProject = useMemo(() => {
@@ -304,17 +324,29 @@ export function ProjectsDockPanel() {
     return names;
   }, [openProjects, projectsById]);
 
-  // Project sections render in sort order, latest-active first under `recent`.
-  const pinnedProjects = useMemo(() => {
+  // Origin label shown on a pinned row so its home section stays legible: the
+  // project name for a repo task, the Chats label for a scratch chat.
+  const originLabelFor = useCallback(
+    (task: StoredTask): string | null =>
+      scratchProjectIds.has(task.project_id)
+        ? t("chatsSection")
+        : projectNames[task.project_id] ?? null,
+    [scratchProjectIds, projectNames, t],
+  );
+
+  // Open (non-scratch) projects always render as sections, latest-active first
+  // under `recent`, even when they currently have no sessions.
+  const orderedProjects = useMemo(() => {
     const lastActivity: Record<string, number> = {};
-    for (const task of visibleSorted) {
+    for (const task of projectTasks) {
       const at = new Date(task.updated_at).getTime();
       lastActivity[task.project_id] = Math.max(
         lastActivity[task.project_id] ?? 0,
         Number.isNaN(at) ? 0 : at,
       );
     }
-    return [...openProjects]
+    return openProjects
+      .filter((project) => !scratchProjectIds.has(project.id))
       .sort((a, b) => {
         if (sortMode === "recent") {
           const diff = (lastActivity[b.id] ?? 0) - (lastActivity[a.id] ?? 0);
@@ -325,7 +357,7 @@ export function ProjectsDockPanel() {
         return sortMode === "name-desc" ? -cmp : cmp;
       })
       .map((project) => ({ id: project.id, name: project.name }));
-  }, [openProjects, visibleSorted, sortMode]);
+  }, [openProjects, projectTasks, sortMode, scratchProjectIds]);
 
   const labels = useMemo<GroupLabels>(
     () => ({
@@ -349,17 +381,17 @@ export function ProjectsDockPanel() {
     [t],
   );
 
-  const groups = useMemo(
+  const projectGroups = useMemo(
     () =>
       groupSessions({
-        tasks: visibleSorted,
-        mode: groupMode,
+        tasks: projectTasks,
+        mode: "project",
         projectNames,
-        pinnedProjects,
+        pinnedProjects: orderedProjects,
         now: Date.now(),
         labels,
       }),
-    [visibleSorted, groupMode, projectNames, pinnedProjects, labels],
+    [projectTasks, projectNames, orderedProjects, labels],
   );
 
   const openProjectsById = useMemo(() => {
@@ -380,35 +412,24 @@ export function ProjectsDockPanel() {
   const collapseAll = useCallback(() => {
     setCollapsed((prev) => {
       // If everything is already collapsed, expand all instead (toggle).
-      const allCollapsed = groups.every((group) => prev.has(group.key));
+      const allCollapsed = projectGroups.every((group) => prev.has(group.key));
       if (allCollapsed) return new Set();
-      return new Set(groups.map((group) => group.key));
+      return new Set(projectGroups.map((group) => group.key));
     });
-  }, [groups]);
+  }, [projectGroups]);
 
-  const hasExpanded = groups.some((group) => !collapsed.has(group.key));
-  // Only `project` mode keeps showing (project headers) when there are no
-  // sessions but projects are open; the other modes have nothing to render.
-  const isEmpty =
-    visibleSorted.length === 0 &&
-    (groupMode !== "project" || pinnedProjects.length === 0);
+  const hasExpanded = projectGroups.some((group) => !collapsed.has(group.key));
+  const hasAnyContent =
+    pinnedTasks.length > 0 ||
+    projectGroups.length > 0 ||
+    chatTasks.length > 0 ||
+    openProjects.length > 0;
 
   return (
     <SessionPreviewProvider>
       <div className="flex h-full flex-col">
         <div className="flex h-11 shrink-0 items-center justify-between px-3">
           <div className="flex items-center gap-1">
-            <ChoiceDropdown
-              ariaLabel={t("groupBy")}
-              title={t("groupBy")}
-              icon={<Group className="h-4 w-4" />}
-              current={groupMode}
-              options={GROUP_OPTIONS.map((o) => ({
-                value: o.mode,
-                label: t(o.labelKey),
-              }))}
-              onSelect={setGroupMode}
-            />
             <ChoiceDropdown
               ariaLabel={t("sortProjects")}
               title={t("sortProjects")}
@@ -427,7 +448,7 @@ export function ProjectsDockPanel() {
                     type="button"
                     aria-label={t("collapseAllProjects")}
                     onClick={collapseAll}
-                    disabled={!hasExpanded && groups.length === 0}
+                    disabled={!hasExpanded && projectGroups.length === 0}
                     className={ICON_BUTTON_CLASS}
                   >
                     <ChevronsDownUp className="h-4 w-4" />
@@ -505,40 +526,105 @@ export function ProjectsDockPanel() {
             />
           </button>
         </div>
-        <ViewFade viewKey={groupMode} className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-            {isLoading && isEmpty ? (
+            {isLoading && !hasAnyContent ? (
               <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
                 <LoadingDot isLoading className="h-3 w-3" />
               </div>
-            ) : isEmpty ? (
-              <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-                {t("noSessions")}
-              </div>
             ) : (
-              groups.map((group) => (
-                <SessionGroupSection
-                  key={group.key}
-                  group={group}
-                  mode={groupMode}
-                  collapsed={collapsed.has(group.key)}
-                  onToggle={() => toggleCollapsed(group.key)}
-                  project={
-                    group.projectId
-                      ? openProjectsById[group.projectId] ?? null
-                      : null
-                  }
-                  archived={
-                    group.projectId
-                      ? archivedByProject[group.projectId] ?? EMPTY_ARCHIVED
-                      : EMPTY_ARCHIVED
-                  }
-                  t={t}
-                />
-              ))
+              <>
+                {pinnedTasks.length > 0 ? (
+                  <div className="mb-1">
+                    <SectionLabel>{t("pinnedSection")}</SectionLabel>
+                    <div className="flex flex-col gap-0.5">
+                      {pinnedTasks.map((task) => (
+                        <SessionRowContainer
+                          key={task.id}
+                          task={task}
+                          indented={false}
+                          showProject
+                          projectName={originLabelFor(task)}
+                          isPinned
+                          onTogglePin={() => togglePin(task.id)}
+                          isActive={
+                            activeTaskKey === task.id ||
+                            activeTaskKey === task.slug
+                          }
+                          onOpen={() => openSession(task)}
+                          onArchive={() => archiveSession(task)}
+                          t={t}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="mb-1">
+                  <SectionLabel>{t("projects")}</SectionLabel>
+                  {projectGroups.length === 0 ? (
+                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                      {t("noProjectsYet")}
+                    </div>
+                  ) : (
+                    projectGroups.map((group) => (
+                      <SessionGroupSection
+                        key={group.key}
+                        group={group}
+                        collapsed={collapsed.has(group.key)}
+                        onToggle={() => toggleCollapsed(group.key)}
+                        project={
+                          group.projectId
+                            ? openProjectsById[group.projectId] ?? null
+                            : null
+                        }
+                        archived={
+                          group.projectId
+                            ? archivedByProject[group.projectId] ??
+                              EMPTY_ARCHIVED
+                            : EMPTY_ARCHIVED
+                        }
+                        isPinned={isPinned}
+                        onTogglePin={togglePin}
+                        t={t}
+                      />
+                    ))
+                  )}
+                </div>
+
+                <div className="mb-1">
+                  <SectionLabel>{t("chatsSection")}</SectionLabel>
+                  {chatTasks.length === 0 ? (
+                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                      {t("noChats")}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-0.5">
+                      {chatTasks.map((task) => (
+                        <SessionRowContainer
+                          key={task.id}
+                          task={task}
+                          indented={false}
+                          showProject={false}
+                          projectName={null}
+                          isPinned={isPinned(task.id)}
+                          onTogglePin={() => togglePin(task.id)}
+                          isActive={
+                            activeTaskKey === task.id ||
+                            activeTaskKey === task.slug
+                          }
+                          onOpen={() => openSession(task)}
+                          onArchive={() => archiveSession(task)}
+                          t={t}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
-        </ViewFade>
+        </div>
       </div>
     </SessionPreviewProvider>
   );
@@ -612,36 +698,43 @@ function ChoiceDropdown<T extends string>({
   );
 }
 
+/** Muted top-level section heading (Pinned / Projects / Chats). */
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="select-none px-2.5 pt-3 pb-1 text-xs font-medium text-custom-sidebar-text-400">
+      {children}
+    </div>
+  );
+}
+
 interface SessionGroupSectionProps {
   group: SessionGroup;
-  mode: SessionGroupMode;
   collapsed: boolean;
   onToggle: () => void;
   /** The open-project tab when this is a project section for an open project. */
   project: OpenProjectTab | null;
   /** Archived sessions for this project (project sections only). */
   archived: readonly ArchivedSessionSummary[];
+  isPinned: (taskId: string) => boolean;
+  onTogglePin: (taskId: string) => void;
   t: TranslationFunction;
 }
 
 const SessionGroupSection = memo(function SessionGroupSection({
   group,
-  mode,
   collapsed,
   onToggle,
   project,
   archived,
+  isPinned,
+  onTogglePin,
   t,
 }: SessionGroupSectionProps) {
   const activeTaskKey = useFocusedSessionTaskKey();
   const { archiveSession, restoreSession } = useArchivedSessions();
   const { activateProject, newSession } = useProjectNavigation();
   const closeProject = useOpenProjectsStore((s) => s.closeProject);
-  const projectsById = useAllProjects(true);
   const openSession = useOpenSession();
-
-  // `none` is the flat list: no header, just rows (the former inbox).
-  const headerless = mode === "none";
 
   const handleHeaderClick = () => {
     if (project) {
@@ -654,60 +747,47 @@ const SessionGroupSection = memo(function SessionGroupSection({
 
   return (
     <div className="mb-0.5">
-      {headerless ? null : (
-        <GroupHeader
-          group={group}
-          collapsed={collapsed}
-          project={project}
-          archived={archived}
-          onToggleChevron={onToggle}
-          onHeaderClick={handleHeaderClick}
-          onNewSession={project ? () => newSession(project) : undefined}
-          onRestore={restoreSession}
-          onRevealInFinder={
-            project
-              ? () => {
-                  revealInFinder(project.id, "/").catch((error) => {
-                    console.warn(
-                      "[projects-panel] Failed to reveal in finder:",
-                      error,
-                    );
-                  });
-                }
-              : undefined
-          }
-          onRemove={project ? () => closeProject(project.id) : undefined}
-          t={t}
-        />
-      )}
+      <GroupHeader
+        group={group}
+        collapsed={collapsed}
+        project={project}
+        archived={archived}
+        onToggleChevron={onToggle}
+        onHeaderClick={handleHeaderClick}
+        onNewSession={project ? () => newSession(project) : undefined}
+        onRestore={restoreSession}
+        onRevealInFinder={
+          project
+            ? () => {
+                revealInFinder(project.id, "/").catch((error) => {
+                  console.warn(
+                    "[projects-panel] Failed to reveal in finder:",
+                    error,
+                  );
+                });
+              }
+            : undefined
+        }
+        onRemove={project ? () => closeProject(project.id) : undefined}
+        t={t}
+      />
 
       {collapsed ? null : (
-        <div
-          className={cn(
-            "flex flex-col gap-0.5",
-            headerless ? undefined : "tree-group-reveal mt-0.5",
-          )}
-        >
+        <div className="tree-group-reveal mt-0.5 flex flex-col gap-0.5">
           {group.tasks.length === 0 ? (
-            <div
-              className={cn(
-                "py-1.5 text-sm text-custom-sidebar-text-400",
-                headerless ? "pl-2.5" : "pl-5",
-              )}
-            >
+            <div className="py-1.5 pl-5 text-sm text-custom-sidebar-text-400">
               {t("noChats")}
             </div>
           ) : (
             group.tasks.map((task) => (
-              <SessionRow
+              <SessionRowContainer
                 key={task.id}
                 task={task}
-                indented={!headerless}
-                showProject={mode !== "project"}
-                projectName={
-                  projectsById[task.project_id]?.name ??
-                  (task.project_id || null)
-                }
+                indented
+                showProject={false}
+                projectName={null}
+                isPinned={isPinned(task.id)}
+                onTogglePin={() => onTogglePin(task.id)}
                 isActive={
                   activeTaskKey === task.id || activeTaskKey === task.slug
                 }
@@ -853,8 +933,14 @@ function GroupHeader({
 /**
  * Leading status marker rendered before every session title so the list keeps
  * a consistent left rail: a quiet hollow bullet by default, a solid blue
- * bullet for an unread completed run, and an amber warning glyph for an unread
- * failure.
+ * bullet for an unread completed run, an amber warning glyph for an unread
+ * failure, and a struck-through bullet for a session whose worktree has been
+ * reclaimed.
+ *
+ * The circle markers all share one size so the rail reads as a single column.
+ * The struck-through circle borrows the universal "unavailable" slash rather
+ * than a subtler outline treatment, because the row it marks is one the user
+ * can no longer act on; a tooltip spells that out on hover.
  */
 function SessionLeadingMarker({
   kind,
@@ -881,6 +967,22 @@ function SessionLeadingMarker({
       />
     );
   }
+  if (kind === "cleaned") {
+    // The slash alone can't say why the row is dead, so the wrapper carries a
+    // native tooltip (lucide icons don't take a `title` prop).
+    return (
+      <span
+        title={t("sessionWorktreeCleaned")}
+        className="flex items-center justify-center"
+      >
+        <CircleSlash
+          role="status"
+          aria-label={t("sessionWorktreeCleaned")}
+          className="size-2.5 text-custom-sidebar-text-400"
+        />
+      </span>
+    );
+  }
   // Idle, running, or already-viewed: a decorative hollow bullet.
   return (
     <Circle
@@ -890,12 +992,84 @@ function SessionLeadingMarker({
   );
 }
 
+interface SessionRowContainerProps {
+  task: StoredTask;
+  indented: boolean;
+  showProject: boolean;
+  projectName: string | null;
+  isPinned: boolean;
+  onTogglePin: () => void;
+  isActive: boolean;
+  onOpen: () => void;
+  onArchive: () => void;
+  t: TranslationFunction;
+}
+
+/**
+ * Wraps a session row with its right-click menu (pin/unpin, archive). Open,
+ * archive and active-state are resolved once per section by the caller and
+ * passed in, so this stays a pure presentational wrapper.
+ *
+ * The trigger wraps `SessionRow` in a plain `<div>` rather than using
+ * `asChild` directly on the component: Radix injects its ref and
+ * `onContextMenu` onto the child element, and `SessionRow` (a component that
+ * owns its own ref for hover-preview) would drop them, leaving right-click
+ * dead. A real DOM node receives them cleanly.
+ */
+function SessionRowContainer(props: SessionRowContainerProps) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div>
+          <SessionRow
+            task={props.task}
+            indented={props.indented}
+            showProject={props.showProject}
+            projectName={props.projectName}
+            isActive={props.isActive}
+            isPinned={props.isPinned}
+            onTogglePin={props.onTogglePin}
+            onOpen={props.onOpen}
+            onArchive={props.onArchive}
+            t={props.t}
+          />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="z-20 w-44 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
+        <ContextMenuItem
+          onSelect={props.onTogglePin}
+          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+        >
+          {props.isPinned ? (
+            <PinOff className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <Pin className="h-3.5 w-3.5 shrink-0" />
+          )}
+          <span>
+            {props.isPinned ? props.t("unpinSession") : props.t("pinSession")}
+          </span>
+        </ContextMenuItem>
+        <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+        <ContextMenuItem
+          onSelect={props.onArchive}
+          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+        >
+          <Archive className="h-3.5 w-3.5 shrink-0" />
+          <span>{props.t("archive")}</span>
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 interface SessionRowProps {
   task: StoredTask;
   indented: boolean;
   showProject: boolean;
   projectName: string | null;
   isActive: boolean;
+  isPinned: boolean;
+  onTogglePin: () => void;
   onOpen: () => void;
   onArchive: () => void;
   t: TranslationFunction;
@@ -907,6 +1081,8 @@ function SessionRow({
   showProject,
   projectName,
   isActive,
+  isPinned,
+  onTogglePin,
   onOpen,
   onArchive,
   t,
@@ -976,7 +1152,7 @@ function SessionRow({
           ) : null}
         </span>
       </div>
-      <span className="flex shrink-0 items-center">
+      <span className="flex shrink-0 items-center gap-2">
         {isRunning ? (
           <span className="inline-flex items-center group-hover/row:hidden">
             <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
@@ -986,17 +1162,31 @@ function SessionRow({
             {formatRelativeTime(task.updated_at)}
           </span>
         )}
-        <button
-          type="button"
-          aria-label="Archive session"
-          onClick={(event) => {
-            event.stopPropagation();
-            onArchive();
-          }}
-          className="hidden items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100 group-hover/row:flex"
-        >
-          <Archive className="h-3.5 w-3.5" />
-        </button>
+        <span className="hidden items-center gap-1.5 group-hover/row:flex">
+          <button
+            type="button"
+            aria-label={isPinned ? t("unpinSession") : t("pinSession")}
+            title={isPinned ? t("unpinSession") : t("pinSession")}
+            onClick={(event) => {
+              event.stopPropagation();
+              onTogglePin();
+            }}
+            className="flex items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100"
+          >
+            <Pin className={cn("h-3.5 w-3.5", isPinned && "fill-current")} />
+          </button>
+          <button
+            type="button"
+            aria-label="Archive session"
+            onClick={(event) => {
+              event.stopPropagation();
+              onArchive();
+            }}
+            className="flex items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100"
+          >
+            <Archive className="h-3.5 w-3.5" />
+          </button>
+        </span>
       </span>
     </div>
   );

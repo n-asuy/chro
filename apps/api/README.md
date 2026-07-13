@@ -8,9 +8,11 @@ Rust-based Cloudflare Worker that powers the waitlist and invite-code flows used
 - D1 (`APP_DB`) stores:
   - `waitlist_entries` – emails + metadata collected from the marketing site.
   - `invite_codes` / `invite_claims` – gated access for early adopters.
+  - `feedback` – in-app feedback submissions (category, message, app context).
 - JSON endpoints:
   - `POST /waitlist` – Public entry point to join the waitlist.
   - `GET /waitlist`, `PUT /waitlist/:id/status`, `GET /waitlist/summary` – Authenticated dashboards.
+  - `POST /feedback` – Public endpoint that stores desktop feedback and posts it to Slack. Body: `{ "category": "feedback" | "bug" | "feature", "message": string, "appVersion"?, "platform"? }`.
   - `GET /invite-codes`, `POST /invite-codes` – Create/list invite codes.
   - `POST /internal/invite-codes` – Admin-only invite creation guarded by `ADMIN_SECRET` (send `X-Admin-Secret` header).
   - `POST /invite-codes/:code/claim` – Public claim endpoint that also upgrades the waitlist entry.

@@ -1,10 +1,9 @@
 // Canvas browser renderer.
 //
-// The same Zed-style split the terminal uses: the Rust backend (`crates/browser`)
-// owns one CDP WebSocket to a real Chrome and streams JPEG screencast frames;
+// The Rust backend (`crates/browser`) owns one CDP WebSocket to a real Chrome
+// and streams JPEG screencast frames;
 // this module only paints them and translates pointer/keyboard input into the
-// CSS-pixel coordinates CDP `Input.*` expects. It speaks no CDP itself — it is
-// the browser counterpart to `canvas-terminal.ts`.
+// CSS-pixel coordinates CDP `Input.*` expects. It speaks no CDP itself.
 
 /** `Page.screencastFrame.metadata` — geometry to map a painted pixel back to a
  * CSS-pixel coordinate in the page. Mirrors `browser::ScreencastMetadata`. */

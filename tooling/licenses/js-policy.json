@@ -4,11 +4,13 @@
     "(Apache-2.0 AND BSD-3-Clause)",
     "(BSD-2-Clause OR MIT OR Apache-2.0)",
     "(MIT AND Zlib)",
+    "(MIT OR Apache-2.0)",
     "(MIT OR CC0-1.0)",
     "(MIT OR WTFPL)",
     "(MPL-2.0 OR Apache-2.0)",
     "(WTFPL OR MIT)",
     "Apache-2.0",
+    "Apache-2.0 OR MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BlueOak-1.0.0",
@@ -31,6 +33,10 @@
     "WTFPL": "Not on the approved allowlist."
   },
   "overrides": {
+    "node-forge@1.4.0": {
+      "license": "BSD-3-Clause",
+      "reason": "Dual-licensed (BSD-3-Clause OR GPL-2.0); used under the permissive BSD-3-Clause option."
+    },
     "khroma@2.1.0": {
       "license": "MIT",
       "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."

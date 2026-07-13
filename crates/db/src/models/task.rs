@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
-use log_types::LogEntry;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Sqlite};
-use std::mem;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -401,15 +399,17 @@ impl TaskRecord {
     /// Batch-update sort_order for a list of task IDs.
     /// Each entry is (task_id, new_sort_order).
     pub async fn reorder(pool: &Pool<Sqlite>, updates: &[(Uuid, i32)]) -> Result<(), sqlx::Error> {
+        let mut transaction = pool.begin().await?;
         for (task_id, sort_order) in updates {
             sqlx::query(
                 "UPDATE task_records SET sort_order = ?, updated_at = datetime('now') WHERE id = ?",
             )
             .bind(sort_order)
             .bind(task_id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await?;
         }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -560,10 +560,6 @@ pub struct TaskRun {
     pub workspace_path: Option<String>,
     pub executor_label: Option<String>,
     pub resume_session_id: Option<String>,
-    /// Claude execution engine pinned at session birth ("pty" / "print"), reused
-    /// for every follow-up so a session is never resumed under the other engine.
-    /// `None` for legacy runs predating the column (resolved as PTY at spawn).
-    pub claude_execution_mode: Option<String>,
     pub worktree_deleted: bool,
     // Remote execution fields (nullable)
     pub executor_job_id: Option<String>,
@@ -601,7 +597,6 @@ impl TaskRun {
             workspace_path: None,
             executor_label: None,
             resume_session_id: None,
-            claude_execution_mode: None,
             worktree_deleted: false,
             executor_job_id: None,
             s3_prefix: None,
@@ -640,9 +635,9 @@ impl TaskRun {
                 exit_code, dropped, before_head_commit, after_head_commit, executor_job_id, s3_prefix,
                 logs_uri, summary_uri, diffs_prefix, logs_retrieval_failed, started_at, completed_at,
                 created_at, updated_at, branch_name, target_branch, container_ref, workspace_path,
-                executor_label, resume_session_id, claude_execution_mode, worktree_deleted
+                executor_label, resume_session_id, worktree_deleted
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )",
         )
         .bind(self.id)
@@ -673,30 +668,10 @@ impl TaskRun {
         .bind(self.workspace_path.clone())
         .bind(self.executor_label.clone())
         .bind(self.resume_session_id.clone())
-        .bind(self.claude_execution_mode.clone())
         .bind(self.worktree_deleted as i32)
         .execute(pool)
         .await?;
 
-        Ok(())
-    }
-
-    /// Pin (or update) the Claude execution engine for this run. Called once at
-    /// the first spawn of a fresh session; follow-up runs inherit the value at
-    /// creation so the whole chain shares one engine.
-    pub async fn set_claude_execution_mode(
-        pool: &Pool<Sqlite>,
-        run_id: Uuid,
-        mode: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE task_runs SET claude_execution_mode = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(mode)
-        .bind(Utc::now())
-        .bind(run_id)
-        .execute(pool)
-        .await?;
         Ok(())
     }
 
@@ -832,134 +807,6 @@ impl TaskRun {
     }
 }
 
-/// Task run logs (local execution only, chunked storage)
-///
-/// Stores logs in NDJSON format, split into chunks to avoid hitting
-/// database size limits. Each chunk is max 10MB.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, TS)]
-#[ts(export, export_to = "task-run-log.ts")]
-pub struct TaskRunLog {
-    pub task_run_id: Uuid,
-    pub sequence_number: i32,
-    pub logs_jsonl: String,
-    pub byte_size: i32,
-    pub inserted_at: DateTime<Utc>,
-}
-
-impl TaskRunLog {
-    pub const MAX_CHUNK_BYTES: usize = 10 * 1024 * 1024;
-
-    /// Create a new log chunk
-    pub fn new(task_run_id: Uuid, sequence_number: i32, logs_jsonl: String) -> Self {
-        Self {
-            task_run_id,
-            sequence_number,
-            byte_size: logs_jsonl.len() as i32,
-            logs_jsonl,
-            inserted_at: Utc::now(),
-        }
-    }
-
-    /// Append log entries to a run, chunking automatically.
-    pub async fn append_entries(
-        pool: &Pool<Sqlite>,
-        task_run_id: Uuid,
-        entries: &[LogEntry],
-    ) -> Result<(), sqlx::Error> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let mut sequence: i64 = sqlx::query_scalar::<Sqlite, Option<i64>>(
-            "SELECT COALESCE(MAX(sequence_number), -1) FROM task_run_logs WHERE task_run_id = ?",
-        )
-        .bind(task_run_id)
-        .fetch_one(pool)
-        .await?
-        .unwrap_or(-1);
-
-        let mut buffer = String::new();
-        for entry in entries {
-            let line = entry
-                .to_json_line()
-                .map_err(|err| sqlx::Error::ColumnDecode {
-                    index: "logs_jsonl".into(),
-                    source: err.into(),
-                })?;
-
-            if buffer.len() + line.len() > Self::MAX_CHUNK_BYTES && !buffer.is_empty() {
-                sequence += 1;
-                let chunk = mem::take(&mut buffer);
-                Self::insert_chunk(pool, task_run_id, sequence, chunk).await?;
-            }
-
-            buffer.push_str(&line);
-        }
-
-        if !buffer.is_empty() {
-            sequence += 1;
-            let chunk = mem::take(&mut buffer);
-            Self::insert_chunk(pool, task_run_id, sequence, chunk).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn insert_chunk(
-        pool: &Pool<Sqlite>,
-        task_run_id: Uuid,
-        sequence: i64,
-        chunk: String,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO task_run_logs (task_run_id, sequence_number, logs_jsonl, byte_size) VALUES (?, ?, ?, ?)",
-        )
-        .bind(task_run_id)
-        .bind(sequence as i32)
-        .bind(&chunk)
-        .bind(chunk.len() as i32)
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Fetch every log entry for a run.
-    pub async fn fetch_entries(
-        pool: &Pool<Sqlite>,
-        task_run_id: Uuid,
-    ) -> Result<Vec<LogEntry>, sqlx::Error> {
-        let rows: Vec<TaskRunLog> = sqlx::query_as(
-            "SELECT task_run_id, sequence_number, logs_jsonl, byte_size, inserted_at FROM task_run_logs WHERE task_run_id = ? ORDER BY sequence_number ASC",
-        )
-        .bind(task_run_id)
-        .fetch_all(pool)
-        .await?;
-
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.extend(row.parse_entries()?);
-        }
-        Ok(entries)
-    }
-
-    fn parse_entries(&self) -> Result<Vec<LogEntry>, sqlx::Error> {
-        let mut parsed = Vec::new();
-        for line in self.logs_jsonl.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let entry =
-                LogEntry::from_json_line(line).map_err(|err| sqlx::Error::ColumnDecode {
-                    index: "logs_jsonl".into(),
-                    source: err.into(),
-                })?;
-            parsed.push(entry);
-        }
-        Ok(parsed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,66 +923,6 @@ mod tests {
         assert!(run.completed_at.is_some());
     }
 
-    #[test]
-    fn test_log_chunk_creation() {
-        let run_id = Uuid::new_v4();
-        let logs = r#"{"level":"info","msg":"test"}\n{"level":"error","msg":"fail"}"#;
-        let log = TaskRunLog::new(run_id, 0, logs.to_string());
-        assert_eq!(log.sequence_number, 0);
-        assert_eq!(log.byte_size, logs.len() as i32);
-    }
-
-    #[tokio::test]
-    async fn append_and_fetch_logs() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("logs.db");
-        let service = crate::DBService::new_with_path(&db_path).await.unwrap();
-
-        let project_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO project_records (id, name, git_repo_path, created_at, updated_at) VALUES (?, 'proj', '/tmp', datetime('now'), datetime('now'))",
-        )
-        .bind(project_id)
-        .execute(service.pool())
-        .await
-        .unwrap();
-
-        let task_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO task_records (id, project_id, title, created_at, updated_at)
-             VALUES (?, ?, 'task', datetime('now'), datetime('now'))",
-        )
-        .bind(task_id)
-        .bind(project_id)
-        .execute(service.pool())
-        .await
-        .unwrap();
-
-        let mut run = TaskRun::new_local(task_id, None);
-        run.id = Uuid::new_v4();
-        sqlx::query("INSERT INTO task_runs (id, task_id, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))")
-        .bind(run.id)
-        .bind(task_id)
-        .execute(service.pool())
-        .await
-        .unwrap();
-
-        let entries = vec![
-            LogEntry::Stdout("hello".into()),
-            LogEntry::Stdout("world".into()),
-            LogEntry::Finished,
-        ];
-
-        TaskRunLog::append_entries(service.pool(), run.id, &entries)
-            .await
-            .unwrap();
-        let stored = TaskRunLog::fetch_entries(service.pool(), run.id)
-            .await
-            .unwrap();
-        assert_eq!(stored.len(), 3);
-        assert!(matches!(stored.last(), Some(LogEntry::Finished)));
-    }
-
     #[tokio::test]
     async fn update_status_persists_changes() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1238,5 +1025,53 @@ mod tests {
             cleared.updated_at, baseline_updated_at,
             "set_awaiting_input must not bump updated_at"
         );
+    }
+
+    #[tokio::test]
+    async fn reorder_rolls_back_every_update_when_one_fails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = crate::DBService::new_with_path(temp_dir.path().join("reorder.db"))
+            .await
+            .unwrap();
+        let pool = service.pool();
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path) VALUES (?, 'proj', '/tmp/reorder')",
+        )
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for id in [first, second] {
+            sqlx::query(
+                "INSERT INTO task_records (id, project_id, title, sort_order) VALUES (?, ?, 'task', 0)",
+            )
+            .bind(id)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "CREATE TRIGGER fail_second_reorder BEFORE UPDATE OF sort_order ON task_records
+             WHEN NEW.sort_order = 2 BEGIN SELECT RAISE(ABORT, 'forced reorder failure'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let result = TaskRecord::reorder(pool, &[(first, 1), (second, 2)]).await;
+        assert!(result.is_err());
+
+        let first_order: i32 =
+            sqlx::query_scalar("SELECT sort_order FROM task_records WHERE id = ?")
+                .bind(first)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(first_order, 0, "the first update must be rolled back");
     }
 }

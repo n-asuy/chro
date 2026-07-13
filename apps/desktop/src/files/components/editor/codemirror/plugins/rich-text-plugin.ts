@@ -2,7 +2,7 @@
  * Rich text plugin for WYSIWYG markdown editing
  * Hides markdown syntax tokens when not editing them
  *
- * Based on Type-32/codemirror-rich-obsidian
+ * Based on a reference CodeMirror rich-text Markdown plugin
  */
 
 import type {

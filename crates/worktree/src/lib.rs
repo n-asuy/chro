@@ -174,10 +174,6 @@ impl WorktreeManager {
         &self.base_dir
     }
 
-    pub fn derive_worktree_path(&self, attempt_id: &str, task_title: &str) -> PathBuf {
-        resolve_worktree_path(&*self.base_dir, task_title, attempt_id)
-    }
-
     pub async fn ensure_worktree(
         &self,
         repo_path: impl AsRef<Path>,

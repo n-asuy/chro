@@ -212,7 +212,7 @@ function extractAndRun(zipPath, extractDir, baseName, args) {
   const proc = spawn(binPath, args, { stdio: "inherit" });
   proc.on("exit", (code) => process.exit(code || 0));
   proc.on("error", (error) => {
-    console.error("Failed to launch chro-server:", error.message);
+    console.error("Failed to launch Chro:", error.message);
     process.exit(1);
   });
 
@@ -223,10 +223,15 @@ function extractAndRun(zipPath, extractDir, baseName, args) {
 }
 
 const cliVersion = require("../package.json").version;
-console.log(`Starting chro v${cliVersion}...`);
-
 const platformDir = getPlatformDir();
 const args = process.argv.slice(2);
+
+if (args.length === 1 && ["-v", "-V", "--version"].includes(args[0])) {
+  console.log(`chro ${cliVersion}`);
+  process.exit(0);
+}
+
+console.log(`Starting chro v${cliVersion}...`);
 
 ensureBinaryZip(platformDir, "chro-server")
   .then((zipPath) => {

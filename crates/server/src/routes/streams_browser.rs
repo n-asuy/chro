@@ -1,7 +1,7 @@
 //! Interactive browser WebSocket endpoint.
 //!
-//! The browser counterpart to [`streams_terminal`]. Chrome renders server-side
-//! and streams JPEG frames; the renderer paints them and sends back pointer and
+//! Chrome renders server-side and streams JPEG frames; the renderer paints
+//! them and sends back pointer and
 //! keyboard input mapped to viewport (CSS-pixel) coordinates. The agent drives
 //! the same session through the engine, so its actions render live in the human
 //! pane — and the human can take over mid-task.
@@ -27,7 +27,7 @@
 //!   - `{ "type": "error", "message": "<string>" }`
 //!
 //! The Chrome process is launched on upgrade and killed when the client
-//! disconnects (no reattach yet — same lifetime model as the terminal pane).
+//! disconnects; reattachment is not currently supported.
 
 use std::{path::PathBuf, str::FromStr};
 

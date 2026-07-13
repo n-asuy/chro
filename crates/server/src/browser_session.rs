@@ -1,13 +1,13 @@
 //! Live browser sessions for the browser pane.
 //!
-//! This is the browser counterpart to [`crate::pty`]. Each session owns a
-//! dedicated Chrome (via the [`browser`] engine), an event pump that turns CDP
-//! `Page.screencastFrame`/navigation events into [`BrowserOutbound`] messages,
-//! and a broadcast channel the WebSocket layer paints from. Emulation-free:
+//! Each session owns a dedicated Chrome (via the [`browser`] engine), an event
+//! pump that turns CDP `Page.screencastFrame`/navigation events into
+//! [`BrowserOutbound`] messages, and a broadcast channel the WebSocket layer
+//! paints from. Emulation-free:
 //! the engine streams JPEG frames produced by Chrome itself, so the renderer
 //! only paints pixels and maps pointer coordinates — it never speaks CDP.
 //!
-//! Like the PTY layer, each connection owns its own session (no reattach yet):
+//! Each connection owns its own session (no reattach yet):
 //! socket close → Chrome killed, no orphaned browsers.
 
 use std::{

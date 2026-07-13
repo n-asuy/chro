@@ -550,13 +550,32 @@ export type SearchMatchType =
   | "FullPath"
   | "ContentMatch";
 
+/**
+ * A single matching line for a content search result. `ranges` are
+ * `[start, end)` UTF-16 offsets into `line_content`, ready to slice for
+ * highlighting.
+ */
+export type SearchLineMatch = {
+  line_number: number;
+  line_content: string;
+  ranges: [number, number][];
+};
+
 export type ProjectSearchResult = {
   path: string;
   is_file: boolean;
   match_type: SearchMatchType;
+  /** Matching lines for content search; empty for name/path results. */
+  line_matches: SearchLineMatch[];
 };
 
 type SearchMode = "taskform" | "settings";
+
+/** "name" (default) matches file names/paths; "content" runs full-text search. */
+export type SearchKind = "name" | "content";
+
+/** Case handling for content search; omit for smart-case (uppercase = sensitive). */
+export type SearchCase = "sensitive" | "insensitive";
 
 type ProjectSearchResponse = {
   results: ProjectSearchResult[];
@@ -565,7 +584,12 @@ type ProjectSearchResponse = {
 export const searchProjectFiles = async (
   projectId: string,
   query: string,
-  options?: { mode?: SearchMode; limit?: number },
+  options?: {
+    mode?: SearchMode;
+    limit?: number;
+    kind?: SearchKind;
+    case?: SearchCase;
+  },
 ): Promise<ProjectSearchResult[]> => {
   if (!query.trim()) {
     return [];
@@ -577,6 +601,12 @@ export const searchProjectFiles = async (
   }
   if (options?.limit) {
     params.set("limit", options.limit.toString());
+  }
+  if (options?.kind) {
+    params.set("kind", options.kind);
+  }
+  if (options?.case) {
+    params.set("case", options.case);
   }
 
   const { results } = await desktopFetch<ProjectSearchResponse>(

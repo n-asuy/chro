@@ -1,6 +1,6 @@
 //! Resolve a live `webSocketDebuggerUrl` for a Chrome DevTools endpoint.
 //!
-//! Ported from browser-harness `daemon.py:get_ws_url`. Two real-world quirks
+//! Ported from a reference CDP daemon's WebSocket-URL resolution. Two real-world quirks
 //! drive the shape:
 //!
 //! * The browser UUID baked into `DevToolsActivePort` goes stale if the same
