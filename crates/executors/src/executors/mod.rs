@@ -71,6 +71,10 @@ pub enum ExecutorError {
     SetupHelperNotSupported,
     #[error("Auth required: {0}")]
     AuthRequired(String),
+    #[error(
+        "Windows batch argument contains an unsafe character (one of & | < > ^ \" % ! CR LF): {0}"
+    )]
+    UnsafeWindowsBatchArguments(String),
 }
 
 /// CodingAgent enum with enum_dispatch for trait dispatch.
@@ -198,6 +202,25 @@ pub trait StandardCodingAgentExecutor {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError>;
 
+    /// Continue `session_id`'s conversation in a *new* session, leaving the
+    /// original untouched.
+    ///
+    /// The default resumes in place, which is right for agents whose follow-up
+    /// already branches (codex copies its rollout every turn) and is the closest
+    /// available behaviour for those that cannot branch at all. Agents that keep
+    /// writing to the resumed session must override this, or a fork would
+    /// silently append to its source.
+    async fn spawn_fork(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        session_id: &str,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        self.spawn_follow_up(current_dir, prompt, session_id, None, env)
+            .await
+    }
+
     async fn spawn_review(
         &self,
         current_dir: &Path,
@@ -223,7 +246,7 @@ pub trait StandardCodingAgentExecutor {
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
 
-    fn get_availability_info(&self) -> AvailabilityInfo {
+    async fn get_availability_info(&self) -> AvailabilityInfo {
         let config_files_found = self
             .default_mcp_config_path()
             .is_some_and(|path| path.exists());

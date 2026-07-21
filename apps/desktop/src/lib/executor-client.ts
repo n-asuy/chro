@@ -3,8 +3,12 @@ import { desktopFetch } from "./backend-client";
 // Base coding agent types (matches BaseCodingAgent enum in Rust)
 export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX" | "PI";
 
-// Reasoning effort (Codex only; matches ReasoningEffort enum in Rust, kebab-case)
+// Reasoning effort (matches ReasoningEffort enum in Rust, kebab-case)
 export type ReasoningEffort = "low" | "medium" | "high" | "x-high";
+
+// Output speed (matches SpeedMode enum in Rust). `fast` maps to Claude Code's
+// fast mode (`speed: "fast"`), currently Opus-only; `standard` is the default.
+export type SpeedMode = "standard" | "fast";
 
 // Current executor profile selection
 export type ExecutorProfileId = {
@@ -13,6 +17,7 @@ export type ExecutorProfileId = {
   // Optional per-request overrides applied on top of the resolved variant.
   model?: string | null;
   reasoning_effort?: ReasoningEffort | null;
+  speed?: SpeedMode | null;
 };
 
 // All executor configurations

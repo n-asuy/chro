@@ -50,6 +50,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { FeatureFlagsSection } from "./components/feature-flags-section";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
@@ -1157,12 +1158,15 @@ export function SettingsPanel({
           {t("settingsTabsDeveloper")}
         </h2>
         <p className="font-workspace text-[13px] text-muted-foreground mt-1">
-          {t("developerWorktreeDescription")}
+          {t("developerTabDescription")}
         </p>
       </div>
 
+      <FeatureFlagsSection />
+
       <SettingsSection
         heading={t("developerWorktreeTitle")}
+        description={t("developerWorktreeDescription")}
         action={
           <Button
             variant="ghost"

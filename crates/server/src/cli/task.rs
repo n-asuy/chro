@@ -78,6 +78,21 @@ pub enum TaskCommand {
         id: String,
     },
 
+
+    /// Delegate part of a session's work to a new session. The child starts
+    /// immediately with a digest of the delegating session in its boot
+    /// prompt; when every task delegated by that session has finished, the
+    /// results are handed back in one packet and the delegating session
+    /// wakes.
+    Delegate {
+        /// The brief for the delegated work
+        prompt: String,
+        /// Delegating task ID or slug. Defaults to $CHRO_TASK_ID, which chro
+        /// sets inside every session it runs.
+        #[arg(long, value_name = "TASK")]
+        from: Option<String>,
+    },
+
     /// Merge task run changes into target branch
     Merge {
         /// Task run ID or slug
@@ -128,6 +143,7 @@ pub fn run(
         TaskCommand::Cancel { id } => cancel(client, id),
         TaskCommand::Diff { id } => diff(client, id),
         TaskCommand::Merge { id, message } => merge(client, id, message.as_deref()),
+        TaskCommand::Delegate { prompt, from } => delegate(client, prompt, from.as_deref()),
     }
 }
 
@@ -497,6 +513,34 @@ fn merge(
         .unwrap_or("?");
 
     println!("Merged into {target}  commit:{commit:.8}");
+    Ok(())
+}
+
+
+fn delegate(
+    client: &ServerClient,
+    prompt: &str,
+    from: Option<&str>,
+) -> Result<(), client::ClientError> {
+    let from = match from {
+        Some(value) => value.to_string(),
+        None => std::env::var("CHRO_TASK_ID").map_err(|_| {
+            client::ClientError::Usage(
+                "No delegating session: pass --from <task>, or run inside a chro session (which sets CHRO_TASK_ID).".to_string(),
+            )
+        })?,
+    };
+    let body = serde_json::json!({ "prompt": prompt });
+    let resp = client.post(&format!("/rpc/tasks/{}/delegate", urlencoded(&from)), &body)?;
+    let task = &resp["task"];
+    let id = task
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .or_else(|| task.get("id").and_then(|v| v.as_str()))
+        .unwrap_or("-");
+    let title = task.get("title").and_then(|v| v.as_str()).unwrap_or("-");
+    println!("Delegated to new session: {id}  {title}");
+    println!("It is running now. When every task delegated by this session has finished, the results are handed back here in one packet.");
     Ok(())
 }
 

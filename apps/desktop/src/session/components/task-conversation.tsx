@@ -9,6 +9,7 @@ import {
   useRef,
 } from "react";
 import { ConversationEntries } from "../conversation-view";
+import type { ReactNode } from "react";
 import type { DisplayEntry } from "../types";
 import {
   SESSION_SELECT_ACTIVE_ATTR,
@@ -62,6 +63,10 @@ interface TaskConversationProps {
   hasMoreHistory?: boolean;
   isLoadingMoreHistory?: boolean;
   onLoadMoreHistory?: () => Promise<void> | void;
+  /** Branch the conversation from a given run into a new session. */
+  onForkFromRun?: (runId: string) => void;
+  /** Fork-origin block rendered above all entries (inherited history + boundary). */
+  forkOrigin?: ReactNode;
 }
 
 export const TaskConversation = memo(function TaskConversation({
@@ -80,6 +85,8 @@ export const TaskConversation = memo(function TaskConversation({
   hasMoreHistory = false,
   isLoadingMoreHistory = false,
   onLoadMoreHistory,
+  onForkFromRun,
+  forkOrigin,
 }: TaskConversationProps) {
   const internalScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef =
@@ -344,6 +351,8 @@ export const TaskConversation = memo(function TaskConversation({
     ) : (
       <ConversationEntries
         entries={entries}
+        onForkFromRun={onForkFromRun}
+        leading={forkOrigin}
         endRef={messagesEndRef}
         onWikilinkClick={onWikilinkClick}
         onFilePathClick={onFilePathClick}

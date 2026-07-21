@@ -49,3 +49,20 @@ export const persistCbase = async (
     `/rpc/projects/${projectId}/cbase/persist`,
     jsonInit({ basePath, definition, properties }),
   );
+
+/**
+ * Rewrite one frontmatter property of a row file. The caller shows the value
+ * optimistically; the worktree watcher event triggers the re-query that
+ * settles the table, so nothing is returned.
+ */
+export const setCbaseProperty = async (
+  projectId: string,
+  filePath: string,
+  key: string,
+  value: unknown,
+): Promise<void> => {
+  await desktopFetch<Record<string, never>>(
+    `/rpc/projects/${projectId}/cbase/set-property`,
+    jsonInit({ filePath, key, value: value ?? null }),
+  );
+};

@@ -8,6 +8,7 @@
  * Edits are synced back to the markdown source via CodeMirror transactions.
  */
 
+import { hasDecorationRefresh } from "../decoration-refresh";
 import { syntaxTree } from "@codemirror/language";
 import {
   type ChangeSpec,
@@ -1303,7 +1304,7 @@ export function createTablePlugin(config: TablePluginConfig = {}): Extension {
         }
         return value;
       }
-      if (tr.docChanged || tr.effects.length > 0 || rawChanged) {
+      if (tr.docChanged || hasDecorationRefresh(tr) || rawChanged) {
         return RangeSet.of(buildTableDecorations(tr.state, config), true);
       }
       return value;

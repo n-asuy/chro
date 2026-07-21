@@ -268,7 +268,10 @@ function applyEntriesPatches(
  * Load entries from a historic (non-running) TaskRun via WebSocket.
  * Returns a promise that resolves when the stream finishes.
  */
-function loadHistoricTaskRunEntries(
+/// Exported for the fork-origin block: a fork renders its source's history the
+/// same way this hook replays its own historic runs, and the replay stream is
+/// run-scoped so a foreign task's runs load identically.
+export function loadHistoricTaskRunEntries(
   taskRunId: string,
   onEntries: (entries: DisplayEntry[]) => void,
 ): Promise<void> {

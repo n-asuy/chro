@@ -130,6 +130,7 @@ async fn ensure_project(
     )
     .await?;
 
+    state.spawn_index_prewarm(PathBuf::from(&project.git_repo_path));
     Ok(Json(ProjectEnvelope::new(project)))
 }
 
@@ -146,6 +147,7 @@ async fn ensure_general_project(
     let project =
         ProjectRecord::ensure_with_name_hint(state.pool(), chats_dir.as_ref(), Some("General"))
             .await?;
+    state.spawn_index_prewarm(PathBuf::from(&project.git_repo_path));
     Ok(Json(ProjectEnvelope::new(project)))
 }
 
@@ -159,6 +161,7 @@ async fn get_project(
             sqlx::Error::RowNotFound => ApiError::NotFound,
             other => ApiError::Sqlx(other),
         })?;
+    state.spawn_index_prewarm(PathBuf::from(&project.git_repo_path));
     Ok(Json(ProjectEnvelope::new(project)))
 }
 
@@ -741,6 +744,7 @@ async fn search_project_files(
         _ => SearchMode::TaskForm,
     };
 
+    state.runtime().ensure_search_cache_watch(&project_path);
     let file_search_cache = state.runtime().file_search_cache();
     let search_results = match file_search_cache
         .search(&project_path, needle, mode, limit)

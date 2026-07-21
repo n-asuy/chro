@@ -9,6 +9,7 @@
  * - https://youtube.com/shorts/VIDEO_ID
  */
 
+import { hasDecorationRefresh } from "../decoration-refresh";
 import {
   Decoration,
   EditorView,
@@ -274,7 +275,7 @@ export function createYouTubeEmbedPlugin(): Extension {
       return RangeSet.of(buildYouTubeEmbedDecorations(state), true);
     },
     update(value, tr) {
-      if (tr.docChanged || tr.selection || tr.effects.length > 0) {
+      if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
         return RangeSet.of(buildYouTubeEmbedDecorations(tr.state), true);
       }
       return value.map(tr.changes);

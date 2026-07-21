@@ -7,8 +7,8 @@ use std::{
 use chrono::Utc;
 use db::{
     models::{
-        AgentProfile, ProjectRecord, TaskContextRef, TaskContextRefInput, TaskMerge, TaskRecord,
-        TaskRun, TaskSession,
+        AgentProfile, ForkAnchor, ForkMode, HandoffInfo, ProjectRecord, TaskContextRef,
+        TaskContextRefInput, TaskMerge, TaskRecord, TaskRun, TaskSession,
     },
     types::{RunStatus, TaskStatus},
 };
@@ -58,6 +58,43 @@ pub struct TaskRunBranchStatus {
 #[derive(Debug, Clone)]
 pub struct RebaseOutcome {
     pub new_base_branch: String,
+}
+
+/// Where a forked session does its work.
+///
+/// Only offered for git projects. General chats and non-git projects always
+/// share the source directory, so the caller has nothing to choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkWorkspace {
+    /// Keep working in the source's directory.
+    Same,
+    /// Cut a worktree from the anchor commit, so the branch can diverge without
+    /// touching the source's files.
+    NewWorktree,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForkOutcome {
+    pub task: TaskRecord,
+    /// Whether the conversation will be duplicated or degraded to a digest.
+    /// Resolved at fork time so the UI can explain a degrade immediately.
+    pub mode: ForkMode,
+}
+
+/// How a forked task picks up its source on its very first turn.
+///
+/// Decided when that turn starts (not at fork time) because it depends on the
+/// executor the user chose for it: the same fork resumes natively for its
+/// origin executor and degrades to a digest for a different one.
+enum ForkStart {
+    /// Resume the source session under a new id (`--fork-session` / rollout
+    /// copy). Full context carries over live.
+    Native { resume_session_id: String },
+    /// Inline a digest of the source into the prompt. Used when the executor
+    /// cannot duplicate the session, or it was switched, or the source ended
+    /// resume-unsafe.
+    Digest { source_task_id: Uuid },
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +329,599 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .await?;
         }
         Ok(task)
+    }
+
+    /// Branch a session at an anchor run into a new task.
+    ///
+    /// Fork is a lifecycle operation, not one of the inter-session verbs: it
+    /// delivers no payload and wakes nobody. Only its provenance lands on the
+    /// relation graph, as a single `fork` edge.
+    ///
+    /// The new task is created idle. Whoever forked writes the first turn; the
+    /// executor's own duplication (`--fork-session` / rollout copy) happens then,
+    /// driven by `fork_source` on the session row.
+    pub async fn fork_task(
+        &self,
+        anchor_run_id: Uuid,
+        workspace: ForkWorkspace,
+    ) -> Result<ForkOutcome, RuntimeError> {
+        let anchor_run = TaskRun::get(self.pool(), anchor_run_id).await?;
+        let source_task = TaskRecord::get(self.pool(), anchor_run.task_id).await?;
+        let project = ProjectRecord::get(self.pool(), source_task.project_id).await?;
+
+        if matches!(anchor_run.status, RunStatus::Running | RunStatus::Pending) {
+            return Err(RuntimeError::BadRequest(
+                "cannot fork a run that is still executing",
+            ));
+        }
+
+        // A new worktree needs a commit to branch from, and a git repo to put it
+        // in. General chats and non-git projects have neither: they fork the
+        // conversation and keep sharing the directory.
+        let repo_path = PathBuf::from(&project.git_repo_path);
+        let is_git = self.runtime().git().is_repository(&repo_path);
+        let workspace = match workspace {
+            ForkWorkspace::NewWorktree if !is_git => {
+                return Err(RuntimeError::BadRequest(
+                    "a git repository is required to continue in a new worktree",
+                ))
+            }
+            other => other,
+        };
+
+        // Resolve the code anchor: the exact state the source ended on. The run
+        // ledger (after→before) is the durable record; the source branch tip is
+        // the same state by another name, covering runs whose ledger predates
+        // boundary recording. Whichever still resolves is a real commit that
+        // survives the source's worktree being reclaimed — never HEAD, which is
+        // the project's default branch (main) and has nothing to do with this
+        // session.
+        let anchor_commit: Option<String> = if is_git {
+            [
+                anchor_run.after_head_commit.clone(),
+                anchor_run.before_head_commit.clone(),
+                anchor_run.branch_name.clone(),
+                source_task.branch.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(|rev| self.runtime().git().resolve_commit_sha(&repo_path, &rev))
+        } else {
+            None
+        };
+
+        // A git session whose anchor no longer resolves (worktree reclaimed and
+        // no commit or branch survived) has no honest point to continue from.
+        // Refuse rather than silently branching from main.
+        if is_git && anchor_commit.is_none() {
+            return Err(RuntimeError::BadRequest(
+                "this session's checkpoint is gone (its branch and commits were reclaimed); it can no longer be continued",
+            ));
+        }
+
+        let mode = self.resolve_fork_mode(&anchor_run).await;
+        let title = fork_title(&source_task.title);
+        let task = TaskRecord::new_with_prompt(source_task.project_id, title, None, None);
+        task.insert(self.pool()).await?;
+
+        // "Same" keeps working in the source's live worktree only while it
+        // actually exists; the reclaimed case falls through to cutting a fresh
+        // worktree from the anchor, so a fork never runs in the project root.
+        let reuse_dir = matches!(workspace, ForkWorkspace::Same)
+            .then(|| source_task.worktree_path.clone())
+            .flatten()
+            .filter(|path| Path::new(path).is_dir());
+
+        // Provision the fork's workspace now, so its first turn adopts it
+        // instead of cutting a fresh worktree from the target branch (which
+        // would silently discard the anchor).
+        match reuse_dir {
+            Some(shared_dir) if is_git => {
+                // Continue in the source's own worktree, on its branch.
+                TaskRecord::update_worktree_state(self.pool(), task.id, Some(shared_dir), false, true)
+                    .await?;
+                TaskRecord::update_branch(self.pool(), task.id, source_task.branch.clone()).await?;
+            }
+            _ if is_git => {
+                // NewWorktree, or a Same whose worktree is gone: cut a fresh
+                // worktree from the resolved anchor commit.
+                let anchor_commit = anchor_commit
+                    .as_deref()
+                    .expect("anchor_commit is Some for git forks (refused above otherwise)");
+                let branch_name = generate_attempt_branch_name(&task.title, &task.id.to_string());
+                self.runtime().git().ensure_branch_exists_at_commit(
+                    &repo_path,
+                    &branch_name,
+                    anchor_commit,
+                )?;
+                let handle = self
+                    .runtime()
+                    .worktree()
+                    .ensure_worktree(&repo_path, EnsureOptions::new(&branch_name))
+                    .await?;
+                TaskRecord::update_worktree_state(
+                    self.pool(),
+                    task.id,
+                    Some(handle.path.to_string_lossy().into_owned()),
+                    false,
+                    true,
+                )
+                .await?;
+                TaskRecord::update_branch(self.pool(), task.id, Some(branch_name)).await?;
+            }
+            _ => {
+                // Non-git / General scratch: no branch to diverge, no main to
+                // fly off to. Share the source's directory (or the project root
+                // when it has none).
+                let shared_dir = source_task
+                    .worktree_path
+                    .clone()
+                    .filter(|path| Path::new(path).is_dir())
+                    .unwrap_or_else(|| project.git_repo_path.clone());
+                TaskRecord::update_worktree_state(self.pool(), task.id, Some(shared_dir), false, true)
+                    .await?;
+                TaskRecord::update_branch(self.pool(), task.id, source_task.branch.clone()).await?;
+            }
+        }
+
+        let anchor = ForkAnchor {
+            run_id: anchor_run.id,
+            message_uuid: None,
+            // The resolved anchor for git forks (survives worktree deletion);
+            // None for non-git/scratch, which have no commit.
+            commit: anchor_commit.clone(),
+        };
+        let source_session_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM task_sessions WHERE task_run_id = ? ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(anchor_run.id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        let mut refs = vec![TaskContextRefInput::fork(
+            source_task.id,
+            source_session_id,
+            mode,
+            anchor,
+            Some(source_task.title.clone()),
+        )];
+        // Carry the source's read context forward: a fork continues the same
+        // work, so the files and sessions it was told to look at still apply.
+        refs.extend(
+            TaskContextRef::list_by_task_id(self.pool(), source_task.id)
+                .await?
+                .into_iter()
+                .filter(|existing| !db::models::is_broker_authored_kind(&existing.kind))
+                .map(|existing| TaskContextRefInput {
+                    kind: existing.kind,
+                    target_task_id: existing.target_task_id,
+                    target_session_id: existing.target_session_id,
+                    path: existing.path,
+                    branch: existing.branch,
+                    mode: Some(existing.mode),
+                    label: existing.label,
+                    metadata_json: existing.metadata_json,
+                }),
+        );
+
+        for (index, input) in refs.iter().enumerate() {
+            TaskContextRef::insert_for_task(self.pool(), task.id, None, None, input, index as i32)
+                .await?;
+        }
+
+        info!(
+            task_id = %task.id,
+            source_task_id = %source_task.id,
+            anchor_run_id = %anchor_run.id,
+            mode = mode.as_str(),
+            workspace = ?workspace,
+            "forked session"
+        );
+
+        Ok(ForkOutcome { task, mode })
+    }
+
+    /// Fork a task from its most recent finished run.
+    ///
+    /// The session-list entry point has no anchor to offer, so "latest" is the
+    /// only sensible one; picking an earlier point is what the conversation
+    /// entry point is for.
+    pub async fn fork_task_latest(
+        &self,
+        task_id: Uuid,
+        workspace: ForkWorkspace,
+    ) -> Result<ForkOutcome, RuntimeError> {
+        let anchor_run_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM task_runs \
+             WHERE task_id = ? AND status NOT IN ('running', 'pending') AND dropped = 0 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(RuntimeError::BadRequest(
+            "this session has no finished run to continue from",
+        ))?;
+        self.fork_task(anchor_run_id, workspace).await
+    }
+
+    /// How a forked task should pick up its source on its first turn.
+    ///
+    /// Returns None once the task has run at least once (the branch already
+    /// exists, so later turns resume normally) or when the task was not forked.
+    async fn resolve_fork_start(
+        &self,
+        task: &TaskRecord,
+        executor: &ExecutorProfileId,
+    ) -> Option<ForkStart> {
+        let already_ran: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE task_id = ?")
+            .bind(task.id)
+            .fetch_one(self.pool())
+            .await
+            .unwrap_or(1);
+        if already_ran > 1 {
+            return None;
+        }
+
+        let edge = TaskContextRef::list_by_task_id(self.pool(), task.id)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|r| r.kind == "fork")?;
+        let anchor: ForkAnchor = serde_json::from_str(edge.metadata_json.as_deref()?).ok()?;
+        let anchor_run = TaskRun::get(self.pool(), anchor.run_id).await.ok()?;
+        // Whatever happens below, the source's work must reach the new session:
+        // falling back to a digest is a downgrade, never a fresh start.
+        let digest = ForkStart::Digest {
+            source_task_id: anchor_run.task_id,
+        };
+
+        if edge.mode != ForkMode::Native.as_str() {
+            return Some(digest);
+        }
+
+        // Resume ids are executor-specific: a claude session id means nothing to
+        // codex, which would reject it as an unknown thread. Switching executor
+        // on the fork's first turn is a legitimate thing to do, so it degrades to
+        // a digest handoff rather than failing.
+        if !run_targets_executor(&anchor_run, executor) {
+            info!(
+                task_id = %task.id,
+                anchor_run_id = %anchor.run_id,
+                executor = %executor.executor,
+                "fork switched executor; carrying a digest instead of duplicating the session"
+            );
+            return Some(digest);
+        }
+
+        match self
+            .resolve_resume_session_id_for_follow_up(&anchor_run)
+            .await
+        {
+            Ok(Some(resume_session_id)) => Some(ForkStart::Native { resume_session_id }),
+            Ok(None) => Some(digest),
+            Err(err) => {
+                warn!(
+                    task_id = %task.id,
+                    anchor_run_id = %anchor.run_id,
+                    error = %err,
+                    "fork source session could not be resolved; carrying a digest instead"
+                );
+                Some(digest)
+            }
+        }
+    }
+
+    /// Pick how the fork inherits its conversation.
+    ///
+    /// Duplicating a session whose last turn died on an API error or a
+    /// malformed tool call carries the poison into the copy, so those degrade to
+    /// a digest handoff instead.
+    async fn resolve_fork_mode(&self, anchor_run: &TaskRun) -> ForkMode {
+        if matches!(anchor_run.status, RunStatus::Failed) {
+            return ForkMode::Digest;
+        }
+        match self
+            .resolve_resume_session_id_for_follow_up(anchor_run)
+            .await
+        {
+            Ok(Some(_)) => ForkMode::Native,
+            Ok(None) => ForkMode::Digest,
+            Err(err) => {
+                warn!(
+                    task_run_id = %anchor_run.id,
+                    error = %err,
+                    "failed to resolve session id for fork; falling back to digest"
+                );
+                ForkMode::Digest
+            }
+        }
+    }
+
+    /// Spawn a new session to carry a piece of another session's work.
+    ///
+    /// Delegation is the request half of the lifecycle-communication backbone:
+    /// the delegating task rides into the child's boot prompt as a digest (the
+    /// only guaranteed first delivery), a broker-authored `delegate` edge
+    /// records the provenance, and the child starts running immediately. The
+    /// response half is [`Self::settle_delegation_handoff`], which fires when a
+    /// child run completes.
+    pub async fn delegate_task(
+        &self,
+        source_task_id: Uuid,
+        prompt: String,
+        executor_profile_id: Option<ExecutorProfileId>,
+    ) -> Result<TaskRecord, RuntimeError> {
+        let prompt = normalize_optional_text(Some(prompt))
+            .ok_or(RuntimeError::BadRequest("prompt is required"))?;
+        let source_task = TaskRecord::get(self.pool(), source_task_id).await?;
+        let project = ProjectRecord::get(self.pool(), source_task.project_id).await?;
+
+        let title = infer_task_title(&prompt);
+        let description = infer_task_description(&prompt);
+        let task = TaskRecord::new_with_prompt(
+            source_task.project_id,
+            title,
+            description,
+            Some(prompt.clone()),
+        );
+        task.insert(self.pool()).await?;
+
+        TaskContextRef::insert_for_task(
+            self.pool(),
+            task.id,
+            None,
+            None,
+            &TaskContextRefInput::delegate(source_task.id, Some(source_task.title.clone())),
+            0,
+        )
+        .await?;
+
+        // The child branches from wherever the delegating task currently
+        // works: its digest describes that state, so a worktree cut from the
+        // project's default branch would contradict what the prompt says.
+        let target_branch = source_task.branch.clone();
+
+        let start = self
+            .start_execution_session(StartExecutionSessionParams {
+                prompt: Some(prompt),
+                workspace_path: PathBuf::from(&project.git_repo_path),
+                resume_session_id: None,
+                force_new_attempt: Some(false),
+                task_id: Some(task.id),
+                executor_profile_id,
+                image_ids: None,
+                use_worktree: None,
+                target_branch,
+                selected_skill_ids: Vec::new(),
+                // Spawn-time push: the delegating session rides in as a
+                // session ref so the shared digest materialization inlines it
+                // into the boot prompt.
+                context_refs: vec![TaskContextRefInput::session(
+                    source_task.id,
+                    source_task.branch.clone(),
+                )],
+            })
+            .await?;
+
+        info!(
+            task_id = %task.id,
+            source_task_id = %source_task.id,
+            task_run_id = %start.task_run.id,
+            "delegated work to a new session"
+        );
+
+        Ok(TaskRecord::get(self.pool(), task.id).await?)
+    }
+
+    /// Close the delegation loop for a finished run: record the handoff on the
+    /// delegating task, then run the barrier check.
+    ///
+    /// The broker calls this after every run completion (post auto-commit, so
+    /// the packet can carry the commit). Runs of tasks that were never
+    /// delegated settle nothing. Runs that did not complete successfully write
+    /// no handoff — but they still count toward the barrier, so a failed
+    /// sibling never blocks the wake forever.
+    pub async fn settle_delegation_handoff(&self, run_id: Uuid) -> Result<(), RuntimeError> {
+        let run = TaskRun::get(self.pool(), run_id).await?;
+        let child = TaskRecord::get(self.pool(), run.task_id).await?;
+        let Some(edge) = TaskContextRef::list_by_task_id(self.pool(), child.id)
+            .await?
+            .into_iter()
+            .find(|r| r.kind == "delegate")
+        else {
+            return Ok(());
+        };
+        let Some(parent_task_id) = edge.target_task_id else {
+            return Ok(());
+        };
+        let parent = match TaskRecord::get(self.pool(), parent_task_id).await {
+            Ok(parent) => parent,
+            Err(err) => {
+                warn!(
+                    child_task_id = %child.id,
+                    parent_task_id = %parent_task_id,
+                    error = %err,
+                    "delegating task is gone; dropping the handoff"
+                );
+                return Ok(());
+            }
+        };
+
+        if run.status == RunStatus::Completed {
+            // Completion can be retried (crash between edge and wake, repeated
+            // finalizers); one child run must never hand off twice.
+            let already_settled = TaskContextRef::list_by_task_id(self.pool(), parent.id)
+                .await?
+                .into_iter()
+                .filter(|r| r.kind == "handoff")
+                .filter_map(|r| r.metadata_json)
+                .filter_map(|json| serde_json::from_str::<HandoffInfo>(&json).ok())
+                .any(|info| info.run_id == run.id);
+            if !already_settled {
+                // The commit the child's work landed on. Read from the run
+                // ledger (recorded at completion), which survives worktree
+                // deletion; the workspace HEAD does not. None for non-git
+                // workspaces (General chats).
+                let commit = run.after_head_commit.clone();
+                let info = HandoffInfo {
+                    run_id: run.id,
+                    commit,
+                    branch: run.branch_name.clone(),
+                    delivered: false,
+                };
+                TaskContextRef::insert_for_task(
+                    self.pool(),
+                    parent.id,
+                    None,
+                    None,
+                    &TaskContextRefInput::handoff(child.id, info, Some(child.title.clone())),
+                    0,
+                )
+                .await?;
+            }
+        }
+
+        self.try_delegation_barrier_wake(&parent).await
+    }
+
+    /// Wake the delegating session once — when every task it delegated has
+    /// reached a terminal state.
+    ///
+    /// One wake per barrier, not per child: the undelivered handoffs
+    /// accumulate as edges and ship together in a single packet, which is then
+    /// marked delivered. Skipped while the delegating session is mid-turn; the
+    /// undelivered edges keep the results safe, and the next settlement (or
+    /// barrier re-check) delivers them.
+    async fn try_delegation_barrier_wake(&self, parent: &TaskRecord) -> Result<(), RuntimeError> {
+        // The barrier: every delegate edge pointing at this parent belongs to
+        // a child that is no longer running.
+        let child_task_ids: Vec<Uuid> = TaskContextRef::list_referencing_task_id(self.pool(), parent.id)
+            .await?
+            .into_iter()
+            .filter(|r| r.kind == "delegate")
+            .map(|r| r.task_id)
+            .collect();
+        for child_task_id in &child_task_ids {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM task_runs \
+                 WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
+            )
+            .bind(child_task_id)
+            .fetch_one(self.pool())
+            .await?;
+            if active > 0 {
+                info!(
+                    parent_task_id = %parent.id,
+                    waiting_on = %child_task_id,
+                    "delegation barrier not met; handoff recorded without a wake"
+                );
+                return Ok(());
+            }
+        }
+
+        let undelivered: Vec<(TaskContextRef, HandoffInfo)> =
+            TaskContextRef::list_by_task_id(self.pool(), parent.id)
+                .await?
+                .into_iter()
+                .filter(|r| r.kind == "handoff")
+                .filter_map(|r| {
+                    let info: HandoffInfo = serde_json::from_str(r.metadata_json.as_deref()?).ok()?;
+                    (!info.delivered).then_some((r, info))
+                })
+                .collect();
+        if undelivered.is_empty() {
+            return Ok(());
+        }
+
+        let busy: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_runs \
+             WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
+        )
+        .bind(parent.id)
+        .fetch_one(self.pool())
+        .await?;
+        if busy > 0 {
+            info!(
+                parent_task_id = %parent.id,
+                pending_handoffs = undelivered.len(),
+                "delegating session is mid-turn; barrier wake deferred"
+            );
+            return Ok(());
+        }
+
+        let mut packets = Vec::with_capacity(undelivered.len());
+        for (edge, info) in &undelivered {
+            let child_title = edge.label.clone().unwrap_or_else(|| {
+                edge.target_task_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "delegated task".to_string())
+            });
+            let summary = match edge.target_task_id {
+                Some(child_task_id) => self
+                    .runtime()
+                    .task_last_exchange(child_task_id)
+                    .await
+                    .ok()
+                    .and_then(|exchange| exchange.assistant)
+                    .filter(|text| !text.trim().is_empty()),
+                None => None,
+            };
+            let workspace_path: Option<String> = sqlx::query_scalar(
+                "SELECT workspace_path FROM task_runs WHERE id = ?",
+            )
+            .bind(info.run_id)
+            .fetch_optional(self.pool())
+            .await?
+            .flatten();
+            packets.push(build_handoff_packet(
+                &child_title,
+                info.branch.as_deref(),
+                workspace_path.as_deref(),
+                info.commit.as_deref(),
+                summary.as_deref(),
+            ));
+        }
+        // Failed children produced no handoff; the delegating session must
+        // still learn they are done, or it would reason as if work were
+        // pending.
+        for child_task_id in &child_task_ids {
+            if let Ok(child) = TaskRecord::get(self.pool(), *child_task_id).await {
+                if child.status == db::types::TaskStatus::Failed {
+                    packets.push(format!(
+                        "Task \"{}\" failed and produced no result. Inspect its session if its work is still needed.",
+                        child.title
+                    ));
+                }
+            }
+        }
+
+        let wake_prompt = build_barrier_wake_prompt(&packets);
+        if let Err(err) = self.follow_up_by_task(parent.id, wake_prompt).await {
+            warn!(
+                parent_task_id = %parent.id,
+                error = %err,
+                "delegation barrier wake failed; handoffs stay undelivered"
+            );
+            return Ok(());
+        }
+        for (edge, info) in undelivered {
+            let delivered = HandoffInfo {
+                delivered: true,
+                ..info
+            };
+            TaskContextRef::update_metadata(
+                self.pool(),
+                edge.id,
+                serde_json::to_string(&delivered).ok(),
+            )
+            .await?;
+        }
+        info!(
+            parent_task_id = %parent.id,
+            "delegation barrier met; woke the delegating session"
+        );
+        Ok(())
     }
 
     pub async fn reorder_tasks(&self, updates: &[(Uuid, i32)]) -> Result<(), RuntimeError> {
@@ -700,7 +1330,33 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             (None, None, false)
         };
 
-        let (worktree_path, container_ref) = if use_worktree {
+        // A task can arrive here with its workspace already provisioned: a fork
+        // prepares the directory (and branch) at fork time so the anchor
+        // survives. Adopt it instead of cutting a fresh worktree from the
+        // target branch.
+        let adopted_workspace = task
+            .worktree_path
+            .clone()
+            .filter(|_| run.branch_name.is_none())
+            .filter(|path| Path::new(path).is_dir());
+
+        // The adopted workspace comes with the task's own branch (the fork
+        // branch, or the shared source branch): the generated attempt branch
+        // must not leak into the run row or clobber `task.branch`.
+        let branch_name = if adopted_workspace.is_some() {
+            task.branch.clone()
+        } else {
+            branch_name
+        };
+
+        let (worktree_path, container_ref) = if let Some(adopted) = adopted_workspace {
+            info!(
+                task_id = %task.id,
+                workspace = %adopted,
+                "adopting the task's pre-provisioned workspace"
+            );
+            (PathBuf::from(&adopted), adopted)
+        } else if use_worktree {
             let branch_name = branch_name.as_deref().ok_or(RuntimeError::BadRequest(
                 "branch name is required for worktree execution",
             ))?;
@@ -737,6 +1393,32 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             (path, container)
         };
 
+        // Resolve how a forked task's first turn picks up its source before the
+        // prompt is built: a digest handoff has to be inlined into that prompt,
+        // and that only works if it is decided here rather than after the prompt
+        // is already assembled.
+        let (resume_session_id, fork_session, fork_context_refs) = match resume_session_id {
+            Some(existing) => (Some(existing), false, Vec::new()),
+            None => match self.resolve_fork_start(&task, &executor_profile).await {
+                Some(ForkStart::Native { resume_session_id }) => {
+                    (Some(resume_session_id), true, Vec::new())
+                }
+                // Carry the source in as a session ref so the shared digest
+                // materialization inlines it, exactly like an attached session.
+                Some(ForkStart::Digest { source_task_id }) => (
+                    None,
+                    false,
+                    vec![TaskContextRefInput::session(source_task_id, None)],
+                ),
+                None => (None, false, Vec::new()),
+            },
+        };
+        let context_refs_with_fork: Vec<TaskContextRefInput> = context_refs
+            .iter()
+            .cloned()
+            .chain(fork_context_refs)
+            .collect();
+
         let materialized_skills =
             SkillRegistry::new().materialize(Some(&workspace_path), &selected_skill_ids)?;
         let execution_prompt =
@@ -744,7 +1426,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let executor_user_prompt = strip_display_skill_context_blocks(&execution_prompt);
         let executor_prompt =
             apply_materialized_skills(&executor_user_prompt, materialized_skills.as_ref());
-        let session_digests = self.collect_session_context_digests(&context_refs).await;
+        let session_digests = self
+            .collect_session_context_digests(&context_refs_with_fork)
+            .await;
         let executor_prompt = apply_session_context(&executor_prompt, &session_digests);
 
         if let Err(err) = self
@@ -852,6 +1536,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 prompt: executor_prompt,
                 workspace_path: worktree_path.clone(),
                 resume_session_id: resume_session_id.clone(),
+                fork_session,
                 force_new_attempt,
             })
             .await?;
@@ -1093,6 +1778,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 workspace_path: workspace_path_buf.clone(),
                 resume_session_id,
                 force_new_attempt: Some(false),
+                // A follow-up continues this task's own session; only a forked
+                // task's first turn branches.
+                fork_session: false,
             })
             .await?;
 
@@ -1710,6 +2398,23 @@ impl<'a> TaskLifecycle<'a> {
     }
 }
 
+/// Whether `run` was produced by the same executor the next turn will use.
+///
+/// Compares only the runtime, not the model or reasoning effort: those can
+/// change freely within one executor's session, but a session id never crosses
+/// from one executor to another. A run with no label predates labelling and
+/// cannot be matched, so it is treated as a mismatch.
+fn run_targets_executor(run: &TaskRun, executor: &ExecutorProfileId) -> bool {
+    let Some(label) = run.executor_label.as_deref() else {
+        return false;
+    };
+    match serde_json::from_str::<ExecutorProfileId>(label) {
+        Ok(profile) => profile.executor == executor.executor,
+        // Legacy labels stored the bare executor name rather than a profile.
+        Err(_) => label == executor.executor.to_string(),
+    }
+}
+
 /// Resolve the executor label for a follow-up run.
 ///
 /// The runtime (executor) and variant are fixed by the prior run; a follow-up
@@ -1733,6 +2438,9 @@ fn follow_up_executor_label(
         }
         if req.reasoning_effort.is_some() {
             profile.reasoning_effort = req.reasoning_effort.clone();
+        }
+        if req.speed.is_some() {
+            profile.speed = req.speed;
         }
     }
     Some(serde_json::to_string(&profile).unwrap_or_else(|_| previous_label.to_string()))
@@ -1881,6 +2589,64 @@ fn short_id_from_uuid(id: &Uuid) -> String {
         .to_string()
 }
 
+/// Name a forked session after its source, numbering repeats.
+///
+/// Both reference desktop apps do the same thing rather than inventing a name:
+/// the fork is the same work continued, so the title should read that way.
+/// One delegated result, rendered for the barrier wake packet.
+fn build_handoff_packet(
+    child_title: &str,
+    branch: Option<&str>,
+    workspace_path: Option<&str>,
+    commit: Option<&str>,
+    summary: Option<&str>,
+) -> String {
+    let mut packet = format!("Task: \"{child_title}\"\n");
+    match (branch, workspace_path) {
+        (Some(branch), Some(path)) => {
+            packet.push_str(&format!("Branch: {branch} (worktree: {path})\n"))
+        }
+        (Some(branch), None) => packet.push_str(&format!("Branch: {branch}\n")),
+        (None, Some(path)) => packet.push_str(&format!("Workspace: {path}\n")),
+        (None, None) => {}
+    }
+    if let Some(commit) = commit {
+        packet.push_str(&format!("Commit: {commit}\n"));
+    }
+    packet.push_str("Result:\n");
+    packet.push_str(summary.unwrap_or("(the task produced no summary)"));
+    packet
+}
+
+/// The wake prompt the barrier delivers to the delegating session.
+///
+/// This text is exactly what the woken model reads, and exactly what its
+/// conversation shows as the turn's prompt: the surface and the model see the
+/// same thing.
+fn build_barrier_wake_prompt(packets: &[String]) -> String {
+    let header = if packets.len() == 1 {
+        "A task you delegated has finished.".to_string()
+    } else {
+        format!("All {} tasks you delegated have finished.", packets.len())
+    };
+    format!(
+        "{header}\n\n{}\n\nIntegrate these results into your ongoing work: review them, and merge or build on the branches if appropriate.",
+        packets.join("\n\n---\n\n"),
+    )
+}
+
+fn fork_title(source_title: &str) -> String {
+    let base = source_title.trim();
+    let (stem, next) = match base.rsplit_once(" (") {
+        Some((stem, tail)) => match tail.strip_suffix(')').and_then(|n| n.parse::<u32>().ok()) {
+            Some(n) => (stem.trim(), n.saturating_add(1)),
+            None => (base, 2),
+        },
+        None => (base, 2),
+    };
+    format!("{stem} ({next})")
+}
+
 fn extract_session_id_from_entries(entries: &[LogEntry]) -> Option<String> {
     entries.iter().rev().find_map(|entry| match entry {
         LogEntry::SessionId(id) if !id.trim().is_empty() => Some(id.clone()),
@@ -1942,6 +2708,83 @@ fn scratch_chat_dir(chats_root: &Path, task_title: &str, task_id: &str) -> PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Forking a claude session and running its first turn on codex used to hand
+    /// codex a claude session id, which it rejects with "no rollout found for
+    /// thread id". Cross-executor forks must fall back to a digest instead.
+    #[test]
+    fn run_targets_executor_rejects_a_different_executor() {
+        use executors::executors::BaseCodingAgent;
+
+        let claude = ExecutorProfileId::new(BaseCodingAgent::ClaudeCode);
+        let codex = ExecutorProfileId::new(BaseCodingAgent::Codex);
+
+        let mut run = TaskRun::new_local(Uuid::new_v4(), None);
+        run.executor_label = Some(serde_json::to_string(&claude).unwrap());
+
+        assert!(run_targets_executor(&run, &claude));
+        assert!(!run_targets_executor(&run, &codex));
+
+        // Model / reasoning differences stay within one executor's session.
+        let claude_other_model = ExecutorProfileId {
+            model: Some("claude-opus-4-8".to_string()),
+            ..claude.clone()
+        };
+        assert!(run_targets_executor(&run, &claude_other_model));
+
+        // Legacy runs stored a bare executor name instead of a profile.
+        run.executor_label = Some(claude.executor.to_string());
+        assert!(run_targets_executor(&run, &claude));
+        assert!(!run_targets_executor(&run, &codex));
+
+        // A run with no label cannot be matched, so it must not be resumed.
+        run.executor_label = None;
+        assert!(!run_targets_executor(&run, &claude));
+    }
+
+    /// The wake packet is the delegating model's entire view of the results,
+    /// so every field a handoff has must appear, and every field it lacks must
+    /// degrade silently instead of printing an empty line.
+    #[test]
+    fn barrier_wake_prompt_carries_packets_and_degrades_per_field() {
+        let full = build_handoff_packet(
+            "DB schema migration",
+            Some("ch/a1b2"),
+            Some("/worktrees/ch/a1b2"),
+            Some("b7d9e2f"),
+            Some("Applied the migration and updated the models."),
+        );
+        assert!(full.contains("Task: \"DB schema migration\""));
+        assert!(full.contains("Branch: ch/a1b2 (worktree: /worktrees/ch/a1b2)"));
+        assert!(full.contains("Commit: b7d9e2f"));
+        assert!(full.contains("Applied the migration and updated the models."));
+
+        // A General-chat child has no git side at all.
+        let bare = build_handoff_packet("meeting notes", None, None, None, None);
+        assert!(!bare.contains("Branch"));
+        assert!(!bare.contains("Commit:"));
+        assert!(!bare.contains("Workspace:"));
+        assert!(bare.contains("(the task produced no summary)"));
+
+        let single = build_barrier_wake_prompt(&[full.clone()]);
+        assert!(single.starts_with("A task you delegated has finished."));
+        assert!(single.contains("Integrate these results"));
+
+        let multi = build_barrier_wake_prompt(&[full, bare]);
+        assert!(multi.starts_with("All 2 tasks you delegated have finished."));
+        assert!(multi.contains("\n\n---\n\n"));
+    }
+
+    #[test]
+    fn fork_title_numbers_repeated_forks() {
+        assert_eq!(fork_title("retry policy"), "retry policy (2)");
+        // Forking a fork continues the count rather than nesting suffixes.
+        assert_eq!(fork_title("retry policy (2)"), "retry policy (3)");
+        assert_eq!(fork_title("retry policy (9)"), "retry policy (10)");
+        // A parenthetical that isn't a counter is left intact.
+        assert_eq!(fork_title("retry policy (draft)"), "retry policy (draft) (2)");
+        assert_eq!(fork_title("  spaced  "), "spaced (2)");
+    }
 
     #[test]
     fn infer_task_title_ignores_leading_context_block() {

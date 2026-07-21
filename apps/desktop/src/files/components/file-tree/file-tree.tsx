@@ -33,6 +33,7 @@ import {
   FileText,
   FolderInput,
   FolderPlus,
+  Images,
   Minimize2,
   PanelLeftClose,
   PenLine,
@@ -45,7 +46,7 @@ import { useFileTreeDnd } from "../../hooks/use-file-tree-dnd";
 import { useFileTreeExternalDrop } from "../../hooks/use-file-tree-external-drop";
 import { EMPTY_DECORATIONS } from "../../lib/git-status-decoration";
 import { useFileTreeStore } from "../../state/file-tree-store";
-import { type WorktreeTreeView, useFilesStore } from "../../state/files-store";
+import { type WorktreeScopeView, useFilesStore } from "../../state/files-store";
 import type { FileNode } from "../../types/file-tree";
 import {
   FileNodeType,
@@ -104,21 +105,24 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     editingPath,
     addRoot,
     removeRoot,
-    worktreeTreeView,
-    setWorktreeTreeView,
+    worktreeScopeView,
+    setWorktreeScopeView,
+    worktreePresentation,
+    setWorktreePresentation,
   } = useFilesStore();
 
   // A session sandbox (task-run worktree) is read-only here: it lists and
   // opens files, but project-scoped mutations are hidden/disabled.
   const isWorktreeScope = scopeTaskRunId != null;
+  const isGallery = worktreePresentation === "gallery";
 
-  // Worktree-only toggle between the changed-files view and the full worktree
-  // listing. The data swap lives in the dock panel, which reacts to
-  // `worktreeTreeView`; this just sets the mode.
-  const worktreeViewOptions: { value: WorktreeTreeView; label: string }[] = [
+  // Worktree-only range switch: how much of the tree to list. The data swap
+  // lives in the dock panel, which reacts to `worktreeScopeView`; this just sets
+  // the mode. The tree/gallery choice is a separate control (see below) because
+  // it is a different axis — text peers here, an icon toggle there.
+  const worktreeScopeOptions: { value: WorktreeScopeView; label: string }[] = [
     { value: "changed", label: t("worktreeChangedFiles") },
     { value: "all", label: t("worktreeAllFiles") },
-    { value: "gallery", label: t("worktreeGalleryTab") },
   ];
 
   // Git status decorations: tint + badge changed files and roll the status up to
@@ -758,27 +762,60 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
             )}
           </TooltipProvider>
           {isWorktreeScope && (
-            <div
-              role="group"
-              aria-label={t("worktreeFileViewLabel")}
-              className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs"
-            >
-              {worktreeViewOptions.map(({ value, label }) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={worktreeTreeView === value}
-                  onClick={() => setWorktreeTreeView(value)}
-                  className={cn(
-                    "rounded-[4px] px-2 py-0.5 transition",
-                    worktreeTreeView === value
-                      ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
-                      : "text-custom-text-300 hover:text-custom-text-100",
-                  )}
+            <div className="flex items-center gap-1.5">
+              {/* Range axis. Hidden in gallery mode, where "how much of the
+                  tree" has no meaning. */}
+              {!isGallery && (
+                <div
+                  role="group"
+                  aria-label={t("worktreeFileViewLabel")}
+                  className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs"
                 >
-                  {label}
-                </button>
-              ))}
+                  {worktreeScopeOptions.map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={worktreeScopeView === value}
+                      onClick={() => setWorktreeScopeView(value)}
+                      className={cn(
+                        "rounded-[4px] px-2 py-0.5 transition",
+                        worktreeScopeView === value
+                          ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
+                          : "text-custom-text-300 hover:text-custom-text-100",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Form axis. An icon toggle rather than a text peer so the
+                  control itself signals it belongs to a different axis. */}
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-pressed={isGallery}
+                      aria-label={t("worktreeGalleryToggle")}
+                      onClick={() =>
+                        setWorktreePresentation(isGallery ? "files" : "gallery")
+                      }
+                      className={cn(
+                        "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 transition",
+                        isGallery
+                          ? "bg-custom-background-80 text-custom-text-100"
+                          : "text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
+                      )}
+                    >
+                      <Images className="size-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" align="center">
+                    {t("worktreeGalleryToggle")}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
           )}
         </div>
@@ -803,7 +840,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         )}
       </div>
 
-      {isWorktreeScope && worktreeTreeView === "gallery" ? (
+      {isWorktreeScope && isGallery ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <GalleryPanel taskRunId={scopeTaskRunId ?? undefined} />
         </div>
@@ -832,7 +869,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
               role="tree"
             >
               {isWorktreeScope &&
-              worktreeTreeView === "changed" &&
+              worktreeScopeView === "changed" &&
               fileTree.length === 0 ? (
                 <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-custom-sidebar-text-400">
                   {t("sessionNoChanges")}

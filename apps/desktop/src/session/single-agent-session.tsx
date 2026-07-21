@@ -11,20 +11,28 @@ import { useRebase } from "@/hooks/use-rebase";
 import { useLanguage } from "@/i18n";
 import {
   type ModelOption,
-  REASONING_OPTIONS,
   RUNTIME_DEFAULT_LABEL,
+  getAllModelOptions,
   getModelLabel,
   getModelOptions,
+  getModelReasoningOptions,
+  getModelSpeedOptions,
   getReasoningLabel,
-  runtimeSupportsReasoning,
+  getSpeedLabel,
 } from "@/lib/agent-runtime-options";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
+import { forkTaskRun } from "@/lib/fork-client";
+import {
+  ConversationForkOrigin,
+  useForkEdge,
+} from "@/session/components/conversation-fork-origin";
 import {
   type BaseCodingAgent,
   type ExecutorConfigs,
   type ExecutorProfileId,
   type ReasoningEffort,
+  type SpeedMode,
   fetchExecutorProfile,
   fetchPiModels,
 } from "@/lib/executor-client";
@@ -51,7 +59,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
@@ -514,6 +521,29 @@ export function SingleAgentSessionView({
 
   const sidebarActiveTaskId = activeTaskId;
 
+  /** Branch this session from a specific run and open the copy.
+   *
+   * The conversation knows which run produced each turn, so this entry point
+   * can anchor exactly where the user clicked instead of assuming the latest. */
+  const forkFromRun = useCallback(
+    async (runId: string) => {
+      try {
+        const result = await forkTaskRun(runId, isScratch ? undefined : "same");
+        navigateToSession(result.task.slug ?? result.task.id, null);
+      } catch (error) {
+        console.error("[single-agent-session] fork from run failed", error);
+        addErrorMessage(
+          error instanceof Error && error.message
+            ? error.message
+            : t("forkFailed"),
+        );
+      }
+    },
+    [isScratch, navigateToSession, addErrorMessage, t],
+  );
+
+  const forkEdge = useForkEdge(sidebarActiveTaskId ?? null);
+
   const {
     runs: taskRuns,
     isLoading: isTaskRunsLoading,
@@ -843,40 +873,77 @@ export function SingleAgentSessionView({
     [executorProfileId, isExecutorLocked],
   );
 
-  // The runtime/model selector is a two-step menu: pick the runtime first, then
-  // pick a model from that runtime's own list. Mixing both in one flat list is
-  // confusing (and pi's model list is huge), so we navigate between the two
-  // steps in place instead of closing on the first click.
-  const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
-  const [runtimeMenuView, setRuntimeMenuView] = useState<"runtime" | "model">(
-    "runtime",
+  const handleSpeedSelect = useCallback(
+    (speed: SpeedMode) => {
+      if (isModelLocked) return;
+      setSessionExecutorProfile((prev) => {
+        const base = prev ?? executorProfileId;
+        if (!base) return prev;
+        return { ...base, speed };
+      });
+    },
+    [executorProfileId, isModelLocked],
   );
-  // Free-text filter for the model step (pi exposes hundreds of models).
+
+  // Model-first pick: selecting a model sets its runtime too. Crossing runtimes
+  // invalidates the effort / speed overrides (they are runtime-specific); the
+  // runtime itself is fixed once a session is running, so a cross-runtime pick
+  // is only allowed before the first run.
+  const handleModelPick = useCallback(
+    (option: ModelOption) => {
+      if (isModelLocked) return;
+      setSessionExecutorProfile((prev) => {
+        const base = prev ?? executorProfileId;
+        const currentExecutor = base?.executor ?? executorProfileId?.executor;
+        if (currentExecutor === option.executor) {
+          return {
+            executor: option.executor,
+            variant: base?.variant ?? null,
+            model: option.value,
+            reasoning_effort: base?.reasoning_effort ?? null,
+            speed: base?.speed ?? null,
+          };
+        }
+        if (isExecutorLocked) return prev;
+        const variant =
+          executorProfileId?.executor === option.executor
+            ? executorProfileId.variant ?? null
+            : null;
+        return {
+          executor: option.executor,
+          variant,
+          model: option.value,
+          reasoning_effort: null,
+          speed: null,
+        };
+      });
+    },
+    [executorProfileId, isExecutorLocked, isModelLocked],
+  );
+
+  // The selector is model-first: a root view lists the Model / Effort / Speed
+  // axes as peer rows, each opening a sub-view. Picking a model sets its runtime
+  // too, so there is no separate "choose the CLI first" step. Effort and Speed
+  // rows only appear when the selected model supports them.
+  const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
+  const [pillMenuView, setPillMenuView] = useState<
+    "root" | "model" | "effort" | "speed"
+  >("root");
+  // Free-text filter for the model list (pi exposes many provider models).
   const [modelQuery, setModelQuery] = useState("");
   const modelSearchRef = useRef<HTMLInputElement>(null);
-  const handleRuntimeMenuOpenChange = useCallback(
-    (open: boolean) => {
-      setRuntimeMenuOpen(open);
-      setModelQuery("");
-      if (open) {
-        // Locked runtime (mid-session) only allows model changes, so jump
-        // straight to the model step; otherwise start at runtime selection.
-        setRuntimeMenuView(isExecutorLocked ? "model" : "runtime");
-      }
-    },
-    [isExecutorLocked],
-  );
-  const handleRuntimePick = useCallback(
-    (executor: BaseCodingAgent) => {
-      handleExecutorSelect(executor);
-      setModelQuery("");
-      setRuntimeMenuView("model");
-    },
-    [handleExecutorSelect],
-  );
-  const handleModelStepBack = useCallback(() => {
+  const handleRuntimeMenuOpenChange = useCallback((open: boolean) => {
+    setRuntimeMenuOpen(open);
     setModelQuery("");
-    setRuntimeMenuView("runtime");
+    if (open) setPillMenuView("root");
+  }, []);
+  const openPillModelView = useCallback(() => {
+    setModelQuery("");
+    setPillMenuView("model");
+  }, []);
+  const pillMenuBack = useCallback(() => {
+    setModelQuery("");
+    setPillMenuView("root");
   }, []);
 
   // Current Runtime / Model / Reasoning values + options for the @ palette.
@@ -894,12 +961,11 @@ export function SingleAgentSessionView({
   );
   const modelValue = sessionExecutorSelection?.model ?? null;
   // pi's model list is provider-dependent, so it is fetched from the agent
-  // (narrowed to the user's configured providers) rather than hardcoded.
+  // (narrowed to the user's configured providers) rather than hardcoded. The
+  // model-first picker lists every runtime's models together, so fetch pi's
+  // models eagerly rather than only when pi is the active runtime.
   const [piModels, setPiModels] = useState<ModelOption[] | null>(null);
   useEffect(() => {
-    if (runtimeValue !== "PI") {
-      return;
-    }
     let cancelled = false;
     void fetchPiModels().then((models) => {
       if (!cancelled) {
@@ -907,6 +973,7 @@ export function SingleAgentSessionView({
           models.map((m) => ({
             value: m.value,
             label: m.label,
+            executor: "PI" as const,
             description: m.provider,
           })),
         );
@@ -915,36 +982,41 @@ export function SingleAgentSessionView({
     return () => {
       cancelled = true;
     };
-  }, [runtimeValue]);
+  }, []);
+  // Per-runtime list still feeds the `@` command palette (runtime → model).
   const modelOptions = useMemo(() => {
     if (!runtimeValue) return [];
     if (runtimeValue === "PI") return piModels ?? [];
     return getModelOptions(runtimeValue);
   }, [runtimeValue, piModels]);
-  // Only surface the search box when the list is long enough to need it
-  // (pi); Claude/Codex have a handful of presets where it would be noise.
-  const showModelSearch = modelOptions.length > 8;
+  // Flat list for the model-first pill picker: every runtime's models in one
+  // searchable list, each entry carrying the runtime it selects.
+  const flatModelOptions = useMemo(
+    () => [...getAllModelOptions(), ...(piModels ?? [])],
+    [piModels],
+  );
+  const showModelSearch = flatModelOptions.length > 8;
   const filteredModelOptions = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();
-    if (!q) return modelOptions;
-    return modelOptions.filter(
+    if (!q) return flatModelOptions;
+    return flatModelOptions.filter(
       (m) =>
         m.label.toLowerCase().includes(q) ||
         m.value.toLowerCase().includes(q) ||
         (m.description?.toLowerCase().includes(q) ?? false),
     );
-  }, [modelOptions, modelQuery]);
-  // Focus the search box when entering the model step so the user can type
-  // immediately (the step is reached via in-place nav, not a fresh open).
+  }, [flatModelOptions, modelQuery]);
+  // Focus the search box when entering the model view so the user can type
+  // immediately (the view is reached via in-place nav, not a fresh open).
   useEffect(() => {
-    if (!runtimeMenuOpen || runtimeMenuView !== "model" || !showModelSearch) {
+    if (!runtimeMenuOpen || pillMenuView !== "model" || !showModelSearch) {
       return;
     }
     const frame = requestAnimationFrame(() => {
       modelSearchRef.current?.focus();
     });
     return () => cancelAnimationFrame(frame);
-  }, [runtimeMenuOpen, runtimeMenuView, showModelSearch]);
+  }, [runtimeMenuOpen, pillMenuView, showModelSearch]);
   const modelLabel = useMemo(() => {
     if (!runtimeValue) return null;
     if (runtimeValue === "PI") {
@@ -956,9 +1028,21 @@ export function SingleAgentSessionView({
   const reasoningValue = sessionExecutorSelection?.reasoning_effort ?? null;
   const reasoningLabel =
     getReasoningLabel(reasoningValue) ?? RUNTIME_DEFAULT_LABEL;
-  const showReasoning = runtimeValue
-    ? runtimeSupportsReasoning(runtimeValue)
-    : false;
+  // Effort and Speed are per-model capability axes: the rows only appear when
+  // the selected model advertises them.
+  const reasoningOptions = useMemo(
+    () =>
+      runtimeValue ? getModelReasoningOptions(runtimeValue, modelValue) : [],
+    [runtimeValue, modelValue],
+  );
+  const showReasoning = reasoningOptions.length > 0;
+  const speedValue = sessionExecutorSelection?.speed ?? null;
+  const speedLabel = getSpeedLabel(speedValue) ?? RUNTIME_DEFAULT_LABEL;
+  const speedOptions = useMemo(
+    () => (runtimeValue ? getModelSpeedOptions(runtimeValue, modelValue) : []),
+    [runtimeValue, modelValue],
+  );
+  const showSpeed = speedOptions.length > 0;
 
   const { submitPrompt } = useSingleSessionController({
     workspace,
@@ -1343,7 +1427,6 @@ export function SingleAgentSessionView({
     useBranchStatus({
       taskRunId,
       enabled: Boolean(taskRunId),
-      pollInterval: 10000,
     });
 
   // Merge diffs handler
@@ -1565,6 +1648,24 @@ export function SingleAgentSessionView({
   // Model shown alongside the runtime on the selector button; hidden while the
   // executor profile is still loading.
   const executorModelLabel = executorProfileLoading ? null : modelLabel;
+  // Model-first pill: primary text is the chosen model (falling back to the
+  // runtime name when no model override is set), secondary text is the effort
+  // and non-default speed, so the resolved state reads at a glance.
+  const hasModelOverride =
+    !!executorModelLabel && executorModelLabel !== RUNTIME_DEFAULT_LABEL;
+  const pillPrimaryLabel = executorProfileLoading
+    ? t("loadingMessage")
+    : hasModelOverride
+      ? (executorModelLabel as string)
+      : executorDisplayLabel;
+  const pillSecondaryLabel = executorProfileLoading
+    ? null
+    : [
+        showReasoning && reasoningValue ? reasoningLabel : null,
+        showSpeed && speedValue === "fast" ? speedLabel : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || null;
 
   const diffItems = useMemo(
     () =>
@@ -1727,7 +1828,7 @@ export function SingleAgentSessionView({
             onSelectModel={handleModelSelect}
             reasoningValue={reasoningValue}
             reasoningLabel={reasoningLabel}
-            reasoningOptions={REASONING_OPTIONS}
+            reasoningOptions={reasoningOptions}
             onSelectReasoning={handleReasoningSelect}
             showReasoning={showReasoning}
             runtimeLocked={isExecutorLocked}
@@ -1820,83 +1921,81 @@ export function SingleAgentSessionView({
                       agent={sessionExecutorSelection?.executor ?? null}
                       className="h-3.5 w-3.5 shrink-0"
                     />
-                    <span className="text-xs">{executorSelectorLabel}</span>
-                    {executorModelLabel ? (
+                    <span className="text-xs">{pillPrimaryLabel}</span>
+                    {pillSecondaryLabel ? (
                       <>
                         <span className="text-xs text-muted-foreground/30">
                           ·
                         </span>
                         <span className="text-xs text-muted-foreground/70">
-                          {executorModelLabel}
+                          {pillSecondaryLabel}
                         </span>
                       </>
                     ) : null}
                     <ChevronDown className="h-3 w-3 text-muted-foreground/60" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-[200px]">
-                  {/* Step 1 — pick a runtime. Runtime can't change mid-session,
-                      so once locked we skip straight to the model step. */}
-                  {runtimeMenuView === "runtime" && !isExecutorLocked ? (
+                <DropdownMenuContent align="start" className="min-w-[220px]">
+                  {pillMenuView === "root" ? (
                     <>
-                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-                        Runtime
-                      </DropdownMenuLabel>
-                      {availableExecutors.map((executor) => {
-                        const isActive =
-                          sessionExecutorSelection?.executor === executor;
-                        return (
-                          <DropdownMenuItem
-                            key={executor}
-                            // Stay open and advance to the model step instead of
-                            // committing-and-closing on the first click.
-                            onSelect={(event) => {
-                              event.preventDefault();
-                              handleRuntimePick(executor);
-                            }}
-                            className="flex items-center justify-between gap-3 text-[11px]"
-                          >
-                            <span className="flex items-center gap-2">
-                              <AgentLogo
-                                agent={executor}
-                                className="h-3.5 w-3.5 shrink-0"
-                              />
-                              {executorLabels[executor] ??
-                                executor.replace(/_/g, " ")}
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              {isActive ? (
-                                <Check className="h-3.5 w-3.5" />
-                              ) : null}
-                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
-                            </span>
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </>
-                  ) : (
-                    <>
-                      {/* Step 2 — pick a model for the chosen runtime. */}
-                      {!isExecutorLocked ? (
+                      {/* Root — Model / Effort / Speed as peer axes. */}
+                      <DropdownMenuItem
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          openPillModelView();
+                        }}
+                        className="flex items-center justify-between gap-6 text-[13px]"
+                      >
+                        <span>{t("modelAxisLabel")}</span>
+                        <span className="flex items-center gap-1.5 text-muted-foreground">
+                          {modelLabel ?? RUNTIME_DEFAULT_LABEL}
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                        </span>
+                      </DropdownMenuItem>
+                      {showReasoning ? (
                         <DropdownMenuItem
                           onSelect={(event) => {
                             event.preventDefault();
-                            handleModelStepBack();
+                            setPillMenuView("effort");
                           }}
-                          className="flex items-center gap-2 text-[11px] text-muted-foreground"
+                          className="flex items-center justify-between gap-6 text-[13px]"
                         >
-                          <ChevronLeft className="h-3.5 w-3.5" />
-                          <AgentLogo
-                            agent={sessionExecutorSelection?.executor ?? null}
-                            className="h-3.5 w-3.5 shrink-0"
-                          />
-                          <span>{runtimeLabel ?? "Runtime"}</span>
+                          <span>{t("effortAxisLabel")}</span>
+                          <span className="flex items-center gap-1.5 text-muted-foreground">
+                            {reasoningLabel}
+                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                          </span>
                         </DropdownMenuItem>
                       ) : null}
-                      {!isExecutorLocked ? <DropdownMenuSeparator /> : null}
-                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-                        Model
-                      </DropdownMenuLabel>
+                      {showSpeed ? (
+                        <DropdownMenuItem
+                          onSelect={(event) => {
+                            event.preventDefault();
+                            setPillMenuView("speed");
+                          }}
+                          className="flex items-center justify-between gap-6 text-[13px]"
+                        >
+                          <span>{t("speedAxisLabel")}</span>
+                          <span className="flex items-center gap-1.5 text-muted-foreground">
+                            {speedLabel}
+                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                          </span>
+                        </DropdownMenuItem>
+                      ) : null}
+                    </>
+                  ) : pillMenuView === "model" ? (
+                    <>
+                      <DropdownMenuItem
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          pillMenuBack();
+                        }}
+                        className="flex items-center gap-2 text-[11px] text-muted-foreground"
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                        <span>{t("modelAxisLabel")}</span>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       {showModelSearch ? (
                         <div className="px-2 pb-1">
                           <div className="relative">
@@ -1921,9 +2020,13 @@ export function SingleAgentSessionView({
                                 if (event.key === "Enter") {
                                   event.preventDefault();
                                   event.stopPropagation();
-                                  const first = filteredModelOptions[0];
+                                  const first = filteredModelOptions.find(
+                                    (m) =>
+                                      !isExecutorLocked ||
+                                      m.executor === runtimeValue,
+                                  );
                                   if (first) {
-                                    handleModelSelect(first.value);
+                                    handleModelPick(first);
                                     setRuntimeMenuOpen(false);
                                   }
                                   return;
@@ -1935,30 +2038,40 @@ export function SingleAgentSessionView({
                           </div>
                         </div>
                       ) : null}
-                      {modelOptions.length === 0 ? (
-                        <DropdownMenuItem
-                          disabled
-                          className="text-[11px] text-muted-foreground"
-                        >
-                          {runtimeValue === "PI" && piModels === null
-                            ? t("loadingMessage")
-                            : RUNTIME_DEFAULT_LABEL}
-                        </DropdownMenuItem>
-                      ) : filteredModelOptions.length === 0 ? (
+                      {filteredModelOptions.length === 0 ? (
                         <div className="px-2 py-2 text-center text-[11px] text-muted-foreground">
                           {t("modelSelectorEmpty")}
                         </div>
                       ) : (
                         <div className="max-h-[40vh] overflow-y-auto">
                           {filteredModelOptions.map((model) => {
-                            const isActive = modelValue === model.value;
+                            const isActive =
+                              modelValue === model.value &&
+                              runtimeValue === model.executor;
+                            // Runtime is fixed once a session is running, so a
+                            // cross-runtime model can't be picked mid-session.
+                            const disabled =
+                              isExecutorLocked &&
+                              model.executor !== runtimeValue;
                             return (
                               <DropdownMenuItem
-                                key={model.value}
-                                onClick={() => handleModelSelect(model.value)}
+                                key={`${model.executor}:${model.value}`}
+                                disabled={disabled}
+                                onClick={() => handleModelPick(model)}
+                                title={
+                                  disabled
+                                    ? t("modelSwitchRuntimeLocked")
+                                    : undefined
+                                }
                                 className="flex items-center justify-between gap-3 text-[11px]"
                               >
-                                <span>{model.label}</span>
+                                <span className="flex items-center gap-2">
+                                  <AgentLogo
+                                    agent={model.executor}
+                                    className="h-3.5 w-3.5 shrink-0"
+                                  />
+                                  {model.label}
+                                </span>
                                 {isActive ? (
                                   <Check className="h-3.5 w-3.5" />
                                 ) : null}
@@ -1967,6 +2080,70 @@ export function SingleAgentSessionView({
                           })}
                         </div>
                       )}
+                    </>
+                  ) : pillMenuView === "effort" ? (
+                    <>
+                      <DropdownMenuItem
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          pillMenuBack();
+                        }}
+                        className="flex items-center gap-2 text-[11px] text-muted-foreground"
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                        <span>{t("effortAxisLabel")}</span>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      {reasoningOptions.map((option) => (
+                        <DropdownMenuItem
+                          key={option.value}
+                          onClick={() => handleReasoningSelect(option.value)}
+                          className="flex items-center justify-between gap-3 text-[11px]"
+                        >
+                          <span>{option.label}</span>
+                          {reasoningValue === option.value ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : null}
+                        </DropdownMenuItem>
+                      ))}
+                    </>
+                  ) : (
+                    <>
+                      <DropdownMenuItem
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          pillMenuBack();
+                        }}
+                        className="flex items-center gap-2 text-[11px] text-muted-foreground"
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                        <span>{t("speedAxisLabel")}</span>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      {speedOptions.map((option) => {
+                        const isActive =
+                          speedValue === option.value ||
+                          (!speedValue && option.value === "standard");
+                        return (
+                          <DropdownMenuItem
+                            key={option.value}
+                            onClick={() => handleSpeedSelect(option.value)}
+                            className="flex items-start justify-between gap-3 text-[11px]"
+                          >
+                            <span className="flex flex-col">
+                              <span>{option.label}</span>
+                              {option.description ? (
+                                <span className="text-[10px] text-muted-foreground">
+                                  {option.description}
+                                </span>
+                              ) : null}
+                            </span>
+                            {isActive ? (
+                              <Check className="mt-0.5 h-3.5 w-3.5" />
+                            ) : null}
+                          </DropdownMenuItem>
+                        );
+                      })}
                     </>
                   )}
                 </DropdownMenuContent>
@@ -2068,6 +2245,19 @@ export function SingleAgentSessionView({
             <TaskConversation
               key={conversationScrollKey}
               entries={entries}
+              onForkFromRun={forkFromRun}
+              forkOrigin={
+                forkEdge ? (
+                  <ConversationForkOrigin
+                    edge={forkEdge}
+                    onNavigateToSource={(sourceTaskId) =>
+                      navigateToSession(sourceTaskId, null)
+                    }
+                    scrollContainerRef={conversationScrollRef}
+                    t={t}
+                  />
+                ) : undefined
+              }
               isLoading={isConversationLoading}
               error={conversationError}
               messagesEndRef={messagesEndRef}

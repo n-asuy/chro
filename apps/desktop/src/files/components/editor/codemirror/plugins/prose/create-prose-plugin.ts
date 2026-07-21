@@ -10,6 +10,7 @@ import {
   type EditorState,
   type Range as EditorRange,
 } from "@codemirror/state";
+import { hasDecorationRefresh } from "../decoration-refresh";
 
 /**
  * Configuration options for creating a prose plugin
@@ -64,7 +65,7 @@ export function createProsePlugin(
       const shouldRebuild =
         (rebuildOnDocChange && tr.docChanged) ||
         (rebuildOnSelection && tr.selection) ||
-        tr.effects.length > 0;
+        hasDecorationRefresh(tr);
 
       if (shouldRebuild) {
         return RangeSet.of(buildDecorations(tr.state), sortDecorations);

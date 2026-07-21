@@ -44,6 +44,7 @@ use crate::{
         AppendPrompt, AvailabilityInfo, CancellationToken, ExecutorError, ExecutorExitResult,
         SpawnedChild, StandardCodingAgentExecutor,
     },
+    spawn::Invocation,
     stdout_dup::create_stdout_pipe_writer,
 };
 
@@ -293,7 +294,10 @@ impl Codex {
         resume_session: Option<&str>,
     ) -> Result<SpawnedChild, ExecutorError> {
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let Invocation {
+            program: program_path,
+            args,
+        } = command_parts.into_resolved().await?;
 
         let mut process = Command::new(program_path);
         process
@@ -477,7 +481,7 @@ impl StandardCodingAgentExecutor for Codex {
         codex_home().map(|home| home.join("config.toml"))
     }
 
-    fn get_availability_info(&self) -> AvailabilityInfo {
+    async fn get_availability_info(&self) -> AvailabilityInfo {
         if let Some(timestamp) = codex_home()
             .and_then(|home| std::fs::metadata(home.join("auth.json")).ok())
             .and_then(|m| m.modified().ok())

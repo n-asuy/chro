@@ -80,6 +80,9 @@ const CLAUDE_CANDIDATES: &[Candidate] = &[
     Candidate::UnderHome(r".local\bin\claude.exe"),
     Candidate::UnderHome(r".local\bin\claude.cmd"),
     Candidate::UnderHome(r".claude\bin\claude.exe"),
+    // npm global shim location, for GUI launches whose PATH missed the
+    // user-level npm prefix.
+    Candidate::UnderHome(r"AppData\Roaming\npm\claude.cmd"),
     Candidate::InPath("claude.exe"),
     Candidate::InPath("claude.cmd"),
     Candidate::InPath("claude"),

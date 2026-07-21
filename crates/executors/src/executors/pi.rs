@@ -42,6 +42,7 @@ use crate::{
         AppendPrompt, AvailabilityInfo, CancellationToken, ExecutorError, ExecutorExitResult,
         SpawnedChild, StandardCodingAgentExecutor,
     },
+    spawn::Invocation,
     stdout_dup::create_stdout_pipe_writer,
 };
 
@@ -147,7 +148,10 @@ impl Pi {
         let command_parts = self
             .build_command_builder(resume_session)?
             .build_initial()?;
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let Invocation {
+            program: program_path,
+            args,
+        } = command_parts.into_resolved().await?;
 
         let mut process = Command::new(&program_path);
         process
@@ -271,7 +275,7 @@ impl StandardCodingAgentExecutor for Pi {
         None
     }
 
-    fn get_availability_info(&self) -> AvailabilityInfo {
+    async fn get_availability_info(&self) -> AvailabilityInfo {
         let Some(home) = pi_home() else {
             return AvailabilityInfo::NotFound;
         };

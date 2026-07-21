@@ -1,9 +1,12 @@
 import { type TranslationFunction, useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
+import { type ForkWorkspace, forkTaskLatest } from "@/lib/fork-client";
 import { revealInFinder } from "@/lib/project-client";
 import { getUiValue, isUiStateReady, setUiValue } from "@/lib/ui-state-client";
 import { ArchivePopover } from "@/session/components/archive-popover";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
+import { SessionLeadingMarker } from "@/session/components/session-leading-marker";
+import { formatRelativeTime } from "@/session/lib/relative-time";
 import {
   SessionPreviewProvider,
   useSessionPreviewTrigger,
@@ -16,7 +19,6 @@ import {
   sortPinnedSessions,
 } from "@/session/domain/session-grouping";
 import { applyPendingSubmissionGroupsToTasks } from "@/session/domain/session-task-state";
-import type { TaskStatusDotKind } from "@/session/domain/task-read-state";
 import {
   useArchivedSessions,
   useInboxTasksStream,
@@ -34,6 +36,9 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@chro/ui/context-menu";
 import {
@@ -56,15 +61,13 @@ import {
   Check,
   ChevronRight,
   ChevronsDownUp,
-  Circle,
-  CircleSlash,
   ExternalLink,
+  GitBranch,
   Pin,
   PinOff,
   Plus,
   Search,
   SquarePen,
-  TriangleAlert,
   X,
 } from "lucide-react";
 import {
@@ -74,6 +77,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useAllProjects } from "../../hooks/use-all-projects";
@@ -100,20 +104,6 @@ interface ArchivedSessionSummary {
 }
 
 const EMPTY_ARCHIVED: readonly ArchivedSessionSummary[] = [];
-
-const formatRelativeTime = (input: Date | string): string => {
-  const date = input instanceof Date ? input : new Date(input);
-  const diffMins = Math.floor((Date.now() - date.getTime()) / 60000);
-  if (diffMins < 1) return "now";
-  if (diffMins < 60) return `${diffMins}m`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 7) return `${diffDays}d`;
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w`;
-  if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo`;
-  return `${Math.floor(diffDays / 365)}y`;
-};
 
 /**
  * How sessions are ordered inside each group. `name-asc`/`name-desc` order by
@@ -230,6 +220,72 @@ export function ProjectsDockPanel() {
   const { pins, isPinned, togglePin } = usePinnedSessions();
   const openSession = useOpenSession();
   const activeTaskKey = useFocusedSessionTaskKey();
+
+  // Reveal the active session after a navigation (palette jump, deep link):
+  // scroll its row into view once per focused-session change. Runs on every
+  // render but is gated by the ref, so it also catches the row appearing late
+  // (list still streaming in at mount) while stream reorders never re-scroll.
+  // A row inside a collapsed group stays unrendered and is deliberately left
+  // alone. `nearest` keeps an already-visible row still.
+  const sessionListRef = useRef<HTMLDivElement>(null);
+  const revealedTaskKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeTaskKey) {
+      revealedTaskKeyRef.current = null;
+      return;
+    }
+    if (revealedTaskKeyRef.current === activeTaskKey) return;
+    const row = sessionListRef.current?.querySelector(
+      '[role="option"][aria-selected="true"]',
+    );
+    if (!row) return;
+    revealedTaskKeyRef.current = activeTaskKey;
+    row.scrollIntoView({ block: "nearest" });
+  });
+
+  // Reveal the active project's section after a navigation that lands on its
+  // overview with no active session (Command+K project pick, deep link) — the
+  // symmetric counterpart to the session-row reveal above. Skipped while a
+  // session is active, since that row lives inside this same section and its
+  // own reveal already brings the section into view. Same once-per-change
+  // gate. Aligns the header to the top (`start`), not `nearest`: the header is
+  // the top of its section, so `nearest` would park it at the bottom edge with
+  // the section's sessions scrolled off-screen below it.
+  const activeProjectId = useLayoutStore((s) => s.projectId);
+  const revealedProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeTaskKey || !activeProjectId) {
+      revealedProjectIdRef.current = null;
+      return;
+    }
+    if (revealedProjectIdRef.current === activeProjectId) return;
+    const header = sessionListRef.current?.querySelector(
+      `[data-project-id="${activeProjectId}"]`,
+    );
+    if (!header) return;
+    revealedProjectIdRef.current = activeProjectId;
+    header.scrollIntoView({ block: "start" });
+  });
+
+  // Fork lands the user in the new session straight away: they asked to
+  // continue, and the fork only becomes real once they write the first turn.
+  const forkSession = useCallback(
+    async (task: StoredTask, workspace?: ForkWorkspace) => {
+      try {
+        const result = await forkTaskLatest(task.id, workspace);
+        openSession({
+          ...task,
+          id: result.task.id,
+          slug: result.task.slug,
+          title: result.task.title,
+          active_session_id: null,
+        });
+      } catch (error) {
+        console.error("[projects-panel] fork failed", error);
+      }
+    },
+    [openSession],
+  );
 
   // One source of truth: the cross-project stream with optimistic rows overlaid.
   // Archived sessions are split off (hidden from the list but still restorable
@@ -527,7 +583,10 @@ export function ProjectsDockPanel() {
           </button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          <div
+            ref={sessionListRef}
+            className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+          >
             {isLoading && !hasAnyContent ? (
               <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
                 <LoadingDot isLoading className="h-3 w-3" />
@@ -553,6 +612,8 @@ export function ProjectsDockPanel() {
                           }
                           onOpen={() => openSession(task)}
                           onArchive={() => archiveSession(task)}
+                          onFork={(workspace) => void forkSession(task, workspace)}
+                          canUseWorktree={!scratchProjectIds.has(task.project_id)}
                           t={t}
                         />
                       ))}
@@ -615,6 +676,8 @@ export function ProjectsDockPanel() {
                           }
                           onOpen={() => openSession(task)}
                           onArchive={() => archiveSession(task)}
+                          onFork={(workspace) => void forkSession(task, workspace)}
+                          canUseWorktree={!scratchProjectIds.has(task.project_id)}
                           t={t}
                         />
                       ))}
@@ -736,6 +799,24 @@ const SessionGroupSection = memo(function SessionGroupSection({
   const closeProject = useOpenProjectsStore((s) => s.closeProject);
   const openSession = useOpenSession();
 
+  const forkSession = useCallback(
+    async (task: StoredTask, workspace?: ForkWorkspace) => {
+      try {
+        const result = await forkTaskLatest(task.id, workspace);
+        openSession({
+          ...task,
+          id: result.task.id,
+          slug: result.task.slug,
+          title: result.task.title,
+          active_session_id: null,
+        });
+      } catch (error) {
+        console.error("[projects-panel] fork failed", error);
+      }
+    },
+    [openSession],
+  );
+
   const handleHeaderClick = () => {
     if (project) {
       activateProject(project);
@@ -793,6 +874,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
                 }
                 onOpen={() => openSession(task)}
                 onArchive={() => archiveSession(task)}
+                onFork={(workspace) => void forkSession(task, workspace)}
+                canUseWorktree={project !== null}
                 t={t}
               />
             ))
@@ -836,6 +919,10 @@ function GroupHeader({
     <div
       role="treeitem"
       aria-expanded={!collapsed}
+      // Reveal target for the active-project scroll effect (a project opened
+      // via Command+K / deep link lands on its overview with no active
+      // session, so the session-row reveal can't surface it).
+      data-project-id={group.projectId ?? undefined}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: role="treeitem" requires keyboard focus for Enter/Space activation
       tabIndex={0}
       onClick={onHeaderClick}
@@ -930,68 +1017,6 @@ function GroupHeader({
   );
 }
 
-/**
- * Leading status marker rendered before every session title so the list keeps
- * a consistent left rail: a quiet hollow bullet by default, a solid blue
- * bullet for an unread completed run, an amber warning glyph for an unread
- * failure, and a struck-through bullet for a session whose worktree has been
- * reclaimed.
- *
- * The circle markers all share one size so the rail reads as a single column.
- * The struck-through circle borrows the universal "unavailable" slash rather
- * than a subtler outline treatment, because the row it marks is one the user
- * can no longer act on; a tooltip spells that out on hover.
- */
-function SessionLeadingMarker({
-  kind,
-  t,
-}: {
-  kind: TaskStatusDotKind;
-  t: TranslationFunction;
-}) {
-  if (kind === "failed") {
-    return (
-      <TriangleAlert
-        role="status"
-        aria-label={t("sessionFailedUnread")}
-        className="size-3 text-amber-500"
-      />
-    );
-  }
-  if (kind === "completed") {
-    return (
-      <Circle
-        role="status"
-        aria-label={t("sessionCompletedUnread")}
-        className="size-2.5 fill-[#307BD0] text-[#307BD0]"
-      />
-    );
-  }
-  if (kind === "cleaned") {
-    // The slash alone can't say why the row is dead, so the wrapper carries a
-    // native tooltip (lucide icons don't take a `title` prop).
-    return (
-      <span
-        title={t("sessionWorktreeCleaned")}
-        className="flex items-center justify-center"
-      >
-        <CircleSlash
-          role="status"
-          aria-label={t("sessionWorktreeCleaned")}
-          className="size-2.5 text-custom-sidebar-text-400"
-        />
-      </span>
-    );
-  }
-  // Idle, running, or already-viewed: a decorative hollow bullet.
-  return (
-    <Circle
-      aria-hidden="true"
-      className="size-2.5 text-custom-sidebar-text-400"
-    />
-  );
-}
-
 interface SessionRowContainerProps {
   task: StoredTask;
   indented: boolean;
@@ -1002,6 +1027,10 @@ interface SessionRowContainerProps {
   isActive: boolean;
   onOpen: () => void;
   onArchive: () => void;
+  onFork: (workspace?: ForkWorkspace) => void;
+  /** Scratch chats have no repo, so there is no worktree to choose between and
+   * the menu collapses to a single item. */
+  canUseWorktree: boolean;
   t: TranslationFunction;
 }
 
@@ -1049,6 +1078,39 @@ function SessionRowContainer(props: SessionRowContainerProps) {
             {props.isPinned ? props.t("unpinSession") : props.t("pinSession")}
           </span>
         </ContextMenuItem>
+        {/* Continuing from a session row has no anchor to pick, so it always
+            branches from the latest finished run. The only open question is
+            where the copy works, and only a repo can answer it. */}
+        {props.canUseWorktree ? (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
+              <GitBranch className="h-3.5 w-3.5 shrink-0" />
+              <span>{props.t("continueIn")}</span>
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="z-20 w-52 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
+              <ContextMenuItem
+                onSelect={() => props.onFork("same")}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <span>{props.t("continueInNewSession")}</span>
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => props.onFork("new_worktree")}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <span>{props.t("continueInNewWorktree")}</span>
+              </ContextMenuItem>
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        ) : (
+          <ContextMenuItem
+            onSelect={() => props.onFork()}
+            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <GitBranch className="h-3.5 w-3.5 shrink-0" />
+            <span>{props.t("continueInNewSession")}</span>
+          </ContextMenuItem>
+        )}
         <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
         <ContextMenuItem
           onSelect={props.onArchive}
@@ -1145,7 +1207,24 @@ function SessionRow({
               {t("sessionUnresolved")}
             </span>
           )}
-          {showProject && projectName ? (
+          {/* One sub-line, one fact. The run outcome wins: it says what the
+              session actually did, which no other row element carries.
+              Provenance is next (a forked row is only legible if you can see
+              what it continues; also the only signal before the first run),
+              then the project name for pinned rows. */}
+          {task.last_summary ? (
+            <span className="truncate text-xs text-custom-sidebar-text-400">
+              {task.last_summary}
+            </span>
+          ) : task.forked_from_title ? (
+            <span className="truncate text-xs text-custom-sidebar-text-400">
+              {t("forkedFrom", { title: task.forked_from_title })}
+            </span>
+          ) : task.delegated_from_title ? (
+            <span className="truncate text-xs text-custom-sidebar-text-400">
+              {t("delegatedFrom", { title: task.delegated_from_title })}
+            </span>
+          ) : showProject && projectName ? (
             <span className="truncate text-xs text-custom-sidebar-text-400">
               {projectName}
             </span>

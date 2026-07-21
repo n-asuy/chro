@@ -16,6 +16,7 @@ mod engine;
 mod error;
 mod frontmatter;
 mod glob;
+mod index_cache;
 mod indexer;
 mod parser;
 mod property_inference;
@@ -27,6 +28,8 @@ mod yaml;
 
 pub use document::{build_document, ensure_referenced_properties, CbaseDocument};
 pub use error::CbaseError;
+pub use frontmatter::set_property as set_frontmatter_property;
+pub use index_cache::CbaseIndexCache;
 pub use indexer::{index_project, index_rows, FileInput};
 pub use parser::parse_cbase;
 pub use serializer::serialize_cbase;
@@ -53,6 +56,25 @@ pub fn query(
         Err(other) => return Err(other),
     };
     let rows = index_project(root, &definition.dataset)?;
+    Ok(build_document(&definition, &rows, is_query_language))
+}
+
+/// Like [`query`], but reuses `cache` so unchanged files are not re-read or
+/// re-parsed across calls. Use this for repeated queries against the same
+/// project (the workspace re-queries a `.cbase` on every tab activation).
+pub fn query_cached(
+    root: &Path,
+    content: &str,
+    base_path: Option<&str>,
+    cache: &CbaseIndexCache,
+) -> Result<CbaseDocument, CbaseError> {
+    let is_query_language = query_language::looks_like_query_language(content);
+    let definition = match parse_cbase(content, base_path) {
+        Ok(definition) => definition,
+        Err(CbaseError::Parse(message)) => return Ok(CbaseDocument::parse_error(message)),
+        Err(other) => return Err(other),
+    };
+    let rows = cache.index_project(root, &definition.dataset)?;
     Ok(build_document(&definition, &rows, is_query_language))
 }
 
@@ -206,7 +228,9 @@ mod tests {
         let yaml = "version: 1\nname: \"Query Cbase\"\nquery: |\n  TABLE title\n  FROM \"notes\"\n  WHERE done = false\n";
         let definition = parse_cbase(yaml, None).unwrap();
         assert_eq!(definition.name, "Query Cbase");
-        assert_eq!(definition.dataset.include, vec!["**/*.md".to_string()]);
+        // The embedded query's `FROM "notes"` narrows the dataset the same way
+        // it does for a bare query-language file.
+        assert_eq!(definition.dataset.include, vec!["notes/**/*.md".to_string()]);
         assert_eq!(definition.views[0].default, Some(true));
     }
 
@@ -235,10 +259,52 @@ mod tests {
     }
 
     #[test]
-    fn keeps_vault_wide_dataset_when_from_present() {
+    fn path_source_narrows_the_dataset_to_that_folder() {
+        // `FROM "tasks"` must not widen the walk to the whole vault: the files
+        // that can match are exactly those under `tasks/`.
         let query = "TABLE title\nFROM \"tasks\"\n";
-        let definition = parse_cbase(query, Some("tasks/overview/my-table.cbase")).unwrap();
+        let definition = parse_cbase(query, Some("notes/my-table.cbase")).unwrap();
+        assert_eq!(definition.dataset.include, vec!["tasks/**/*.md".to_string()]);
+        // The equivalent filter is still emitted, so results are unchanged.
+        assert!(definition.filters.is_some());
+    }
+
+    #[test]
+    fn path_source_union_narrows_to_both_folders() {
+        let query = "TABLE title\nFROM \"tasks\" OR \"issues\"\n";
+        let definition = parse_cbase(query, None).unwrap();
+        assert_eq!(
+            definition.dataset.include,
+            vec!["tasks/**/*.md".to_string(), "issues/**/*.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn file_source_narrows_to_the_single_file() {
+        let query = "TABLE title\nFROM \"notes/pinned.md\"\n";
+        let definition = parse_cbase(query, None).unwrap();
+        assert_eq!(
+            definition.dataset.include,
+            vec!["notes/pinned.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn keeps_vault_wide_dataset_when_the_source_cannot_narrow() {
+        // Tags live in frontmatter, so every file must still be indexed.
+        let tag_query = "TABLE title\nFROM #work\n";
+        let definition = parse_cbase(tag_query, None).unwrap();
         assert_eq!(definition.dataset.include, vec!["**/*.md".to_string()]);
+
+        // A union with a non-narrowable side would drop rows if narrowed.
+        let mixed = "TABLE title\nFROM \"tasks\" OR #work\n";
+        let definition = parse_cbase(mixed, None).unwrap();
+        assert_eq!(definition.dataset.include, vec!["**/*.md".to_string()]);
+
+        // An intersection is contained in the path side, so it may narrow.
+        let intersect = "TABLE title\nFROM \"tasks\" AND #work\n";
+        let definition = parse_cbase(intersect, None).unwrap();
+        assert_eq!(definition.dataset.include, vec!["tasks/**/*.md".to_string()]);
     }
 
     #[test]

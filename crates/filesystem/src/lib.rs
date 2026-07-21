@@ -9,9 +9,14 @@ use ignore::WalkBuilder;
 use rayon::prelude::*;
 use thiserror::Error;
 
+pub mod git_watcher;
 pub mod watcher;
 pub mod workspace;
 
+pub use git_watcher::{
+    resolve_git_dirs, GitEventScope, GitStateEvent, GitStateEventBatch, GitStateEventKind,
+    GitStateSubscription, GitStateWatcherService, ResolvedGitDirs,
+};
 pub use watcher::{
     FilesystemWatcherError, WorktreeEvent, WorktreeEventBatch, WorktreeEventKind,
     WorktreeWatcherService,
@@ -295,11 +300,67 @@ fn contains_match(path: &Path, needle_lower: &str) -> Result<Option<String>, io:
     Ok(None)
 }
 
+/// Expand a leading `~` in a user-supplied path to the user's home directory.
+///
+/// Handles the two common forms an agent, a pasted terminal line, or a typed
+/// path uses: a bare `~` (the home directory itself) and `~/rest` (a path
+/// relative to home). `~user/...` forms are intentionally left untouched — they
+/// require a passwd lookup we do not perform, and mis-expanding them would be
+/// worse than leaving them literal. Returns `None` when `path` does not start
+/// with `~`, so callers fall back to the original string unchanged.
+pub fn expand_home_tilde(path: &str) -> Option<String> {
+    expand_tilde_with(path, dirs::home_dir()?.as_path())
+}
+
+/// Home-directory-injected core of [`expand_home_tilde`], split out so the
+/// expansion rules can be unit-tested without depending on the host's real home.
+fn expand_tilde_with(path: &str, home: &Path) -> Option<String> {
+    let rest = path.strip_prefix('~')?;
+    if rest.is_empty() {
+        return Some(home.to_string_lossy().into_owned());
+    }
+    // Only `~/...` (or the Windows `~\...`) expands; anything else after the
+    // tilde is a `~user` form we leave literal.
+    if !rest.starts_with('/') && !rest.starts_with('\\') {
+        return None;
+    }
+    Some(home.join(&rest[1..]).to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::tempdir;
+
+    #[test]
+    fn expands_bare_tilde_to_home() {
+        let home = Path::new("/Users/alice");
+        assert_eq!(expand_tilde_with("~", home).as_deref(), Some("/Users/alice"));
+    }
+
+    #[test]
+    fn expands_tilde_slash_path() {
+        let home = Path::new("/Users/alice");
+        assert_eq!(
+            expand_tilde_with("~/workspace/curino/note.md", home).as_deref(),
+            Some("/Users/alice/workspace/curino/note.md"),
+        );
+    }
+
+    #[test]
+    fn leaves_named_user_tilde_unexpanded() {
+        let home = Path::new("/Users/alice");
+        assert_eq!(expand_tilde_with("~bob/docs", home), None);
+    }
+
+    #[test]
+    fn ignores_paths_without_leading_tilde() {
+        let home = Path::new("/Users/alice");
+        assert_eq!(expand_tilde_with("/abs/path", home), None);
+        assert_eq!(expand_tilde_with("relative/path", home), None);
+        assert_eq!(expand_tilde_with("a/~/b", home), None);
+    }
 
     #[test]
     fn detect_git_repo() {

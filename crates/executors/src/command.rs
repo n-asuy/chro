@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use crate::cli_manifest::CliManifest;
 use crate::cli_resolver::resolve_cli;
 use crate::executors::ExecutorError;
 use crate::shell::resolve_executable_path;
+use crate::spawn::{Invocation, prepare_invocation};
 
 #[derive(Debug, Error)]
 pub enum CommandBuildError {
@@ -47,7 +48,9 @@ impl CommandParts {
         self
     }
 
-    pub async fn into_resolved(self) -> Result<(PathBuf, Vec<String>), ExecutorError> {
+    /// Resolve the binary via the layered discovery sequence and normalize the
+    /// invocation for the host platform (see [`crate::spawn::prepare_invocation`]).
+    pub async fn into_resolved(self) -> Result<Invocation, ExecutorError> {
         let CommandParts {
             program,
             args,
@@ -73,7 +76,7 @@ impl CommandParts {
                 }
             },
         };
-        Ok((executable, args))
+        prepare_invocation(executable, args)
     }
 }
 

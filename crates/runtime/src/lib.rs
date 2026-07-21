@@ -33,9 +33,10 @@ use worktree::WorktreeManager;
 pub use container::{ContainerError, ContainerService};
 pub use execution::{ExecutionEvent, ExecutionStartParams};
 pub use tasks::{
-    ExecutionSessionStart, MergeOutcome, RebaseOutcome, SendTaskMessageParams,
-    StartExecutionProcessParams, StartExecutionSessionParams, TaskMessageMode, TaskMessageStart,
-    TaskRunBranchStatus, TaskRunTaskProject, TaskRunWithTask, TaskService,
+    ExecutionSessionStart, ForkOutcome, ForkWorkspace, MergeOutcome, RebaseOutcome,
+    SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
+    TaskMessageMode, TaskMessageStart, TaskRunBranchStatus, TaskRunTaskProject, TaskRunWithTask,
+    TaskService,
 };
 pub use workspace::{canonicalize_path, ProjectFileService};
 

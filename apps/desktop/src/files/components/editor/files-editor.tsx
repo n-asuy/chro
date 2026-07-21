@@ -34,6 +34,7 @@ import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
 import { useAutoSave } from "../../hooks/use-auto-save";
 import { delimiterForExtension } from "../../lib/csv";
+import { resolveEmbedPath } from "../../lib/embed-path";
 import {
   type Frontmatter,
   combineFrontmatterAndBody,
@@ -665,35 +666,8 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
 
   const embedConfig: EmbedPluginConfig = useMemo(
     () => ({
-      getImageUrl: (path: string) => {
-        // Resolve relative path from current file's directory
-        const currentDir = relativePath
-          ? relativePath.substring(0, relativePath.lastIndexOf("/"))
-          : "";
-        let resolvedPath: string;
-
-        if (path.startsWith("/")) {
-          resolvedPath = path.replace(/^\/+/, "");
-        } else if (currentDir) {
-          resolvedPath = `${currentDir}/${path}`;
-        } else {
-          resolvedPath = path;
-        }
-
-        // Normalize the path (handle ../ and ./)
-        const parts = resolvedPath.split("/").filter(Boolean);
-        const resolved: string[] = [];
-        for (const part of parts) {
-          if (part === "..") {
-            resolved.pop();
-          } else if (part !== ".") {
-            resolved.push(part);
-          }
-        }
-
-        const joined = resolved.join("/");
-        return getBinaryFileUrl(joined);
-      },
+      getImageUrl: (path: string) =>
+        getBinaryFileUrl(resolveEmbedPath(relativePath, path)),
     }),
     [relativePath, getBinaryFileUrl],
   );

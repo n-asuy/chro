@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { desktopFetch } from "@/lib/backend-client";
+import { useRepoEvents } from "@/hooks/use-repo-events";
 
 type MergeStatus = "open" | "merged" | "closed";
 
@@ -33,7 +34,6 @@ type BranchStatus = {
 type UseBranchStatusOptions = {
   taskRunId: string | null;
   enabled?: boolean;
-  pollInterval?: number;
 };
 
 type UseBranchStatusReturn = {
@@ -43,12 +43,9 @@ type UseBranchStatusReturn = {
   refetch: () => Promise<void>;
 };
 
-const DEFAULT_POLL_INTERVAL = 5000;
-
 export const useBranchStatus = ({
   taskRunId,
   enabled = true,
-  pollInterval = DEFAULT_POLL_INTERVAL,
 }: UseBranchStatusOptions): UseBranchStatusReturn => {
   const [status, setStatus] = useState<BranchStatus | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -76,6 +73,15 @@ export const useBranchStatus = ({
     }
   }, [taskRunId, enabled]);
 
+  // Ahead/behind and conflict state derive from refs and operation state, so
+  // git events replace the previous interval polling; a visibility refresh
+  // covers changes made while the window was hidden on a lagging stream.
+  useRepoEvents(taskRunId && enabled ? { taskRunId } : undefined, {
+    channels: ["git"],
+    gitKinds: ["headMoved", "operationChanged"],
+    onInvalidate: () => void fetchStatus(),
+  });
+
   useEffect(() => {
     if (!taskRunId || !enabled) {
       setStatus(null);
@@ -83,12 +89,6 @@ export const useBranchStatus = ({
     }
 
     void fetchStatus();
-
-    const intervalId = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        void fetchStatus();
-      }
-    }, pollInterval);
 
     const onVisible = () => {
       if (document.visibilityState === "visible") {
@@ -98,10 +98,9 @@ export const useBranchStatus = ({
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [taskRunId, enabled, fetchStatus, pollInterval]);
+  }, [taskRunId, enabled, fetchStatus]);
 
   return {
     status,

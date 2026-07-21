@@ -157,6 +157,18 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
         None
     }
 
+    /// Return the full pending request for a run, if any. Unlike
+    /// [`Self::pending`], this includes `tool_input`, so callers can surface
+    /// what the agent is blocked on (e.g. the AskUserQuestion question text).
+    pub async fn pending_request_for_run(&self, task_run_id: Uuid) -> Option<ApprovalRequest> {
+        self.pending
+            .read()
+            .await
+            .values()
+            .find(|pending| pending.request.task_run_id == task_run_id)
+            .map(|pending| pending.request.clone())
+    }
+
     pub async fn pending(&self) -> Vec<ApprovalPendingInfo> {
         self.pending
             .read()

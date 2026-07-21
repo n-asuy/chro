@@ -28,10 +28,16 @@ declare module "@tanstack/react-router" {
 // Load persisted UI state and analytics config from backend
 loadUiState().catch(() => {});
 
-// Resolve feature flags once at startup so `useFlag` reads real values.
-import("./lib/feature-flags-store").then(({ useFeatureFlagStore }) =>
-  useFeatureFlagStore.getState().load(),
-);
+// Resolve feature flags at startup so `useFlag` reads real values, then keep
+// them fresh: this window may stay open for days, and a flag flipped remotely
+// (e.g. a kill switch) has to reach it without a restart.
+import("./lib/feature-flags-store").then(async ({ useFeatureFlagStore }) => {
+  await useFeatureFlagStore.getState().load();
+  const { startFlagRefresh } = await import("./lib/flag-refresh");
+  startFlagRefresh({
+    refresh: () => void useFeatureFlagStore.getState().load(),
+  });
+});
 
 import("./lib/preferences-client").then(({ fetchPreferences }) =>
   fetchPreferences()

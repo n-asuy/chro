@@ -12,6 +12,9 @@ pub struct ExecutionStartParams {
     pub workspace_path: PathBuf,
     pub resume_session_id: Option<String>,
     pub force_new_attempt: Option<bool>,
+    /// Branch `resume_session_id` instead of continuing it, so the session this
+    /// run came from stays untouched. Set on a forked task's first turn.
+    pub fork_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

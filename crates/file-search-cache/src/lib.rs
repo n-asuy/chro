@@ -6,13 +6,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use fst::{Map, MapBuilder};
 use git2::{Repository, Sort};
 use ignore::WalkBuilder;
 use moka::future::Cache;
-use notify::{RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -113,7 +110,6 @@ const FREQUENCY_WEIGHT: i64 = 1;
 pub struct FileSearchCache {
     cache: Cache<PathBuf, CachedRepo>,
     build_queue: mpsc::UnboundedSender<PathBuf>,
-    watchers: DashMap<PathBuf, ()>,
 }
 
 impl FileSearchCache {
@@ -134,7 +130,6 @@ impl FileSearchCache {
         Self {
             cache,
             build_queue: build_sender,
-            watchers: DashMap::new(),
         }
     }
 
@@ -185,63 +180,13 @@ impl FileSearchCache {
         Ok(())
     }
 
-    /// Setup file watcher for repository HEAD changes
-    pub async fn setup_watcher(&self, repo_path: &Path) -> Result<(), String> {
-        let repo_path_buf = repo_path.to_path_buf();
-
-        if self.watchers.contains_key(&repo_path_buf) {
-            return Ok(());
+    /// Queue a rebuild of the repository's index. Called by the git state
+    /// watcher when HEAD moves (branch switch, commit), so the next search
+    /// hits a fresh cache instead of the slow filesystem fallback.
+    pub fn invalidate(&self, repo_path: &Path) {
+        if let Err(e) = self.build_queue.send(repo_path.to_path_buf()) {
+            warn!("Failed to enqueue cache invalidation: {}", e);
         }
-
-        let git_dir = repo_path.join(".git");
-        if !git_dir.exists() {
-            return Err("Not a git repository".to_string());
-        }
-
-        let build_queue = self.build_queue.clone();
-        let watched_path = repo_path_buf.clone();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(500),
-            None,
-            move |res: DebounceEventResult| {
-                if let Ok(events) = res {
-                    for event in events {
-                        for path in &event.event.paths {
-                            if path.file_name().is_some_and(|name| name == "HEAD") {
-                                if let Err(e) = tx.send(()) {
-                                    error!("Failed to send HEAD change event: {}", e);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            },
-        )
-        .map_err(|e| format!("Failed to create file watcher: {e}"))?;
-
-        debouncer
-            .watcher()
-            .watch(git_dir.join("HEAD").as_path(), RecursiveMode::NonRecursive)
-            .map_err(|e| format!("Failed to watch HEAD file: {e}"))?;
-
-        self.watchers.insert(repo_path_buf.clone(), ());
-
-        tokio::spawn(async move {
-            let _debouncer = debouncer;
-            while rx.recv().await.is_some() {
-                info!("HEAD changed for repo: {:?}", watched_path);
-                if let Err(e) = build_queue.send(watched_path.clone()) {
-                    error!("Failed to enqueue cache refresh: {}", e);
-                }
-            }
-        });
-
-        info!("Setup file watcher for repo: {:?}", repo_path);
-        Ok(())
     }
 
     /// Background worker for cache building

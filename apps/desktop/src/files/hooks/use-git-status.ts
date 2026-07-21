@@ -16,6 +16,7 @@ import {
   stageFiles,
   unstageFiles,
 } from "@/lib/git-client";
+import { useRepoEvents } from "@/hooks/use-repo-events";
 import { toast } from "@chro/ui/hooks/use-toast";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -26,8 +27,8 @@ interface UseGitStatusOptions {
    * instead of the project's main checkout. Falls back to the project otherwise.
    */
   taskRunId?: string | null;
+  /** Whether the status follows worktree/git change events automatically. */
   autoRefresh?: boolean;
-  refreshInterval?: number;
 }
 
 interface UseGitStatusReturn {
@@ -169,7 +170,6 @@ export function useGitStatus({
   projectId,
   taskRunId,
   autoRefresh = true,
-  refreshInterval = 5000,
 }: UseGitStatusOptions): UseGitStatusReturn {
   const { t } = useLanguage();
 
@@ -362,15 +362,18 @@ export function useGitStatus({
     refresh();
   }, [refresh]);
 
-  // Auto-refresh interval (paused when page is not visible)
+  // Working-tree status derives from file changes plus git state (index,
+  // HEAD, in-progress operations), so change events replace the previous
+  // interval polling.
+  useRepoEvents(autoRefresh && scope ? scope : undefined, {
+    channels: ["files", "git"],
+    onInvalidate: () => void refresh(),
+  });
+
+  // A visibility refresh covers changes made while the window was hidden on a
+  // lagging stream.
   useEffect(() => {
     if (!autoRefresh || !scope) return;
-
-    const interval = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        void refresh();
-      }
-    }, refreshInterval);
 
     const onVisible = () => {
       if (document.visibilityState === "visible") {
@@ -380,10 +383,9 @@ export function useGitStatus({
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [autoRefresh, scope, refresh, refreshInterval]);
+  }, [autoRefresh, scope, refresh]);
 
   return {
     status,

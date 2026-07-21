@@ -16,6 +16,9 @@ pub enum ClientError {
     NoGitRepo,
     Http(String),
     Api { status: u16, body: String },
+    /// The command was invoked in a way that cannot be resolved (bad or
+    /// missing arguments); the message is shown to the user verbatim.
+    Usage(String),
 }
 
 impl fmt::Display for ClientError {
@@ -31,6 +34,7 @@ impl fmt::Display for ClientError {
             ),
             Self::Http(msg) => write!(f, "HTTP error: {msg}"),
             Self::Api { status, body } => write!(f, "Server responded {status}: {body}"),
+            Self::Usage(msg) => write!(f, "{msg}"),
         }
     }
 }

@@ -184,10 +184,14 @@ pub fn parse_to_definition(
         table_columns
     };
 
-    let dataset_include = if parsed.source.is_some() {
-        vec!["**/*.md".to_string()]
-    } else {
-        resolve_default_dataset_include(base_path)
+    let dataset_include = match &parsed.source {
+        // A path-based `FROM` narrows which files are indexed at all, instead of
+        // walking + parsing the whole vault only to drop non-matching rows in
+        // the filter stage. The equivalent filter is still emitted, so the
+        // result set is unchanged — this only shrinks the walk.
+        Some(source) => source_include_globs(source)
+            .unwrap_or_else(|| vec!["**/*.md".to_string()]),
+        None => resolve_default_dataset_include(base_path),
     };
 
     Ok(CbaseDefinition {
@@ -412,6 +416,39 @@ fn parse_sort_fields(raw: &str) -> ParseResult<Vec<ParsedSortField>> {
             })
         })
         .collect()
+}
+
+/// Dataset include globs equivalent to (or a superset of) `node`, when the
+/// source can be resolved to paths. `None` means the source cannot narrow the
+/// walk (tags need frontmatter, and a negation can match anything), so the
+/// caller keeps the vault-wide default.
+fn source_include_globs(node: &SourceNode) -> Option<Vec<String>> {
+    match node {
+        SourceNode::Path(value) => {
+            let path = value.trim_matches('/');
+            if path.is_empty() {
+                return None;
+            }
+            Some(vec![if path.ends_with(".md") {
+                path.to_string()
+            } else {
+                format!("{path}/**/*.md")
+            }])
+        }
+        // A union needs both sides narrowable, otherwise the un-narrowed side
+        // would lose rows.
+        SourceNode::Or(left, right) => {
+            let mut globs = source_include_globs(left)?;
+            globs.extend(source_include_globs(right)?);
+            Some(globs)
+        }
+        // An intersection is contained in either side, so narrowing to whichever
+        // side resolves stays a superset of the result.
+        SourceNode::And(left, right) => {
+            source_include_globs(left).or_else(|| source_include_globs(right))
+        }
+        SourceNode::Tag(_) | SourceNode::Not(_) => None,
+    }
 }
 
 fn source_node_to_filter(

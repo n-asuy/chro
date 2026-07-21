@@ -1,11 +1,12 @@
 [package]
 name = "chro-server"
-version = "0.1.45"
+version = "0.1.46"
 edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
+dunce = "1.0"
 axum = { version = "0.7", features = ["macros", "multipart"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -14,7 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 thiserror = "1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "process"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.4"
@@ -46,6 +47,10 @@ ureq = { version = "2", features = ["json"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 browser = { path = "../browser" }
 base64 = "0.22"
+
+[dev-dependencies]
+dirs = "5.0"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"

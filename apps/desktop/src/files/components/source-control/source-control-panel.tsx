@@ -1,10 +1,10 @@
 import { useBranchStatus } from "@/hooks/use-branch-status";
+import { useMergeRun } from "@/hooks/use-merge-run";
+import { useRebase } from "@/hooks/use-rebase";
 import { cn } from "@/lib/cn";
 import {
-  type BranchInfo,
   type FileChangeStatus,
   type GitScope,
-  listGitBranches,
 } from "@/lib/git-client";
 import type { DiffChangeKind } from "@/session/hooks";
 import { useLayoutStore } from "@/workspace-layout/state/layout-store";
@@ -31,11 +31,10 @@ import {
   Minus,
   Plus,
   RefreshCw,
-  Search,
   Undo2,
   Upload,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useProjectContext } from "../../context/project-context";
 import {
   ChangeFileList,
@@ -329,29 +328,31 @@ export const SourceControlPanel = () => {
     scopeTaskRunId ? "all" : "uncommitted",
   );
 
-  // The base ref a session branch is compared against in "all" scope. Defaults
-  // to the run's actual target branch (what it forked from and merges back
-  // into) rather than a hardcoded "main", so the comparison reflects reality
-  // instead of always reading "vs main". The dropdown sets an explicit override;
-  // `null` means "follow the run".
-  const { status: branchStatus } = useBranchStatus({
-    taskRunId: scopeTaskRunId,
-    enabled: Boolean(scopeTaskRunId),
-    pollInterval: 30000,
-  });
-  const [baseRefOverride, setBaseRefOverride] = useState<string | null>(null);
-  const baseRef =
-    baseRefOverride ?? branchStatus?.target_branch ?? DEFAULT_BASE_REF;
+  // In "all" scope a session branch is compared against its own target branch —
+  // the ref it forked from and merges back into. That base is not selectable
+  // here: letting this panel redefine the comparison is what made its numbers
+  // disagree with the run's canonical diff shown in the header and the diff tab.
+  const { status: branchStatus, refetch: refetchBranchStatus } =
+    useBranchStatus({
+      taskRunId: scopeTaskRunId,
+      enabled: Boolean(scopeTaskRunId),
+    });
+  const runTargetBranch = branchStatus?.target_branch ?? null;
+  const baseRef = scopeTaskRunId ? runTargetBranch : DEFAULT_BASE_REF;
 
   useEffect(() => {
     setScope(scopeTaskRunId ? "all" : "uncommitted");
-    // Drop any manual base-ref override so the newly scoped run's target branch
-    // takes effect.
-    setBaseRefOverride(null);
   }, [scopeTaskRunId]);
 
-  const activeBase = scope === "all" ? baseRef : undefined;
-  const { diffs: scopedDiffs } = useWorkingDiffs(gitScope, activeBase);
+  // Until the run's target branch is known, no base is correct: fetching with a
+  // guessed one would render a number that silently disagrees with the run's
+  // diff. Hold the request instead of showing a wrong total.
+  const isBaseResolving = scope === "all" && Boolean(scopeTaskRunId) && !baseRef;
+  const activeBase = scope === "all" ? (baseRef ?? undefined) : undefined;
+  const { diffs: scopedDiffs } = useWorkingDiffs(
+    isBaseResolving ? null : gitScope,
+    activeBase,
+  );
 
   // path → line counts, for the +/- badges on each changed row (uncommitted).
   const countsByPath = useMemo(() => {
@@ -379,36 +380,51 @@ export const SourceControlPanel = () => {
 
   const [commitMessage, setCommitMessage] = useState(getDefaultCommitMessage);
   const [isCommitting, setIsCommitting] = useState(false);
-  const [branches, setBranches] = useState<BranchInfo[]>([]);
-  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
-  const [branchSearchTerm, setBranchSearchTerm] = useState("");
-  const branchSearchRef = useRef<HTMLInputElement>(null);
 
-  // Fetch branches when dropdown opens
-  useEffect(() => {
-    if (branchDropdownOpen && gitScope) {
-      listGitBranches(gitScope)
-        .then((result) => setBranches(result.branches))
-        .catch((err) =>
-          console.error("[source-control] Failed to fetch branches:", err),
-        );
-    }
-  }, [branchDropdownOpen, gitScope]);
+  // Integration verbs. Both refresh branch status on success so the ahead/behind
+  // counts these buttons key off reflect the new reality immediately.
+  const { rebase, isRebasing } = useRebase({
+    taskRunId: scopeTaskRunId,
+    onSuccess: () => void refetchBranchStatus(),
+  });
+  const { merge, isMerging, didMerge } = useMergeRun({
+    taskRunId: scopeTaskRunId,
+    onSuccess: () => void refetchBranchStatus(),
+  });
 
-  // Focus search input when dropdown opens
-  useEffect(() => {
-    if (branchDropdownOpen) {
-      setTimeout(() => branchSearchRef.current?.focus(), 0);
-    } else {
-      setBranchSearchTerm("");
-    }
-  }, [branchDropdownOpen]);
+  const conflictCount = branchStatus?.conflicted_files?.length ?? 0;
+  // Any half-finished history rewrite makes integration unsafe; surface that
+  // instead of offering buttons that would fail.
+  const isRebaseBlocked =
+    conflictCount > 0 || Boolean(branchStatus?.is_rebase_in_progress);
+  // Rebase only needs the branch to be behind; merge needs something to land.
+  const canRebase =
+    Boolean(baseRef) && !isRebaseBlocked && !isRebasing && commitsBehind > 0;
+  const canMerge =
+    Boolean(baseRef) && !isRebaseBlocked && !isMerging && commitsAhead > 0;
 
-  const filteredBranches = useMemo(() => {
-    if (!branchSearchTerm.trim()) return branches;
-    const query = branchSearchTerm.toLowerCase();
-    return branches.filter((b) => b.name.toLowerCase().includes(query));
-  }, [branches, branchSearchTerm]);
+  // The buttons stay visible even when unavailable, so each one has to say why
+  // it is inert rather than leaving the user guessing.
+  const baseLabel = baseRef ?? "base";
+  const rebaseHint = isRebaseBlocked
+    ? "Resolve the in-progress rebase first"
+    : !baseRef
+      ? "Waiting for the run's target branch"
+      : commitsBehind === 0
+        ? `Already up to date with ${baseLabel}`
+        : `Replay this branch on top of ${baseLabel}`;
+  const mergeHint = isRebaseBlocked
+    ? "Resolve the in-progress rebase first"
+    : !baseRef
+      ? "Waiting for the run's target branch"
+      : commitsAhead === 0
+        ? "No commits to merge yet"
+        : `Merge this branch into ${baseLabel}`;
+
+  const handleRebase = useCallback(() => {
+    if (!baseRef) return;
+    void rebase(baseRef, baseRef);
+  }, [baseRef, rebase]);
 
   // Update commit message with fresh timestamp when text area is focused
   const handleCommitMessageFocus = useCallback(() => {
@@ -724,105 +740,20 @@ export const SourceControlPanel = () => {
         </div>
       </div>
 
-      {/* Branch / base-ref row. In "all" scope the dropdown picks the base ref
-          to compare against (not a branch switch). */}
-      <div className="relative px-3 py-2">
-        <button
-          type="button"
-          onClick={() => setBranchDropdownOpen(!branchDropdownOpen)}
-          disabled={scope !== "all"}
-          className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-sm hover:bg-custom-background-80 disabled:hover:bg-transparent"
-        >
-          <div className="flex min-w-0 items-center gap-2">
-            <GitBranch className="size-3.5 shrink-0 text-custom-text-300" />
-            <span className="truncate text-custom-text-200">
-              {currentBranch ?? "No branch"}
+      {/* Branch / base row. Read-only: the comparison follows the run, so this
+          states which branch is being compared against which base. */}
+      <div className="px-3 py-2">
+        <div className="flex w-full items-center gap-2 px-2 py-1 text-sm">
+          <GitBranch className="size-3.5 shrink-0 text-custom-text-300" />
+          <span className="truncate text-custom-text-200">
+            {currentBranch ?? "No branch"}
+          </span>
+          {scope === "all" && baseRef && (
+            <span className="shrink-0 text-custom-text-300">
+              vs <span className="text-custom-text-200">{baseRef}</span>
             </span>
-            {scope === "all" && (
-              <span className="shrink-0 text-custom-text-300">
-                vs <span className="text-custom-text-200">{baseRef}</span>
-              </span>
-            )}
-          </div>
-          {scope === "all" && (
-            <ChevronDown
-              className={cn(
-                "size-3.5 shrink-0 text-custom-text-300 transition-transform duration-150 ease-out",
-                branchDropdownOpen && "rotate-180",
-              )}
-            />
           )}
-        </button>
-
-        {branchDropdownOpen && (
-          <div className="absolute left-0 right-0 z-50 mt-1 mx-3 max-h-64 overflow-hidden rounded-xl border border-custom-border-200 bg-custom-background-100 shadow-sm">
-            {/* Search input */}
-            <div className="border-b border-custom-border-200 p-2">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-custom-text-300" />
-                <input
-                  ref={branchSearchRef}
-                  type="text"
-                  value={branchSearchTerm}
-                  onChange={(e) => setBranchSearchTerm(e.target.value)}
-                  placeholder="Search branches..."
-                  className="w-full rounded border border-custom-border-200 bg-custom-background-90 py-1 pl-7 pr-2 text-sm text-custom-text-100 placeholder:text-custom-text-300 focus:border-custom-primary-100 focus:outline-none"
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setBranchDropdownOpen(false);
-                    }
-                  }}
-                />
-              </div>
-            </div>
-            {/* Branch list */}
-            <div className="max-h-48 overflow-y-auto">
-              {filteredBranches.length === 0 ? (
-                <div className="p-2 text-center text-sm text-custom-text-300">
-                  No branches found
-                </div>
-              ) : (
-                filteredBranches.map((branch) => (
-                  <button
-                    key={branch.name}
-                    type="button"
-                    onClick={() => {
-                      // Pick the base ref to compare the branch against.
-                      setBaseRefOverride(branch.name);
-                      setBranchDropdownOpen(false);
-                    }}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 px-3 py-1.5 text-sm hover:bg-custom-background-80",
-                      branch.name === baseRef && "bg-custom-background-90",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "truncate",
-                        branch.name === baseRef && "font-medium",
-                      )}
-                    >
-                      {branch.name}
-                    </span>
-                    <div className="flex gap-1 text-xs">
-                      {branch.name === baseRef && (
-                        <span className="rounded bg-custom-primary-100/20 px-1 text-custom-primary-100">
-                          base
-                        </span>
-                      )}
-                      {branch.is_remote && (
-                        <span className="rounded bg-custom-background-80 px-1 text-custom-text-300">
-                          remote
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-        )}
+        </div>
       </div>
 
       {/* Commit message input */}
@@ -979,6 +910,66 @@ export const SourceControlPanel = () => {
               ]}
             />
           </CollapsibleSection>
+        </div>
+      )}
+
+      {/* Integrate: the verbs that land a run's work on its target. They belong
+          here, next to the changes they act on, rather than in a header popover
+          detached from the list. The section is always present in a worktree
+          scope — a verb the user cannot find is a verb that does not exist — so
+          state is carried by the label and the disabled reason, never by hiding
+          the control. */}
+      {scopeTaskRunId && (
+        <div className="shrink-0 space-y-2 border-t border-custom-border-200 p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-custom-text-300">
+            Integrate
+          </div>
+
+          {isRebaseBlocked && (
+            <div className="rounded-md bg-amber-500/10 px-2.5 py-1.5 text-[11.5px] leading-snug text-amber-700 dark:text-amber-400">
+              {conflictCount > 0
+                ? `Resolve ${conflictCount} conflicted ${conflictCount === 1 ? "file" : "files"} to continue`
+                : "Finish the in-progress rebase to continue"}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleRebase}
+            disabled={!canRebase}
+            title={rebaseHint}
+            className="flex w-full items-center justify-between gap-2 rounded-md border border-custom-border-200 px-2.5 py-1.5 text-[12px] text-custom-text-200 transition hover:bg-custom-background-80 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <span>
+              {isRebasing ? "Rebasing…" : `Rebase onto ${baseLabel}`}
+            </span>
+            {pullCount > 0 && (
+              <span className="rounded bg-custom-background-80 px-1.5 py-0.5 text-[10px] tabular-nums text-custom-text-300">
+                {pullCount} behind
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void merge()}
+            disabled={!canMerge}
+            title={mergeHint}
+            className="flex w-full items-center justify-between gap-2 rounded-md bg-custom-primary-100 px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <span>
+              {isMerging
+                ? "Merging…"
+                : didMerge
+                  ? "Merged"
+                  : `Merge into ${baseLabel}`}
+            </span>
+            {pushCount > 0 && (
+              <span className="rounded bg-white/20 px-1.5 py-0.5 text-[10px] tabular-nums">
+                {pushCount} ahead
+              </span>
+            )}
+          </button>
         </div>
       )}
     </div>

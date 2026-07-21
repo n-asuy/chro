@@ -403,11 +403,20 @@ impl GitCli {
     /// - rebase-merge (interactive rebase)
     /// - rebase-apply (am-based rebase)
     pub fn is_rebase_in_progress(&self, worktree_path: &Path) -> Result<bool, GitCliError> {
+        // `--git-path` output is relative to the worktree for plain repos (only
+        // linked worktrees yield absolute paths), so resolve it against the
+        // worktree, never the server process's cwd.
+        let resolve = |raw: &str| {
+            let path = Path::new(raw.trim());
+            if path.is_absolute() {
+                path.exists()
+            } else {
+                worktree_path.join(path).exists()
+            }
+        };
         let rebase_merge = self.git(worktree_path, ["rev-parse", "--git-path", "rebase-merge"])?;
         let rebase_apply = self.git(worktree_path, ["rev-parse", "--git-path", "rebase-apply"])?;
-        let rm_exists = std::path::Path::new(rebase_merge.trim()).exists();
-        let ra_exists = std::path::Path::new(rebase_apply.trim()).exists();
-        Ok(rm_exists || ra_exists)
+        Ok(resolve(&rebase_merge) || resolve(&rebase_apply))
     }
 
     /// Return true if a merge is in progress (MERGE_HEAD exists).
@@ -438,6 +447,15 @@ impl GitCli {
     }
 
     /// Perform `git rebase --onto <new_base> <old_base>` on <task_branch> in `worktree_path`.
+    /// Rebase the branch currently checked out in `worktree_path` onto
+    /// `new_base`.
+    ///
+    /// The branch is never passed as a positional argument: that form makes git
+    /// check the branch out first, which fails outright ("already used by
+    /// worktree") when the branch lives in a different worktree. Rebasing HEAD
+    /// keeps the operation inside the worktree it was invoked on, so it cannot
+    /// collide with another checkout. The caller is responsible for invoking
+    /// this in the worktree that actually holds the branch.
     pub fn rebase_onto(
         &self,
         worktree_path: &Path,
@@ -452,10 +470,7 @@ impl GitCli {
             .merge_base(worktree_path, old_base, task_branch)
             .unwrap_or(old_base.to_string());
 
-        self.git(
-            worktree_path,
-            ["rebase", "--onto", new_base, &merge_base, task_branch],
-        )?;
+        self.git(worktree_path, ["rebase", "--onto", new_base, &merge_base])?;
         Ok(())
     }
 

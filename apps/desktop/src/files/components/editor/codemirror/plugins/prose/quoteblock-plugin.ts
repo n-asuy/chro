@@ -3,6 +3,7 @@
  * Adds styling to blockquote elements
  */
 
+import { hasDecorationRefresh } from "../decoration-refresh";
 import { Decoration, EditorView } from "@codemirror/view";
 import { StateField, RangeSet } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
@@ -101,7 +102,7 @@ export const quoteblockPlugin = StateField.define<DecorationSet>({
     return RangeSet.of(buildQuoteblockDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || tr.effects.length > 0) {
+    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
       return RangeSet.of(buildQuoteblockDecorations(tr.state), true);
     }
     return value.map(tr.changes);

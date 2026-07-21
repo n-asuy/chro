@@ -7,10 +7,12 @@ export type FlagStatus =
   | "graduated"
   | "killed";
 
-// Matches the flag keys in crates/analytics/src/flags.rs.
-// The backend registry is the source of truth; this union exists for
-// autocomplete and compile-time safety when gating code on a flag.
-export type FlagKey = "session_references_popover";
+// Matches Rollout in crates/analytics/src/flags.rs
+// "local": the backend registry decides and PostHog is never consulted.
+// "remote": PostHog decides, and default_enabled is only a fallback.
+export type FlagRollout = "local" | "remote";
+
+export type { FlagKey } from "./flags.generated";
 
 // Matches FlagView in crates/server/src/routes/rpc/flags.rs
 export interface FlagView {
@@ -19,6 +21,7 @@ export interface FlagView {
   created: string;
   retire_by: string;
   default_enabled: boolean;
+  rollout: FlagRollout;
   status: FlagStatus;
   description: string;
   // Effective value before any local developer override is applied.

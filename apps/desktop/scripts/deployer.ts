@@ -7,14 +7,15 @@ import {
   Dirent,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,7 +26,7 @@ import { redistCrtImports } from "./pe-imports";
 // CI calling conventions stay the same. The interior switches to running
 // `tauri build` and staging chro-server as a Tauri sidecar.
 
-type Command = "package" | "release" | "upload" | "tag";
+type Command = "package" | "release" | "upload" | "tag" | "updater-manifest";
 
 const PROJECT_NAMES = ["desktop"] as const;
 type ProjectName = (typeof PROJECT_NAMES)[number];
@@ -145,7 +146,8 @@ function parseArgs(rawArgs: string[]): Options {
       candidate === "package" ||
       candidate === "release" ||
       candidate === "upload" ||
-      candidate === "tag"
+      candidate === "tag" ||
+      candidate === "updater-manifest"
     ) {
       command = candidate;
     } else {
@@ -235,7 +237,11 @@ function parseArgs(rawArgs: string[]): Options {
 }
 
 function ensureGhRepoConfigured(command: Command) {
-  if (command !== "release" && command !== "upload") {
+  if (
+    command !== "release" &&
+    command !== "upload" &&
+    command !== "updater-manifest"
+  ) {
     return;
   }
   const ghRepo = process.env.GH_REPO?.trim();
@@ -895,13 +901,6 @@ function packageDesktop(
   }
   mkdirSync(releaseDir, { recursive: true });
 
-  // For multi-arch macOS we want to consolidate the per-arch latest.json into
-  // a single feed manifest so the updater plugin gets one URL it can hit.
-  const latestJsonByPlatform = new Map<
-    string,
-    Record<string, unknown>
-  >();
-
   for (const ctx of contexts) {
     buildAndStageRustBinary(ctx);
     cleanBundleArtifacts(ctx);
@@ -914,34 +913,13 @@ function packageDesktop(
     }
     for (const artifact of artifacts) {
       const base = path.basename(artifact);
-      const target = path.join(releaseDir, prefixed(ctx, base));
+      const target = path.join(releaseDir, archScopedName(ctx, base));
       copyOrMoveArtifact(artifact, target);
-
-      if (base === "latest.json") {
-        const json = JSON.parse(readFileSync(target, "utf8")) as Record<
-          string,
-          unknown
-        >;
-        const platform = osPlatformKey(ctx.triple);
-        const existing = latestJsonByPlatform.get(platform);
-        latestJsonByPlatform.set(
-          platform,
-          mergeLatestJson(existing, json, ctx.triple),
-        );
-        // Remove the per-arch file; we'll write the merged one below.
-        unlinkSync(target);
-      }
     }
   }
-
-  for (const [platform, manifest] of latestJsonByPlatform) {
-    const filename = `latest-${platform}.json`;
-    writeFileSync(
-      path.join(releaseDir, filename),
-      `${JSON.stringify(manifest, null, 2)}\n`,
-      "utf8",
-    );
-  }
+  // The updater feed manifest (latest-<os>.json) is not written here: each arch
+  // builds on its own runner, so it is assembled from every arch's signed
+  // artifact once they are all published. See the `updater-manifest` command.
 }
 
 function copyOrMoveArtifact(source: string, target: string) {
@@ -951,76 +929,17 @@ function copyOrMoveArtifact(source: string, target: string) {
   copyFileSync(source, target);
 }
 
-function prefixed(ctx: TauriBuildContext, base: string): string {
-  // Disambiguate same-name artifacts (e.g. latest.json) per arch by prefixing
-  // the triple. Final cross-arch merging happens after collection.
-  if (base === "latest.json") {
-    return `${ctx.triple}.${base}`;
+function archScopedName(ctx: TauriBuildContext, base: string): string {
+  // Tauri names the macOS updater bundle "<Product>.app.tar.gz" with no arch,
+  // so the arm64 and x64 runners produce the same filename and clobber each
+  // other on the shared release. Give each arch a distinct name so both
+  // survive and the manifest can reference them by URL.
+  const macUpdater = base.match(/^(.*)\.app\.tar\.gz(\.sig)?$/i);
+  if (macUpdater && ctx.triple.includes("apple-darwin")) {
+    const suffix = macDmgArchSuffix(ctx.triple);
+    return `${macUpdater[1]}_${suffix}.app.tar.gz${macUpdater[2] ?? ""}`;
   }
   return base;
-}
-
-function osPlatformKey(triple: string): string {
-  if (triple.includes("apple-darwin")) return "darwin";
-  if (triple.includes("windows")) return "windows";
-  if (triple.includes("linux")) return "linux";
-  return triple;
-}
-
-interface LatestJsonPlatform {
-  signature?: string;
-  url?: string;
-  with_elevated_task?: boolean;
-}
-
-interface LatestJson {
-  version?: string;
-  notes?: string;
-  pub_date?: string;
-  platforms?: Record<string, LatestJsonPlatform>;
-  // Tauri's manifest sometimes has only `signature` + `url` at the root for
-  // single-platform builds, but the canonical form is `platforms`.
-}
-
-function mergeLatestJson(
-  existing: Record<string, unknown> | undefined,
-  incoming: Record<string, unknown>,
-  triple: string,
-): Record<string, unknown> {
-  const base = (existing ?? incoming) as LatestJson;
-  const next = incoming as LatestJson;
-  const platforms: Record<string, LatestJsonPlatform> = {
-    ...(base.platforms ?? {}),
-    ...(next.platforms ?? {}),
-  };
-  const archKey = tauriArchKey(triple);
-  if (archKey && next.platforms?.[Object.keys(next.platforms)[0]]) {
-    // If the incoming json only declared one platform, re-key it under the
-    // arch-specific name expected by the updater plugin endpoints.
-    const firstKey = Object.keys(next.platforms)[0];
-    platforms[archKey] = next.platforms[firstKey];
-  }
-  const merged: LatestJson = {
-    version: next.version ?? base.version,
-    notes: next.notes ?? base.notes,
-    pub_date: pickLatest(base.pub_date, next.pub_date),
-    platforms,
-  };
-  return merged as unknown as Record<string, unknown>;
-}
-
-function tauriArchKey(triple: string): string | null {
-  if (triple === "aarch64-apple-darwin") return "darwin-aarch64";
-  if (triple === "x86_64-apple-darwin") return "darwin-x86_64";
-  if (triple === "x86_64-pc-windows-msvc") return "windows-x86_64";
-  if (triple === "x86_64-unknown-linux-gnu") return "linux-x86_64";
-  return null;
-}
-
-function pickLatest(a?: string, b?: string): string | undefined {
-  if (!a) return b;
-  if (!b) return a;
-  return new Date(a) > new Date(b) ? a : b;
 }
 
 function packageProject(
@@ -1160,6 +1079,132 @@ function normaliseTag(versionOrTag: string): string {
   return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
 }
 
+interface UpdaterManifestPlatform {
+  signature: string;
+  url: string;
+}
+
+// macOS is the only platform with a working updater feed: Windows is built
+// `--skip-sign` so it carries no updater signature (the EV-signed installer is
+// its own distribution channel). Each row maps an arch-scoped bundle suffix to
+// the platform key the updater plugin looks up.
+const MAC_UPDATER_TARGETS: ReadonlyArray<{
+  suffix: string;
+  platform: string;
+}> = [
+  { suffix: "aarch64", platform: "darwin-aarch64" },
+  { suffix: "x64", platform: "darwin-x86_64" },
+];
+
+// Assemble the updater feed manifest (latest-darwin.json) from the signed
+// bundles already published on the release, and upload it alongside them. This
+// runs once, after every arch has published, because each arch builds on its
+// own runner and only the release has all of them together.
+function buildUpdaterManifest(tagName: string, version: string) {
+  const ghRepo = process.env.GH_REPO?.trim();
+  if (!ghRepo) {
+    throw new Error(
+      "GH_REPO environment variable is required for the updater-manifest command.",
+    );
+  }
+
+  const release = JSON.parse(
+    runCommand(
+      "gh",
+      [
+        "release",
+        "view",
+        tagName,
+        "--repo",
+        ghRepo,
+        "--json",
+        "body,publishedAt,createdAt,assets",
+      ],
+      { cwd: repoRoot, capture: true },
+    ).stdout,
+  ) as {
+    body?: string;
+    publishedAt?: string;
+    createdAt?: string;
+    assets: Array<{ name: string }>;
+  };
+
+  const assetNames = new Set(release.assets.map((asset) => asset.name));
+  const workDir = mkdtempSync(path.join(tmpdir(), "chro-updater-"));
+  const platforms: Record<string, UpdaterManifestPlatform> = {};
+
+  try {
+    for (const { suffix, platform } of MAC_UPDATER_TARGETS) {
+      const bundle = [...assetNames].find((name) =>
+        name.endsWith(`_${suffix}.app.tar.gz`),
+      );
+      if (!bundle) {
+        console.warn(
+          `No macOS updater bundle for ${platform} (…_${suffix}.app.tar.gz); skipping.`,
+        );
+        continue;
+      }
+      const sigName = `${bundle}.sig`;
+      if (!assetNames.has(sigName)) {
+        throw new Error(
+          `Updater bundle ${bundle} is missing its signature asset ${sigName}.`,
+        );
+      }
+      runCommand(
+        "gh",
+        [
+          "release",
+          "download",
+          tagName,
+          "--repo",
+          ghRepo,
+          "--pattern",
+          sigName,
+          "--dir",
+          workDir,
+          "--clobber",
+        ],
+        { cwd: repoRoot },
+      );
+      platforms[platform] = {
+        signature: readFileSync(path.join(workDir, sigName), "utf8").trim(),
+        url: `https://github.com/${ghRepo}/releases/download/${tagName}/${bundle}`,
+      };
+    }
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+
+  if (Object.keys(platforms).length === 0) {
+    throw new Error(
+      `No macOS updater bundles found on release ${tagName}; cannot build a manifest.`,
+    );
+  }
+
+  const manifest = {
+    version,
+    notes: release.body?.trim() || `Chro ${version}`,
+    pub_date: release.publishedAt || release.createdAt,
+    platforms,
+  };
+
+  const manifestPath = path.join(tmpdir(), "latest-darwin.json");
+  writeFileSync(
+    manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "utf8",
+  );
+  console.log(
+    `Built latest-darwin.json for ${Object.keys(platforms).join(", ")}.`,
+  );
+  runCommand(
+    "gh",
+    ["release", "upload", tagName, manifestPath, "--repo", ghRepo, "--clobber"],
+    { cwd: repoRoot },
+  );
+  console.log(`Uploaded latest-darwin.json to ${tagName}.`);
+}
+
 function tagRelease(
   configs: ProjectConfig[],
   packageInfos: PackageInfo[],
@@ -1213,10 +1258,11 @@ function main(options: Options) {
     options.command !== "release" &&
     options.command !== "upload" &&
     options.command !== "tag" &&
+    options.command !== "updater-manifest" &&
     options.version
   ) {
     throw new Error(
-      "--version is only supported for the release/upload/tag command.",
+      "--version is only supported for the release/upload/tag/updater-manifest command.",
     );
   }
 
@@ -1231,6 +1277,15 @@ function main(options: Options) {
     console.log(`Uploading artifacts for ${tagName} (version ${version})…`);
     uploadToExistingRelease(configs, tagName, version);
     console.log("Done.");
+    return;
+  }
+
+  if (options.command === "updater-manifest") {
+    const version = options.version
+      ? normaliseVersionInput(options.version)
+      : packageInfos[0].version;
+    const tagName = options.tag ?? `v${version}`;
+    buildUpdaterManifest(tagName, version);
     return;
   }
 

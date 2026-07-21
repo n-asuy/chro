@@ -123,7 +123,7 @@ export function FileTreeDockPanel() {
   const expandPath = useFileTreeStore((s) => s.expandPath);
   const replaceExpandedPaths = useFileTreeStore((s) => s.replaceExpandedPaths);
   const fileTree = useFilesStore((s) => s.fileTree);
-  const worktreeTreeView = useFilesStore((s) => s.worktreeTreeView);
+  const worktreeScopeView = useFilesStore((s) => s.worktreeScopeView);
   const revealRequest = useFilesStore((s) => s.revealRequest);
   const expandedPaths = useFileTreeStore((s) => s.expandedPaths);
   const handledRevealTokenRef = useRef(0);
@@ -170,7 +170,7 @@ export function FileTreeDockPanel() {
   // tree's saved state. Skipped in the "all" view, which loads the full
   // worktree listing instead (effect below).
   useEffect(() => {
-    if (!scopeTaskRunId || worktreeTreeView !== "changed") return;
+    if (!scopeTaskRunId || worktreeScopeView !== "changed") return;
     const tree = buildChangedFilesTree(changedPaths);
     setFileTree(tree);
     const expanded = new Set(collectDirectoryPaths(tree));
@@ -178,7 +178,7 @@ export function FileTreeDockPanel() {
     replaceExpandedPaths(expanded);
   }, [
     scopeTaskRunId,
-    worktreeTreeView,
+    worktreeScopeView,
     changedPaths,
     primaryRoot,
     setFileTree,
@@ -193,7 +193,7 @@ export function FileTreeDockPanel() {
   // the listing loads once per scope so expanding folders is never reset out
   // from under the user as the agent works.
   useEffect(() => {
-    if (!scopeTaskRunId || worktreeTreeView !== "all") return;
+    if (!scopeTaskRunId || worktreeScopeView !== "all") return;
     let cancelled = false;
     void (async () => {
       try {
@@ -218,7 +218,7 @@ export function FileTreeDockPanel() {
     };
   }, [
     scopeTaskRunId,
-    worktreeTreeView,
+    worktreeScopeView,
     primaryRoot,
     setFileTree,
     replaceExpandedPaths,

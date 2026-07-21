@@ -31,6 +31,7 @@ mod sessions;
 mod skills;
 mod task_runs;
 mod tasks;
+pub(crate) mod usage;
 mod workspace;
 
 use axum::Router;
@@ -50,6 +51,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(events::router())
         .merge(developer::router())
         .merge(cli_status::router())
+        .merge(usage::router())
         .merge(flags::router())
         .merge(images::router())
         .merge(merges::router())

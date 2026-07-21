@@ -24,6 +24,16 @@ export type StoredTask = {
   sort_order: number;
   /** Bare agent kind the task last ran with (e.g. "CLAUDE_CODE", "CODEX"). */
   last_executor?: string | null;
+  /** One-line outcome of the latest completed run, derived from the final
+   * assistant message. Undefined until a run completes. */
+  last_summary?: string | null;
+  /** Title of the session this one was forked from, snapshotted at fork time.
+   * Shown as provenance in the session list. Undefined for sessions that were
+   * not forked. */
+  forked_from_title?: string | null;
+  /** Title of the session that delegated this one, snapshotted at delegation
+   * time. Same provenance contract as `forked_from_title`. */
+  delegated_from_title?: string | null;
   /** True once housekeeping has reclaimed the run's isolated worktree. The
    * session turns read-only: its workspace path is gone, so it can no longer be
    * continued, merged or rebased — only its history remains readable. */

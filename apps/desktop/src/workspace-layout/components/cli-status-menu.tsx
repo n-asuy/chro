@@ -1,4 +1,5 @@
 import { cn } from "@/lib/cn";
+import { type ProviderUsage, fetchAgentUsage } from "@/lib/agent-usage-client";
 import {
   type CliStatus,
   type CliStatusResponse,
@@ -72,6 +73,9 @@ function agentMeta(name: string): { label: string; homepage: string | null } {
  */
 export function CliStatusMenu() {
   const [status, setStatus] = useState<CliStatusResponse | null>(null);
+  const [usageByProvider, setUsageByProvider] = useState<
+    Record<string, ProviderUsage>
+  >({});
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
 
@@ -86,12 +90,27 @@ export function CliStatusMenu() {
     }
   }, []);
 
+  // Usage windows come from a slower network fetch, so they load independently
+  // of the fast CLI probe and never block the menu from rendering. The backend
+  // caches the result, so re-opening the menu is cheap.
+  const loadUsage = useCallback(async () => {
+    try {
+      const res = await fetchAgentUsage();
+      setUsageByProvider(
+        Object.fromEntries(res.providers.map((p) => [p.provider, p])),
+      );
+    } catch {
+      // Usage is auxiliary; a failure leaves the rows in their plain state.
+    }
+  }, []);
+
   // Fetch once when the menu is first opened, then on explicit refresh only.
   useEffect(() => {
     if (open && status === null && !loading) {
       void load();
+      void loadUsage();
     }
-  }, [open, status, loading, load]);
+  }, [open, status, loading, load, loadUsage]);
 
   const driftWarning = status?.update_available ?? false;
 
@@ -132,6 +151,7 @@ export function CliStatusMenu() {
             onClick={(e) => {
               e.preventDefault();
               void load();
+              void loadUsage();
             }}
             aria-label="Refresh"
             className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
@@ -162,6 +182,7 @@ export function CliStatusMenu() {
                   label={meta.label}
                   homepage={meta.homepage}
                   status={agent}
+                  usage={usageByProvider[agent.name]}
                 />
               );
             })}
@@ -217,10 +238,12 @@ function CliRow({
   label,
   homepage,
   status,
+  usage,
 }: {
   label: string;
   homepage: string | null;
   status: CliStatus;
+  usage?: ProviderUsage;
 }) {
   return (
     <div className="px-2 py-1.5">
@@ -250,8 +273,79 @@ function CliRow({
           {status.install_hint}
         </p>
       )}
+      {status.found ? <UsageMeter usage={usage} /> : null}
     </div>
   );
+}
+
+/**
+ * Rolling-window token usage for an agent CLI, read from its local session
+ * logs. Hidden when the CLI keeps no logs, or when it simply has not been used
+ * in the window — an all-zero row is noise next to the CLIs that were.
+ *
+ * There is deliberately no "% of limit" bar: the logs carry what was consumed,
+ * not the plan ceiling, so a filled bar would need a denominator we do not
+ * have. The bar here shows composition (fresh vs cached prompt tokens), which
+ * the data does support.
+ */
+function UsageMeter({ usage }: { usage?: ProviderUsage }) {
+  if (!usage || usage.status !== "ok" || usage.tokens.total === 0) {
+    return null;
+  }
+  const { tokens } = usage;
+  const cachedPct = Math.round((tokens.cache_read / tokens.total) * 100);
+
+  return (
+    <div className="mt-1.5 space-y-1 pl-5">
+      <div className="flex items-center gap-2">
+        <span className="w-5 shrink-0 text-[10px] text-muted-foreground">
+          {usageWindowLabel(usage.window_minutes)}
+        </span>
+        <span className="flex h-1 flex-1 overflow-hidden rounded-full bg-muted">
+          <span
+            className="block h-full bg-emerald-500"
+            style={{ width: `${100 - cachedPct}%` }}
+          />
+          <span
+            className="block h-full bg-foreground/25"
+            style={{ width: `${cachedPct}%` }}
+          />
+        </span>
+        <span className="w-14 shrink-0 text-right text-[10px] tabular-nums text-foreground/80">
+          {formatTokens(tokens.total)}
+        </span>
+      </div>
+      <p className="text-[10px] text-muted-foreground/70">
+        {formatTokens(tokens.output)} out · {cachedPct}% cached ·{" "}
+        {usage.session_count} session{usage.session_count === 1 ? "" : "s"}
+        {usage.cost_usd != null ? ` · ${formatCost(usage.cost_usd)}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function usageWindowLabel(windowMinutes: number): string {
+  if (windowMinutes % 60 === 0) {
+    return `${windowMinutes / 60}h`;
+  }
+  return `${windowMinutes}m`;
+}
+
+function formatTokens(count: number): string {
+  if (count >= 1_000_000_000) {
+    return `${(count / 1_000_000_000).toFixed(1)}B`;
+  }
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    return `${(count / 1_000).toFixed(1)}k`;
+  }
+  return `${count}`;
+}
+
+function formatCost(usd: number): string {
+  return usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
 }
 
 function MetaLine({ label, value }: { label: string; value: string }) {

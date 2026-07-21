@@ -75,7 +75,8 @@ pub fn index_project(root: &Path, dataset: &CbaseDataset) -> Result<Vec<CbaseRow
         if !matcher.matches(&relative_path) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else {
+        // Only the leading frontmatter block is needed; never read the body.
+        let Ok(values) = crate::frontmatter::read_file_properties(path) else {
             continue;
         };
         let modified_at = path
@@ -88,7 +89,7 @@ pub fn index_project(root: &Path, dataset: &CbaseDataset) -> Result<Vec<CbaseRow
             file_path: relative_path.clone(),
             display_name: display_name(&relative_path),
             modified_at,
-            values: extract_properties(&content),
+            values,
         });
     }
 

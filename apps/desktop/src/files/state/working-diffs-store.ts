@@ -3,21 +3,20 @@
  * run's worktree).
  *
  * Both the source-control panel (for per-file +/- counts) and the
- * working-changes diff tab read from here. A single ref-counted poll loop per
- * scope backs all subscribers, so opening the diff tab while the panel is
- * visible does not double the network traffic. Polling pauses while the
- * document is hidden, mirroring `use-git-status`.
+ * working-changes diff tab read from here. A single ref-counted repo-events
+ * subscription per scope backs all subscribers, so opening the diff tab while
+ * the panel is visible does not double the network traffic. Refreshes are
+ * driven by worktree/git change events instead of an interval.
  */
 import {
   type GitScope,
   type WorkingDiffEntry,
   getWorkingDiffs,
 } from "@/lib/git-client";
+import { repoEventsEndpoint, subscribeRepoEvents } from "@/lib/repo-events";
 import { useEffect } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-
-const POLL_INTERVAL_MS = 3000;
 
 export interface WorkingDiffsState {
   diffs: WorkingDiffEntry[];
@@ -47,7 +46,7 @@ const scopeKey = (scope: GitScope, base?: string): string => {
 
 // Subscription bookkeeping — intentionally outside reactive state.
 const refCounts = new Map<string, number>();
-const timers = new Map<string, ReturnType<typeof setInterval>>();
+const disposers = new Map<string, () => void>();
 const inFlight = new Set<string>();
 
 function patch(key: string, next: Partial<WorkingDiffsState>): void {
@@ -78,30 +77,26 @@ async function fetchOnce(scope: GitScope, base?: string): Promise<void> {
   }
 }
 
-function subscribeWorkingDiffs(scope: GitScope, base?: string): () => void {
+export function subscribeWorkingDiffs(scope: GitScope, base?: string): () => void {
   const key = scopeKey(scope, base);
   const next = (refCounts.get(key) ?? 0) + 1;
   refCounts.set(key, next);
   if (next === 1) {
     void fetchOnce(scope, base);
-    const timer = setInterval(() => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "hidden"
-      ) {
-        return;
-      }
-      void fetchOnce(scope, base);
-    }, POLL_INTERVAL_MS);
-    timers.set(key, timer);
+    // Working diffs change with the working tree, the index (staging), and
+    // HEAD (commits fold working changes into the base comparison).
+    const dispose = subscribeRepoEvents(repoEventsEndpoint(scope), () => ({
+      channels: ["files", "git"],
+      onInvalidate: () => void fetchOnce(scope, base),
+    }));
+    disposers.set(key, dispose);
   }
   return () => {
     const count = (refCounts.get(key) ?? 1) - 1;
     if (count <= 0) {
       refCounts.delete(key);
-      const timer = timers.get(key);
-      if (timer) clearInterval(timer);
-      timers.delete(key);
+      disposers.get(key)?.();
+      disposers.delete(key);
     } else {
       refCounts.set(key, count);
     }

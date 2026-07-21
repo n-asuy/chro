@@ -138,6 +138,23 @@ export const taskApi = {
     };
   },
 
+  /**
+   * Fetch the approval request the task's running agent is blocked on, if any
+   * (signalled by `awaiting_input` on the task). `tool_input` carries the
+   * AskUserQuestion payload so the hover preview can show the question text.
+   */
+  pendingQuestion: async (
+    taskId: string,
+  ): Promise<{
+    tool_name: string;
+    tool_input: unknown;
+  } | null> => {
+    const response = await desktopFetch<{
+      approval: { tool_name: string; tool_input: unknown } | null;
+    }>(`/rpc/tasks/${encodeURIComponent(taskId)}/pending-question`);
+    return response.approval ?? null;
+  },
+
   ensureProject: async (gitRepoPath: string): Promise<ProjectResponse> => {
     const response = await desktopFetch<EnsureProjectResponse>(
       "/rpc/projects/ensure",

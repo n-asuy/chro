@@ -473,6 +473,35 @@ const base64UrlEncode = (input: string): string => {
 };
 
 /**
+ * Get a path-based asset URL for a file inside an arbitrary workspace root.
+ * The root travels as a single base64url segment, so it keeps its leading
+ * slash, while the remainder stays a real path hierarchy.
+ */
+const workspaceAssetUrl = (rootPath: string, relativePath: string): string => {
+  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
+  const encodedRoot = base64UrlEncode(rootPath);
+  return `${baseUrl}/rpc/filesystem/workspace-asset/${encodedRoot}/${encodeRelativePathSegments(relativePath)}`;
+};
+
+/**
+ * Asset URL for a file addressed by a host-absolute path.
+ *
+ * A leading slash is not a path segment, so an absolute path fed to a
+ * scope-relative asset route arrives with its slash stripped and is then
+ * joined under the wrong root. Carrying the containing directory as the
+ * encoded root instead keeps the path absolute and still lets sibling
+ * references inside served HTML resolve through the same endpoint.
+ */
+const absoluteAssetUrl = (absolutePath: string): string => {
+  const index = absolutePath.lastIndexOf("/");
+  const directory = index <= 0 ? "/" : absolutePath.slice(0, index);
+  return workspaceAssetUrl(directory, absolutePath.slice(index + 1));
+};
+
+/** Host-absolute paths cannot be expressed as scope-relative URL segments. */
+const isHostAbsolutePath = (path: string): boolean => path.startsWith("/");
+
+/**
  * Get a path-based asset URL for a project file. Unlike `getProjectBinaryFileUrl`
  * (which uses a query parameter), this puts the relative path directly into the
  * URL so that relative resources referenced from served HTML (CSS, JS, images)
@@ -482,6 +511,7 @@ export const getProjectAssetUrl = (
   projectId: string,
   relativePath: string,
 ): string => {
+  if (isHostAbsolutePath(relativePath)) return absoluteAssetUrl(relativePath);
   const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
   return `${baseUrl}/rpc/projects/${projectId}/asset/${encodeRelativePathSegments(relativePath)}`;
 };
@@ -493,6 +523,7 @@ export const getTaskRunAssetUrl = (
   taskRunId: string,
   relativePath: string,
 ): string => {
+  if (isHostAbsolutePath(relativePath)) return absoluteAssetUrl(relativePath);
   const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
   return `${baseUrl}/rpc/task-runs/${taskRunId}/asset/${encodeRelativePathSegments(relativePath)}`;
 };
@@ -504,9 +535,8 @@ export const getWorkspaceAssetUrl = (
   absolutePath: string,
   relativePath: string,
 ): string => {
-  const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
-  const encodedRoot = base64UrlEncode(absolutePath);
-  return `${baseUrl}/rpc/filesystem/workspace-asset/${encodedRoot}/${encodeRelativePathSegments(relativePath)}`;
+  if (isHostAbsolutePath(relativePath)) return absoluteAssetUrl(relativePath);
+  return workspaceAssetUrl(absolutePath, relativePath);
 };
 
 type UploadBinaryFileResponse = {

@@ -77,7 +77,7 @@ impl LocalRuntime {
 /// Mirrors [`render_raw_transcript`]'s interpretation of the raw Claude
 /// stream-json `Stdout` lines, but walks backwards and stops at the first
 /// assistant message that carries non-empty text.
-fn last_assistant_text(entries: &[LogEntry]) -> Option<String> {
+pub(crate) fn last_assistant_text(entries: &[LogEntry]) -> Option<String> {
     for entry in entries.iter().rev() {
         let LogEntry::Stdout(chunk) = entry else {
             continue;
@@ -107,6 +107,84 @@ fn last_assistant_text(entries: &[LogEntry]) -> Option<String> {
                 return Some(text);
             }
         }
+    }
+    None
+}
+
+/// Character budget for a one-line outcome summary. Wide enough for a full
+/// sentence, short enough to render on a single sidebar/preview line.
+const OUTCOME_MAX_CHARS: usize = 160;
+
+/// Distill a final assistant message into a one-line outcome summary.
+///
+/// Agents conventionally lead their final message with the outcome, so the
+/// first prose line is a faithful "what this run did". Markdown structure is
+/// stripped rather than rendered: heading/list/quote markers are removed,
+/// fenced code and non-prose lines (tables, rules, images) are skipped, and
+/// inline emphasis/code markers are dropped. Returns `None` when the text has
+/// no prose line at all.
+pub(crate) fn outcome_summary(text: &str) -> Option<String> {
+    let mut in_fence = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || line.is_empty() {
+            continue;
+        }
+        // Non-prose structure: tables, horizontal rules, images.
+        if line.starts_with('|') || line.starts_with("![") {
+            continue;
+        }
+        if line.chars().all(|c| matches!(c, '-' | '*' | '_' | ' ')) {
+            continue;
+        }
+
+        let mut rest = line;
+        // Peel leading block markers (headings, quotes, list bullets), which
+        // can nest (e.g. "> - **Done**: ...").
+        loop {
+            let peeled = rest
+                .trim_start_matches('#')
+                .trim_start_matches('>')
+                .trim_start();
+            let peeled = peeled
+                .strip_prefix("- ")
+                .or_else(|| peeled.strip_prefix("* "))
+                .or_else(|| peeled.strip_prefix("+ "))
+                .or_else(|| {
+                    // Ordered list: "12. rest"
+                    let digits = peeled.chars().take_while(char::is_ascii_digit).count();
+                    (digits > 0)
+                        .then(|| peeled[digits..].strip_prefix(". "))
+                        .flatten()
+                })
+                .unwrap_or(peeled);
+            if peeled == rest {
+                break;
+            }
+            rest = peeled;
+        }
+
+        // Drop inline emphasis/code markers; keep the words.
+        let cleaned: String = rest
+            .replace("**", "")
+            .replace("__", "")
+            .chars()
+            .filter(|c| *c != '`')
+            .collect();
+        let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        if cleaned.chars().count() <= OUTCOME_MAX_CHARS {
+            return Some(cleaned);
+        }
+        let truncated: String = cleaned.chars().take(OUTCOME_MAX_CHARS).collect();
+        return Some(format!("{}…", truncated.trim_end()));
     }
     None
 }
@@ -470,6 +548,49 @@ mod tests {
         assert!(md.contains("---"));
         assert!(md.contains("### User"));
         assert!(md.contains("### Assistant"));
+    }
+
+    #[test]
+    fn outcome_summary_takes_first_prose_line() {
+        assert_eq!(
+            outcome_summary("Fixed the race in the settle effect.\n\nDetails follow."),
+            Some("Fixed the race in the settle effect.".to_string())
+        );
+    }
+
+    #[test]
+    fn outcome_summary_strips_markdown_structure() {
+        assert_eq!(
+            outcome_summary("## 結論\n\n**修正完了**: `container.rs` の順序を入れ替えました。"),
+            Some("結論".to_string())
+        );
+        assert_eq!(
+            outcome_summary("- **Done**: wired the summary field"),
+            Some("Done: wired the summary field".to_string())
+        );
+    }
+
+    #[test]
+    fn outcome_summary_skips_fences_tables_and_rules() {
+        let text = "```rust\nlet x = 1;\n```\n\n| a | b |\n\n---\n\nActual outcome line.";
+        assert_eq!(
+            outcome_summary(text),
+            Some("Actual outcome line.".to_string())
+        );
+    }
+
+    #[test]
+    fn outcome_summary_truncates_long_lines_on_char_boundary() {
+        let long = "あ".repeat(200);
+        let summary = outcome_summary(&long).unwrap();
+        assert!(summary.ends_with('…'));
+        assert_eq!(summary.chars().count(), 161);
+    }
+
+    #[test]
+    fn outcome_summary_none_for_non_prose() {
+        assert_eq!(outcome_summary(""), None);
+        assert_eq!(outcome_summary("```\ncode only\n```"), None);
     }
 
     #[test]

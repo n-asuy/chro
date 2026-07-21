@@ -19,6 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 use thiserror::Error;
 use ts_rs::TS;
 
+use crate::executors::claude::SpeedMode;
 use crate::executors::codex::ReasoningEffort;
 use crate::executors::{
     AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
@@ -105,6 +106,9 @@ pub struct ExecutorProfileId {
     /// Optional reasoning effort override (Codex only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Optional output-speed override (Claude Code fast mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<SpeedMode>,
 }
 
 fn de_base_coding_agent_kebab<'de, D>(de: D) -> Result<BaseCodingAgent, D::Error>
@@ -125,6 +129,7 @@ impl ExecutorProfileId {
             variant: None,
             model: None,
             reasoning_effort: None,
+            speed: None,
         }
     }
 
@@ -135,6 +140,9 @@ impl ExecutorProfileId {
             CodingAgent::ClaudeCode(claude) => {
                 if let Some(model) = &self.model {
                     claude.model = Some(model.clone());
+                }
+                if let Some(speed) = &self.speed {
+                    claude.speed = Some(*speed);
                 }
             }
             CodingAgent::Codex(codex) => {
@@ -306,7 +314,7 @@ impl ExecutorConfigs {
         for &base_agent in self.executors.keys() {
             let profile_id = ExecutorProfileId::new(base_agent);
             if let Some(coding_agent) = self.get_coding_agent(&profile_id) {
-                let info = coding_agent.get_availability_info();
+                let info = coding_agent.get_availability_info().await;
                 if info.is_available() {
                     agents_with_info.push((base_agent, info));
                 }
@@ -415,7 +423,21 @@ async fn mcp_command(
 ) -> tokio::process::Command {
     match crate::cli_resolver::resolve_cli(manifest).await {
         Some(resolved) => {
-            let mut command = tokio::process::Command::new(&resolved.path);
+            // Normalize for the host platform so a Windows `.cmd` shim runs
+            // through the command interpreter. Subcommand args the caller
+            // appends flow through as trailing argv, which is exactly right for
+            // `%ComSpec% /d /c <shim> <subcommand...>`.
+            let invocation = crate::spawn::prepare_invocation(resolved.path.clone(), Vec::new());
+            let mut command = match invocation {
+                Ok(invocation) => {
+                    let mut command = tokio::process::Command::new(&invocation.program);
+                    command.args(&invocation.args);
+                    command
+                }
+                Err(_) => tokio::process::Command::new(&resolved.path),
+            };
+            // PATH gets the shim's own directory so a co-located `node` runtime
+            // resolves; use the original resolved path, not the interpreter.
             add_parent_dir_to_path_env(&mut command, &resolved.path);
             command
         }
@@ -696,7 +718,24 @@ pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_detected_version;
+    use super::{ExecutorProfileId, SpeedMode, extract_detected_version};
+    use crate::executors::{BaseCodingAgent, CodingAgent};
+
+    #[test]
+    fn speed_override_applies_to_claude_code() {
+        let profile = ExecutorProfileId {
+            speed: Some(SpeedMode::Fast),
+            ..ExecutorProfileId::new(BaseCodingAgent::ClaudeCode)
+        };
+        let mut agent = CodingAgent::ClaudeCode(Default::default());
+        profile.apply_overrides(&mut agent);
+        match agent {
+            CodingAgent::ClaudeCode(claude) => {
+                assert_eq!(claude.speed, Some(SpeedMode::Fast));
+            }
+            _ => panic!("expected Claude Code agent"),
+        }
+    }
 
     #[test]
     fn extract_detected_version_prefers_stdout() {

@@ -23,25 +23,58 @@ use crate::ApiError;
 /// The outcome of resolving a raw path against a set of workspace candidate
 /// roots.
 pub(crate) enum WorkspacePath {
-    /// A workspace-internal path — either originally relative, or an absolute
-    /// path that matched a candidate root (the matching prefix is stripped,
-    /// leaving a leading-slash form). Safe to join under the workspace root by
-    /// the filesystem layer.
+    /// A genuinely relative input, to be joined under the caller's service root.
+    /// Holds the workspace-relative form.
     Internal(String),
+    /// An absolute path that matched a *known* candidate root. The file lives at
+    /// `relative` under `root`, and must be read/written there via the
+    /// normalizing workspace reader — NOT re-joined under the caller's service
+    /// root, which may be a different checkout (e.g. a task-run worktree while
+    /// the path names the project's main checkout). `relative` keeps its leading
+    /// slash; the filesystem layer strips it.
+    Scoped { root: PathBuf, relative: String },
     /// An absolute path that matched none of the candidate roots, so it points
     /// outside every known workspace root. Read endpoints may serve it
     /// directly; mutating endpoints must reject it.
     External(PathBuf),
 }
 
+/// macOS (APFS) and Windows filesystems are case-insensitive by default, so a
+/// candidate root and an absolute path differing only in case still name the
+/// same directory on disk. On those platforms the root-prefix match folds ASCII
+/// case; elsewhere it stays exact.
+const CASE_INSENSITIVE_FS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// If `path` names `root` itself or a descendant of it, return the remainder
+/// (empty for `root` itself, otherwise the leading-slash suffix). Returns `None`
+/// when `path` merely shares a textual prefix with a different sibling
+/// (`/root2` vs `/root`). Folds ASCII case on case-insensitive filesystems.
+fn match_root_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if path.len() < root.len() || !path.is_char_boundary(root.len()) {
+        return None;
+    }
+    let (head, rest) = path.split_at(root.len());
+    let matches = if CASE_INSENSITIVE_FS {
+        head.eq_ignore_ascii_case(root)
+    } else {
+        head == root
+    };
+    if matches && (rest.is_empty() || rest.starts_with('/')) {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
 /// Resolve `raw` against the provided candidate roots.
 ///
 /// Behavior:
 /// - Empty / whitespace input → `Internal("")` (caller rejects).
+/// - A leading `~` is expanded to the home directory, then resolved as absolute.
 /// - Relative input (no leading `/`) → `Internal(input)` unchanged.
-/// - Absolute input matching one of the candidate roots → `Internal` with the
-///   root prefix stripped (always starts with `/`, or is empty for the root
-///   itself).
+/// - Absolute input matching one of the candidate roots → `Scoped { root,
+///   relative }`, so the file is read/written under the *matched* root rather
+///   than re-joined under a caller's (possibly different) service root.
 /// - Absolute input matching none of the candidates → `External(path)`.
 ///
 /// Candidates are checked in order; the first prefix match wins. Trailing
@@ -59,6 +92,13 @@ where
     if trimmed.is_empty() {
         return WorkspacePath::Internal(String::new());
     }
+    // Expand a leading `~` to the user's home directory before anything else.
+    // Agents and pasted terminal lines routinely use `~/foo`; without this it
+    // is treated as a relative segment and mis-joined under the workspace root,
+    // surfacing as a spurious "not a file" error. After expansion the path is
+    // absolute and flows through the candidate-match / external logic below.
+    let expanded = filesystem::expand_home_tilde(trimmed);
+    let trimmed = expanded.as_deref().unwrap_or(trimmed);
     if !trimmed.starts_with('/') {
         return WorkspacePath::Internal(trimmed.to_string());
     }
@@ -68,13 +108,11 @@ where
             continue;
         }
         for variant in prefix_variants(candidate) {
-            if trimmed == variant {
-                return WorkspacePath::Internal(String::new());
-            }
-            if let Some(rest) = trimmed.strip_prefix(&variant) {
-                if rest.starts_with('/') {
-                    return WorkspacePath::Internal(rest.to_string());
-                }
+            if let Some(rest) = match_root_prefix(trimmed, &variant) {
+                return WorkspacePath::Scoped {
+                    root: PathBuf::from(candidate),
+                    relative: rest.to_string(),
+                };
             }
         }
     }
@@ -91,6 +129,9 @@ pub(crate) async fn read_binary_resolving<R: Runtime>(
 ) -> Result<WorkspaceBinaryFile, RuntimeError> {
     match resolve_workspace_path(raw, candidates.iter().copied()) {
         WorkspacePath::Internal(relative) => service.read_binary_file(&relative).await,
+        WorkspacePath::Scoped { root, relative } => {
+            service.read_binary_file_in(&root, &relative).await
+        }
         WorkspacePath::External(absolute) => service.read_binary_file_absolute(absolute).await,
     }
 }
@@ -104,6 +145,7 @@ pub(crate) async fn read_text_resolving<R: Runtime>(
 ) -> Result<WorkspaceFile, RuntimeError> {
     match resolve_workspace_path(raw, candidates.iter().copied()) {
         WorkspacePath::Internal(relative) => service.read_file(&relative).await,
+        WorkspacePath::Scoped { root, relative } => service.read_file_in(&root, &relative).await,
         WorkspacePath::External(absolute) => service.read_file_absolute(absolute).await,
     }
 }
@@ -113,7 +155,9 @@ pub(crate) async fn read_text_resolving<R: Runtime>(
 /// path resolves outside every candidate root.
 pub(crate) fn require_internal(raw: &str, root: &str) -> Result<String, ApiError> {
     match resolve_workspace_path(raw, [root]) {
-        WorkspacePath::Internal(relative) => Ok(relative),
+        // A single root is passed, so a `Scoped` match is against that same root:
+        // its relative form is exactly what the caller writes under `root`.
+        WorkspacePath::Internal(relative) | WorkspacePath::Scoped { relative, .. } => Ok(relative),
         WorkspacePath::External(_) => {
             Err(ApiError::BadRequest("path is outside the workspace".into()))
         }
@@ -149,25 +193,75 @@ mod tests {
     use super::*;
 
     /// Assert the resolution lands on `Internal` with the expected relative form.
+    #[track_caller]
     fn assert_internal(path: WorkspacePath, expected: &str) {
         match path {
             WorkspacePath::Internal(relative) => assert_eq!(relative, expected),
-            WorkspacePath::External(absolute) => {
-                panic!("expected Internal({expected:?}), got External({absolute:?})")
+            other => panic!("expected Internal({expected:?}), got {}", describe(&other)),
+        }
+    }
+
+    /// Assert the resolution lands on `Scoped` under `root` with the expected
+    /// relative form. This is the outcome for an absolute path that matched a
+    /// known candidate root; the relative is read/written under the *matched*
+    /// root, not a caller's service root.
+    #[track_caller]
+    fn assert_scoped(path: WorkspacePath, expected_root: &str, expected_relative: &str) {
+        match path {
+            WorkspacePath::Scoped { root, relative } => {
+                assert_eq!(root, PathBuf::from(expected_root), "matched root");
+                assert_eq!(relative, expected_relative, "relative");
             }
+            other => panic!(
+                "expected Scoped({expected_root:?}, {expected_relative:?}), got {}",
+                describe(&other)
+            ),
         }
     }
 
     /// Assert the resolution lands on `External` with the expected absolute path.
+    #[track_caller]
     fn assert_external(path: WorkspacePath, expected: &str) {
         match path {
             WorkspacePath::External(absolute) => {
                 assert_eq!(absolute, PathBuf::from(expected))
             }
-            WorkspacePath::Internal(relative) => {
-                panic!("expected External({expected:?}), got Internal({relative:?})")
-            }
+            other => panic!("expected External({expected:?}), got {}", describe(&other)),
         }
+    }
+
+    fn describe(path: &WorkspacePath) -> String {
+        match path {
+            WorkspacePath::Internal(relative) => format!("Internal({relative:?})"),
+            WorkspacePath::Scoped { root, relative } => format!("Scoped({root:?}, {relative:?})"),
+            WorkspacePath::External(absolute) => format!("External({absolute:?})"),
+        }
+    }
+
+    /// A `~/...` path whose expansion falls under a candidate root resolves to a
+    /// `Scoped` read under the home root, exactly as the equivalent absolute
+    /// path would.
+    #[test]
+    fn expands_tilde_matching_candidate_root() {
+        let home = dirs::home_dir().expect("home dir");
+        let root = home.to_string_lossy().into_owned();
+        assert_scoped(
+            resolve_workspace_path("~/docs/x.md", [root.as_str()]),
+            &root,
+            "/docs/x.md",
+        );
+    }
+
+    /// A `~/...` path outside every candidate root resolves to its real absolute
+    /// location (External), not a segment mis-joined under the workspace root.
+    #[test]
+    fn expands_tilde_outside_candidates_to_external() {
+        let home = dirs::home_dir().expect("home dir");
+        let expected = home.join("workspace/curino/note.md");
+        assert_external(
+            resolve_workspace_path("~/workspace/curino/note.md", ["/some/other/root"]),
+            &expected.to_string_lossy(),
+        );
     }
 
     #[test]
@@ -178,29 +272,52 @@ mod tests {
 
     #[test]
     fn strips_matching_root() {
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path("/root/docs/x.md", ["/root"]),
+            "/root",
             "/docs/x.md",
         );
-        assert_internal(resolve_workspace_path("/root/", ["/root"]), "/");
-        assert_internal(resolve_workspace_path("/root", ["/root"]), "");
+        assert_scoped(resolve_workspace_path("/root/", ["/root"]), "/root", "/");
+        assert_scoped(resolve_workspace_path("/root", ["/root"]), "/root", "");
     }
 
+    /// The first candidate whose prefix matches wins, and the resolution records
+    /// *which* root it matched so the read happens under that checkout. This is
+    /// the fix for worktree-vs-main confusion: a path naming the project main
+    /// checkout must be read from the project, not re-joined under the worktree
+    /// service root.
     #[test]
-    fn first_match_wins() {
-        assert_internal(
+    fn first_match_wins_and_records_matched_root() {
+        assert_scoped(
             resolve_workspace_path(
                 "/var/folders/abc/worktree/docs/x.md",
                 ["/var/folders/abc/worktree", "/Users/alice/proj"],
             ),
+            "/var/folders/abc/worktree",
             "/docs/x.md",
         );
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path(
                 "/Users/alice/proj/docs/x.md",
                 ["/var/folders/abc/worktree", "/Users/alice/proj"],
             ),
+            "/Users/alice/proj",
             "/docs/x.md",
+        );
+    }
+
+    /// The leading slash is what makes `External` reachable at all. A wildcard
+    /// route segment cannot carry one, so an absolute path routed through a
+    /// scope-relative asset URL arrives stripped and is silently re-rooted
+    /// under the workspace instead of being served from its real location.
+    /// Callers must therefore carry an absolute path as an encoded root plus a
+    /// relative remainder (see the asset URL builders in the desktop client)
+    /// rather than flattening it into a path segment.
+    #[test]
+    fn absolute_path_without_leading_slash_is_not_external() {
+        assert_internal(
+            resolve_workspace_path("Users/alice/site/index.html", ["/root"]),
+            "Users/alice/site/index.html",
         );
     }
 
@@ -224,8 +341,9 @@ mod tests {
 
     #[test]
     fn tolerates_trailing_slash_on_candidate() {
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path("/root/docs/x.md", ["/root/"]),
+            "/root",
             "/docs/x.md",
         );
     }
@@ -242,7 +360,11 @@ mod tests {
 
     #[test]
     fn empty_candidate_is_skipped() {
-        assert_internal(resolve_workspace_path("/root/x.md", ["", "/root"]), "/x.md");
+        assert_scoped(
+            resolve_workspace_path("/root/x.md", ["", "/root"]),
+            "/root",
+            "/x.md",
+        );
     }
 
     /// `/var` is a symlink to `/private/var` on macOS. When the DB stores the
@@ -251,11 +373,12 @@ mod tests {
     /// still succeed.
     #[test]
     fn matches_private_var_against_var_candidate() {
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path(
                 "/private/var/folders/abc/worktree/docs/x.md",
                 ["/var/folders/abc/worktree"],
             ),
+            "/var/folders/abc/worktree",
             "/docs/x.md",
         );
     }
@@ -263,11 +386,12 @@ mod tests {
     /// The reverse: candidate stored with `/private` prefix, input without.
     #[test]
     fn matches_var_against_private_var_candidate() {
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path(
                 "/var/folders/abc/worktree/docs/x.md",
                 ["/private/var/folders/abc/worktree"],
             ),
+            "/private/var/folders/abc/worktree",
             "/docs/x.md",
         );
     }
@@ -275,9 +399,36 @@ mod tests {
     /// `/tmp` is the other firmlinked path on macOS.
     #[test]
     fn matches_private_tmp_against_tmp_candidate() {
-        assert_internal(
+        assert_scoped(
             resolve_workspace_path("/private/tmp/work/x.md", ["/tmp/work"]),
+            "/tmp/work",
             "/x.md",
+        );
+    }
+
+    /// On a case-insensitive filesystem (macOS/Windows), an absolute path that
+    /// differs from the candidate root only in case still names the same
+    /// directory, so it must resolve to `Scoped` under that root rather than
+    /// falling through to `External` (which would read the wrong checkout, and,
+    /// for mutating endpoints, wrongly reject an in-workspace path).
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn matches_root_case_insensitively() {
+        assert_scoped(
+            resolve_workspace_path("/Users/Alice/proj/src/main.rs", ["/Users/alice/proj"]),
+            "/Users/alice/proj",
+            "/src/main.rs",
+        );
+    }
+
+    /// On a case-sensitive filesystem the exact-match behavior is preserved: a
+    /// case-differing path is a different directory and stays `External`.
+    #[test]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn case_differing_path_is_external_on_case_sensitive_fs() {
+        assert_external(
+            resolve_workspace_path("/Users/Alice/proj/src/main.rs", ["/Users/alice/proj"]),
+            "/Users/Alice/proj/src/main.rs",
         );
     }
 

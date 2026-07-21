@@ -59,6 +59,24 @@ impl TaskSession {
         session
     }
 
+    /// Record the one-line outcome summary on the session that executed a run.
+    /// A per-session historical record; the latest value is also denormalized
+    /// onto the task via `TaskRecord::set_last_summary`.
+    pub async fn set_summary_by_run_id(
+        pool: &Pool<Sqlite>,
+        task_run_id: Uuid,
+        summary: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE task_sessions SET summary = ?, updated_at = datetime('now') WHERE task_run_id = ?",
+        )
+        .bind(summary)
+        .bind(task_run_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// Return the most recent run id mapped to an external session, if any.
     pub async fn latest_run_id_by_external_session(
         pool: &Pool<Sqlite>,

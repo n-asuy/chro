@@ -15,6 +15,7 @@ import {
   Eye,
   FileText,
   Folder,
+  GitBranch,
   Globe,
   Hammer,
   ImageIcon,
@@ -169,6 +170,10 @@ interface MessageActionsProps {
   timestamp?: string | null;
   /** Horizontal alignment within the message column. */
   align?: "start" | "end";
+  /** Branch the conversation from this point into a new session. Omitted where
+   * there is no point to branch from (a turn still running, or a session the
+   * caller cannot fork). */
+  onFork?: () => void;
 }
 
 /**
@@ -181,6 +186,7 @@ const MessageActions = ({
   copyText,
   timestamp,
   align = "end",
+  onFork,
 }: MessageActionsProps) => {
   const { t } = useLanguage();
   const [copied, setCopied] = useState(false);
@@ -232,6 +238,25 @@ const MessageActions = ({
           <TooltipContent side="bottom">{copyLabel}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
+      {/* Icon only, like every other action here: the label belongs in the
+          tooltip, not in a banner across the conversation. */}
+      {onFork ? (
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={onFork}
+                aria-label={t("continueFromHere")}
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-custom-sidebar-background-80 hover:text-foreground"
+              >
+                <GitBranch className="h-3.5 w-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t("continueFromHere")}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      ) : null}
     </div>
   );
 };
@@ -1493,6 +1518,12 @@ type ConversationEntriesProps = {
    * of the rendered window.
    */
   expandAll?: boolean;
+  /** Branch the conversation from a given run into a new session. Rendered as a
+   * per-turn action; omitted when the session cannot be forked. */
+  onForkFromRun?: (runId: string) => void;
+  /** Rendered inside the scroll container above everything else. Used for the
+   * fork-origin block: inherited history sits above even the oldest own turn. */
+  leading?: ReactNode;
 };
 
 const INITIAL_RENDER_COUNT = 120;
@@ -1513,6 +1544,8 @@ export const ConversationEntries = memo(
     onLoadMoreHistory,
     searchActive,
     expandAll,
+    onForkFromRun,
+    leading,
   }: ConversationEntriesProps) => {
     const { t } = useLanguage();
 
@@ -1720,12 +1753,14 @@ export const ConversationEntries = memo(
           )}
           style={{ height: "100%", contain: "strict" }}
         >
+          {leading}
           {historyLoader}
           <EntryList
             entries={visibleEntries}
             onWikilinkClick={stableOnWikilinkClick}
             onFilePathClick={stableOnFilePathClick}
             endRef={endRef}
+            onForkFromRun={onForkFromRun}
           />
         </div>
       );
@@ -1733,12 +1768,14 @@ export const ConversationEntries = memo(
 
     return (
       <>
+        {leading}
         {historyLoader}
         <EntryList
           entries={visibleEntries}
           onWikilinkClick={stableOnWikilinkClick}
           onFilePathClick={stableOnFilePathClick}
           endRef={endRef}
+          onForkFromRun={onForkFromRun}
         />
       </>
     );
@@ -1750,6 +1787,7 @@ interface EntryListProps {
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
+  onForkFromRun?: (runId: string) => void;
 }
 
 // Group entries by user message: each group starts with a user_message and includes
@@ -1843,10 +1881,13 @@ interface GroupProps {
   group: EntryGroup;
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
+  /** Branch from the run this turn belongs to. Omitted when the session cannot
+   * be forked (e.g. its worktree is gone). */
+  onForkFromRun?: (runId: string) => void;
 }
 
 const Group = memo(
-  ({ group, onWikilinkClick, onFilePathClick }: GroupProps) => {
+  ({ group, onWikilinkClick, onFilePathClick, onForkFromRun }: GroupProps) => {
     const userMessage =
       group.userEntry?.type === "NORMALIZED_ENTRY"
         ? group.userEntry.content
@@ -1869,6 +1910,14 @@ const Group = memo(
         break;
       }
     }
+    // Every entry key is `<runId>:<entryId>`, so the turn's own key already
+    // says which run produced it — no separate plumbing needed to anchor a fork
+    // at this point in the conversation.
+    const anchorRunId = lastAssistantKey?.split(":")[0] ?? null;
+    const forkFromThisTurn =
+      onForkFromRun && anchorRunId
+        ? () => onForkFromRun(anchorRunId)
+        : undefined;
     return (
       <div className="relative">
         {group.userEntry && (
@@ -1906,6 +1955,11 @@ const Group = memo(
                   onFilePathClick={onFilePathClick}
                   messageTimestamp={turnTimestamp}
                   showActions={segment.key === lastAssistantKey}
+                  onFork={
+                    segment.key === lastAssistantKey
+                      ? forkFromThisTurn
+                      : undefined
+                  }
                 />
               )}
             </div>
@@ -1917,11 +1971,18 @@ const Group = memo(
   (prev, next) =>
     prev.group === next.group &&
     prev.onWikilinkClick === next.onWikilinkClick &&
-    prev.onFilePathClick === next.onFilePathClick,
+    prev.onFilePathClick === next.onFilePathClick &&
+    prev.onForkFromRun === next.onForkFromRun,
 );
 
-const EntryList = memo(
-  ({ entries, onWikilinkClick, onFilePathClick, endRef }: EntryListProps) => {
+export const EntryList = memo(
+  ({
+    entries,
+    onWikilinkClick,
+    onFilePathClick,
+    endRef,
+    onForkFromRun,
+  }: EntryListProps) => {
     const groupingCacheRef = useRef<GroupingCache | null>(null);
     if (groupingCacheRef.current === null) {
       groupingCacheRef.current = createGroupingCache();
@@ -1933,6 +1994,7 @@ const EntryList = memo(
         {groups.map((group) => (
           <Group
             key={group.key}
+            onForkFromRun={onForkFromRun}
             group={group}
             onWikilinkClick={onWikilinkClick}
             onFilePathClick={onFilePathClick}
@@ -1966,6 +2028,9 @@ interface EntryRendererProps {
    * final assistant message of a turn so intermediate replies stay clean.
    */
   showActions?: boolean;
+  /** Branch the conversation from this turn. Only passed alongside
+   * `showActions`, so it lands on the same final assistant message. */
+  onFork?: () => void;
 }
 
 const EntryRenderer = memo(
@@ -1975,6 +2040,7 @@ const EntryRenderer = memo(
     onFilePathClick,
     messageTimestamp,
     showActions,
+    onFork,
   }: EntryRendererProps) => {
     if (displayEntry.type === "STDOUT") {
       return (
@@ -2021,6 +2087,7 @@ const EntryRenderer = memo(
                 copyText={entry.content}
                 timestamp={entry.timestamp ?? messageTimestamp}
                 align="start"
+                onFork={onFork}
               />
             )}
           </div>

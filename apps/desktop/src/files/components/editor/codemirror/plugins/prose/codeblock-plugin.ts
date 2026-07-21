@@ -3,30 +3,21 @@
  * Adds styling to fenced code block elements
  */
 
+import { hasDecorationRefresh } from "../decoration-refresh";
 import { Decoration, EditorView } from "@codemirror/view";
 import { StateField, RangeSet } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import type { EditorState, Range as EditorRange } from "@codemirror/state";
+import type { SyntaxNode } from "@lezer/common";
 import type { DecorationSet } from "@codemirror/view";
 
-function isInsideBlockquote(
-  state: EditorState,
-  from: number,
-  to: number,
-): boolean {
-  let insideBlockquote = false;
-  syntaxTree(state).iterate({
-    from: 0,
-    to: state.doc.length,
-    enter(node) {
-      if (node.name === "Blockquote") {
-        if (node.from <= from && node.to >= to) {
-          insideBlockquote = true;
-        }
-      }
-    },
-  });
-  return insideBlockquote;
+function isInsideBlockquote(node: SyntaxNode): boolean {
+  // Walk the ancestor chain instead of scanning the whole tree per code block
+  // (which was O(blocks × doc)). Callouts render their own fenced-code styling.
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.name === "Blockquote") return true;
+  }
+  return false;
 }
 
 function buildCodeblockDecorations(
@@ -38,7 +29,7 @@ function buildCodeblockDecorations(
     enter(node) {
       if (node.name === "FencedCode") {
         // Skip code blocks inside blockquotes (callouts handle their own styling)
-        if (isInsideBlockquote(state, node.from, node.to)) {
+        if (isInsideBlockquote(node.node)) {
           return false;
         }
 
@@ -80,7 +71,9 @@ export const codeblockPlugin = StateField.define<DecorationSet>({
     return RangeSet.of(buildCodeblockDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || tr.effects.length > 0) {
+    // Code-block line styling depends only on the document, so cursor movement
+    // does not need a rebuild (only doc edits or an explicit refresh do).
+    if (tr.docChanged || hasDecorationRefresh(tr)) {
       return RangeSet.of(buildCodeblockDecorations(tr.state), true);
     }
     return value.map(tr.changes);

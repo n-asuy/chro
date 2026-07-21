@@ -31,6 +31,8 @@ export type LogEntryMessage =
   | { type: "session_id"; payload: string }
   | { type: "ui_event"; payload: { kind: string; data?: unknown } }
   | { type: "user_prompt"; payload: string }
+  /** Repo-events notification; shape owned and narrowed by lib/repo-events. */
+  | { type: "repo_event"; payload: unknown }
   | { type: "finished" };
 
 export interface UseJsonPatchWsStreamOptions<T = unknown> {

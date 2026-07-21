@@ -96,13 +96,24 @@ export interface WorkspaceRoot {
 }
 
 /**
- * How the file tree presents a task run's worktree. "changed" lists only the
- * files the agent touched (sourced from the run's diff); "all" lists the whole
- * worktree directory tree (the same entries RPC the project root uses);
- * "gallery" replaces the tree with a grid of the run's renderable media. Only
+ * Which slice of a task run's worktree the tree lists: "changed" shows only the
+ * files the agent touched (sourced from the run's diff), "all" shows the whole
+ * worktree directory tree (the same entries RPC the project root uses). Only
  * meaningful while a worktree scope is active.
+ *
+ * This is the *range* axis. It is deliberately independent of
+ * {@link WorktreePresentation}, the *form* axis: the two answer different
+ * questions ("how much of the tree" vs "tree or grid") and mixing them into one
+ * option list makes unrelated choices look like peers.
  */
-export type WorktreeTreeView = "changed" | "all" | "gallery";
+export type WorktreeScopeView = "changed" | "all";
+
+/**
+ * How the worktree panel renders: as a file tree, or as a grid of the run's
+ * renderable media. The gallery is an index of the same scope by thumbnail, not
+ * a viewer — opening a tile still routes to a center tab.
+ */
+export type WorktreePresentation = "files" | "gallery";
 
 interface FilesState {
   // Project context
@@ -114,10 +125,15 @@ interface FilesState {
   // disabled. Null means the project root is the active scope.
   scopeTaskRunId: string | null;
 
-  // How the worktree tree is presented (changed-only vs. full listing). Sticky
-  // across sessions so the user's choice persists while switching runs. Ignored
-  // outside worktree scope (the project root always lists everything).
-  worktreeTreeView: WorktreeTreeView;
+  // Which slice of the worktree the tree lists (changed-only vs. full listing).
+  // Sticky across sessions so the user's choice persists while switching runs.
+  // Ignored outside worktree scope (the project root always lists everything).
+  worktreeScopeView: WorktreeScopeView;
+
+  // Tree vs. media grid. Deliberately NOT sticky: it resets to "files" whenever
+  // the active run changes, so opening a session to review a diff never lands on
+  // the gallery because of a choice made in some earlier session.
+  worktreePresentation: WorktreePresentation;
 
   // Tree state
   roots: WorkspaceRoot[];
@@ -166,7 +182,10 @@ interface FilesActions {
   setScopeTaskRunId: (taskRunId: string | null) => void;
 
   // Switch the worktree tree between changed-only and full-listing views.
-  setWorktreeTreeView: (view: WorktreeTreeView) => void;
+  setWorktreeScopeView: (view: WorktreeScopeView) => void;
+
+  // Switch the worktree panel between the file tree and the media grid.
+  setWorktreePresentation: (presentation: WorktreePresentation) => void;
 
   // Root management
   setRoots: (roots: WorkspaceRoot[]) => void;
@@ -243,7 +262,8 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   // Initial state
   projectId: null,
   scopeTaskRunId: null,
-  worktreeTreeView: "changed",
+  worktreeScopeView: "changed",
+  worktreePresentation: "files",
   roots: [],
   rootPath: null,
   selectedPaths: [],
@@ -261,12 +281,19 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
 
   setScopeTaskRunId: (taskRunId) => {
     if (get().scopeTaskRunId === taskRunId) return;
-    set({ scopeTaskRunId: taskRunId });
+    // Presentation is per-visit, not per-user: entering a run always starts on
+    // the file tree. The range choice (changed/all) stays sticky.
+    set({ scopeTaskRunId: taskRunId, worktreePresentation: "files" });
   },
 
-  setWorktreeTreeView: (view) => {
-    if (get().worktreeTreeView === view) return;
-    set({ worktreeTreeView: view });
+  setWorktreeScopeView: (view) => {
+    if (get().worktreeScopeView === view) return;
+    set({ worktreeScopeView: view });
+  },
+
+  setWorktreePresentation: (presentation) => {
+    if (get().worktreePresentation === presentation) return;
+    set({ worktreePresentation: presentation });
   },
 
   // Root management

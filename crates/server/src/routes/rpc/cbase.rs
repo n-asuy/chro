@@ -25,6 +25,10 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/projects/:project_id/cbase/query", post(query_cbase))
         .route("/projects/:project_id/cbase/persist", post(persist_cbase))
+        .route(
+            "/projects/:project_id/cbase/set-property",
+            post(set_cbase_property),
+        )
 }
 
 async fn resolve_project_path(state: &AppState, identifier: &str) -> Result<PathBuf, ApiError> {
@@ -33,15 +37,21 @@ async fn resolve_project_path(state: &AppState, identifier: &str) -> Result<Path
 }
 
 /// Indexing walks the filesystem synchronously; keep it off the async workers.
+/// The shared index cache re-reads only files whose mtime changed since the
+/// last query, so repeated queries (tab re-activation) stay cheap.
 async fn run_query(
+    state: &AppState,
     root: PathBuf,
     content: String,
     base_path: Option<String>,
 ) -> Result<CbaseDocument, ApiError> {
-    tokio::task::spawn_blocking(move || cbase::query(&root, &content, base_path.as_deref()))
-        .await
-        .map_err(|err| ApiError::Internal(err.to_string()))?
-        .map_err(map_cbase_error)
+    let cache = state.cbase_index().clone();
+    tokio::task::spawn_blocking(move || {
+        cbase::query_cached(&root, &content, base_path.as_deref(), &cache)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))?
+    .map_err(map_cbase_error)
 }
 
 /// Parse failures are returned in-band on the document, so any error here is an
@@ -67,7 +77,7 @@ async fn query_cbase(
     Json(request): Json<CbaseQueryRequest>,
 ) -> Result<Json<CbaseDocument>, ApiError> {
     let project_path = resolve_project_path(&state, &project_id).await?;
-    let document = run_query(project_path, request.content, request.base_path).await?;
+    let document = run_query(&state, project_path, request.content, request.base_path).await?;
     Ok(Json(document))
 }
 
@@ -96,6 +106,52 @@ async fn persist_cbase(
         .write_file(&resolved, &content)
         .await?;
 
-    let document = run_query(project_path, content.clone(), Some(input.base_path)).await?;
+    let document = run_query(&state, project_path, content.clone(), Some(input.base_path)).await?;
     Ok(Json(CbasePersistResponse { content, document }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPropertyRequest {
+    /// Relative path of the row's markdown file.
+    file_path: String,
+    /// Frontmatter key to write.
+    key: String,
+    /// New value; `null` removes the key.
+    value: serde_json::Value,
+}
+
+/// Rewrite one frontmatter property of a row file. The UI applies the change
+/// optimistically; the worktree watcher event triggers the re-query that
+/// settles the table, so no document is returned here.
+async fn set_cbase_property(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<SetPropertyRequest>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    if request.file_path.trim().is_empty() {
+        return Err(ApiError::BadRequest("filePath is required".into()));
+    }
+    if request.key.trim().is_empty() {
+        return Err(ApiError::BadRequest("key is required".into()));
+    }
+
+    let project_path = resolve_project_path(&state, &project_id).await?;
+    let project_root = project_path.to_string_lossy().to_string();
+    let resolved = require_internal(&request.file_path, &project_root)?;
+
+    let absolute = project_path.join(&resolved);
+    let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(absolute))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+    let updated = cbase::set_frontmatter_property(&content, &request.key, &request.value)
+        .map_err(map_cbase_error)?;
+
+    ProjectFileService::new(state.runtime(), project_path)
+        .write_file(&resolved, &updated)
+        .await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

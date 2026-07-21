@@ -61,6 +61,15 @@ export function PiLogo({ className }: { className?: string }) {
 }
 
 /**
+ * Whether {@link AgentLogo} renders a brand mark for the given agent kind.
+ * Lets callers pick a fallback glyph (e.g. a chat bubble) when the referenced
+ * session has no recognized executor yet.
+ */
+export function hasAgentLogo(agent: string | null | undefined): boolean {
+  return agent === "CLAUDE_CODE" || agent === "CODEX" || agent === "PI";
+}
+
+/**
  * Resolve the logo for an agent kind. Returns `null` for unknown / absent
  * agents so callers can fall back (e.g. render no icon on a fresh session
  * that has not run yet).

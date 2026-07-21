@@ -15,7 +15,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use db::{
-    models::{ProjectRecord, TaskMerge, TaskRecord, TaskRun},
+    models::{ForkMode, ProjectRecord, TaskMerge, TaskRecord, TaskRun},
     types::RunStatus,
 };
 use executors::ExecutorProfileId;
@@ -23,8 +23,8 @@ use filesystem::WorkspaceEntryDetail;
 use futures::{SinkExt, StreamExt};
 use log_types::LogEntry;
 use runtime::{
-    ProjectFileService, Runtime, RuntimeError, SendTaskMessageParams, StartExecutionProcessParams,
-    StartExecutionSessionParams, TaskMessageMode, TaskService,
+    ForkWorkspace, ProjectFileService, Runtime, RuntimeError, SendTaskMessageParams,
+    StartExecutionProcessParams, StartExecutionSessionParams, TaskMessageMode, TaskService,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -48,6 +48,9 @@ pub(super) fn router() -> Router<AppState> {
         .route("/task-runs/:id/status", patch(update_execution_status))
         .route("/task-runs/:id/cancel", post(cancel_execution))
         .route("/task-runs/:id/follow-up", post(follow_up_execution))
+        .route("/task-runs/:id/fork", post(fork_task_run))
+        .route("/tasks/:id/fork", post(fork_task_latest))
+        .route("/tasks/:id/delegate", post(delegate_task))
         .route("/tasks/:id/messages", post(send_task_message))
         .route("/tasks/:id/follow-up", post(follow_up_by_task))
         .route(
@@ -603,6 +606,89 @@ struct FollowUpRequest {
     selected_skill_ids: Vec<String>,
     #[serde(default)]
     context_refs: Vec<ContextRefRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForkRequest {
+    /// Omitted for General chats and non-git projects, where there is nothing to
+    /// choose: the fork always shares the source directory.
+    #[serde(default)]
+    workspace: Option<ForkWorkspace>,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkResponse {
+    task: TaskRecord,
+    /// `digest` tells the client the conversation could not be duplicated, so it
+    /// can say why instead of silently starting a thinner session.
+    mode: ForkMode,
+}
+
+/// Branch the session at this run into a new task.
+///
+/// The new task is created idle: forking is not a request, so nothing starts
+/// until the user writes the first turn.
+async fn fork_task_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<ForkRequest>,
+) -> Result<Json<ForkResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let outcome = TaskService::new(state.runtime())
+        .fork_task(id, payload.workspace.unwrap_or(ForkWorkspace::Same))
+        .await?;
+    Ok(Json(ForkResponse {
+        task: outcome.task,
+        mode: outcome.mode,
+    }))
+}
+
+/// Fork a session from its latest finished run.
+///
+/// The session-list entry point: it has no anchor to pass, so the server picks
+/// the newest one.
+async fn fork_task_latest(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<ForkRequest>,
+) -> Result<Json<ForkResponse>, ApiError> {
+    let id = resolve_task_id(state.pool(), &id).await?;
+    let outcome = TaskService::new(state.runtime())
+        .fork_task_latest(id, payload.workspace.unwrap_or(ForkWorkspace::Same))
+        .await?;
+    Ok(Json(ForkResponse {
+        task: outcome.task,
+        mode: outcome.mode,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct DelegateRequest {
+    /// The brief for the delegated work; becomes the child session's first
+    /// prompt (its boot prompt also carries a digest of the delegating
+    /// session).
+    prompt: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DelegateResponse {
+    task: TaskRecord,
+}
+
+/// Delegate a piece of this session's work to a new session.
+///
+/// Unlike fork, delegation is a request: the child starts running
+/// immediately, and its completion hands back to this session and wakes it.
+async fn delegate_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<DelegateRequest>,
+) -> Result<Json<DelegateResponse>, ApiError> {
+    let id = resolve_task_id(state.pool(), &id).await?;
+    let task = TaskService::new(state.runtime())
+        .delegate_task(id, payload.prompt, None)
+        .await?;
+    Ok(Json(DelegateResponse { task }))
 }
 
 async fn follow_up_execution(

@@ -136,6 +136,44 @@ impl GitService {
         Ok(())
     }
 
+    /// Create `branch` pointing at `commit` unless it already exists.
+    ///
+    /// Unlike [`Self::ensure_branch_exists`], the base is a commit-ish rather
+    /// than a branch name: forking a session branches from the exact commit its
+    /// anchor run ended on, which usually has no branch of its own.
+    /// Resolve a revision (a commit sha, a branch name, `HEAD`, ...) to a
+    /// concrete commit sha, or None if it does not resolve in this repo.
+    ///
+    /// Used to pin a fork's anchor: a source's `after`/`before` commit or its
+    /// branch tip all name the same durable object, and any that still
+    /// resolves is a valid floor even after the source's worktree is gone.
+    pub fn resolve_commit_sha(&self, repo_path: impl AsRef<Path>, rev: &str) -> Option<String> {
+        let repo = self.open_repo(repo_path).ok()?;
+        let object = repo.revparse_single(rev).ok()?;
+        let commit = object.peel_to_commit().ok()?;
+        Some(commit.id().to_string())
+    }
+
+    pub fn ensure_branch_exists_at_commit(
+        &self,
+        repo_path: impl AsRef<Path>,
+        branch: &str,
+        commit: &str,
+    ) -> Result<(), GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        if repo.find_branch(branch, BranchType::Local).is_ok() {
+            return Ok(());
+        }
+        let object = repo
+            .revparse_single(commit)
+            .map_err(|_| GitServiceError::ReferenceNotFound(commit.to_string()))?;
+        let commit = object
+            .peel_to_commit()
+            .map_err(|_| GitServiceError::ReferenceNotFound(object.id().to_string()))?;
+        repo.branch(branch, &commit, false)?;
+        Ok(())
+    }
+
     pub fn ensure_branch_exists(
         &self,
         repo_path: impl AsRef<Path>,
@@ -408,6 +446,21 @@ impl GitService {
     }
 
     /// Rebase a worktree branch onto a new base
+    /// The worktree that currently has `branch` checked out, if any.
+    ///
+    /// Git is the source of truth for where a branch lives: a run's recorded
+    /// workspace path can drift (reclaimed and re-provisioned worktrees, a
+    /// checkout the agent made itself), and acting on the stale record is what
+    /// produces "already used by worktree" failures.
+    pub fn worktree_for_branch(&self, repo_path: &Path, branch: &str) -> Option<PathBuf> {
+        GitCli::new()
+            .list_worktrees(repo_path)
+            .ok()?
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch))
+            .map(|wt| wt.path)
+    }
+
     pub fn rebase_branch(
         &self,
         repo_path: &Path,
@@ -416,6 +469,31 @@ impl GitService {
         old_base_branch: &str,
         task_branch: &str,
     ) -> Result<String, GitServiceError> {
+        // Rebase acts on the branch, so it must run where the branch actually
+        // is. Prefer git's own answer over the caller's recorded path; fall
+        // back to that path only when it is itself on the branch.
+        let worktree_path: PathBuf = match self.worktree_for_branch(repo_path, task_branch) {
+            Some(path) => path,
+            None => {
+                let recorded_branch = GitCli::new()
+                    .list_worktrees(repo_path)
+                    .ok()
+                    .and_then(|worktrees| {
+                        worktrees
+                            .into_iter()
+                            .find(|wt| wt.path == worktree_path)
+                            .and_then(|wt| wt.branch)
+                    });
+                if recorded_branch.as_deref() != Some(task_branch) {
+                    return Err(GitServiceError::InvalidRepository(format!(
+                        "no worktree currently has '{task_branch}' checked out, so it cannot be rebased"
+                    )));
+                }
+                worktree_path.to_path_buf()
+            }
+        };
+        let worktree_path = worktree_path.as_path();
+
         let worktree_repo = Repository::open(worktree_path)?;
         let main_repo = self.open_repo(repo_path)?;
 
@@ -1429,6 +1507,121 @@ mod tests {
         let path = root.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    /// A run's recorded workspace path drifts (worktree reclaimed and
+    /// re-provisioned, or the agent checked something else out) while its
+    /// branch lives in another worktree. Rebase must follow the branch to its
+    /// real worktree instead of failing with git's "already used by worktree".
+    #[test]
+    fn rebase_follows_the_branch_to_its_actual_worktree() {
+        let (tmp, repo) = init_repo();
+        let service = GitService::new();
+        let root = tmp.path();
+        write_file(root, "base.txt", "base\n");
+        service.commit_all(root, "base commit").unwrap();
+        let base_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // A task branch with its own commit, living in its own worktree.
+        service
+            .ensure_branch_exists(root, "ch/task", Some(&base_branch))
+            .unwrap();
+        let wt_home = tempdir().unwrap();
+        let task_wt = wt_home.path().join("task-worktree");
+        let added = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["worktree", "add", task_wt.to_str().unwrap(), "ch/task"])
+            .output()
+            .unwrap();
+        assert!(
+            added.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        write_file(&task_wt, "task.txt", "task work\n");
+        service.commit_all(&task_wt, "task commit").unwrap();
+
+        // The base moves on, so there is something to rebase onto.
+        write_file(root, "base.txt", "base moved\n");
+        service.commit_all(root, "base advances").unwrap();
+
+        let held_by = service
+            .worktree_for_branch(root, "ch/task")
+            .expect("branch lookup should find the worktree holding it");
+        assert_eq!(
+            held_by.canonicalize().unwrap(),
+            task_wt.canonicalize().unwrap()
+        );
+
+        // Caller passes the *drifted* path (the main checkout, which is on the
+        // base branch) — the old code would try to check ch/task out there.
+        let head = service
+            .rebase_branch(root, root, &base_branch, &base_branch, "ch/task")
+            .expect("rebase should follow the branch to its worktree");
+        assert!(!head.is_empty());
+
+        // The rebase landed in the task worktree, and its branch now contains
+        // the advanced base.
+        let rebased = Repository::open(&task_wt).unwrap();
+        assert_eq!(rebased.head().unwrap().shorthand(), Some("ch/task"));
+        assert_eq!(
+            std::fs::read_to_string(task_wt.join("base.txt")).unwrap(),
+            "base moved\n"
+        );
+        assert!(task_wt.join("task.txt").exists());
+        drop(repo);
+    }
+
+    /// When no worktree holds the branch at all, rebase refuses in chro's own
+    /// words rather than surfacing a git fatal.
+    #[test]
+    fn rebase_refuses_when_no_worktree_holds_the_branch() {
+        let (tmp, repo) = init_repo();
+        let service = GitService::new();
+        let root = tmp.path();
+        write_file(root, "base.txt", "base\n");
+        service.commit_all(root, "base commit").unwrap();
+        let base_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        service
+            .ensure_branch_exists(root, "ch/orphan", Some(&base_branch))
+            .unwrap();
+
+        let err = service
+            .rebase_branch(root, root, &base_branch, &base_branch, "ch/orphan")
+            .expect_err("a branch nobody has checked out cannot be rebased");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no worktree currently has"),
+            "expected chro's own wording, got: {msg}"
+        );
+        drop(repo);
+    }
+
+    #[test]
+    fn resolve_commit_sha_handles_shas_branches_and_misses() {
+        let (tmp, repo) = init_repo();
+        let service = GitService::new();
+        let head = repo.head().unwrap().target().unwrap().to_string();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // A full sha resolves to itself; a branch name resolves to its tip.
+        assert_eq!(
+            service.resolve_commit_sha(tmp.path(), &head).as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            service.resolve_commit_sha(tmp.path(), &branch).as_deref(),
+            Some(head.as_str())
+        );
+        // A revision that names nothing in this repo resolves to None — the
+        // signal fork uses to refuse rather than fall back to main.
+        assert!(service
+            .resolve_commit_sha(tmp.path(), "ch/gone-branch")
+            .is_none());
+        assert!(service
+            .resolve_commit_sha(tmp.path(), "0000000000000000000000000000000000000000")
+            .is_none());
+        drop(repo);
     }
 
     #[test]

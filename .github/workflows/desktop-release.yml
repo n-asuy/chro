@@ -179,7 +179,6 @@ jobs:
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.dmg
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.app.tar.gz
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.app.tar.gz.sig
-            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/latest-darwin.json
           retention-days: 7
 
       - name: Upload to GitHub Release
@@ -314,7 +313,6 @@ jobs:
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.msi
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.zip
             apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*.zip.sig
-            apps/desktop/release/${{ steps.desktop_version.outputs.value }}/latest-windows.json
           retention-days: 7
 
       - name: Upload to GitHub Release
@@ -323,3 +321,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ env.RELEASE_REPO }}
         run: bun ./apps/desktop/scripts/deployer.ts upload --tag ${{ github.ref_name }}
+
+  # Assemble the macOS updater feed (latest-darwin.json) from the per-arch
+  # signed bundles once both have been published, and upload it to the release.
+  # This is what the in-app updater fetches; without it the endpoint 404s.
+  updater-manifest:
+    name: Publish updater manifest
+    needs: macos
+    if: >
+      github.repository == (vars.RELEASE_REPO || 'n-asuy/chro') &&
+      startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.1.26
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build and upload latest-darwin.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.RELEASE_REPO }}
+        run: bun ./apps/desktop/scripts/deployer.ts updater-manifest --tag ${{ github.ref_name }}

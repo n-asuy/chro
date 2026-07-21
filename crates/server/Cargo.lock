@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "analytics",
  "anyhow",
@@ -605,6 +605,8 @@ dependencies = [
  "config",
  "conversation",
  "db",
+ "dirs 5.0.1",
+ "dunce",
  "events",
  "executors",
  "file-search-cache",
@@ -624,6 +626,7 @@ dependencies = [
  "serde_json",
  "skills",
  "sqlx",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -1249,20 +1252,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dashmap"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
-dependencies = [
- "cfg-if",
- "crossbeam-utils",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
-]
-
-[[package]]
 name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1784,26 +1773,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-id"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1fc6a637b6dc58414714eddd9170ff187ecb0933d4c7024d1abbd23a3cc26e9"
-dependencies = [
- "windows-sys 0.60.2",
-]
-
-[[package]]
 name = "file-search-cache"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dashmap",
  "fst",
  "git2",
  "ignore",
  "moka",
- "notify",
- "notify-debouncer-full",
  "regex",
  "serde",
  "thiserror 2.0.18",
@@ -3473,20 +3450,6 @@ dependencies = [
  "mio 0.8.11",
  "walkdir",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "notify-debouncer-full"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb7fd166739789c9ff169e654dc1501373db9d80a4c3f972817c8a4d7cf8f34e"
-dependencies = [
- "crossbeam-channel",
- "file-id",
- "log",
- "notify",
- "parking_lot",
- "walkdir",
 ]
 
 [[package]]

@@ -55,6 +55,10 @@ export function initAnalytics(options?: { enabled?: boolean }): void {
     capture_pageleave: false,
     persistence: "localStorage",
     disable_session_recording: true,
+    // Feature flags are resolved once by the backend and read through
+    // `useFlag`. Letting posthog-js resolve them again here would produce a
+    // second, independent answer that the UI never gates on.
+    advanced_disable_feature_flags: true,
     loaded: (ph) => {
       if (options?.enabled === false) {
         ph.opt_out_capturing();

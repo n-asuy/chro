@@ -62,6 +62,7 @@ import {
   type BubbleMenuPlacement,
   bubbleMenuExtension,
 } from "./plugins/bubble-menu";
+import { refreshDecorationsEffect } from "./plugins/decoration-refresh";
 import type { EmbedPluginConfig } from "./plugins/prose";
 import { type WysiwygConfig, createWysiwygPlugin } from "./wysiwyg";
 
@@ -175,7 +176,6 @@ const DEFAULT_EDITOR_TAB_SIZE = 4;
 const DEFAULT_EDITOR_INDENT_WITH_SPACES = true;
 const DEFAULT_EDITOR_SHOW_LINE_NUMBERS = false;
 
-const refreshDecorationsEffect = StateEffect.define<void>();
 
 export const CodeMirrorEditor = forwardRef<
   CodeMirrorEditorHandle,

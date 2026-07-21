@@ -48,6 +48,11 @@ mod executor_approval_bridge;
 
 use executor_approval_bridge::ExecutorApprovalBridge;
 
+/// Broker callback fired after a run reaches its terminal state and its
+/// auto-commit has settled. Used to close the delegation loop (handoff edge +
+/// wake); injected from the runtime because the container cannot depend on it.
+pub type RunFinishedHook = Arc<dyn Fn(Uuid) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -60,6 +65,7 @@ pub struct LocalContainerService {
     approvals: Approvals<MsgStore>,
     logs_dir: PathBuf,
     worktree_watchers: filesystem::WorktreeWatcherService,
+    run_finished_hook: Arc<RwLock<Option<RunFinishedHook>>>,
 }
 
 struct ExecutionHandle {
@@ -96,7 +102,14 @@ impl LocalContainerService {
             approvals,
             logs_dir,
             worktree_watchers,
+            run_finished_hook: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Install the broker's post-completion callback. Set once at bootstrap;
+    /// runs that finish before it is installed simply skip it.
+    pub async fn set_run_finished_hook(&self, hook: RunFinishedHook) {
+        *self.run_finished_hook.write().await = Some(hook);
     }
 
     async fn current_profile(&self) -> ExecutorProfileId {
@@ -201,6 +214,34 @@ impl LocalContainerService {
         .await
     }
 
+    /// Record the workspace HEAD a run starts from.
+    ///
+    /// The run ledger (`before`/`after_head_commit`) is the only anchor that
+    /// survives worktree deletion: fork resolves the source's code state from
+    /// it, so it must be a real commit, not a value the frontend may or may not
+    /// backfill. Best-effort — a non-git workspace has no HEAD.
+    async fn record_run_start_commit(&self, run_id: Uuid, workspace_path: &PathBuf) {
+        let git = self.git.clone();
+        let workspace = workspace_path.clone();
+        let head = runtime::perf::spawn_blocking_instrumented("git.run_start_head", move || {
+            git.head_commit(&workspace)
+        })
+        .await;
+        if let Ok(Ok(oid)) = head {
+            let sha = oid.as_oid().to_string();
+            if let Err(e) = sqlx::query(
+                "UPDATE task_runs SET before_head_commit = ?, updated_at = datetime('now') WHERE id = ? AND before_head_commit IS NULL",
+            )
+            .bind(&sha)
+            .bind(run_id)
+            .execute(self.db.pool())
+            .await
+            {
+                tracing::warn!(%run_id, error = %e, "[record_run_start_commit] failed to persist before_head_commit");
+            }
+        }
+    }
+
     /// Auto-commit changes after successful execution.
     /// Commits all changes in the workspace if any exist.
     async fn try_commit_changes(&self, run_id: Uuid, workspace_path: &PathBuf) {
@@ -214,6 +255,36 @@ impl LocalContainerService {
             git.commit_all(&workspace, &message)
         })
         .await;
+
+        // Whether or not there were changes to commit, the workspace HEAD after
+        // this run is where its work landed — that is the fork anchor. Record
+        // it (the committed oid, or the unchanged HEAD) so the ledger is real.
+        let after: Option<String> = match &result {
+            Ok(Ok(Some(oid))) => Some(oid.clone()),
+            _ => {
+                let git = self.git.clone();
+                let workspace = workspace_path.clone();
+                runtime::perf::spawn_blocking_instrumented("git.after_head", move || {
+                    git.head_commit(&workspace)
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|oid| oid.as_oid().to_string())
+            }
+        };
+        if let Some(sha) = after {
+            if let Err(e) = sqlx::query(
+                "UPDATE task_runs SET after_head_commit = ?, updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(&sha)
+            .bind(run_id)
+            .execute(self.db.pool())
+            .await
+            {
+                tracing::warn!(%run_id, error = %e, "[try_commit_changes] failed to persist after_head_commit");
+            }
+        }
 
         match result {
             Ok(Ok(Some(oid))) => {
@@ -357,6 +428,49 @@ impl LocalContainerService {
             "[complete_task_execution] task_records updated - status and active_session_id cleared"
         );
 
+        // Best-effort outcome summary, in the background: reading the run's
+        // logs must never delay the completion path (the sidebar spinner
+        // resolves off the task_records update above).
+        if run_status == RunStatus::Completed {
+            let this = self.clone();
+            let task_id = run.task_id;
+            tokio::spawn(async move {
+                if let Err(err) = this.record_run_outcome(run_id, task_id).await {
+                    tracing::warn!(
+                        %run_id,
+                        error = %err,
+                        "[complete_task_execution] failed to record run outcome summary"
+                    );
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Derive a one-line outcome from the run's final assistant message and
+    /// persist it: per-session on `task_sessions.summary`, and denormalized
+    /// onto the task as `last_summary` for list surfaces. No-op when the run
+    /// produced no assistant prose (e.g. it only ran tools).
+    async fn record_run_outcome(&self, run_id: Uuid, task_id: Uuid) -> Result<(), ContainerError> {
+        let entries = self.fetch_logs(run_id).await?;
+        let Some(summary) =
+            crate::transcript::last_assistant_text(&entries).and_then(|text| {
+                crate::transcript::outcome_summary(&text)
+            })
+        else {
+            return Ok(());
+        };
+
+        db::models::TaskSession::set_summary_by_run_id(self.db.pool(), run_id, &summary).await?;
+        TaskRecord::set_last_summary(self.db.pool(), task_id, &summary).await?;
+
+        tracing::debug!(
+            %run_id,
+            %task_id,
+            summary_chars = summary.chars().count(),
+            "[record_run_outcome] stored outcome summary"
+        );
         Ok(())
     }
 
@@ -422,19 +536,26 @@ impl LocalContainerService {
             "[run_execution_process] starting execution"
         );
 
+        // Pin the commit this run starts from before the agent can move HEAD,
+        // so the ledger reflects the true base even on a run that ends without
+        // committing.
+        self.record_run_start_commit(run_id, &params.workspace_path)
+            .await;
+
         let (mut agent, agent_kind) = self.create_agent_for_run(run_id).await?;
         tracing::debug!(
             agent_kind = ?agent_kind,
             "[run_execution_process] using coding agent"
         );
 
+        let task_id = TaskRun::find_by_id(self.db.pool(), params.task_run_id)
+            .await?
+            .map(|run| run.task_id);
+
         let approvals_service: Arc<dyn ExecutorApprovalService> = if matches!(
             agent_kind,
             BaseCodingAgent::Codex | BaseCodingAgent::ClaudeCode | BaseCodingAgent::Pi
         ) {
-            let task_id = TaskRun::find_by_id(self.db.pool(), params.task_run_id)
-                .await?
-                .map(|run| run.task_id);
             ExecutorApprovalBridge::new(
                 self.approvals.clone(),
                 params.task_run_id,
@@ -448,19 +569,33 @@ impl LocalContainerService {
 
         let repo_names = Self::collect_workspace_repo_names(&params.workspace_path);
         let repo_context = RepoContext::new(params.workspace_path.clone(), repo_names);
-        let env = ExecutionEnv::new(repo_context, false, String::new());
+        let mut env = ExecutionEnv::new(repo_context, false, String::new());
+        // The session's own identity, injected so the industrialized CLI can
+        // resolve "this session" without being told: `chro task delegate`
+        // reads it to know who is delegating.
+        if let Some(task_id) = task_id {
+            env.vars
+                .insert("CHRO_TASK_ID".to_string(), task_id.to_string());
+        }
 
         let spawned = if let Some(session_id) = params.resume_session_id.as_ref() {
-            agent
-                .spawn_follow_up(
-                    &params.workspace_path,
-                    &params.prompt,
-                    session_id,
-                    None,
-                    &env,
-                )
-                .await
-                .context("failed to spawn agent follow-up")?
+            if params.fork_session {
+                agent
+                    .spawn_fork(&params.workspace_path, &params.prompt, session_id, &env)
+                    .await
+                    .context("failed to spawn agent fork")?
+            } else {
+                agent
+                    .spawn_follow_up(
+                        &params.workspace_path,
+                        &params.prompt,
+                        session_id,
+                        None,
+                        &env,
+                    )
+                    .await
+                    .context("failed to spawn agent follow-up")?
+            }
         } else {
             agent
                 .spawn(&params.workspace_path, &params.prompt, &env)
@@ -868,6 +1003,14 @@ impl LocalContainerService {
 
         self.drop_execution_registry(run_id).await;
 
+        // Completion is a broker moment: the delegation loop (handoff edge +
+        // wake) settles after the auto-commit so the packet can carry the
+        // commit the work landed on.
+        let hook = self.run_finished_hook.read().await.clone();
+        if let Some(hook) = hook {
+            hook(run_id);
+        }
+
         Ok(())
     }
 }
@@ -1271,32 +1414,26 @@ impl ContainerService for LocalContainerService {
         if !workspace_path.exists() {
             return Err(ContainerError::BadRequest("workspace path missing"));
         }
-        let base_commit = match (run.branch_name.as_deref(), run.target_branch.as_deref()) {
-            (Some(branch), Some(target_branch)) => {
-                let git = self.git.clone();
-                let repo_path = project_repo_path.clone();
-                let branch = branch.to_string();
-                let target_branch = target_branch.to_string();
-                tokio::task::spawn_blocking(move || {
-                    git.get_base_commit(&repo_path, &branch, &target_branch)
-                })
-                .await??
-            }
+        // A branch/target run anchors its diff on the live merge-base, resolved
+        // on every recompute so a rebase re-anchors the diff instead of leaking
+        // the target branch's commits. Runs without a branch (e.g. non-git) fall
+        // back to a fixed worktree HEAD captured now.
+        let base = match (run.branch_name.as_deref(), run.target_branch.as_deref()) {
+            (Some(branch), Some(target_branch)) => diff_stream::BaseSource::MergeBase {
+                repo_path: project_repo_path.clone(),
+                branch: branch.to_string(),
+                target: target_branch.to_string(),
+            },
             _ => {
                 let git = self.git.clone();
                 let wp = workspace_path.clone();
-                tokio::task::spawn_blocking(move || git.head_commit(&wp)).await??
+                let head = tokio::task::spawn_blocking(move || git.head_commit(&wp)).await??;
+                diff_stream::BaseSource::Fixed(head)
             }
         };
         let events = self.worktree_watchers.subscribe(workspace_path.clone());
-        let handle = diff_stream::create(
-            self.git.clone(),
-            workspace_path,
-            base_commit,
-            stats_only,
-            events,
-        )
-        .await?;
+        let handle =
+            diff_stream::create(self.git.clone(), workspace_path, base, stats_only, events).await?;
 
         let msg_store_stream: BoxStream<'static, Result<LogEntry, std::io::Error>> = {
             let store = {

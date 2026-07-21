@@ -3,6 +3,7 @@ import { cn } from "@/lib/cn";
 
 type SettingsSectionProps = {
   heading?: string;
+  description?: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
@@ -10,6 +11,7 @@ type SettingsSectionProps = {
 
 export function SettingsSection({
   heading,
+  description,
   action,
   children,
   className,
@@ -17,16 +19,23 @@ export function SettingsSection({
   return (
     <div className={cn("flex flex-col gap-2.5", className)}>
       {heading || action ? (
-        <div className="flex items-center justify-between px-0.5">
+        <div className="flex items-start justify-between gap-4 px-0.5">
           {heading ? (
-            <h3 className="font-workspace text-[14px] font-semibold text-foreground">
-              {heading}
-            </h3>
+            <div className="flex flex-col gap-0.5">
+              <h3 className="font-workspace text-[14px] font-semibold text-foreground">
+                {heading}
+              </h3>
+              {description ? (
+                <p className="font-workspace text-[12px] text-muted-foreground">
+                  {description}
+                </p>
+              ) : null}
+            </div>
           ) : (
             <div />
           )}
           {action ? (
-            <div className="flex items-center">{action}</div>
+            <div className="flex shrink-0 items-center">{action}</div>
           ) : null}
         </div>
       ) : null}

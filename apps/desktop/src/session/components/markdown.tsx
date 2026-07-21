@@ -23,6 +23,10 @@ type MarkdownProps = {
   onWikilinkClick?: (path: string, subpath?: string) => void;
   onFilePathClick?: (path: string) => void;
   tone?: "default" | "muted";
+  /** "document" renders the full heading scale; "flat" renders every heading
+   * at body size in bold, for preview surfaces where document-scale headings
+   * would shout (e.g. the sidebar hover preview). */
+  headings?: "document" | "flat";
   localImages?: LocalImageMetadata[];
 };
 
@@ -463,11 +467,28 @@ const createComponents = (
   onFilePathClick?: (path: string) => void,
   tone: MarkdownProps["tone"] = "default",
   localImages?: LocalImageMetadata[],
+  headings: MarkdownProps["headings"] = "document",
 ): Partial<Components> => {
   const textClass =
     tone === "muted" ? "text-muted-foreground" : "text-foreground";
   const subtleTextClass =
     tone === "muted" ? "text-muted-foreground/80" : "text-foreground/80";
+  const flatHeading = ({ children }: { children?: ReactNode }) => (
+    <p className={`mt-3 text-sm font-semibold leading-relaxed ${textClass}`}>
+      {children}
+    </p>
+  );
+  const flatHeadings: Partial<Components> =
+    headings === "flat"
+      ? {
+          h1: flatHeading,
+          h2: flatHeading,
+          h3: flatHeading,
+          h4: flatHeading,
+          h5: flatHeading,
+          h6: flatHeading,
+        }
+      : {};
 
   return {
     img: ({ src, alt }) => (
@@ -701,6 +722,7 @@ const createComponents = (
 
       return <span {...props}>{children}</span>;
     },
+    ...flatHeadings,
   };
 };
 
@@ -710,6 +732,7 @@ export const Markdown = memo(
     onWikilinkClick,
     onFilePathClick,
     tone = "default",
+    headings = "document",
     localImages,
   }: MarkdownProps) => {
     const formatted = useMemo(
@@ -718,8 +741,14 @@ export const Markdown = memo(
     );
     const components = useMemo(
       () =>
-        createComponents(onWikilinkClick, onFilePathClick, tone, localImages),
-      [onWikilinkClick, onFilePathClick, tone, localImages],
+        createComponents(
+          onWikilinkClick,
+          onFilePathClick,
+          tone,
+          localImages,
+          headings,
+        ),
+      [onWikilinkClick, onFilePathClick, tone, localImages, headings],
     );
     const toneClass =
       tone === "muted" ? "text-muted-foreground" : "text-foreground";

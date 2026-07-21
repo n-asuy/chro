@@ -10,7 +10,7 @@ use db::{
     models::{TaskContextRef, TaskRecord},
     types::TaskStatus,
 };
-use runtime::TaskService;
+use runtime::{Runtime, TaskService};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,6 +27,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
         .route("/tasks/:id/last-message", get(get_task_last_message))
+        .route("/tasks/:id/pending-question", get(get_task_pending_question))
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +137,39 @@ async fn get_task_last_message(
         user: exchange.user,
         assistant: exchange.assistant,
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct TaskPendingQuestionResponse {
+    approval: Option<approvals::ApprovalRequest>,
+}
+
+/// Return the approval request the task's running agent is currently blocked
+/// on, if any (`awaiting_input` on the task record signals its existence).
+/// Includes `tool_input`, so the hover preview can show the AskUserQuestion
+/// question text without opening the session.
+async fn get_task_pending_question(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<TaskPendingQuestionResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let runs = db::models::TaskRun::list_by_task_id(state.pool(), task_id).await?;
+    let mut approval = None;
+    for run in runs
+        .iter()
+        .filter(|run| run.status == db::types::RunStatus::Running)
+    {
+        if let Some(request) = state
+            .runtime()
+            .approvals()
+            .pending_request_for_run(run.id)
+            .await
+        {
+            approval = Some(request);
+            break;
+        }
+    }
+    Ok(Json(TaskPendingQuestionResponse { approval }))
 }
 
 #[derive(Debug, Deserialize)]

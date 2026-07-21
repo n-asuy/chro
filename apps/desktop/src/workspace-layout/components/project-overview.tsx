@@ -8,6 +8,7 @@ import {
 } from "@/session/components/session-preview";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useArchivedSessions } from "@/session/hooks";
+import { formatRelativeTime } from "@/session/lib/relative-time";
 import type { StoredTask } from "@/session/types";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import { useNavigate } from "@tanstack/react-router";
@@ -306,17 +307,3 @@ export function ProjectOverview() {
     </SessionPreviewProvider>
   );
 }
-
-const formatRelativeTime = (input: Date | string): string => {
-  const date = input instanceof Date ? input : new Date(input);
-  const diffMins = Math.floor((Date.now() - date.getTime()) / 60000);
-  if (diffMins < 1) return "now";
-  if (diffMins < 60) return `${diffMins}m`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h`;
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 7) return `${diffDays}d`;
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w`;
-  if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo`;
-  return `${Math.floor(diffDays / 365)}y`;
-};

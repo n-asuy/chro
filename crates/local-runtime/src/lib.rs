@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -101,6 +101,10 @@ pub struct LocalRuntime {
     normalized_log_cache: Arc<RwLock<NormalizedLogReplayCache>>,
     container: LocalContainerService,
     worktree_watchers: filesystem::WorktreeWatcherService,
+    git_state_watchers: filesystem::GitStateWatcherService,
+    /// Repos whose search cache is already invalidated by a git-state
+    /// subscription; guards against spawning duplicate listeners.
+    search_cache_watches: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
 }
 
 impl LocalRuntime {
@@ -234,6 +238,7 @@ impl Runtime for LocalRuntime {
         let events = EventService::new(db.clone(), event_resources);
         events.hydrate().await?;
         let worktree_watchers = filesystem::WorktreeWatcherService::default();
+        let git_state_watchers = filesystem::GitStateWatcherService::default();
         let container = LocalContainerService::new(
             db.clone(),
             git.clone(),
@@ -259,9 +264,37 @@ impl Runtime for LocalRuntime {
             normalized_log_cache,
             container,
             worktree_watchers,
+            git_state_watchers,
+            search_cache_watches: Arc::new(std::sync::Mutex::new(HashSet::new())),
         };
 
         runtime.start_background_housekeeping();
+
+        // Close the delegation loop from the broker's completion moment: when
+        // a run finishes (after its auto-commit), the delegating session gets
+        // its handoff edge and wake. Wired here because the container cannot
+        // depend on the runtime it lives in.
+        {
+            let hook_runtime = runtime.clone();
+            runtime
+                .container
+                .set_run_finished_hook(Arc::new(move |run_id| {
+                    let hook_runtime = hook_runtime.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = runtime::TaskService::new(&hook_runtime)
+                            .settle_delegation_handoff(run_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                %run_id,
+                                error = %err,
+                                "delegation handoff settlement failed"
+                            );
+                        }
+                    });
+                }))
+                .await;
+        }
 
         Ok(runtime)
     }
@@ -322,6 +355,7 @@ impl Runtime for LocalRuntime {
     ) -> Result<Vec<PathBuf>, RuntimeError> {
         use file_search_cache::{CacheError, SearchMode};
 
+        self.ensure_search_cache_watch(repo_path);
         match self
             .file_search_cache
             .search(repo_path, needle, SearchMode::TaskForm, limit)
@@ -533,6 +567,78 @@ impl LocalRuntime {
 
     pub async fn current_config(&self) -> Config {
         self.config.read().await.clone()
+    }
+
+    /// Raw worktree file change batches (dotfiles included), backed by the
+    /// shared per-worktree watcher. Used by notification streams whose
+    /// consumers care about dotfile paths too (e.g. `.claude/**` datasets).
+    pub fn subscribe_worktree_changes(
+        &self,
+        worktree_path: PathBuf,
+    ) -> tokio::sync::broadcast::Receiver<filesystem::WorktreeEventBatch> {
+        self.worktree_watchers.subscribe(worktree_path)
+    }
+
+    /// Git metadata state events for the worktree, or `None` when it is not a
+    /// git repository. Resolves the git dir with blocking filesystem reads;
+    /// call from a blocking-safe context.
+    pub fn subscribe_git_state(
+        &self,
+        worktree_path: &Path,
+    ) -> Option<filesystem::GitStateSubscription> {
+        self.git_state_watchers.subscribe(worktree_path)
+    }
+
+    /// The shared git metadata watcher registry.
+    pub fn git_state_watchers(&self) -> &filesystem::GitStateWatcherService {
+        &self.git_state_watchers
+    }
+
+    /// Keep `repo_path`'s file-search index fresh: on the first call per repo,
+    /// spawn a listener that queues an index rebuild whenever HEAD moves
+    /// (branch switch, commit), so searches after a switch hit a warm cache
+    /// instead of the slow filesystem fallback.
+    pub fn ensure_search_cache_watch(&self, repo_path: &Path) {
+        {
+            let mut watched = self.search_cache_watches.lock().unwrap();
+            if !watched.insert(repo_path.to_path_buf()) {
+                return;
+            }
+        }
+
+        let cache = self.file_search_cache.clone();
+        let watchers = self.git_state_watchers.clone();
+        let repo = repo_path.to_path_buf();
+        tokio::spawn(async move {
+            // Git dir resolution reads the filesystem; keep it off the workers.
+            let subscription = tokio::task::spawn_blocking({
+                let repo = repo.clone();
+                move || watchers.subscribe(&repo)
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(mut subscription) = subscription else {
+                return;
+            };
+
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match subscription.receiver.recv().await {
+                    Ok(batch) => {
+                        if subscription
+                            .relevant_kinds(&batch)
+                            .contains(&filesystem::GitStateEventKind::HeadMoved)
+                        {
+                            cache.invalidate(&repo);
+                        }
+                    }
+                    // Events were dropped; assume HEAD may have moved.
+                    Err(RecvError::Lagged(_)) => cache.invalidate(&repo),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     /// Subscribe to workspace file change events, mapped into the workspace-tree

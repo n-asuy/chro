@@ -44,7 +44,36 @@ pub struct TaskRecord {
     /// Denormalized from the latest run's executor so UIs can show the agent
     /// logo without a per-task run lookup. `None` until the first run.
     pub last_executor: Option<String>,
+    /// One-line outcome of the latest completed run, derived from the final
+    /// assistant message at run-completion time. Denormalized like
+    /// `last_executor` so list surfaces can show "what this session did"
+    /// without a transcript lookup. `None` until a run completes.
+    pub last_summary: Option<String>,
+    /// Title of the session this one was forked from, snapshotted at fork time.
+    ///
+    /// Read from the fork edge rather than stored on the row, but carried here
+    /// so the session list can render provenance without a per-task lookup. A
+    /// snapshot, not a live join to the source's current title: the source can
+    /// be renamed or deleted without breaking this label.
+    #[sqlx(default)]
+    pub forked_from_title: Option<String>,
+    /// Title of the task that delegated this one, snapshotted at delegation
+    /// time. Same denormalization contract as `forked_from_title`, read from
+    /// the delegate edge.
+    #[sqlx(default)]
+    pub delegated_from_title: Option<String>,
 }
+
+/// Selects every task column plus the fork and delegate edges' snapshot
+/// labels.
+///
+/// `task_context_refs` is indexed on `task_id`, and a task has at most one
+/// fork edge and one delegate edge, so this stays two indexed probes per row.
+const SELECT_TASKS_WITH_FORK: &str =
+    "SELECT t.*, f.label AS forked_from_title, d.label AS delegated_from_title \
+     FROM task_records t \
+     LEFT JOIN task_context_refs f ON f.task_id = t.id AND f.kind = 'fork' \
+     LEFT JOIN task_context_refs d ON d.task_id = t.id AND d.kind = 'delegate'";
 
 impl TaskRecord {
     /// Create a new task
@@ -81,6 +110,9 @@ impl TaskRecord {
             updated_at: now,
             sort_order: 0,
             last_executor: None,
+            last_summary: None,
+            forked_from_title: None,
+            delegated_from_title: None,
         }
     }
 
@@ -107,8 +139,8 @@ impl TaskRecord {
     /// Persist the task record.
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor, last_summary)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.id)
         .bind(&self.slug)
@@ -127,6 +159,7 @@ impl TaskRecord {
         .bind(self.updated_at)
         .bind(self.sort_order)
         .bind(&self.last_executor)
+        .bind(&self.last_summary)
         .execute(pool)
         .await?;
         Ok(())
@@ -180,7 +213,7 @@ impl TaskRecord {
 
     /// Return all tasks currently stored.
     pub async fn list_all(pool: &Pool<Sqlite>) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT * FROM task_records")
+        sqlx::query_as::<_, Self>(SELECT_TASKS_WITH_FORK)
             .fetch_all(pool)
             .await
     }
@@ -191,9 +224,9 @@ impl TaskRecord {
         pool: &Pool<Sqlite>,
         project_id: Uuid,
     ) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>(
-            "SELECT * FROM task_records WHERE project_id = ? ORDER BY sort_order ASC, updated_at DESC",
-        )
+        sqlx::query_as::<_, Self>(&format!(
+            "{SELECT_TASKS_WITH_FORK} WHERE t.project_id = ? ORDER BY t.sort_order ASC, t.updated_at DESC"
+        ))
         .bind(project_id)
         .fetch_all(pool)
         .await
@@ -289,6 +322,24 @@ impl TaskRecord {
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE task_records SET last_executor = ? WHERE id = ?")
             .bind(executor)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Record the one-line outcome of the task's latest completed run. Like
+    /// `set_last_executor`, this deliberately does not touch `updated_at`:
+    /// run-derived metadata must not re-order the task list. The row write
+    /// still fans out through the SQLite update hook so the tasks stream
+    /// reflects it live.
+    pub async fn set_last_summary(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        summary: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET last_summary = ? WHERE id = ?")
+            .bind(summary)
             .bind(task_id)
             .execute(pool)
             .await?;

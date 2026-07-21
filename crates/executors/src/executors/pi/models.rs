@@ -22,7 +22,7 @@ use tokio::{
 use ts_rs::TS;
 
 use super::pi_home;
-use crate::{cli_manifest, command::CommandBuilder, executors::ExecutorError};
+use crate::{cli_manifest, command::CommandBuilder, executors::ExecutorError, spawn::Invocation};
 
 /// One selectable pi model. `value` is pi's `provider/id` form (accepted
 /// verbatim by `pi --model`); `label` is the human-facing name.
@@ -151,7 +151,7 @@ async fn query_pi() -> Result<(Vec<PiModelOption>, Option<String>), ExecutorErro
     let command_parts = CommandBuilder::for_manifest(&cli_manifest::PI)
         .extend_params(["--mode", "rpc"])
         .build_initial()?;
-    let (program, args) = command_parts.into_resolved().await?;
+    let Invocation { program, args } = command_parts.into_resolved().await?;
 
     let mut child = Command::new(&program)
         .args(&args)

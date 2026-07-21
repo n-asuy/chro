@@ -10,6 +10,7 @@ pub mod mcp_config;
 pub mod process;
 pub mod profile;
 pub mod shell;
+pub mod spawn;
 pub mod stdout_dup;
 
 pub use executors::{

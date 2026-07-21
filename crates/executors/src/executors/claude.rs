@@ -32,7 +32,18 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
     },
+    spawn::Invocation,
 };
+
+/// Output speed for the underlying model. `Fast` maps to Claude Code's fast
+/// mode (Anthropic `speed: "fast"`), currently available on Opus; `Standard`
+/// is the default and needs no CLI opt-in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, TS, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeedMode {
+    Standard,
+    Fast,
+}
 
 /// Claude Code agent configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
@@ -44,6 +55,10 @@ pub struct ClaudeCode {
     /// Model to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Output speed. `Fast` opts into fast mode; unset / `Standard` is default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<SpeedMode>,
 
     /// Command overrides.
     #[serde(flatten)]
@@ -70,6 +85,13 @@ impl ClaudeCode {
             builder = builder.extend_params(["--model", model]);
         }
 
+        // Fast mode has no dedicated flag; the CLI reads it from settings
+        // (`fastMode: true`), gated per model to Opus. `--settings` merges with
+        // the user's own settings rather than replacing them.
+        if self.speed == Some(SpeedMode::Fast) {
+            builder = builder.extend_params(["--settings", r#"{"fastMode":true}"#]);
+        }
+
         apply_overrides(builder, &self.cmd)
     }
 
@@ -87,8 +109,17 @@ impl ClaudeCode {
             builder.build_initial()?
         };
 
-        let (program_path, mut args) = command_parts.into_resolved().await?;
-        args.push(self.append_prompt.combine_prompt(prompt));
+        let Invocation {
+            program: program_path,
+            args,
+        } = command_parts.into_resolved().await?;
+
+        // The prompt is delivered over stdin rather than as a positional
+        // argument. `claude --print` reads stdin when no prompt is passed, and
+        // keeping free-form text out of argv is what lets the Windows batch-shim
+        // wrapper (`prepare_invocation`) forward a fixed, metacharacter-free
+        // argument list through the command interpreter.
+        let prompt = self.append_prompt.combine_prompt(prompt);
 
         tracing::info!(
             program = %program_path.display(),
@@ -101,7 +132,7 @@ impl ClaudeCode {
         let mut process = tokio::process::Command::new(&program_path);
         process
             .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .current_dir(current_dir)
@@ -121,7 +152,23 @@ impl ClaudeCode {
             process.env("PATH", path);
         }
 
-        let child = process.group_spawn()?;
+        let mut child = process.group_spawn()?;
+
+        // Feed the prompt over stdin, then close it so the CLI sees EOF and
+        // begins its turn. Done off-task so a large prompt never blocks the
+        // caller; the CLI drains stdin before emitting output, so there is no
+        // deadlock with the stdout reader the container installs next.
+        let mut child_stdin = child.inner().stdin.take().ok_or_else(|| {
+            ExecutorError::Io(std::io::Error::other("claude process missing stdin"))
+        })?;
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            if let Err(err) = child_stdin.write_all(prompt.as_bytes()).await {
+                tracing::warn!("failed to write prompt to claude stdin: {err}");
+            }
+            // Drop closes the pipe, signalling EOF.
+            drop(child_stdin);
+        });
 
         Ok(SpawnedChild {
             child: child.into(),
@@ -165,6 +212,36 @@ impl StandardCodingAgentExecutor for ClaudeCode {
             .await
     }
 
+    /// `--fork-session` makes the resumed conversation write to a new session id
+    /// instead of appending to the original, which is what keeps a fork from
+    /// mutating the session it branched from.
+    ///
+    /// `--resume` only resolves ids within the current repo's project-dir
+    /// family (verified 2026-07-18: a sibling worktree of the same repo
+    /// resolves, an unrelated directory fails with "No conversation found",
+    /// surfaced as an opaque `error_during_execution` in stream-json mode). A
+    /// fork can legitimately run somewhere the source never did, so the source
+    /// session file is copied into the target cwd's project dir first.
+    async fn spawn_fork(
+        &self,
+        current_dir: &Path,
+        prompt: &str,
+        session_id: &str,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        make_session_visible_from(current_dir, session_id);
+
+        let args = vec![
+            "--resume".to_string(),
+            session_id.to_string(),
+            "--fork-session".to_string(),
+        ];
+
+        let env = env.clone().with_profile(&self.cmd);
+        self.spawn_internal(current_dir, prompt, &env, Some(&args))
+            .await
+    }
+
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
         use log_types::EntryIndexProvider;
         let history = msg_store.history();
@@ -185,7 +262,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         dirs::home_dir().map(|home| home.join(".claude.json"))
     }
 
-    fn get_availability_info(&self) -> AvailabilityInfo {
+    async fn get_availability_info(&self) -> AvailabilityInfo {
         let config_path = dirs::home_dir().map(|home| home.join(".claude.json"));
         let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
 
@@ -195,7 +272,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
 
         // Both ~/.claude.json and Keychain credentials persist after logout,
         // so ask the CLI for its current login state.
-        match check_claude_auth_status() {
+        match check_claude_auth_status().await {
             Some(true) => {
                 let timestamp = config_path
                     .and_then(|p| std::fs::metadata(p).ok())
@@ -216,14 +293,87 @@ impl StandardCodingAgentExecutor for ClaudeCode {
 ///
 /// When chro itself runs inside a Claude session, the inherited
 /// `CLAUDECODE`/`CLAUDE_CODE_*` variables make the spawned CLI reject nesting.
+/// The project-dir name Claude Code derives from a working directory: the
+/// canonical path with every non-alphanumeric character replaced by `-`.
+/// Verified empirically (`/tmp/ab_c.d` → `-private-tmp-ab-c-d`).
+fn claude_project_dir_name(cwd: &Path) -> String {
+    let canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    canonical
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Copy `session_id`'s transcript into `cwd`'s project dir if it lives
+/// elsewhere, so a subsequent `--resume` from `cwd` can find it.
+///
+/// Best-effort on purpose: when the session is already visible (same directory,
+/// or a worktree of the same repo) there is nothing to do, and when the file
+/// cannot be found the resume itself will produce the error worth reporting.
+/// The copy keeps the original session id, so the source file stays untouched
+/// and `--fork-session` still allocates a fresh id for the branch.
+fn make_session_visible_from(cwd: &Path, session_id: &str) {
+    let Some(projects_dir) = dirs::home_dir().map(|home| home.join(".claude").join("projects"))
+    else {
+        return;
+    };
+    let file_name = format!("{session_id}.jsonl");
+    let target_dir = projects_dir.join(claude_project_dir_name(cwd));
+    if target_dir.join(&file_name).exists() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(&file_name);
+        if !candidate.is_file() {
+            continue;
+        }
+        if let Err(err) = std::fs::create_dir_all(&target_dir)
+            .and_then(|_| std::fs::copy(&candidate, target_dir.join(&file_name)).map(|_| ()))
+        {
+            tracing::warn!(
+                session_id,
+                source = %candidate.display(),
+                target = %target_dir.display(),
+                error = %err,
+                "failed to copy session transcript for fork; resume may not resolve"
+            );
+        } else {
+            tracing::info!(
+                session_id,
+                target = %target_dir.display(),
+                "copied session transcript so the fork can resume it here"
+            );
+        }
+        return;
+    }
+}
+
 fn claude_environment() -> impl Iterator<Item = (String, String)> {
     std::env::vars().filter(|(key, _)| key != "CLAUDECODE" && !key.starts_with("CLAUDE_CODE_"))
 }
 
 /// Run `claude auth status` with a timeout and return the `loggedIn` value.
-fn check_claude_auth_status() -> Option<bool> {
-    let mut cmd = std::process::Command::new("claude");
-    cmd.args(["auth", "status"])
+///
+/// Resolves the binary through the shared layered resolver (the same path the
+/// CLI-status pulldown and execution use) and normalizes it for the host, so a
+/// Windows `.cmd` shim is invoked via the command interpreter instead of the
+/// bare `claude` name — which `CreateProcessW` cannot launch and which bypasses
+/// the resolver's PATH discovery.
+async fn check_claude_auth_status() -> Option<bool> {
+    let resolved = crate::cli_resolver::resolve_cli(&cli_manifest::CLAUDE).await?;
+    let invocation = crate::spawn::prepare_invocation(
+        resolved.path,
+        vec!["auth".to_string(), "status".to_string()],
+    )
+    .ok()?;
+
+    let mut cmd = tokio::process::Command::new(&invocation.program);
+    cmd.args(&invocation.args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
@@ -231,30 +381,16 @@ fn check_claude_auth_status() -> Option<bool> {
         cmd.env("PATH", path);
     }
 
-    let mut child = cmd.spawn().ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+        .await
+        .ok()? // timed out
+        .ok()?; // spawn / io failure
 
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return Some(false);
-                }
-                let stdout = child.stdout.take()?;
-                let json: serde_json::Value =
-                    serde_json::from_reader(std::io::BufReader::new(stdout)).ok()?;
-                return json.get("loggedIn")?.as_bool();
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => return None,
-        }
+    if !output.status.success() {
+        return Some(false);
     }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    json.get("loggedIn")?.as_bool()
 }
 
 fn build_claude_path_env() -> Option<String> {
@@ -335,5 +471,43 @@ mod tests {
                 .any(|w| w == ["--model", "claude-sonnet-4-20250514"]),
             "model override must be passed: {params:?}"
         );
+    }
+
+    #[test]
+    fn fast_speed_opts_into_fast_mode_settings() {
+        let claude = ClaudeCode {
+            speed: Some(SpeedMode::Fast),
+            ..Default::default()
+        };
+        let params = claude
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(
+            params
+                .windows(2)
+                .any(|w| w == ["--settings", r#"{"fastMode":true}"#]),
+            "fast speed must enable fast mode via settings: {params:?}"
+        );
+    }
+
+    #[test]
+    fn standard_speed_adds_no_settings() {
+        for speed in [None, Some(SpeedMode::Standard)] {
+            let claude = ClaudeCode {
+                speed,
+                ..Default::default()
+            };
+            let params = claude
+                .build_command_builder()
+                .unwrap()
+                .params
+                .unwrap_or_default();
+            assert!(
+                !params.iter().any(|p| p == "--settings"),
+                "standard speed must not inject settings: {params:?}"
+            );
+        }
     }
 }

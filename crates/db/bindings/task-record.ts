@@ -32,4 +32,26 @@ sort_order: number,
  * Denormalized from the latest run's executor so UIs can show the agent
  * logo without a per-task run lookup. `None` until the first run.
  */
-last_executor: string | null, };
+last_executor: string | null, 
+/**
+ * One-line outcome of the latest completed run, derived from the final
+ * assistant message at run-completion time. Denormalized like
+ * `last_executor` so list surfaces can show "what this session did"
+ * without a transcript lookup. `None` until a run completes.
+ */
+last_summary: string | null, 
+/**
+ * Title of the session this one was forked from, snapshotted at fork time.
+ *
+ * Read from the fork edge rather than stored on the row, but carried here
+ * so the session list can render provenance without a per-task lookup. A
+ * snapshot, not a live join to the source's current title: the source can
+ * be renamed or deleted without breaking this label.
+ */
+forked_from_title: string | null, 
+/**
+ * Title of the task that delegated this one, snapshotted at delegation
+ * time. Same denormalization contract as `forked_from_title`, read from
+ * the delegate edge.
+ */
+delegated_from_title: string | null, };

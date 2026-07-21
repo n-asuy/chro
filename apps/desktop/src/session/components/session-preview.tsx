@@ -1,4 +1,6 @@
+import { AgentLogo } from "@/components/agent-logo";
 import { useLanguage } from "@/i18n";
+import { formatRelativeTime } from "@/session/lib/relative-time";
 import { taskApi } from "@/tasks/task-api";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
@@ -40,9 +42,27 @@ const truncate = (text: string): string =>
     ? `${text.slice(0, PREVIEW_MAX_CHARS).trimEnd()}…`
     : text;
 
+/** Pull the first question text out of a pending AskUserQuestion approval.
+ * Returns null for other tool approvals; the preview only surfaces questions
+ * the user can answer, not permission prompts. */
+const extractPendingQuestion = (
+  approval: { tool_name: string; tool_input: unknown } | null | undefined,
+): string | null => {
+  if (!approval || approval.tool_name !== "AskUserQuestion") return null;
+  const input = approval.tool_input as {
+    questions?: Array<{ question?: unknown }>;
+  } | null;
+  const entry = input?.questions?.find(
+    (item) => typeof item?.question === "string" && item.question.trim(),
+  );
+  return entry ? (entry.question as string).trim() : null;
+};
+
 interface PreviewTarget {
-  taskId: string;
-  updatedAt: string;
+  /** Snapshot of the hovered task, taken at hover time. Everything the header
+   * needs (title, agent, provenance, awaiting flag) is already on the row's
+   * task record, so the panel grounds itself without any extra fetch. */
+  task: StoredTask;
   rect: DOMRect;
 }
 
@@ -177,8 +197,7 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
     (task: StoredTask, el: HTMLElement) => {
       clearCloseTimer();
       const target: PreviewTarget = {
-        taskId: task.id,
-        updatedAt: task.updated_at,
+        task,
         rect: el.getBoundingClientRect(),
       };
       if (openRef.current) {
@@ -243,24 +262,44 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
     [clearOpenTimer, clearCloseTimer],
   );
 
+  const targetTask = view.target?.task ?? null;
   const query = useQuery({
     queryKey: [
       "task-last-message",
-      view.target?.taskId,
-      view.target?.updatedAt,
+      targetTask?.id,
+      targetTask?.updated_at,
     ],
-    queryFn: () => taskApi.lastExchange(view.target?.taskId ?? ""),
-    enabled: view.open && Boolean(view.target),
+    queryFn: () => taskApi.lastExchange(targetTask?.id ?? ""),
+    enabled: view.open && Boolean(targetTask),
     staleTime: 30_000,
     // Keep the prior exchange visible while sliding to a new row so the panel
     // updates smoothly instead of flashing a loading state on every move.
     placeholderData: keepPreviousData,
   });
 
+  // The question the agent is blocked on, fetched only while the hovered task
+  // is actually waiting on one. Lets the user decide whether to answer without
+  // opening the session.
+  const awaitingInput = Boolean(targetTask?.awaiting_input);
+  const pendingQuery = useQuery({
+    queryKey: ["task-pending-question", targetTask?.id],
+    queryFn: () => taskApi.pendingQuestion(targetTask?.id ?? ""),
+    enabled: view.open && awaitingInput,
+    staleTime: 10_000,
+  });
+  const pendingQuestion = awaitingInput
+    ? extractPendingQuestion(pendingQuery.data)
+    : null;
+
   const exchange = query.data;
   const hasContent = Boolean(exchange?.user || exchange?.assistant);
   const showLoading = query.isLoading || (query.isFetching && !hasContent);
   const position = view.target ? computePosition(view.target.rect) : null;
+  const provenance = targetTask?.forked_from_title
+    ? t("forkedFrom", { title: targetTask.forked_from_title })
+    : targetTask?.delegated_from_title
+      ? t("delegatedFrom", { title: targetTask.delegated_from_title })
+      : null;
 
   return (
     <PreviewContext.Provider value={controller}>
@@ -280,44 +319,87 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
                 maxHeight: position.maxHeight,
                 transition: `top ${SLIDE_MS}ms ease, left ${SLIDE_MS}ms ease`,
               }}
-              className="z-[200] overflow-y-auto overscroll-contain rounded-xl border border-border bg-popover px-3 py-2.5 text-[12px] leading-relaxed text-popover-foreground shadow-lg"
+              className="z-[200] flex flex-col overflow-hidden rounded-xl border border-border bg-popover px-3 py-2.5 text-[12px] leading-relaxed text-popover-foreground shadow-lg"
             >
-              {query.isError ? (
-                <span className="text-muted-foreground">
-                  {t("sessionPreviewError")}
+              {/* Grounding header, rendered from the hover-time task snapshot
+                  with no fetch: which session this is, run by which agent, how
+                  recently. Session state (spinner/pause/failure) is NOT
+                  repeated here; the row right next to the panel already shows
+                  it. */}
+              <div className="flex shrink-0 items-center gap-2">
+                <AgentLogo
+                  agent={targetTask?.last_executor}
+                  className="h-3.5 w-3.5 shrink-0"
+                />
+                <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
+                  {targetTask?.title}
                 </span>
-              ) : showLoading ? (
-                <span className="inline-flex items-center gap-2 text-muted-foreground">
-                  <Loader2
-                    className="h-3.5 w-3.5 animate-spin"
-                    aria-hidden="true"
-                  />
-                  {t("sessionPreviewLoading")}
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {targetTask ? formatRelativeTime(targetTask.updated_at) : ""}
                 </span>
-              ) : hasContent ? (
-                <div
-                  // Reset expand state when the panel slides to another session.
-                  key={view.target?.taskId}
-                  className="flex flex-col gap-2"
-                >
-                  {exchange?.user ? (
-                    <div className="rounded-md bg-custom-sidebar-background-80 px-3 py-2">
-                      <CollapsibleMessage fadeClassName="from-custom-sidebar-background-80">
-                        <UserMessageContent content={exchange.user} />
-                      </CollapsibleMessage>
-                    </div>
-                  ) : null}
-                  {exchange?.assistant ? (
-                    <div className="px-1">
-                      <Markdown>{truncate(exchange.assistant)}</Markdown>
-                    </div>
-                  ) : null}
+              </div>
+              {provenance ? (
+                <div className="mt-0.5 shrink-0 truncate text-[11px] text-muted-foreground">
+                  {provenance}
                 </div>
-              ) : (
-                <span className="text-muted-foreground">
-                  {t("sessionPreviewEmpty")}
-                </span>
-              )}
+              ) : null}
+              <div
+                // Reset expand/scroll state when the panel slides to another
+                // session.
+                key={targetTask?.id}
+                className="mt-2 flex min-h-0 flex-col gap-2"
+              >
+                {query.isError ? (
+                  <span className="text-muted-foreground">
+                    {t("sessionPreviewError")}
+                  </span>
+                ) : showLoading ? (
+                  <span className="inline-flex items-center gap-2 text-muted-foreground">
+                    <Loader2
+                      className="h-3.5 w-3.5 animate-spin"
+                      aria-hidden="true"
+                    />
+                    {t("sessionPreviewLoading")}
+                  </span>
+                ) : hasContent || pendingQuestion ? (
+                  <>
+                    {exchange?.user ? (
+                      <div className="shrink-0 rounded-md bg-custom-sidebar-background-80 px-3 py-2">
+                        <CollapsibleMessage fadeClassName="from-custom-sidebar-background-80">
+                          <UserMessageContent content={exchange.user} />
+                        </CollapsibleMessage>
+                      </div>
+                    ) : null}
+                    {pendingQuestion ? (
+                      <div className="shrink-0 rounded-md border border-border px-3 py-2">
+                        <div className="text-[11px] font-medium text-muted-foreground">
+                          {t("sessionAwaitingInput")}
+                        </div>
+                        <div className="mt-1 text-foreground">
+                          {pendingQuestion}
+                        </div>
+                      </div>
+                    ) : null}
+                    {exchange?.assistant ? (
+                      <div className="min-h-0 overflow-y-auto overscroll-contain px-1">
+                        <Markdown headings="flat">
+                          {truncate(exchange.assistant)}
+                        </Markdown>
+                        {/* Sticky bottom fade signalling clipped content; the
+                            reply scrolls underneath it and the trailing
+                            padding keeps the last line readable at scroll
+                            end. */}
+                        <div className="pointer-events-none sticky bottom-0 -mt-10 h-10 bg-gradient-to-b from-transparent to-popover" />
+                        <div className="h-4" />
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">
+                    {t("sessionPreviewEmpty")}
+                  </span>
+                )}
+              </div>
             </div>,
             document.body,
           )

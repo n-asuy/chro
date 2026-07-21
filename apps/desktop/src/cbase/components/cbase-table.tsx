@@ -1,9 +1,13 @@
 /**
- * BaseTable - Obsidian style file database table.
+ * File database table over the materialized cbase document.
+ *
+ * Layout: view tabs on the toolbar's left, meta and actions on its right, a
+ * filter chip row when filters exist, then the table. Cells render by property
+ * type and edit inline; edits surface through `onCellEdit` and are applied
+ * optimistically by the owner. Border hierarchy is strong under the header,
+ * weak between rows, and no vertical rules.
  */
 
-import { Badge } from "@chro/ui/badge";
-import { Button } from "@chro/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -13,7 +17,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
-import { Input } from "@chro/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import {
   Select,
@@ -26,53 +29,73 @@ import {
   ArrowUpDown,
   ChevronDown,
   ChevronUp,
+  FileText,
   Filter,
   Plus,
+  SlidersHorizontal,
+  Table2,
   X,
 } from "lucide-react";
-import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import {
-  comparePropertyValues,
-  formatPropertyValue,
-  resolvePropertyValue,
-} from "../runtime";
+  type FC,
+  type KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { comparePropertyValues, resolvePropertyValue } from "../runtime";
 import type {
-  FilterOperator,
   CbaseFilter,
   CbaseFilterCondition,
   CbaseProperty,
   CbaseRow,
   CbaseView,
+  FilterOperator,
+  SortDirection,
 } from "../types";
-import { resolveTableColumns } from "../view-model";
+import {
+  deriveSelectOptions,
+  isEditableProperty,
+  moveCellFocus,
+  resolveRowTitle,
+  resolveTableColumns,
+} from "../view-model";
+import { CellDisplay, CellEditor } from "./cbase-cells";
 
 interface BaseTableProps {
   rows: CbaseRow[];
   totalCount: number;
   view: CbaseView;
+  /** All views of the definition, rendered as tabs. */
+  views: CbaseView[];
+  activeViewId: string;
+  onViewSelect?: (viewId: string) => void;
   properties: Record<string, CbaseProperty>;
   definedFilters?: CbaseFilter[];
   viewFilters?: CbaseFilter[];
+  /** Whether definition changes (columns/sort/filters/widths) can be saved. */
+  canPersist: boolean;
+  /** Whether row frontmatter can be edited inline. */
+  canEditRows: boolean;
+  onOpenFile?: (filePath: string) => void;
+  onCellEdit?: (filePath: string, frontmatterKey: string, value: unknown) => void;
+  /** Fires when a cell editor opens or closes (owner holds live updates). */
+  onEditingChange?: (editing: boolean) => void;
   onViewFiltersChange?: (filters: CbaseFilter[]) => void;
-  onRowClick?: (filePath: string) => void;
   onColumnsChange?: (columnIds: string[]) => void;
   onSortChange?: (sortKey: string | null, direction: SortDirection) => void;
   onColumnWidthsChange?: (columnWidths: Record<string, number>) => void;
+  onNewNote?: () => void;
 }
 
-type SortDirection = "asc" | "desc";
 type FilterDraft = {
   propertyId: string;
   operator: FilterOperator;
   value: string;
 };
 
-type ColumnOption = {
-  propertyId: string;
-  label: string;
-  type: CbaseProperty["type"];
-  width: number | undefined;
-};
+type CellPosition = { row: number; col: number };
 
 const QUERY_ORDER_SORT_KEY = "__query_order__";
 const DEFAULT_COLUMN_WIDTH = 180;
@@ -92,6 +115,9 @@ const FILTER_OPERATOR_LABELS: Record<FilterOperator, string> = {
   is_empty: "is empty",
   is_not_empty: "is not empty",
 };
+
+const toolbarButtonClassName =
+  "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[13px] text-custom-text-200 transition-colors hover:bg-custom-background-90 hover:text-custom-text-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-custom-primary-100";
 
 function createDraft(): FilterDraft {
   return { propertyId: "", operator: "contains", value: "" };
@@ -156,7 +182,7 @@ function getSortDirectionLabels(
     return { asc: "False to true", desc: "True to false" };
   }
 
-  return { asc: "A → Z", desc: "Z → A" };
+  return { asc: "A to Z", desc: "Z to A" };
 }
 
 function defaultSortDirection(property?: CbaseProperty): SortDirection {
@@ -167,35 +193,18 @@ function isConditionFilter(filter: CbaseFilter): filter is CbaseFilterCondition 
   return !("and" in filter) && !("or" in filter) && !("not" in filter);
 }
 
-function countFilterConditions(filter: CbaseFilter): number {
-  if ("and" in filter) {
-    return filter.and.reduce(
-      (count, entry) => count + countFilterConditions(entry),
-      0,
-    );
-  }
-  if ("or" in filter) {
-    return filter.or.reduce(
-      (count, entry) => count + countFilterConditions(entry),
-      0,
-    );
-  }
-  if ("not" in filter) {
-    return countFilterConditions(filter.not);
-  }
-  return 1;
-}
-
-function formatConditionSummary(
+function formatConditionChip(
   filter: CbaseFilterCondition,
   properties: Record<string, CbaseProperty>,
-): string {
+): { label: string; op: string; value: string } {
   const property = properties[filter.property];
-  const label = property?.label ?? property?.key ?? filter.property;
-  const valueText = FILTER_OPS_WITHOUT_VALUE.includes(filter.op)
-    ? ""
-    : ` ${filterValueToString(filter.value)}`;
-  return `${label} ${FILTER_OPERATOR_LABELS[filter.op]}${valueText}`;
+  return {
+    label: property?.label ?? property?.key ?? filter.property,
+    op: FILTER_OPERATOR_LABELS[filter.op],
+    value: FILTER_OPS_WITHOUT_VALUE.includes(filter.op)
+      ? ""
+      : filterValueToString(filter.value),
+  };
 }
 
 function formatFilterSummary(
@@ -203,7 +212,8 @@ function formatFilterSummary(
   properties: Record<string, CbaseProperty>,
 ): string {
   if (isConditionFilter(filter)) {
-    return formatConditionSummary(filter, properties);
+    const chip = formatConditionChip(filter, properties);
+    return `${chip.label} ${chip.op}${chip.value ? ` ${chip.value}` : ""}`;
   }
   if ("and" in filter) {
     return `All of: ${filter.and
@@ -237,190 +247,89 @@ export const BaseTable: FC<BaseTableProps> = ({
   rows,
   totalCount,
   view,
+  views,
+  activeViewId,
+  onViewSelect,
   properties,
   definedFilters = [],
   viewFilters = [],
+  canPersist,
+  canEditRows,
+  onOpenFile,
+  onCellEdit,
+  onEditingChange,
   onViewFiltersChange,
-  onRowClick,
   onColumnsChange,
   onSortChange,
   onColumnWidthsChange,
+  onNewNote,
 }) => {
-  const toolbarButtonClassName =
-    "inline-flex items-center gap-1.5 rounded px-1.5 py-1 text-custom-text-200 transition-colors hover:bg-custom-background-90 hover:text-custom-text-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-custom-primary-100";
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [draft, setDraft] = useState<FilterDraft>(createDraft());
   const [sortPopoverOpen, setSortPopoverOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<string>(QUERY_ORDER_SORT_KEY);
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  // Local sort is the fallback for read-only definitions (query-language
+  // files); persistable definitions rely on the engine's ordering.
+  const [localSortKey, setLocalSortKey] = useState<string>(QUERY_ORDER_SORT_KEY);
+  const [localSortDirection, setLocalSortDirection] =
+    useState<SortDirection>("asc");
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(
     () => view.table?.column_widths ?? {},
   );
+  const [visibleColumnIds, setVisibleColumnIds] = useState<string[]>(() =>
+    resolveTableColumns(view, properties).map((column) => column.propertyId),
+  );
+  const [focused, setFocused] = useState<CellPosition | null>(null);
+  const [editing, setEditing] = useState<CellPosition | null>(null);
   const [activeResizeColumnId, setActiveResizeColumnId] = useState<
     string | null
   >(null);
-  const columnWidthsRef = useRef<Record<string, number>>(columnWidths);
+
+  const tableRef = useRef<HTMLTableElement>(null);
+  const columnWidthsRef = useRef(columnWidths);
   const resizeStateRef = useRef<{
     propertyId: string;
     startWidth: number;
     startX: number;
   } | null>(null);
 
-  const baseColumns = useMemo(
-    () => resolveTableColumns(view, properties),
-    [view, properties],
-  );
-  const baseColumnIds = useMemo(
-    () => baseColumns.map((column) => column.propertyId),
-    [baseColumns],
-  );
+  // Re-derive per-view UI state when the active view switches.
+  const viewId = view.id;
+  useEffect(() => {
+    setColumnWidths(view.table?.column_widths ?? {});
+    columnWidthsRef.current = view.table?.column_widths ?? {};
+    setVisibleColumnIds(
+      resolveTableColumns(view, properties).map((column) => column.propertyId),
+    );
+    setFocused(null);
+    setEditing(null);
+    // Only the view identity matters; properties refine labels lazily.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewId]);
+
+  useEffect(() => {
+    onEditingChange?.(editing !== null);
+  }, [editing, onEditingChange]);
+
   const allColumns = useMemo(
     () =>
-      Object.entries(properties)
-        .map(([propertyId, property]) => ({
-          propertyId,
-          label: property.label ?? property.key ?? propertyId,
-          type: property.type,
-          width: view.table?.column_widths?.[propertyId],
-        }))
-        .sort((left, right) =>
-          left.label.localeCompare(right.label, "ja", {
-            numeric: true,
-            sensitivity: "base",
-          }),
-        ),
-    [properties, view.table?.column_widths],
+      Object.keys(properties).map((propertyId) => ({
+        propertyId,
+        label:
+          properties[propertyId]?.label ?? properties[propertyId]?.key ?? propertyId,
+        type: properties[propertyId]?.type ?? ("text" as const),
+      })),
+    [properties],
   );
   const columnMap = useMemo(
-    () =>
-      Object.fromEntries(
-        allColumns.map((column) => [column.propertyId, column] as const),
-      ),
+    () => new Map(allColumns.map((column) => [column.propertyId, column])),
     [allColumns],
   );
-  const [visibleColumnIds, setVisibleColumnIds] =
-    useState<string[]>(baseColumnIds);
-
-  useEffect(() => {
-    setVisibleColumnIds(baseColumnIds);
-  }, [baseColumnIds, view.id]);
-
-  useEffect(() => {
-    const nextWidths = view.table?.column_widths ?? {};
-    columnWidthsRef.current = nextWidths;
-    setColumnWidths(nextWidths);
-  }, [view.id, view.table?.column_widths]);
-
-  useEffect(() => {
-    if (sortKey === QUERY_ORDER_SORT_KEY) return;
-    const exists = allColumns.some((column) => column.propertyId === sortKey);
-    if (!exists) {
-      setSortKey(QUERY_ORDER_SORT_KEY);
-      setSortDirection("asc");
-    }
-  }, [allColumns, sortKey]);
-
-  useEffect(() => {
-    const firstPropertyId = allColumns[0]?.propertyId ?? "";
-    setDraft((current) => {
-      const propertyId =
-        current.propertyId && properties[current.propertyId]
-          ? current.propertyId
-          : firstPropertyId;
-      const property = propertyId ? properties[propertyId] : undefined;
-      const operator = getAllowedFilterOperators(property).includes(
-        current.operator,
-      )
-        ? current.operator
-        : defaultFilterOperator(property);
-      const value =
-        property?.type === "checkbox" &&
-        current.value !== "true" &&
-        current.value !== "false"
-          ? ""
-          : current.value;
-
-      if (
-        propertyId === current.propertyId &&
-        operator === current.operator &&
-        value === current.value
-      ) {
-        return current;
-      }
-
-      return { propertyId, operator, value };
-    });
-  }, [allColumns, properties]);
-
   const visibleColumns = useMemo(
     () =>
       visibleColumnIds
-        .map((propertyId) => columnMap[propertyId])
-        .filter((column): column is ColumnOption => Boolean(column)),
+        .map((id) => columnMap.get(id))
+        .filter((column): column is NonNullable<typeof column> => !!column),
     [visibleColumnIds, columnMap],
-  );
-  const getColumnWidth = (column: ColumnOption) =>
-    columnWidths[column.propertyId] ?? column.width ?? DEFAULT_COLUMN_WIDTH;
-  const tableMinWidth = useMemo(
-    () =>
-      visibleColumns.reduce(
-        (total, column) => total + getColumnWidth(column),
-        0,
-      ),
-    [columnWidths, visibleColumns],
-  );
-
-  const activeSortProperty =
-    sortKey === QUERY_ORDER_SORT_KEY ? undefined : properties[sortKey];
-  const sortDirectionLabels = getSortDirectionLabels(activeSortProperty);
-  const draftProperty = draft.propertyId
-    ? properties[draft.propertyId]
-    : undefined;
-  const allowedDraftOperators = getAllowedFilterOperators(draftProperty);
-  const requiresDraftValue = !FILTER_OPS_WITHOUT_VALUE.includes(draft.operator);
-
-  const sortedRows = useMemo(() => {
-    if (sortKey === QUERY_ORDER_SORT_KEY) {
-      return rows;
-    }
-
-    const orderedRows = [...rows];
-    orderedRows.sort((a, b) => {
-      const aValue = resolvePropertyValue(a, sortKey, properties);
-      const bValue = resolvePropertyValue(b, sortKey, properties);
-      const diff = comparePropertyValues(aValue, bValue);
-      if (diff !== 0) {
-        return sortDirection === "asc" ? diff : -diff;
-      }
-
-      return a.filePath.localeCompare(b.filePath, "ja", {
-        numeric: true,
-        sensitivity: "base",
-      });
-    });
-    return orderedRows;
-  }, [rows, sortDirection, sortKey, properties]);
-
-  const formattedCount = useMemo(
-    () => new Intl.NumberFormat("en-US").format(totalCount),
-    [totalCount],
-  );
-
-  const totalActiveFilterCount = useMemo(
-    () =>
-      definedFilters.reduce(
-        (count, filter) => count + countFilterConditions(filter),
-        0,
-      ) +
-      viewFilters.reduce(
-        (count, filter) => count + countFilterConditions(filter),
-        0,
-      ),
-    [definedFilters, viewFilters],
-  );
-  const definedFilterEntries = useMemo(
-    () => createFilterEntries(definedFilters),
-    [definedFilters],
   );
 
   const hiddenColumnOptions = useMemo(
@@ -431,75 +340,96 @@ export const BaseTable: FC<BaseTableProps> = ({
     [allColumns, visibleColumnIds],
   );
 
-  const canAddFilter =
-    Boolean(onViewFiltersChange) &&
-    Boolean(draft.propertyId) &&
-    (!requiresDraftValue ||
-      (draftProperty?.type === "checkbox"
-        ? draft.value === "true" || draft.value === "false"
-        : draft.value.trim().length > 0));
+  const selectOptionsByColumn = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const column of visibleColumns) {
+      if (column.type === "select") {
+        map.set(
+          column.propertyId,
+          deriveSelectOptions(properties[column.propertyId], rows),
+        );
+      }
+    }
+    return map;
+  }, [visibleColumns, properties, rows]);
 
-  const updateDraft = (nextDraft: Partial<FilterDraft>) => {
-    setDraft((current) => ({ ...current, ...nextDraft }));
-  };
+  // Engine order for persistable definitions; local fallback sort otherwise.
+  const displayRows = useMemo(() => {
+    if (canPersist || localSortKey === QUERY_ORDER_SORT_KEY) return rows;
+    const sorted = [...rows].sort((a, b) => {
+      const compared = comparePropertyValues(
+        resolvePropertyValue(a, localSortKey, properties),
+        resolvePropertyValue(b, localSortKey, properties),
+      );
+      return localSortDirection === "asc" ? compared : -compared;
+    });
+    return sorted;
+  }, [rows, canPersist, localSortKey, localSortDirection, properties]);
+
+  const activeSortKey = canPersist
+    ? view.sort?.[0]?.by ?? QUERY_ORDER_SORT_KEY
+    : localSortKey;
+  const activeSortDirection: SortDirection = canPersist
+    ? view.sort?.[0]?.dir ?? "asc"
+    : localSortDirection;
+
+  const totalActiveFilterCount = useMemo(
+    () =>
+      definedFilters.length + viewFilters.length,
+    [definedFilters, viewFilters],
+  );
+
+  const definedFilterEntries = useMemo(
+    () => createFilterEntries(definedFilters),
+    [definedFilters],
+  );
+
+  const draftProperty = properties[draft.propertyId];
+  const draftNeedsValue = !FILTER_OPS_WITHOUT_VALUE.includes(draft.operator);
+
+  const updateDraft = (patch: Partial<FilterDraft>) =>
+    setDraft((current) => ({ ...current, ...patch }));
 
   const handleAddFilter = () => {
-    if (!onViewFiltersChange || !draft.propertyId || !canAddFilter) return;
-
-    const nextFilter: CbaseFilterCondition = {
-      property: draft.propertyId,
-      op: draft.operator,
-    };
-    if (requiresDraftValue) {
-      nextFilter.value =
-        draftProperty?.type === "checkbox"
-          ? draft.value === "true"
-          : draft.value;
+    if (!onViewFiltersChange || draft.propertyId === "") return;
+    const property = properties[draft.propertyId];
+    let condition: CbaseFilterCondition;
+    if (draftNeedsValue) {
+      let value: unknown = draft.value;
+      if (property?.type === "checkbox") value = draft.value === "true";
+      else if (property?.type === "number") {
+        const parsed = Number(draft.value);
+        value = Number.isFinite(parsed) ? parsed : draft.value;
+      }
+      condition = { property: draft.propertyId, op: draft.operator, value };
+    } else {
+      condition = { property: draft.propertyId, op: draft.operator };
     }
-
-    onViewFiltersChange([...viewFilters, nextFilter]);
-    updateDraft({ value: "" });
+    onViewFiltersChange([...viewFilters, condition]);
+    setDraft(createDraft());
+    setFilterPopoverOpen(false);
   };
 
   const handleRemoveViewFilter = (index: number) => {
     if (!onViewFiltersChange) return;
-    onViewFiltersChange(
-      viewFilters.filter((_, currentIndex) => currentIndex !== index),
-    );
+    onViewFiltersChange(viewFilters.filter((_, i) => i !== index));
   };
 
-  const handleClearViewFilters = () => {
-    if (!onViewFiltersChange) return;
-    onViewFiltersChange([]);
-  };
-
-  const toggleDirection = () => {
-    setSortDirection((dir) => {
-      const next = dir === "asc" ? "desc" : "asc";
-      onSortChange?.(sortKey === QUERY_ORDER_SORT_KEY ? null : sortKey, next);
-      return next;
-    });
-  };
-
-  const setColumnSort = (key: string) => {
-    if (sortKey === key) {
-      if (key === QUERY_ORDER_SORT_KEY) return;
-      toggleDirection();
-      return;
+  const setSort = (key: string, direction: SortDirection) => {
+    if (canPersist) {
+      onSortChange?.(key === QUERY_ORDER_SORT_KEY ? null : key, direction);
+    } else {
+      setLocalSortKey(key);
+      setLocalSortDirection(direction);
     }
-    const dir = defaultSortDirection(properties[key]);
-    setSortKey(key);
-    setSortDirection(dir);
-    onSortChange?.(key === QUERY_ORDER_SORT_KEY ? null : key, dir);
   };
 
-  const sortIndicator = (key: string) => {
-    if (sortKey !== key || key === QUERY_ORDER_SORT_KEY) return null;
-    return sortDirection === "asc" ? (
-      <ChevronUp className="h-3.5 w-3.5 text-custom-text-300" />
-    ) : (
-      <ChevronDown className="h-3.5 w-3.5 text-custom-text-300" />
-    );
+  const handleHeaderSort = (propertyId: string) => {
+    if (activeSortKey === propertyId) {
+      setSort(propertyId, activeSortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSort(propertyId, defaultSortDirection(properties[propertyId]));
+    }
   };
 
   const setColumnVisible = (propertyId: string, visible: boolean) => {
@@ -519,14 +449,7 @@ export const BaseTable: FC<BaseTableProps> = ({
     });
   };
 
-  const addHiddenColumn = (propertyId: string) => {
-    setVisibleColumnIds((current) => {
-      if (current.includes(propertyId)) return current;
-      const next = [...current, propertyId];
-      onColumnsChange?.(next);
-      return next;
-    });
-  };
+  // --- column resize (pointer-driven, persisted on release) ---
 
   useEffect(() => {
     if (!activeResizeColumnId) return;
@@ -534,21 +457,13 @@ export const BaseTable: FC<BaseTableProps> = ({
     const handlePointerMove = (event: PointerEvent) => {
       const resizeState = resizeStateRef.current;
       if (!resizeState) return;
-
       const nextWidth = Math.max(
         MIN_COLUMN_WIDTH,
         Math.round(resizeState.startWidth + event.clientX - resizeState.startX),
       );
-
       setColumnWidths((current) => {
-        if (current[resizeState.propertyId] === nextWidth) {
-          return current;
-        }
-
-        const next = {
-          ...current,
-          [resizeState.propertyId]: nextWidth,
-        };
+        if (current[resizeState.propertyId] === nextWidth) return current;
+        const next = { ...current, [resizeState.propertyId]: nextWidth };
         columnWidthsRef.current = next;
         return next;
       });
@@ -560,7 +475,6 @@ export const BaseTable: FC<BaseTableProps> = ({
       setActiveResizeColumnId(null);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-
       if (!resizeState) return;
       onColumnWidthsChange?.(columnWidthsRef.current);
     };
@@ -580,101 +494,172 @@ export const BaseTable: FC<BaseTableProps> = ({
     };
   }, [activeResizeColumnId, onColumnWidthsChange]);
 
+  const getColumnWidth = (propertyId: string): number =>
+    columnWidths[propertyId] ?? DEFAULT_COLUMN_WIDTH;
+
+  const tableMinWidth = useMemo(
+    () =>
+      visibleColumns.reduce(
+        (total, column) => total + getColumnWidth(column.propertyId),
+        0,
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visibleColumns, columnWidths],
+  );
+
+  // --- cell focus, keyboard navigation, and editing ---
+
+  const focusCell = (position: CellPosition) => {
+    setFocused(position);
+    const cell = tableRef.current?.querySelector<HTMLTableCellElement>(
+      `td[data-cell="${position.row}:${position.col}"]`,
+    );
+    cell?.focus();
+  };
+
+  const commitCell = (row: CbaseRow, propertyId: string, value: unknown) => {
+    const property = properties[propertyId];
+    if (property) onCellEdit?.(row.filePath, property.key, value);
+    setEditing(null);
+  };
+
+  const isCellEditable = (colIndex: number): boolean => {
+    if (!canEditRows || !onCellEdit || colIndex === 0) return false;
+    const column = visibleColumns[colIndex];
+    return !!column && isEditableProperty(properties[column.propertyId]);
+  };
+
+  const handleCellKeyDown = (
+    event: KeyboardEvent<HTMLTableCellElement>,
+    position: CellPosition,
+    row: CbaseRow,
+  ) => {
+    if (editing) return;
+    const column = visibleColumns[position.col];
+    if (!column) return;
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (position.col === 0) {
+        onOpenFile?.(row.filePath);
+      } else if (column.type === "checkbox") {
+        if (isCellEditable(position.col)) {
+          const current = resolvePropertyValue(row, column.propertyId, properties);
+          commitCell(row, column.propertyId, current !== true);
+        }
+      } else if (isCellEditable(position.col)) {
+        setEditing(position);
+      }
+      return;
+    }
+    if (event.key === " " && column.type === "checkbox") {
+      event.preventDefault();
+      if (isCellEditable(position.col)) {
+        const current = resolvePropertyValue(row, column.propertyId, properties);
+        commitCell(row, column.propertyId, current !== true);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      (event.target as HTMLElement).blur();
+      setFocused(null);
+      return;
+    }
+
+    const next = moveCellFocus(
+      position,
+      event.key,
+      displayRows.length,
+      visibleColumns.length,
+    );
+    if (next) {
+      event.preventDefault();
+      focusCell(next);
+    }
+  };
+
+  const handleCellClick = (position: CellPosition, row: CbaseRow) => {
+    const column = visibleColumns[position.col];
+    if (!column) return;
+    if (position.col === 0) {
+      onOpenFile?.(row.filePath);
+      return;
+    }
+    setFocused(position);
+    if (column.type === "checkbox") {
+      if (isCellEditable(position.col)) {
+        const current = resolvePropertyValue(row, column.propertyId, properties);
+        commitCell(row, column.propertyId, current !== true);
+      }
+      return;
+    }
+    if (isCellEditable(position.col)) setEditing(position);
+  };
+
   const rowHeightStyle =
     view.table?.row_height != null
       ? { height: `${view.table.row_height}px` }
       : undefined;
 
-  const openRow = (filePath: string) => {
-    onRowClick?.(filePath);
+  const sortIndicator = (propertyId: string) => {
+    if (activeSortKey !== propertyId) return null;
+    return activeSortDirection === "asc" ? (
+      <ChevronUp className="h-3.5 w-3.5 text-custom-text-300" />
+    ) : (
+      <ChevronDown className="h-3.5 w-3.5 text-custom-text-300" />
+    );
   };
+
+  const showFilterRow = totalActiveFilterCount > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-custom-background-100 font-workspace text-[13px] text-custom-text-100">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-custom-border-300 px-3 py-2">
-        <div className="flex items-center gap-3">
-          <span className="text-[14px] font-semibold text-custom-text-200">
-            {formattedCount} results
-          </span>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-custom-border-300 px-2.5 py-1.5">
+        <div className="flex items-center gap-0.5">
+          {views.map((tab) => (
+            <button
+              className={
+                tab.id === activeViewId
+                  ? "inline-flex items-center gap-1.5 rounded-md bg-custom-background-80 px-2.5 py-1 text-[13px] font-medium text-custom-text-100"
+                  : "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[13px] text-custom-text-300 transition-colors hover:text-custom-text-200"
+              }
+              key={tab.id}
+              onClick={() => onViewSelect?.(tab.id)}
+              type="button"
+            >
+              <Table2 className="h-3.5 w-3.5" />
+              {tab.name}
+            </button>
+          ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 text-[14px]">
+        <div className="flex flex-wrap items-center gap-0.5">
+          <span className="mr-2 text-xs tabular-nums text-custom-text-300">
+            {totalCount.toLocaleString()} results
+          </span>
+
           <Popover open={filterPopoverOpen} onOpenChange={setFilterPopoverOpen}>
             <PopoverTrigger asChild>
               <button type="button" className={toolbarButtonClassName}>
-                <Filter className="h-4 w-4" />
-                <span className="font-medium">Filter</span>
+                <Filter className="h-3.5 w-3.5" />
+                Filter
                 {totalActiveFilterCount > 0 ? (
-                  <span className="rounded bg-custom-background-80 px-1.5 py-0.5 text-xs text-custom-text-300">
+                  <span className="rounded-full bg-custom-primary-100/10 px-1.5 text-[11px] leading-4 text-custom-primary-100 tabular-nums">
                     {totalActiveFilterCount}
                   </span>
                 ) : null}
               </button>
             </PopoverTrigger>
-            <PopoverContent
-              align="end"
-              sideOffset={8}
-              className="show-scrollbar flex w-[460px] max-h-[min(70vh,560px)] flex-col overflow-y-auto rounded-md border border-border bg-popover p-0 text-popover-foreground shadow-none data-[state=open]:animate-none data-[state=closed]:animate-none"
-            >
-              <div className="border-b border-border px-3 py-2">
-                <p className="text-sm font-medium text-foreground">Filters</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Add filters to the current view and save them to this .cbase
-                  file.
+            <PopoverContent align="end" sideOffset={8} className="w-[420px] p-0">
+              <div className="border-b border-custom-border-200 px-3 py-2">
+                <p className="text-sm font-medium text-custom-text-100">
+                  Add filter
+                </p>
+                <p className="mt-0.5 text-xs text-custom-text-300">
+                  Saved to this view in the .cbase file.
                 </p>
               </div>
-
-              <div className="space-y-3 px-3 py-3">
-                <div className="space-y-2">
-                  {definedFilterEntries.map(({ filter, key }) => (
-                    <div
-                      key={`defined:${key}`}
-                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
-                    >
-                      <span className="min-w-0 flex-1 text-foreground">
-                        {formatFilterSummary(filter, properties)}
-                      </span>
-                      <Badge variant="outline" className="shrink-0 text-[10px]">
-                        Global
-                      </Badge>
-                    </div>
-                  ))}
-
-                  {viewFilters.map((filter, index) => (
-                    <div
-                      key={`view:${index}`}
-                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
-                    >
-                      <span className="min-w-0 flex-1 text-foreground">
-                        {formatFilterSummary(filter, properties)}
-                      </span>
-                      <div className="flex items-center gap-1">
-                        <Badge
-                          variant="outline"
-                          className="shrink-0 text-[10px]"
-                        >
-                          View
-                        </Badge>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveViewFilter(index)}
-                          disabled={!onViewFiltersChange}
-                          className="text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                          aria-label="Remove filter"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-
-                  {definedFilters.length === 0 && viewFilters.length === 0 ? (
-                    <p className="py-2 text-xs text-muted-foreground">
-                      No filters.
-                    </p>
-                  ) : null}
-                </div>
-
+              <div className="space-y-2 px-3 py-3">
                 <div className="grid grid-cols-[1.2fr_1fr_1.2fr] gap-2">
                   <Select
                     value={draft.propertyId}
@@ -687,7 +672,7 @@ export const BaseTable: FC<BaseTableProps> = ({
                     }}
                     disabled={!onViewFiltersChange || allColumns.length === 0}
                   >
-                    <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
+                    <SelectTrigger className="h-8 min-w-0 text-sm">
                       <SelectValue placeholder="Property" />
                     </SelectTrigger>
                     <SelectContent>
@@ -707,92 +692,61 @@ export const BaseTable: FC<BaseTableProps> = ({
                     onValueChange={(value) =>
                       updateDraft({ operator: value as FilterOperator })
                     }
-                    disabled={!onViewFiltersChange || !draft.propertyId}
+                    disabled={!onViewFiltersChange || draft.propertyId === ""}
                   >
-                    <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
-                      <SelectValue placeholder="Operator" />
+                    <SelectTrigger className="h-8 min-w-0 text-sm">
+                      <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {allowedDraftOperators.map((operator) => (
-                        <SelectItem key={operator} value={operator}>
-                          {FILTER_OPERATOR_LABELS[operator]}
+                      {getAllowedFilterOperators(draftProperty).map((op) => (
+                        <SelectItem key={op} value={op}>
+                          {FILTER_OPERATOR_LABELS[op]}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
 
-                  {requiresDraftValue ? (
+                  {draftNeedsValue ? (
                     draftProperty?.type === "checkbox" ? (
                       <Select
-                        value={draft.value}
+                        value={draft.value === "" ? "true" : draft.value}
                         onValueChange={(value) => updateDraft({ value })}
                         disabled={!onViewFiltersChange}
                       >
-                        <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
-                          <SelectValue placeholder="Value" />
+                        <SelectTrigger className="h-8 min-w-0 text-sm">
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="true">true</SelectItem>
                           <SelectItem value="false">false</SelectItem>
                         </SelectContent>
                       </Select>
-                    ) : draftProperty?.options?.length ? (
-                      <Select
-                        value={draft.value}
-                        onValueChange={(value) => updateDraft({ value })}
-                        disabled={!onViewFiltersChange}
-                      >
-                        <SelectTrigger className="h-9 min-w-0 border-border bg-background text-sm text-foreground">
-                          <SelectValue placeholder="Value" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {draftProperty.options.map((option) => (
-                            <SelectItem key={option} value={option}>
-                              {option}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
                     ) : (
-                      <Input
-                        value={draft.value}
+                      <input
+                        className="h-8 min-w-0 rounded-md border border-custom-border-300 bg-custom-background-100 px-2 text-sm text-custom-text-100 outline-none focus:border-custom-primary-100"
                         onChange={(event) =>
                           updateDraft({ value: event.target.value })
                         }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") handleAddFilter();
+                        }}
                         placeholder="Value"
-                        className="h-9 border-border bg-background text-sm"
-                        disabled={!onViewFiltersChange}
+                        value={draft.value}
                       />
                     )
                   ) : (
-                    <div className="flex h-9 items-center rounded border border-dashed border-border px-2 text-xs text-muted-foreground">
-                      No value needed
-                    </div>
+                    <div />
                   )}
                 </div>
-
-                <div className="flex items-center justify-between gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearViewFilters}
-                    disabled={!onViewFiltersChange || viewFilters.length === 0}
-                    className="h-8 rounded px-1 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground"
-                  >
-                    Clear view filters
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
+                <div className="flex justify-end">
+                  <button
+                    className="rounded-md bg-custom-primary-100/10 px-2.5 py-1 text-[13px] font-medium text-custom-primary-100 transition-colors hover:bg-custom-primary-100/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!onViewFiltersChange || draft.propertyId === ""}
                     onClick={handleAddFilter}
-                    disabled={!canAddFilter}
-                    className="h-8 gap-1 rounded px-1 text-xs hover:bg-transparent"
+                    type="button"
                   >
-                    <Plus className="h-3.5 w-3.5" />
                     Add filter
-                  </Button>
+                  </button>
                 </div>
               </div>
             </PopoverContent>
@@ -801,77 +755,59 @@ export const BaseTable: FC<BaseTableProps> = ({
           <Popover open={sortPopoverOpen} onOpenChange={setSortPopoverOpen}>
             <PopoverTrigger asChild>
               <button type="button" className={toolbarButtonClassName}>
-                <ArrowUpDown className="h-4 w-4" />
-                <span className="font-medium">Sort</span>
+                <ArrowUpDown className="h-3.5 w-3.5" />
+                Sort
               </button>
             </PopoverTrigger>
-            <PopoverContent
-              align="end"
-              sideOffset={8}
-              className="flex w-[320px] flex-col overflow-hidden rounded-md border border-border bg-popover p-0 text-popover-foreground shadow-none data-[state=open]:animate-none data-[state=closed]:animate-none"
-            >
-              <div className="border-b border-border px-3 py-2">
-                <p className="text-sm font-medium text-foreground">Sort by</p>
-              </div>
-              <div className="px-3 py-3">
-                <div className="flex gap-2">
-                  <Select
-                    value={sortKey}
-                    onValueChange={(value) => {
-                      const dir =
-                        value === QUERY_ORDER_SORT_KEY
-                          ? "asc"
-                          : defaultSortDirection(properties[value]);
-                      setSortKey(value);
-                      setSortDirection(dir);
-                      onSortChange?.(
-                        value === QUERY_ORDER_SORT_KEY ? null : value,
-                        dir,
-                      );
-                    }}
-                  >
-                    <SelectTrigger className="h-9 w-auto min-w-0 flex-1 border-border bg-background text-sm text-foreground">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={QUERY_ORDER_SORT_KEY}>
-                        query order
+            <PopoverContent align="end" sideOffset={8} className="w-[300px] p-3">
+              <div className="flex items-center gap-2">
+                <Select
+                  value={activeSortKey}
+                  onValueChange={(value) =>
+                    setSort(
+                      value,
+                      value === QUERY_ORDER_SORT_KEY
+                        ? "asc"
+                        : defaultSortDirection(properties[value]),
+                    )
+                  }
+                >
+                  <SelectTrigger className="h-8 min-w-0 flex-1 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={QUERY_ORDER_SORT_KEY}>
+                      Query order
+                    </SelectItem>
+                    {visibleColumns.map((column) => (
+                      <SelectItem
+                        key={column.propertyId}
+                        value={column.propertyId}
+                      >
+                        {column.label}
                       </SelectItem>
-                      {allColumns.map((column) => (
-                        <SelectItem
-                          key={column.propertyId}
-                          value={column.propertyId}
-                        >
-                          {column.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  <Select
-                    value={sortDirection}
-                    onValueChange={(value) => {
-                      setSortDirection(value as SortDirection);
-                      onSortChange?.(
-                        sortKey === QUERY_ORDER_SORT_KEY ? null : sortKey,
-                        value as SortDirection,
-                      );
-                    }}
-                    disabled={sortKey === QUERY_ORDER_SORT_KEY}
-                  >
-                    <SelectTrigger className="h-9 w-auto min-w-[132px] shrink-0 border-border bg-background text-sm text-foreground">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="desc">
-                        {sortDirectionLabels.desc}
-                      </SelectItem>
-                      <SelectItem value="asc">
-                        {sortDirectionLabels.asc}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={activeSortDirection}
+                  onValueChange={(value) =>
+                    setSort(activeSortKey, value as SortDirection)
+                  }
+                  disabled={activeSortKey === QUERY_ORDER_SORT_KEY}
+                >
+                  <SelectTrigger className="h-8 w-auto min-w-[120px] shrink-0 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="desc">
+                      {getSortDirectionLabels(properties[activeSortKey]).desc}
+                    </SelectItem>
+                    <SelectItem value="asc">
+                      {getSortDirectionLabels(properties[activeSortKey]).asc}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </PopoverContent>
           </Popover>
@@ -879,42 +815,36 @@ export const BaseTable: FC<BaseTableProps> = ({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button type="button" className={toolbarButtonClassName}>
-                <span className="font-medium">Properties</span>
-                <ChevronDown className="h-4 w-4" />
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Properties
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="show-scrollbar max-h-[min(70vh,560px)] w-64 overflow-y-auto shadow-none data-[state=open]:animate-none data-[state=closed]:animate-none"
+              className="show-scrollbar max-h-[min(70vh,560px)] w-64 overflow-y-auto"
             >
               <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              {allColumns.map((column) => {
-                const checked = visibleColumnIds.includes(column.propertyId);
-                const isOnlyVisibleColumn =
-                  checked && visibleColumnIds.length === 1;
-
-                return (
-                  <DropdownMenuCheckboxItem
-                    key={column.propertyId}
-                    checked={checked}
-                    disabled={isOnlyVisibleColumn}
-                    onCheckedChange={(nextChecked) =>
-                      setColumnVisible(column.propertyId, Boolean(nextChecked))
-                    }
-                  >
-                    {column.label}
-                  </DropdownMenuCheckboxItem>
-                );
-              })}
+              {visibleColumns.map((column) => (
+                <DropdownMenuCheckboxItem
+                  key={column.propertyId}
+                  checked
+                  disabled={visibleColumns.length === 1}
+                  onCheckedChange={() =>
+                    setColumnVisible(column.propertyId, false)
+                  }
+                >
+                  {column.label}
+                </DropdownMenuCheckboxItem>
+              ))}
               {hiddenColumnOptions.length > 0 ? (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Add to end</DropdownMenuLabel>
+                  <DropdownMenuLabel>Hidden</DropdownMenuLabel>
                   {hiddenColumnOptions.map((column) => (
                     <DropdownMenuItem
                       key={`add:${column.propertyId}`}
-                      onSelect={() => addHiddenColumn(column.propertyId)}
+                      onSelect={() => setColumnVisible(column.propertyId, true)}
                     >
                       {column.label}
                     </DropdownMenuItem>
@@ -923,12 +853,82 @@ export const BaseTable: FC<BaseTableProps> = ({
               ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
+
+          {onNewNote ? (
+            <button
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[13px] font-medium text-custom-primary-100 transition-colors hover:bg-custom-primary-100/10"
+              onClick={onNewNote}
+              type="button"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New
+            </button>
+          ) : null}
         </div>
       </div>
 
+      {showFilterRow ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-custom-border-200 px-2.5 py-1.5">
+          {definedFilterEntries.map(({ filter, key }) => (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-custom-border-300 bg-custom-background-90 py-0.5 pl-2 pr-2 text-xs text-custom-text-200"
+              key={`defined:${key}`}
+              title={formatFilterSummary(filter, properties)}
+            >
+              {isConditionFilter(filter) ? (
+                <FilterChipBody chip={formatConditionChip(filter, properties)} />
+              ) : (
+                <span className="max-w-[280px] truncate">
+                  {formatFilterSummary(filter, properties)}
+                </span>
+              )}
+              <span className="border-l border-custom-border-300 pl-1.5 text-[10.5px] uppercase tracking-wide text-custom-text-400">
+                base
+              </span>
+            </span>
+          ))}
+
+          {viewFilters.map((filter, index) => (
+            <span
+              className="inline-flex items-center gap-1 rounded-md border border-custom-border-300 bg-custom-background-90 py-0.5 pl-2 pr-1 text-xs text-custom-text-200"
+              key={`view:${JSON.stringify(filter)}:${index}`}
+              title={formatFilterSummary(filter, properties)}
+            >
+              {isConditionFilter(filter) ? (
+                <FilterChipBody chip={formatConditionChip(filter, properties)} />
+              ) : (
+                <span className="max-w-[280px] truncate">
+                  {formatFilterSummary(filter, properties)}
+                </span>
+              )}
+              <button
+                aria-label="Remove filter"
+                className="rounded p-0.5 text-custom-text-300 transition-colors hover:text-custom-text-100 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!onViewFiltersChange}
+                onClick={() => handleRemoveViewFilter(index)}
+                type="button"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+
+          {onViewFiltersChange ? (
+            <button
+              className="rounded-md px-1.5 py-0.5 text-xs text-custom-text-300 transition-colors hover:bg-custom-background-90 hover:text-custom-text-100"
+              onClick={() => setFilterPopoverOpen(true)}
+              type="button"
+            >
+              + Add filter
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="show-scrollbar min-h-0 flex-1 overflow-auto">
         <table
-          className="w-full min-w-full table-fixed border-collapse bg-custom-background-100"
+          className="w-full min-w-full table-fixed border-separate border-spacing-0 bg-custom-background-100"
+          ref={tableRef}
           style={
             tableMinWidth > 0 ? { minWidth: `${tableMinWidth}px` } : undefined
           }
@@ -939,40 +939,31 @@ export const BaseTable: FC<BaseTableProps> = ({
                 key={column.propertyId}
                 style={
                   index !== visibleColumns.length - 1
-                    ? { width: `${getColumnWidth(column)}px` }
+                    ? { width: `${getColumnWidth(column.propertyId)}px` }
                     : {}
                 }
               />
             ))}
           </colgroup>
-          <thead className="sticky top-0 z-10 bg-custom-background-100">
-            <tr className="h-11 border-b border-custom-border-300 text-[13px] font-medium text-custom-text-300">
+          <thead>
+            <tr className="h-9 text-[12.5px] font-medium text-custom-text-300">
               {visibleColumns.map((column, index) => (
                 <th
+                  className="group/th sticky top-0 z-10 border-b border-custom-border-300 bg-custom-background-100 px-3 text-left font-medium"
                   key={column.propertyId}
-                  className={
-                    index === visibleColumns.length - 1
-                      ? "relative px-3 text-left"
-                      : "relative border-r border-custom-border-300 px-3 text-left"
-                  }
                 >
                   <button
+                    className="inline-flex w-full items-center justify-between gap-2 text-left transition-colors hover:text-custom-text-100"
+                    onClick={() => handleHeaderSort(column.propertyId)}
                     type="button"
-                    onClick={() => setColumnSort(column.propertyId)}
-                    className={
-                      index === visibleColumns.length - 1
-                        ? "inline-flex w-full items-center justify-between gap-2 text-left hover:text-custom-text-200"
-                        : "inline-flex w-full items-center justify-between gap-2 pr-3 text-left hover:text-custom-text-200"
-                    }
                   >
-                    <span>{column.label}</span>
+                    <span className="truncate">{column.label}</span>
                     {sortIndicator(column.propertyId)}
                   </button>
                   {index !== visibleColumns.length - 1 ? (
                     <button
-                      type="button"
                       aria-label={`Resize ${column.label} column`}
-                      title={`Resize ${column.label} column`}
+                      className="absolute -right-1.5 top-0 z-10 h-full w-3 cursor-col-resize touch-none select-none border-0 bg-transparent p-0"
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -983,18 +974,18 @@ export const BaseTable: FC<BaseTableProps> = ({
                         event.stopPropagation();
                         resizeStateRef.current = {
                           propertyId: column.propertyId,
-                          startWidth: getColumnWidth(column),
+                          startWidth: getColumnWidth(column.propertyId),
                           startX: event.clientX,
                         };
                         setActiveResizeColumnId(column.propertyId);
                       }}
-                      className="absolute -right-1 top-0 z-10 h-full w-3 cursor-col-resize touch-none select-none border-0 bg-transparent p-0"
+                      type="button"
                     >
                       <span
                         className={
                           activeResizeColumnId === column.propertyId
-                            ? "absolute left-1/2 top-2 bottom-2 w-px -translate-x-1/2 bg-custom-text-200"
-                            : "absolute left-1/2 top-2 bottom-2 w-px -translate-x-1/2 bg-custom-border-300"
+                            ? "absolute bottom-1.5 left-1/2 top-1.5 w-px -translate-x-1/2 bg-custom-primary-100"
+                            : "absolute bottom-1.5 left-1/2 top-1.5 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/th:bg-custom-border-300"
                         }
                       />
                     </button>
@@ -1004,49 +995,119 @@ export const BaseTable: FC<BaseTableProps> = ({
             </tr>
           </thead>
           <tbody>
-            {sortedRows.length === 0 ? (
+            {displayRows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={Math.max(visibleColumns.length, 1)}
                   className="px-4 py-10 text-center text-[13px] text-custom-text-300"
+                  colSpan={Math.max(visibleColumns.length, 1)}
                 >
                   No matching files
                 </td>
               </tr>
             ) : (
-              sortedRows.map((row) => (
+              displayRows.map((row, rowIndex) => (
                 <tr
+                  className="group/row text-[13px] hover:bg-custom-background-90"
                   key={row.filePath}
-                  role="button"
-                  tabIndex={0}
-                  className="cursor-pointer border-b border-custom-border-300 text-[13px] hover:bg-custom-background-80"
                   style={rowHeightStyle}
-                  onClick={() => openRow(row.filePath)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      openRow(row.filePath);
-                    }
-                  }}
                 >
-                  {visibleColumns.map((column, index) => (
-                    <td
-                      key={column.propertyId}
-                      className={
-                        index === visibleColumns.length - 1
-                          ? "truncate px-3 text-custom-text-100"
-                          : "truncate border-r border-custom-border-300 px-3 text-custom-text-100"
-                      }
-                    >
-                      {formatPropertyValue(
-                        resolvePropertyValue(
-                          row,
-                          column.propertyId,
-                          properties,
-                        ),
-                      )}
-                    </td>
-                  ))}
+                  {visibleColumns.map((column, colIndex) => {
+                    const position = { row: rowIndex, col: colIndex };
+                    const isEditing =
+                      editing?.row === rowIndex && editing.col === colIndex;
+                    const value = resolvePropertyValue(
+                      row,
+                      column.propertyId,
+                      properties,
+                    );
+                    const editable = isCellEditable(colIndex);
+
+                    return (
+                      <td
+                        className="relative h-9 border-b border-custom-border-100 px-0 text-custom-text-100 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-custom-primary-100"
+                        data-cell={`${rowIndex}:${colIndex}`}
+                        key={column.propertyId}
+                        onClick={() => handleCellClick(position, row)}
+                        onFocus={() => setFocused(position)}
+                        onKeyDown={(event) =>
+                          handleCellKeyDown(event, position, row)
+                        }
+                        tabIndex={
+                          focused?.row === rowIndex && focused.col === colIndex
+                            ? 0
+                            : -1
+                        }
+                      >
+                        {isEditing ? (
+                          // Clicks inside the editor must not bubble to the
+                          // cell, which would immediately re-open the editor
+                          // that a commit just closed.
+                          // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
+                          <div
+                            className="flex min-h-9 items-center px-1.5"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <CellEditor
+                              onCancel={() => {
+                                setEditing(null);
+                                focusCell(position);
+                              }}
+                              onCommit={(next) => {
+                                commitCell(row, column.propertyId, next);
+                                focusCell(position);
+                              }}
+                              options={
+                                selectOptionsByColumn.get(column.propertyId) ??
+                                []
+                              }
+                              type={column.type}
+                              value={value}
+                            />
+                          </div>
+                        ) : colIndex === 0 ? (
+                          <span className="flex min-h-9 cursor-pointer items-center gap-2 px-3 font-medium">
+                            <FileText className="h-3.5 w-3.5 shrink-0 text-custom-text-300" />
+                            <span className="truncate underline-offset-[3px] group-hover/row:[&:hover]:underline">
+                              {resolveRowTitle(
+                                row,
+                                column.propertyId,
+                                properties,
+                              )}
+                            </span>
+                          </span>
+                        ) : column.type === "checkbox" ? (
+                          <span className="flex min-h-9 items-center px-3">
+                            <input
+                              checked={value === true}
+                              className="h-3.5 w-3.5 accent-custom-primary-100"
+                              disabled={!editable}
+                              onChange={() => {
+                                if (editable) {
+                                  commitCell(
+                                    row,
+                                    column.propertyId,
+                                    value !== true,
+                                  );
+                                }
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                              type="checkbox"
+                            />
+                          </span>
+                        ) : (
+                          <span
+                            className={
+                              editable
+                                ? "flex min-h-9 items-center rounded-[4px] px-3 ring-inset transition-shadow group-hover/row:[&:hover]:ring-1 group-hover/row:[&:hover]:ring-custom-border-300"
+                                : "flex min-h-9 items-center px-3"
+                            }
+                          >
+                            <CellDisplay type={column.type} value={value} />
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))
             )}
@@ -1056,3 +1117,15 @@ export const BaseTable: FC<BaseTableProps> = ({
     </div>
   );
 };
+
+const FilterChipBody: FC<{
+  chip: { label: string; op: string; value: string };
+}> = ({ chip }) => (
+  <span className="flex max-w-[320px] items-center gap-1 truncate">
+    <span className="font-semibold text-custom-text-100">{chip.label}</span>
+    <span>{chip.op}</span>
+    {chip.value !== "" ? (
+      <span className="font-semibold text-custom-text-100">{chip.value}</span>
+    ) : null}
+  </span>
+);

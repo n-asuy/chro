@@ -14,6 +14,7 @@ use ts_rs::TS;
 
 use crate::cli_manifest::{self, CliManifest};
 use crate::cli_resolver::{ResolutionSource, resolve_cli};
+use crate::spawn::prepare_invocation;
 
 /// Max time to wait for a `--version` probe before giving up.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,9 +70,15 @@ pub async fn probe_cli(manifest: &'static CliManifest) -> CliStatus {
 }
 
 async fn probe_version(path: &std::path::Path) -> Option<String> {
+    // Route through the same platform normalization as execution so a resolved
+    // Windows `.cmd` shim is probed via the command interpreter rather than
+    // spawned directly (which `CreateProcessW` cannot do).
+    let invocation = prepare_invocation(path.to_path_buf(), vec!["--version".to_string()]).ok()?;
     let output = tokio::time::timeout(
         VERSION_PROBE_TIMEOUT,
-        Command::new(path).arg("--version").output(),
+        Command::new(&invocation.program)
+            .args(&invocation.args)
+            .output(),
     )
     .await
     .ok()?

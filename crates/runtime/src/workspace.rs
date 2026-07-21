@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use filesystem::{
@@ -14,6 +14,12 @@ pub async fn canonicalize_path(path: &str) -> Result<PathBuf, RuntimeError> {
     if trimmed.is_empty() {
         return Err(RuntimeError::BadRequest("path must not be empty"));
     }
+
+    // A `~/...` directory (e.g. picked or typed when adding a project) must be
+    // expanded to the user's home before it can be stat'd; `fs::canonicalize`
+    // does not do this on its own.
+    let expanded = filesystem::expand_home_tilde(trimmed);
+    let trimmed = expanded.as_deref().unwrap_or(trimmed);
 
     let path_buf = PathBuf::from(trimmed);
     let metadata = fs::metadata(&path_buf)
@@ -124,6 +130,37 @@ impl<'a, R: Runtime> ProjectFileService<'a, R> {
         let fs_service = self.runtime.filesystem().clone();
         let relative = relative_path.to_string();
         self.run_blocking(move || fs_service.read_workspace_binary_file(&project_path, &relative))
+            .await
+    }
+
+    /// Read a text file under an explicit root other than this service's own
+    /// project root. Used when a resolved path matched a *secondary* candidate
+    /// (e.g. the project main checkout while this service is scoped to a
+    /// task-run worktree): the file must be read from the checkout it names, not
+    /// re-joined under this service's root. Containment is enforced against the
+    /// given `root` by the workspace reader.
+    pub async fn read_file_in(
+        &self,
+        root: &Path,
+        relative_path: &str,
+    ) -> Result<WorkspaceFile, RuntimeError> {
+        let root = root.to_path_buf();
+        let fs_service = self.runtime.filesystem().clone();
+        let relative = relative_path.to_string();
+        self.run_blocking(move || fs_service.read_workspace_file(&root, &relative))
+            .await
+    }
+
+    /// Binary counterpart to [`read_file_in`].
+    pub async fn read_binary_file_in(
+        &self,
+        root: &Path,
+        relative_path: &str,
+    ) -> Result<WorkspaceBinaryFile, RuntimeError> {
+        let root = root.to_path_buf();
+        let fs_service = self.runtime.filesystem().clone();
+        let relative = relative_path.to_string();
+        self.run_blocking(move || fs_service.read_workspace_binary_file(&root, &relative))
             .await
     }
 

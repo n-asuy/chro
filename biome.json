@@ -11,6 +11,7 @@
       ".claude",
       "apps/*/convex/_generated",
       "apps/*/convex/_generated/**",
+      "**/*.generated.ts",
       ".turbo",
       "dist",
       "build",

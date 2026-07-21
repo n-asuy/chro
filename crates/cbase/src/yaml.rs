@@ -31,6 +31,39 @@ pub fn yaml_to_json(value: &serde_yaml::Value) -> JsonValue {
     }
 }
 
+/// Convert a JSON value into its YAML equivalent (inverse of [`yaml_to_json`]).
+pub fn json_to_yaml(value: &JsonValue) -> serde_yaml::Value {
+    match value {
+        JsonValue::Null => serde_yaml::Value::Null,
+        JsonValue::Bool(b) => serde_yaml::Value::Bool(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_yaml::Value::Number(i.into())
+            } else if let Some(u) = n.as_u64() {
+                serde_yaml::Value::Number(u.into())
+            } else {
+                n.as_f64()
+                    .map(|f| serde_yaml::Value::Number(f.into()))
+                    .unwrap_or(serde_yaml::Value::Null)
+            }
+        }
+        JsonValue::String(s) => serde_yaml::Value::String(s.clone()),
+        JsonValue::Array(items) => {
+            serde_yaml::Value::Sequence(items.iter().map(json_to_yaml).collect())
+        }
+        JsonValue::Object(map) => {
+            let mut mapping = serde_yaml::Mapping::new();
+            for (key, val) in map {
+                mapping.insert(
+                    serde_yaml::Value::String(key.clone()),
+                    json_to_yaml(val),
+                );
+            }
+            serde_yaml::Value::Mapping(mapping)
+        }
+    }
+}
+
 fn number_to_json(n: &serde_yaml::Number) -> JsonValue {
     if let Some(i) = n.as_i64() {
         return JsonValue::Number(i.into());

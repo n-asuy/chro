@@ -1,3 +1,4 @@
+import { AgentLogo, hasAgentLogo } from "@/components/agent-logo";
 import { desktopFetch } from "@/lib/backend-client";
 import { slugOrId } from "@/lib/slug";
 import type { StoredTask } from "@/session/types";
@@ -286,6 +287,12 @@ function ReferenceRow({
   const task = taskId ? tasksById[taskId] : undefined;
   const path = refItem.path?.trim() || null;
   const isPathRef = refItem.kind === "file" || refItem.kind === "directory";
+  // Session/task rows show the logo of the agent that actually ran the
+  // referenced session, so the reference is identifiable by executor rather
+  // than a generic chat glyph. Falls back to the chat bubble when the
+  // referenced session has not run (no recognized executor) yet.
+  const executor = !isPathRef ? task?.last_executor : null;
+  const showAgentLogo = hasAgentLogo(executor);
 
   const title = useMemo(() => {
     if (refItem.label?.trim()) return refItem.label.trim();
@@ -320,8 +327,12 @@ function ReferenceRow({
   );
   const content = (
     <>
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-400">
-        <Icon className="h-3.5 w-3.5" />
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground">
+        {showAgentLogo ? (
+          <AgentLogo agent={executor} className="h-4 w-4" />
+        ) : (
+          <Icon className="h-4 w-4" />
+        )}
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">

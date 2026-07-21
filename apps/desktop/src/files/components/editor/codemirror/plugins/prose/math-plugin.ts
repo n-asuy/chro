@@ -7,6 +7,8 @@
  * - Block: $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
  */
 
+import { memoizeByDoc } from "../decoration-cache";
+import { hasDecorationRefresh } from "../decoration-refresh";
 import {
   Decoration,
   EditorView,
@@ -216,10 +218,14 @@ function findMathBlocks(state: EditorState): MathBlockInfo[] {
   return blocks;
 }
 
+// The block scan depends only on the document; memoize it so cursor movement
+// reuses the scan instead of re-walking the tree.
+const findMathBlocksCached = memoizeByDoc(findMathBlocks);
+
 function buildMathDecorations(state: EditorState): EditorRange<Decoration>[] {
   const decorations: EditorRange<Decoration>[] = [];
   const cursor = state.selection.main;
-  const blocks = findMathBlocks(state);
+  const blocks = findMathBlocksCached(state);
 
   for (const block of blocks) {
     const isEditing = cursorInNode(
@@ -263,7 +269,7 @@ const mathDecorationField = StateField.define<DecorationSet>({
     return RangeSet.of(buildMathDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || tr.effects.length > 0) {
+    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
       return RangeSet.of(buildMathDecorations(tr.state), true);
     }
     return value.map(tr.changes);

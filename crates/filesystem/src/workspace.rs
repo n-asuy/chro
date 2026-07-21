@@ -355,10 +355,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
         if !target.is_file() {
             return Err(FilesystemError::NotFile);
         }
@@ -385,10 +382,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
         if !target.is_file() {
             return Err(FilesystemError::NotFile);
         }
@@ -463,10 +457,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
 
         if let Some(parent) = target.parent() {
             if !parent.exists() {
@@ -500,10 +491,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
 
         if let Some(parent) = target.parent() {
             if !parent.exists() {
@@ -539,10 +527,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
         if !target.exists() {
             return Err(FilesystemError::NotFound);
         }
@@ -570,10 +555,7 @@ impl FilesystemService {
         if normalized_relative.as_os_str().is_empty() {
             return Err(FilesystemError::InvalidRelativePath);
         }
-        let target = root.join(&normalized_relative);
-        if !target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let target = resolve_within_root(root, &normalized_relative)?;
 
         fs::create_dir_all(&target)?;
 
@@ -616,12 +598,8 @@ impl FilesystemService {
             return Err(FilesystemError::InvalidRelativePath);
         }
 
-        let old_target = root.join(&old_normalized);
-        let new_target = root.join(&new_normalized);
-
-        if !old_target.starts_with(root) || !new_target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let old_target = resolve_within_root(root, &old_normalized)?;
+        let new_target = resolve_within_root(root, &new_normalized)?;
 
         if !old_target.exists() {
             return Err(FilesystemError::NotFound);
@@ -657,12 +635,8 @@ impl FilesystemService {
             return Err(FilesystemError::InvalidRelativePath);
         }
 
-        let source_target = root.join(&source_normalized);
-        let dest_target = root.join(&dest_normalized);
-
-        if !source_target.starts_with(root) || !dest_target.starts_with(root) {
-            return Err(FilesystemError::OutsideWorkspace);
-        }
+        let source_target = resolve_within_root(root, &source_normalized)?;
+        let dest_target = resolve_within_root(root, &dest_normalized)?;
 
         if !source_target.exists() {
             return Err(FilesystemError::NotFound);
@@ -729,6 +703,56 @@ fn ensure_workspace_dir(path: &Path) -> Result<(), FilesystemError> {
         return Err(FilesystemError::WorkspaceMissing);
     }
     Ok(())
+}
+
+/// Join `relative` under `root` and guarantee the result stays inside `root`,
+/// resolving symlinks.
+///
+/// `normalize_relative_path` already strips `..`, but the plain
+/// `target.starts_with(root)` check that used to guard every read/write is
+/// purely textual: a symlink located *inside* the workspace that points outside
+/// it slips through, so a write could follow it and clobber a file beyond the
+/// root (e.g. `~/.zshrc`). Canonicalizing the deepest existing ancestor (the
+/// target itself may not exist yet, for writes) resolves every symlink on the
+/// path and lets us re-check containment against the canonical root. A path that
+/// escapes through a symlink is rejected as `OutsideWorkspace`.
+fn resolve_within_root(
+    root: &Path,
+    normalized_relative: &Path,
+) -> Result<PathBuf, FilesystemError> {
+    let canon_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let target = root.join(normalized_relative);
+
+    // Walk up from `target` to its deepest existing ancestor, recording the
+    // not-yet-existing tail components, then canonicalize that ancestor so any
+    // symlinks in the chain are resolved before the containment check.
+    let mut probe = target.clone();
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let canon_existing = loop {
+        match fs::canonicalize(&probe) {
+            Ok(canonical) => break canonical,
+            Err(_) => {
+                let name = probe
+                    .file_name()
+                    .ok_or(FilesystemError::InvalidRelativePath)?
+                    .to_os_string();
+                trailing.push(name);
+                if !probe.pop() {
+                    return Err(FilesystemError::OutsideWorkspace);
+                }
+            }
+        }
+    };
+
+    if !canon_existing.starts_with(&canon_root) {
+        return Err(FilesystemError::OutsideWorkspace);
+    }
+
+    let mut resolved = canon_existing;
+    for name in trailing.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), FilesystemError> {
@@ -1197,6 +1221,90 @@ mod tests {
             .err()
             .unwrap();
         assert!(matches!(err, FilesystemError::InvalidRelativePath));
+    }
+
+    /// Writing to a symlink that lives inside the workspace but points outside it
+    /// must be rejected. `..` is already blocked; a symlink is the second escape
+    /// route, and following it on a write would clobber a file beyond the root.
+    #[cfg(unix)]
+    #[test]
+    fn write_through_symlink_escaping_workspace_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "original").unwrap();
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        symlink(&secret, workspace.join("escape")).unwrap();
+
+        let service = FilesystemService::new();
+        let err = service
+            .write_workspace_file(workspace, "escape", "overwritten")
+            .err()
+            .unwrap();
+        assert!(matches!(err, FilesystemError::OutsideWorkspace));
+        // The file outside the workspace must be untouched.
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "original");
+    }
+
+    /// Writing a new file *inside* a symlinked directory that escapes the
+    /// workspace must also be rejected (the escape is on an intermediate
+    /// component, not the leaf).
+    #[cfg(unix)]
+    #[test]
+    fn write_into_symlinked_directory_escaping_workspace_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let outside = tempdir().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        symlink(outside.path(), workspace.join("out")).unwrap();
+
+        let service = FilesystemService::new();
+        let err = service
+            .write_workspace_file(workspace, "out/new.txt", "data")
+            .err()
+            .unwrap();
+        assert!(matches!(err, FilesystemError::OutsideWorkspace));
+        assert!(!outside.path().join("new.txt").exists());
+    }
+
+    /// Reading through an escaping symlink is likewise blocked.
+    #[cfg(unix)]
+    #[test]
+    fn read_through_symlink_escaping_workspace_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "top secret").unwrap();
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        symlink(&secret, workspace.join("escape")).unwrap();
+
+        let service = FilesystemService::new();
+        let err = service
+            .read_workspace_file(workspace, "escape")
+            .err()
+            .unwrap();
+        assert!(matches!(err, FilesystemError::OutsideWorkspace));
+    }
+
+    /// Containment must not be over-broad: a symlink that stays *inside* the
+    /// workspace is still followed and read normally.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_pointing_inside_workspace_is_allowed() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir_all(workspace.join("real")).unwrap();
+        fs::write(workspace.join("real/file.txt"), "hello").unwrap();
+        symlink(workspace.join("real/file.txt"), workspace.join("alias.txt")).unwrap();
+
+        let service = FilesystemService::new();
+        let read = service.read_workspace_file(workspace, "alias.txt").unwrap();
+        assert!(read.content.contains("hello"));
     }
 
     #[test]
