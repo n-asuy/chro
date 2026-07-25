@@ -24,10 +24,13 @@ export type TabKind =
       path: string;
       taskRunId?: string;
     }
-  | { type: "diff"; runId: string; path?: string }
+  // Combined diff for a run: every changed file stacked. One tab per run —
+  // `runId` is the whole identity. A file is an anchor inside this tab, not a
+  // tab of its own (see `requestDiffReveal`), so it never enters the key.
+  | { type: "diff"; runId: string }
   // Combined working-tree diff for the project: every uncommitted change
-  // stacked as a diff (changed regions only), navigated via its file tree.
-  // One tab per project — `projectId` is the identity.
+  // stacked as a diff (changed regions only). One tab per project —
+  // `projectId` is the identity.
   | { type: "project-diff"; projectId: string }
   // In-app browser: the page renders directly in an iframe inside the pane.
   | { type: "browser"; browserId?: string; url?: string }
@@ -82,7 +85,7 @@ export function tabKey(kind: TabKind): TabKey {
         ? `file:${kind.taskRunId}:${kind.path}`
         : `file:${kind.path}`;
     case "diff":
-      return `diff:${kind.runId}:${kind.path ?? ""}`;
+      return `diff:${kind.runId}`;
     case "project-diff":
       return `project-diff:${kind.projectId}`;
     case "browser":

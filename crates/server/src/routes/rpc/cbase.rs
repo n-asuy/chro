@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 use super::path_resolve::require_internal;
 use crate::{ApiError, AppState};
 
+const DEFAULT_CBASE_PAGE_SIZE: usize = 250;
+const MAX_CBASE_PAGE_SIZE: usize = 1_000;
+const MAX_CBASE_DEFINITION_BYTES: usize = 512 * 1024;
+
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/projects/:project_id/cbase/query", post(query_cbase))
@@ -44,10 +48,28 @@ async fn run_query(
     root: PathBuf,
     content: String,
     base_path: Option<String>,
+    view_id: Option<String>,
+    offset: usize,
+    limit: usize,
 ) -> Result<CbaseDocument, ApiError> {
     let cache = state.cbase_index().clone();
+    let permit = state
+        .cbase_query_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
     tokio::task::spawn_blocking(move || {
-        cbase::query_cached(&root, &content, base_path.as_deref(), &cache)
+        let _permit = permit;
+        cbase::query_cached_page(
+            &root,
+            &content,
+            base_path.as_deref(),
+            &cache,
+            view_id.as_deref(),
+            offset,
+            limit,
+        )
     })
     .await
     .map_err(|err| ApiError::Internal(err.to_string()))?
@@ -69,6 +91,12 @@ struct CbaseQueryRequest {
     content: String,
     #[serde(default)]
     base_path: Option<String>,
+    #[serde(default)]
+    view_id: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 async fn query_cbase(
@@ -76,8 +104,29 @@ async fn query_cbase(
     Path(project_id): Path<String>,
     Json(request): Json<CbaseQueryRequest>,
 ) -> Result<Json<CbaseDocument>, ApiError> {
+    if request.content.len() > MAX_CBASE_DEFINITION_BYTES {
+        return Err(ApiError::BadRequest(
+            ".cbase definition exceeds the 512 KiB safety limit".into(),
+        ));
+    }
     let project_path = resolve_project_path(&state, &project_id).await?;
-    let document = run_query(&state, project_path, request.content, request.base_path).await?;
+    // Offset is only used to slice an already bounded row-reference vector;
+    // keeping the caller's value avoids duplicate pages for very large views.
+    let offset = request.offset.unwrap_or(0);
+    let limit = request
+        .limit
+        .unwrap_or(DEFAULT_CBASE_PAGE_SIZE)
+        .clamp(1, MAX_CBASE_PAGE_SIZE);
+    let document = run_query(
+        &state,
+        project_path,
+        request.content,
+        request.base_path,
+        request.view_id,
+        offset,
+        limit,
+    )
+    .await?;
     Ok(Json(document))
 }
 
@@ -106,7 +155,17 @@ async fn persist_cbase(
         .write_file(&resolved, &content)
         .await?;
 
-    let document = run_query(&state, project_path, content.clone(), Some(input.base_path)).await?;
+    let view_id = input.view_id.clone();
+    let document = run_query(
+        &state,
+        project_path,
+        content.clone(),
+        Some(input.base_path),
+        view_id,
+        0,
+        DEFAULT_CBASE_PAGE_SIZE,
+    )
+    .await?;
     Ok(Json(CbasePersistResponse { content, document }))
 }
 

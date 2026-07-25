@@ -1044,6 +1044,9 @@ impl ClaudeLogProcessor {
                 }
             }
             ClaudeJson::RateLimitEvent { .. } => {}
+            // Heartbeats for an in-flight tool call: the tool entry is already
+            // rendered, so they add nothing to the conversation.
+            ClaudeJson::ToolProgress { .. } => {}
             ClaudeJson::ApprovalResponse {
                 tool_name,
                 approval_status,
@@ -1165,9 +1168,14 @@ fn extract_version_from_model_id(model_id: &str) -> Option<String> {
 
     for (i, part) in parts.iter().enumerate() {
         if let Ok(major) = part.parse::<u32>() {
-            if i + 1 < parts.len() {
-                if let Ok(minor) = parts[i + 1].parse::<u32>() {
-                    return Some(format!("{major}.{minor}"));
+            // Treat the next segment as a minor version only when it looks like
+            // one (1-2 digits, e.g. "4-8" -> "4.8"), not a YYYYMMDD date
+            // snapshot on a single-major id (e.g. "opus-5-20260724" -> "5").
+            if let Some(next) = parts.get(i + 1) {
+                if next.len() <= 2 {
+                    if let Ok(minor) = next.parse::<u32>() {
+                        return Some(format!("{major}.{minor}"));
+                    }
                 }
             }
             return Some(format!("{major}"));
@@ -1607,6 +1615,20 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_tool_progress_heartbeat_is_silent() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"elapsed_time_seconds":390,"heartbeat":true,"parent_tool_use_id":"toolu_01P2","session_id":"fb365ed8","tool_name":"Bash","tool_use_id":"toolu_01P2-heartbeat-12","type":"tool_progress","uuid":"b5215571"}"#,
+        )
+        .unwrap();
+        assert!(matches!(json, ClaudeJson::ToolProgress { .. }));
+        assert_eq!(json.session_id(), Some("fb365ed8"));
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        assert!(patches.is_empty());
+    }
+
+    #[test]
     fn test_normalize_tool_use() {
         let mut processor = ClaudeLogProcessor::new();
         let provider = EntryIndexProvider::new();
@@ -1688,8 +1710,19 @@ mod tests {
     #[test]
     fn test_format_model_display_name() {
         assert_eq!(format_model_display_name("claude-fable-5"), "Fable 5");
+        assert_eq!(format_model_display_name("claude-opus-5"), "Opus 5");
         assert_eq!(format_model_display_name("claude-sonnet-5"), "Sonnet 5");
         assert_eq!(format_model_display_name("claude-opus-4-8"), "Opus 4.8");
+        // Dated single-major snapshots: the YYYYMMDD suffix must not be read as
+        // a minor version.
+        assert_eq!(
+            format_model_display_name("claude-opus-5-20260724"),
+            "Opus 5"
+        );
+        assert_eq!(
+            format_model_display_name("claude-opus-4-20250514"),
+            "Opus 4"
+        );
         assert_eq!(
             format_model_display_name("claude-opus-4-5-20251101"),
             "Opus 4.5"

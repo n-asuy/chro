@@ -49,36 +49,67 @@ pub enum WorkspaceFileEventType {
     Renamed,
 }
 
-const NORMALIZED_LOG_CACHE_CAPACITY: usize = 128;
+const NORMALIZED_LOG_CACHE_CAPACITY: usize = 32;
+const NORMALIZED_LOG_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+struct CachedNormalizedLog {
+    entries: Arc<Vec<LogEntry>>,
+    bytes: usize,
+}
 
 #[derive(Default)]
 struct NormalizedLogReplayCache {
-    entries: HashMap<Uuid, Arc<Vec<LogEntry>>>,
+    entries: HashMap<Uuid, CachedNormalizedLog>,
     order: VecDeque<Uuid>,
+    total_bytes: usize,
 }
 
 impl NormalizedLogReplayCache {
     fn get(&self, task_run_id: &Uuid) -> Option<Arc<Vec<LogEntry>>> {
-        self.entries.get(task_run_id).cloned()
+        self.entries
+            .get(task_run_id)
+            .map(|cached| cached.entries.clone())
     }
 
     fn insert(&mut self, task_run_id: Uuid, entries: Vec<LogEntry>) {
-        if self.entries.contains_key(&task_run_id) {
+        let bytes = entries.iter().fold(0usize, |total, entry| {
+            total.saturating_add(entry.approx_bytes())
+        });
+        if let Some(previous) = self.entries.remove(&task_run_id) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
             self.order.retain(|id| id != &task_run_id);
         }
 
-        self.entries.insert(task_run_id, Arc::new(entries));
+        if bytes > NORMALIZED_LOG_CACHE_BYTES {
+            return;
+        }
+
+        self.entries.insert(
+            task_run_id,
+            CachedNormalizedLog {
+                entries: Arc::new(entries),
+                bytes,
+            },
+        );
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
         self.order.push_back(task_run_id);
 
-        while self.entries.len() > NORMALIZED_LOG_CACHE_CAPACITY {
+        while self.entries.len() > NORMALIZED_LOG_CACHE_CAPACITY
+            || self.total_bytes > NORMALIZED_LOG_CACHE_BYTES
+        {
             if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
+                if let Some(removed) = self.entries.remove(&oldest) {
+                    self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+                }
+            } else {
+                break;
             }
         }
     }
 
     fn remove(&mut self, task_run_id: &Uuid) {
-        if self.entries.remove(task_run_id).is_some() {
+        if let Some(removed) = self.entries.remove(task_run_id) {
+            self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
             self.order.retain(|id| id != task_run_id);
         }
     }
@@ -296,6 +327,32 @@ impl Runtime for LocalRuntime {
                 .await;
         }
 
+        // Early-wake half of the same loop: when a delegated child suspends on
+        // an approval, rouse the delegating session so it can respond. Without
+        // this the gated child never completes and the barrier above never
+        // fires.
+        {
+            let hook_runtime = runtime.clone();
+            runtime
+                .container
+                .set_approval_pending_hook(Arc::new(move |run_id, approval_id, tool_name| {
+                    let hook_runtime = hook_runtime.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = runtime::TaskService::new(&hook_runtime)
+                            .notify_delegation_approval_pending(run_id, approval_id, tool_name)
+                            .await
+                        {
+                            tracing::warn!(
+                                %run_id,
+                                error = %err,
+                                "delegation approval-pending wake failed"
+                            );
+                        }
+                    });
+                }))
+                .await;
+        }
+
         Ok(runtime)
     }
 
@@ -450,8 +507,10 @@ impl Runtime for LocalRuntime {
 
         if is_run_cacheable {
             if let Some(cached_entries) = self.normalized_log_cache.read().await.get(&task_run_id) {
-                let cached_entries = cached_entries.as_ref().clone();
-                return Ok(stream::iter(cached_entries.into_iter().map(Ok)).boxed());
+                let len = cached_entries.len();
+                return Ok(stream::iter(0..len)
+                    .map(move |index| Ok(cached_entries[index].clone()))
+                    .boxed());
             }
         }
 
@@ -667,6 +726,10 @@ impl LocalRuntime {
 fn convert_worktree_event(event: &filesystem::WorktreeEvent) -> Option<WorkspaceFileEvent> {
     use filesystem::WorktreeEventKind;
 
+    if event.relative_path.is_empty() {
+        return None;
+    }
+
     // Hide dotfiles and dot-directories from the workspace tree.
     if event.relative_path.starts_with('.') || event.relative_path.contains("/.") {
         return None;
@@ -683,4 +746,48 @@ fn convert_worktree_event(event: &filesystem::WorktreeEvent) -> Option<Workspace
         relative_path: event.relative_path.clone(),
         is_directory: event.is_dir,
     })
+}
+
+#[cfg(test)]
+mod load_guard_tests {
+    use super::*;
+
+    #[test]
+    fn normalized_log_cache_evicts_oldest_run_by_count() {
+        let mut cache = NormalizedLogReplayCache::default();
+        let ids: Vec<_> = (0..=NORMALIZED_LOG_CACHE_CAPACITY)
+            .map(|_| Uuid::new_v4())
+            .collect();
+        for id in &ids {
+            cache.insert(*id, vec![LogEntry::Finished]);
+        }
+
+        assert!(cache.get(&ids[0]).is_none());
+        assert!(cache.get(ids.last().unwrap()).is_some());
+        assert_eq!(cache.entries.len(), NORMALIZED_LOG_CACHE_CAPACITY);
+        assert!(cache.total_bytes <= NORMALIZED_LOG_CACHE_BYTES);
+    }
+
+    #[test]
+    fn normalized_log_cache_rejects_single_oversized_run() {
+        let mut cache = NormalizedLogReplayCache::default();
+        let id = Uuid::new_v4();
+        cache.insert(
+            id,
+            vec![LogEntry::Stdout("x".repeat(NORMALIZED_LOG_CACHE_BYTES))],
+        );
+
+        assert!(cache.get(&id).is_none());
+        assert_eq!(cache.total_bytes, 0);
+    }
+
+    #[test]
+    fn watcher_resync_marker_is_not_exposed_as_a_file() {
+        let marker = filesystem::WorktreeEvent {
+            kind: filesystem::WorktreeEventKind::Modified,
+            relative_path: String::new(),
+            is_dir: true,
+        };
+        assert!(convert_worktree_event(&marker).is_none());
+    }
 }

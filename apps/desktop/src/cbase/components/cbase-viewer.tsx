@@ -1,3 +1,5 @@
+import { useRepoEvents } from "@/hooks/use-repo-events";
+import { writeProjectFile } from "@/lib/project-client";
 /**
  * BaseViewer - main component for viewing a .cbase file.
  *
@@ -17,15 +19,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { useRepoEvents } from "@/hooks/use-repo-events";
-import { writeProjectFile } from "@/lib/project-client";
 import { useProjectId } from "../../files/context/project-context";
 import { useFilesStore } from "../../files/state/files-store";
-import {
-  getCachedDocument,
-  setCachedDocument,
-} from "../cbase-document-cache";
 import { persistCbase, queryCbase, setCbaseProperty } from "../cbase-client";
+import { getCachedDocument, setCachedDocument } from "../cbase-document-cache";
 import type {
   CbaseDefinition,
   CbaseDocument,
@@ -36,6 +33,7 @@ import type {
 import {
   type PropertyOverlay,
   applyOverlay,
+  createDatasetPathFilter,
   datasetFolder,
   newNoteContent,
   nextUntitledPath,
@@ -55,8 +53,34 @@ interface BaseViewerProps {
   onContentChange?: (content: string) => void;
 }
 
+const CBASE_PAGE_SIZE = 250;
+const CBASE_REFRESH_SETTLE_MS = 250;
+
 const allDocumentRows = (doc: CbaseDocument): CbaseRow[] =>
   doc.views.flatMap((result) => result.rows);
+
+const mergeDocumentPage = (
+  current: CbaseDocument | null,
+  page: CbaseDocument,
+): CbaseDocument => {
+  const incoming = page.views[0];
+  if (!current || !incoming || incoming.pageOffset === 0) return page;
+  const existing = current.views.find(
+    (result) => result.view.id === incoming.view.id,
+  );
+  if (!existing || incoming.pageOffset !== existing.rows.length) return page;
+
+  return {
+    ...page,
+    views: [
+      {
+        ...incoming,
+        pageOffset: 0,
+        rows: [...existing.rows, ...incoming.rows],
+      },
+    ],
+  };
+};
 
 export const BaseViewer: FC<BaseViewerProps> = ({
   content,
@@ -71,35 +95,54 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   const [document, setDocument] = useState<CbaseDocument | null>(() =>
     getCachedDocument(projectId, basePath, content),
   );
+  const documentRef = useRef(document);
+  documentRef.current = document;
   const [parseError, setParseError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [activeViewId, setActiveViewId] = useState<string | null>(
+    () => document?.views[0]?.view.id ?? null,
+  );
+  const activeViewIdRef = useRef(activeViewId);
+  activeViewIdRef.current = activeViewId;
   const [overlay, setOverlay] = useState<PropertyOverlay>({});
   // Set after a persist so the resulting content change does not re-query.
   const skipNextQuery = useRef(false);
   // Supersession counter: bumping it cancels any in-flight query's effects.
   const queryVersion = useRef(0);
+  const queryControllerRef = useRef<AbortController | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // While a cell editor is open, incoming refreshes are parked here and
   // applied when the editor closes, so rows never move mid-edit.
   const editingRef = useRef(false);
-  const pendingDocRef = useRef<CbaseDocument | null>(null);
+  const pendingDocRef = useRef<{
+    document: CbaseDocument;
+    append: boolean;
+  } | null>(null);
 
   const applyDocument = useCallback(
-    (doc: CbaseDocument) => {
+    (doc: CbaseDocument, append = false) => {
       if (doc.parseError) {
         setParseError(doc.parseError);
+        documentRef.current = null;
         setDocument(null);
         return;
       }
+      const next = append ? mergeDocumentPage(documentRef.current, doc) : doc;
       setParseError(null);
-      setDocument(doc);
-      setCachedDocument(projectId, basePath, content, doc);
-      setOverlay((current) => settleOverlay(allDocumentRows(doc), current));
+      documentRef.current = next;
+      setDocument(next);
+      setCachedDocument(projectId, basePath, content, next);
+      setOverlay((current) => settleOverlay(allDocumentRows(next), current));
       setActiveViewId((prev) => {
-        const views = doc.definition?.views ?? [];
+        const views = next.definition?.views ?? [];
         if (prev && views.some((view) => view.id === prev)) return prev;
-        const fallback = views.find((view) => view.default) ?? views[0];
+        const returnedViewId = next.views[0]?.view.id;
+        const fallback =
+          views.find((view) => view.id === returnedViewId) ??
+          views.find((view) => view.default) ??
+          views[0];
         return fallback?.id ?? null;
       });
     },
@@ -109,31 +152,52 @@ export const BaseViewer: FC<BaseViewerProps> = ({
   // Silent refreshes (file-change events) keep the current table on screen
   // instead of flashing the loading state.
   const runQuery = useCallback(
-    (silent: boolean) => {
+    (
+      silent: boolean,
+      viewId?: string,
+      offset = 0,
+      append = false,
+      limit = CBASE_PAGE_SIZE,
+    ) => {
       if (!projectId) return;
+      queryControllerRef.current?.abort();
+      const controller = new AbortController();
+      queryControllerRef.current = controller;
       queryVersion.current += 1;
       const version = queryVersion.current;
-      if (!silent) {
+      if (append) {
+        setIsLoadingMore(true);
+      } else if (!silent) {
         setIsLoading(true);
         setLoadError(null);
       }
 
-      queryCbase(projectId, content, basePath)
+      queryCbase(projectId, content, basePath, {
+        viewId,
+        offset,
+        limit,
+        signal: controller.signal,
+      })
         .then((doc) => {
           if (version !== queryVersion.current) return;
           if (silent && editingRef.current) {
-            pendingDocRef.current = doc;
+            pendingDocRef.current = { document: doc, append };
             return;
           }
-          applyDocument(doc);
+          applyDocument(doc, append);
         })
         .catch((e) => {
           if (version !== queryVersion.current) return;
-          if (!silent)
-            setLoadError(e instanceof Error ? e.message : String(e));
+          if (e instanceof DOMException && e.name === "AbortError") return;
+          if (!silent) setLoadError(e instanceof Error ? e.message : String(e));
         })
         .finally(() => {
-          if (version === queryVersion.current) setIsLoading(false);
+          if (version !== queryVersion.current) return;
+          if (queryControllerRef.current === controller) {
+            queryControllerRef.current = null;
+          }
+          setIsLoading(false);
+          setIsLoadingMore(false);
         });
     },
     [content, basePath, projectId, applyDocument],
@@ -150,41 +214,64 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     }
     const hasFreshCache =
       getCachedDocument(projectId, basePath, content) !== null;
-    runQuery(hasFreshCache);
+    const cachedViewId = documentRef.current?.views[0]?.view.id;
+    runQuery(hasFreshCache, cachedViewId);
     return () => {
       queryVersion.current += 1;
+      queryControllerRef.current?.abort();
+      queryControllerRef.current = null;
     };
   }, [runQuery, projectId, basePath, content]);
 
   const definition = document?.definition ?? null;
 
-  // Rows are workspace files, so the view follows worktree file events. The
-  // filter stays loose (a false positive only costs a no-op re-query): all
-  // `.md` files for the default markdown datasets; anything but the `.cbase`
-  // itself when the dataset includes other file kinds. Changes to this file
-  // arrive through the editor's `content` prop, not through events.
-  const datasetIncludesOnlyMarkdown = (
-    definition?.dataset.include ?? ["**/*.md"]
-  ).every((glob) => glob.endsWith(".md"));
+  // Rows follow workspace events, narrowed to the common glob forms used by
+  // the active dataset. Uncommon glob syntax deliberately falls back to
+  // match-all so the table can never become stale from a false negative.
+  const datasetPathFilter = useMemo(
+    () => createDatasetPathFilter(definition?.dataset),
+    [definition?.dataset],
+  );
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      const currentResult = documentRef.current?.views[0];
+      const limit = Math.max(
+        CBASE_PAGE_SIZE,
+        currentResult?.rows.length ?? CBASE_PAGE_SIZE,
+      );
+      runQuery(true, activeViewIdRef.current ?? undefined, 0, false, limit);
+    }, CBASE_REFRESH_SETTLE_MS);
+  }, [runQuery]);
+
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    [],
+  );
+
   useRepoEvents(projectId ? { projectId } : undefined, {
     channels: ["files"],
     pathFilter: (path) =>
-      datasetIncludesOnlyMarkdown
-        ? path.endsWith(".md")
-        : basePath !== path && basePath !== `/${path}`,
-    onInvalidate: () => runQuery(true),
+      basePath !== path && basePath !== `/${path}` && datasetPathFilter(path),
+    onInvalidate: scheduleRefresh,
   });
 
-  const handleEditingChange = useCallback((editing: boolean) => {
-    editingRef.current = editing;
-    if (!editing && pendingDocRef.current) {
-      const pending = pendingDocRef.current;
-      pendingDocRef.current = null;
-      applyDocument(pending);
-    }
-    // applyDocument is stable.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyDocument]);
+  const handleEditingChange = useCallback(
+    (editing: boolean) => {
+      editingRef.current = editing;
+      if (!editing && pendingDocRef.current) {
+        const pending = pendingDocRef.current;
+        pendingDocRef.current = null;
+        applyDocument(pending.document, pending.append);
+      }
+      // applyDocument is stable.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [applyDocument],
+  );
 
   const activeView = useMemo(() => {
     if (!definition) return null;
@@ -219,13 +306,27 @@ export const BaseViewer: FC<BaseViewerProps> = ({
       if (!projectId || !basePath) return;
       skipNextQuery.current = true;
       // Optimistically reflect the definition change in the editor.
-      setDocument({ ...document, definition: updated });
-      persistCbase(projectId, basePath, updated, effectiveProperties)
+      const optimistic = { ...document, definition: updated };
+      documentRef.current = optimistic;
+      setDocument(optimistic);
+      persistCbase(
+        projectId,
+        basePath,
+        updated,
+        effectiveProperties,
+        activeViewId ?? undefined,
+      )
         .then((result) => {
+          documentRef.current = result.document;
           setDocument(result.document);
           // Persist changes the file content, so cache under the new content
           // to keep the next remount's cache hit accurate.
-          setCachedDocument(projectId, basePath, result.content, result.document);
+          setCachedDocument(
+            projectId,
+            basePath,
+            result.content,
+            result.document,
+          );
           onContentChange?.(result.content);
         })
         .catch((e) => {
@@ -233,7 +334,14 @@ export const BaseViewer: FC<BaseViewerProps> = ({
           setLoadError(e instanceof Error ? e.message : String(e));
         });
     },
-    [document, projectId, basePath, effectiveProperties, onContentChange],
+    [
+      document,
+      projectId,
+      basePath,
+      effectiveProperties,
+      activeViewId,
+      onContentChange,
+    ],
   );
 
   const handleColumnsChange = useCallback(
@@ -340,8 +448,11 @@ export const BaseViewer: FC<BaseViewerProps> = ({
 
   const handleNewNote = useCallback(() => {
     if (!projectId || !definition || !activeView) return;
-    const folder = definition.template?.folder ?? datasetFolder(definition.dataset);
-    const existing = document ? allDocumentRows(document).map((row) => row.filePath) : [];
+    const folder =
+      definition.template?.folder ?? datasetFolder(definition.dataset);
+    const existing = document
+      ? allDocumentRows(document).map((row) => row.filePath)
+      : [];
     const path = nextUntitledPath(folder, existing);
     const noteContent =
       definition.template?.body != null
@@ -364,6 +475,20 @@ export const BaseViewer: FC<BaseViewerProps> = ({
     effectiveProperties,
     handleRowClick,
   ]);
+
+  const handleViewSelect = useCallback(
+    (viewId: string) => {
+      if (viewId === activeViewId) return;
+      setActiveViewId(viewId);
+      runQuery(false, viewId);
+    },
+    [activeViewId, runQuery],
+  );
+
+  const handleLoadMore = useCallback(() => {
+    if (!viewResult?.hasMore || isLoadingMore || !activeView) return;
+    runQuery(true, activeView.id, overlaidRows.length, true, CBASE_PAGE_SIZE);
+  }, [viewResult, isLoadingMore, activeView, runQuery, overlaidRows.length]);
 
   if (parseError) {
     return (
@@ -413,15 +538,20 @@ export const BaseViewer: FC<BaseViewerProps> = ({
           definedFilters={definition.filters ?? []}
           onCellEdit={canEditRows ? handleCellEdit : undefined}
           onColumnsChange={canPersist ? handleColumnsChange : undefined}
-          onColumnWidthsChange={canPersist ? handleColumnWidthsChange : undefined}
+          onColumnWidthsChange={
+            canPersist ? handleColumnWidthsChange : undefined
+          }
           onEditingChange={handleEditingChange}
+          onLoadMore={handleLoadMore}
           onNewNote={canEditRows ? handleNewNote : undefined}
           onOpenFile={handleRowClick}
           onSortChange={canPersist ? handleSortChange : undefined}
           onViewFiltersChange={canPersist ? handleViewFiltersChange : undefined}
-          onViewSelect={setActiveViewId}
+          onViewSelect={handleViewSelect}
           properties={effectiveProperties}
           rows={overlaidRows}
+          hasMore={viewResult.hasMore}
+          isLoadingMore={isLoadingMore}
           totalCount={viewResult.totalCount}
           view={activeView}
           viewFilters={activeView.filters ?? []}

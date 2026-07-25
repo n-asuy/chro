@@ -10,5 +10,6 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Task { command }) => {
             chro_server::cli::run_task(&command, cli.project.as_deref())
         }
+        Some(Commands::Approvals { command }) => chro_server::cli::run_approvals(&command),
     }
 }

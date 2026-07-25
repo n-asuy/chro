@@ -45,6 +45,7 @@ const BUILT_IN_PROPERTIES: &[BuiltIn] = &[
         property_type: CbasePropertyType::Text,
     },
 ];
+const MAX_INFERRED_FRONTMATTER_PROPERTIES: usize = 512;
 
 /// Merge explicit properties with inferred built-in and frontmatter properties.
 /// Explicit declarations always win; built-ins and frontmatter keys only fill
@@ -75,21 +76,32 @@ pub fn merge_inferred_properties(
         known_keys.insert(built_in.key.to_string());
     }
 
-    // Collect candidate values per frontmatter key, in first-seen order.
-    let mut values_by_key: IndexMap<String, Vec<JsonValue>> = IndexMap::new();
+    // Infer incrementally in first-seen key order. Retaining a clone of every
+    // value here used to temporarily duplicate the entire frontmatter index.
+    let mut inferred_by_key: IndexMap<String, Option<CbasePropertyType>> = IndexMap::new();
     for row in rows {
         for (key, value) in &row.values {
             if known_keys.contains(key) {
                 continue;
             }
-            values_by_key
-                .entry(key.clone())
-                .or_default()
-                .push(value.clone());
+            if !inferred_by_key.contains_key(key)
+                && inferred_by_key.len() >= MAX_INFERRED_FRONTMATTER_PROPERTIES
+            {
+                continue;
+            }
+            let inferred = inferred_by_key.entry(key.clone()).or_insert(None);
+            let Some(observed) = infer_value_type(value) else {
+                continue;
+            };
+            *inferred = Some(match *inferred {
+                None => observed,
+                Some(current) if current == observed => current,
+                Some(_) => CbasePropertyType::Text,
+            });
         }
     }
 
-    for (key, values) in &values_by_key {
+    for (key, inferred) in &inferred_by_key {
         if known_keys.contains(key) {
             continue;
         }
@@ -99,7 +111,7 @@ pub fn merge_inferred_properties(
             CbaseProperty {
                 key: key.clone(),
                 label: Some(default_label(key)),
-                property_type: infer_property_type(values),
+                property_type: inferred.unwrap_or(CbasePropertyType::Text),
                 required: None,
                 default: None,
                 options: None,
@@ -143,39 +155,17 @@ fn make_unique_property_id(key: &str, properties: &IndexMap<String, CbasePropert
     id
 }
 
-fn infer_property_type(values: &[JsonValue]) -> CbasePropertyType {
-    let samples: Vec<&JsonValue> = values
-        .iter()
-        .filter(|value| {
-            !value.is_null() && !matches!(value, JsonValue::String(s) if s.trim().is_empty())
-        })
-        .collect();
-
-    if samples.is_empty() {
-        return CbasePropertyType::Text;
+fn infer_value_type(value: &JsonValue) -> Option<CbasePropertyType> {
+    match value {
+        JsonValue::Null => None,
+        JsonValue::String(value) if value.trim().is_empty() => None,
+        JsonValue::Array(_) => Some(CbasePropertyType::MultiSelect),
+        JsonValue::Bool(_) => Some(CbasePropertyType::Checkbox),
+        JsonValue::Number(_) => Some(CbasePropertyType::Number),
+        JsonValue::String(value) if looks_like_date(value) => Some(CbasePropertyType::Date),
+        JsonValue::String(value) if looks_like_url(value) => Some(CbasePropertyType::Url),
+        _ => Some(CbasePropertyType::Text),
     }
-    if samples.iter().all(|v| v.is_array()) {
-        return CbasePropertyType::MultiSelect;
-    }
-    if samples.iter().all(|v| v.is_boolean()) {
-        return CbasePropertyType::Checkbox;
-    }
-    if samples.iter().all(|v| v.is_number()) {
-        return CbasePropertyType::Number;
-    }
-    if samples
-        .iter()
-        .all(|v| v.as_str().is_some_and(looks_like_date))
-    {
-        return CbasePropertyType::Date;
-    }
-    if samples
-        .iter()
-        .all(|v| v.as_str().is_some_and(looks_like_url))
-    {
-        return CbasePropertyType::Url;
-    }
-    CbasePropertyType::Text
 }
 
 fn looks_like_date(value: &str) -> bool {

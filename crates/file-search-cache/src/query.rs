@@ -23,6 +23,9 @@ use regex::{Regex, RegexBuilder};
 pub type ByteRange = (usize, usize);
 /// Highlights collected during evaluation, keyed by 1-based line number.
 pub type Highlights = BTreeMap<u64, Vec<ByteRange>>;
+/// A minified line can contain millions of single-character matches. A small
+/// representative set is sufficient for highlighting and bounds allocations.
+const MAX_RANGES_PER_LINE: usize = 64;
 
 /// A parsed query ready to evaluate against files.
 #[derive(Debug)]
@@ -62,7 +65,10 @@ struct Term {
 enum MatchKind {
     /// Case-sensitivity is baked in: for insensitive matches the needle is
     /// already lowercased and the haystack is lowercased at match time.
-    Text { needle: String, case_sensitive: bool },
+    Text {
+        needle: String,
+        case_sensitive: bool,
+    },
     Regex(Regex),
 }
 
@@ -82,7 +88,10 @@ impl CompiledQuery {
         };
         let root = parser.parse_or()?;
         let reads_content = node_reads_content(&root);
-        Ok(Self { root, reads_content })
+        Ok(Self {
+            root,
+            reads_content,
+        })
     }
 
     /// Evaluate against one file. `name` is the file path (used by `file:` and
@@ -92,12 +101,35 @@ impl CompiledQuery {
     /// Returns `Some(highlights)` when the file matches (highlights may be
     /// empty for name-only or negated matches), or `None` when it does not.
     pub fn evaluate(&self, name: &str, lines: &[&str]) -> Option<Highlights> {
-        eval(&self.root, name, lines)
+        let mut truncated = false;
+        eval(&self.root, name, lines, usize::MAX, &mut truncated)
+    }
+
+    /// Evaluate while retaining at most `max_highlight_lines`. Boolean query
+    /// truth is preserved while excess highlight detail is discarded.
+    pub fn evaluate_limited(
+        &self,
+        name: &str,
+        lines: &[&str],
+        max_highlight_lines: usize,
+    ) -> Option<(Highlights, bool)> {
+        let mut truncated = false;
+        let highlights = eval(&self.root, name, lines, max_highlight_lines, &mut truncated)?;
+        Some((highlights, truncated))
     }
 
     /// True when the query has no terms at all (blank input).
     pub fn is_empty(&self) -> bool {
         matches!(self.root, Node::Any)
+    }
+
+    /// Whether the file's *name* satisfies the query, treating content terms as
+    /// matching against the basename. Used only for relevance ranking (so a
+    /// search for `design` sorts `design.md` above files that merely mention it),
+    /// never for highlights.
+    pub fn matches_name(&self, path: &str) -> bool {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        self.evaluate(path, &[base]).is_some()
     }
 }
 
@@ -314,8 +346,8 @@ impl<'a> Parser<'a> {
         // /regex/
         if value.len() >= 2 && value.starts_with('/') && value.ends_with('/') {
             let pattern = &value[1..value.len() - 1];
-            let case_insensitive = matches!(case, Some(false))
-                || (case.is_none() && !has_uppercase(pattern));
+            let case_insensitive =
+                matches!(case, Some(false)) || (case.is_none() && !has_uppercase(pattern));
             let regex = RegexBuilder::new(pattern)
                 .case_insensitive(case_insensitive)
                 .build()
@@ -356,11 +388,7 @@ impl<'a> Parser<'a> {
 fn split_field(word: &str) -> Option<(String, &str)> {
     let colon = word.find(':')?;
     let prefix = &word[..colon];
-    if prefix.is_empty()
-        || !prefix
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c == '-')
-    {
+    if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
         return None;
     }
     Some((prefix.to_string(), &word[colon + 1..]))
@@ -384,19 +412,25 @@ fn node_reads_content(node: &Node) -> bool {
 // Evaluation
 // ---------------------------------------------------------------------------
 
-fn eval(node: &Node, name: &str, lines: &[&str]) -> Option<Highlights> {
+fn eval(
+    node: &Node,
+    name: &str,
+    lines: &[&str],
+    max_highlight_lines: usize,
+    truncated: &mut bool,
+) -> Option<Highlights> {
     match node {
         Node::Any => Some(Highlights::new()),
-        Node::Term(term) => eval_term(term, name, lines),
-        Node::Not(inner) => match eval(inner, name, lines) {
+        Node::Term(term) => eval_term(term, name, lines, max_highlight_lines, truncated),
+        Node::Not(inner) => match eval(inner, name, lines, max_highlight_lines, truncated) {
             Some(_) => None,
             None => Some(Highlights::new()),
         },
         Node::And(kids) => {
             let mut merged = Highlights::new();
             for kid in kids {
-                let h = eval(kid, name, lines)?;
-                merge_into(&mut merged, h);
+                let h = eval(kid, name, lines, max_highlight_lines, truncated)?;
+                merge_into(&mut merged, h, max_highlight_lines, truncated);
             }
             Some(merged)
         }
@@ -404,9 +438,9 @@ fn eval(node: &Node, name: &str, lines: &[&str]) -> Option<Highlights> {
             let mut merged = Highlights::new();
             let mut any = false;
             for kid in kids {
-                if let Some(h) = eval(kid, name, lines) {
+                if let Some(h) = eval(kid, name, lines, max_highlight_lines, truncated) {
                     any = true;
-                    merge_into(&mut merged, h);
+                    merge_into(&mut merged, h, max_highlight_lines, truncated);
                 }
             }
             if any {
@@ -420,14 +454,15 @@ fn eval(node: &Node, name: &str, lines: &[&str]) -> Option<Highlights> {
             let mut any = false;
             for (idx, line) in lines.iter().enumerate() {
                 let single = [*line];
-                if let Some(h) = eval(inner, name, &single) {
+                if let Some(h) = eval(inner, name, &single, max_highlight_lines, truncated) {
                     any = true;
                     // Re-key the single-line highlights (line 1) to the real number.
                     if let Some(ranges) = h.get(&1) {
-                        merged
-                            .entry(idx as u64 + 1)
-                            .or_default()
-                            .extend(ranges.iter().copied());
+                        if merged.len() >= max_highlight_lines {
+                            *truncated = true;
+                            break;
+                        }
+                        merged.insert(idx as u64 + 1, ranges.clone());
                     }
                 }
             }
@@ -440,7 +475,13 @@ fn eval(node: &Node, name: &str, lines: &[&str]) -> Option<Highlights> {
     }
 }
 
-fn eval_term(term: &Term, name: &str, lines: &[&str]) -> Option<Highlights> {
+fn eval_term(
+    term: &Term,
+    name: &str,
+    lines: &[&str],
+    max_highlight_lines: usize,
+    truncated: &mut bool,
+) -> Option<Highlights> {
     match term.field {
         Field::File => {
             let base = name.rsplit('/').next().unwrap_or(name);
@@ -459,16 +500,23 @@ fn eval_term(term: &Term, name: &str, lines: &[&str]) -> Option<Highlights> {
         }
         Field::Content => {
             let mut highlights = Highlights::new();
+            let mut matched = false;
             for (idx, line) in lines.iter().enumerate() {
-                let ranges = term_ranges(term, line);
+                let (ranges, ranges_truncated) = term_ranges(term, line);
+                *truncated |= ranges_truncated;
                 if !ranges.is_empty() {
+                    matched = true;
+                    if highlights.len() >= max_highlight_lines {
+                        *truncated = true;
+                        break;
+                    }
                     highlights.insert(idx as u64 + 1, ranges);
                 }
             }
-            if highlights.is_empty() {
-                None
-            } else {
+            if matched {
                 Some(highlights)
+            } else {
+                None
             }
         }
     }
@@ -492,21 +540,26 @@ fn term_matches_str(term: &Term, haystack: &str) -> bool {
 }
 
 /// All match byte-ranges of a content term within a single line.
-fn term_ranges(term: &Term, line: &str) -> Vec<ByteRange> {
+fn term_ranges(term: &Term, line: &str) -> (Vec<ByteRange>, bool) {
     match &term.kind {
         MatchKind::Text {
             needle,
             case_sensitive,
         } => {
             if needle.is_empty() {
-                return Vec::new();
+                return (Vec::new(), false);
             }
             let mut ranges = Vec::new();
+            let mut truncated = false;
             if *case_sensitive {
                 let mut from = 0;
                 while let Some(rel) = line[from..].find(needle.as_str()) {
                     let start = from + rel;
                     let end = start + needle.len();
+                    if ranges.len() >= MAX_RANGES_PER_LINE {
+                        truncated = true;
+                        break;
+                    }
                     ranges.push((start, end));
                     from = end;
                 }
@@ -522,25 +575,35 @@ fn term_ranges(term: &Term, line: &str) -> Vec<ByteRange> {
                         // match via the caller checking emptiness) — but we must
                         // return at least one range to signal a match. Use the
                         // first occurrence clamped to a char boundary.
-                        first_range_clamped(line, &lower, needle)
+                        (first_range_clamped(line, &lower, needle), false)
                     } else {
-                        Vec::new()
+                        (Vec::new(), false)
                     };
                 }
                 let mut from = 0;
                 while let Some(rel) = lower[from..].find(needle.as_str()) {
                     let start = from + rel;
                     let end = start + needle.len();
+                    if ranges.len() >= MAX_RANGES_PER_LINE {
+                        truncated = true;
+                        break;
+                    }
                     ranges.push((start, end));
                     from = end;
                 }
             }
-            ranges
+            (ranges, truncated)
         }
-        MatchKind::Regex(re) => re
-            .find_iter(line)
-            .map(|m| (m.start(), m.end()))
-            .collect(),
+        MatchKind::Regex(re) => {
+            let mut ranges: Vec<_> = re
+                .find_iter(line)
+                .take(MAX_RANGES_PER_LINE + 1)
+                .map(|m| (m.start(), m.end()))
+                .collect();
+            let truncated = ranges.len() > MAX_RANGES_PER_LINE;
+            ranges.truncate(MAX_RANGES_PER_LINE);
+            (ranges, truncated)
+        }
     }
 }
 
@@ -574,9 +637,24 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-fn merge_into(dst: &mut Highlights, src: Highlights) {
+fn merge_into(
+    dst: &mut Highlights,
+    src: Highlights,
+    max_highlight_lines: usize,
+    truncated: &mut bool,
+) {
     for (line, ranges) in src {
-        dst.entry(line).or_default().extend(ranges);
+        if let Some(existing) = dst.get_mut(&line) {
+            let remaining = MAX_RANGES_PER_LINE.saturating_sub(existing.len());
+            if ranges.len() > remaining {
+                *truncated = true;
+            }
+            existing.extend(ranges.into_iter().take(remaining));
+        } else if dst.len() < max_highlight_lines {
+            dst.insert(line, ranges);
+        } else {
+            *truncated = true;
+        }
     }
 }
 
@@ -598,6 +676,29 @@ mod tests {
         assert!(run("foo bar", "a.txt", "foo here\nbar there\n").is_some());
         // Missing one term → no match.
         assert!(run("foo baz", "a.txt", "foo here\nbar there\n").is_none());
+    }
+
+    #[test]
+    fn limited_evaluation_preserves_match_and_caps_highlights() {
+        let compiled = CompiledQuery::parse("needle", None).unwrap();
+        let content = "needle\n".repeat(10);
+        let lines: Vec<&str> = content.lines().collect();
+        let (highlights, truncated) = compiled
+            .evaluate_limited("a.txt", &lines, 3)
+            .expect("query should still match");
+        assert_eq!(highlights.len(), 3);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn minified_line_caps_match_ranges() {
+        let compiled = CompiledQuery::parse("x", None).unwrap();
+        let content = "x".repeat(MAX_RANGES_PER_LINE + 10);
+        let (highlights, truncated) = compiled
+            .evaluate_limited("a.txt", &[&content], 10)
+            .expect("query should match");
+        assert_eq!(highlights[&1].len(), MAX_RANGES_PER_LINE);
+        assert!(truncated);
     }
 
     #[test]

@@ -26,7 +26,9 @@ mod types;
 mod value;
 mod yaml;
 
-pub use document::{build_document, ensure_referenced_properties, CbaseDocument};
+pub use document::{
+    build_document, build_document_page, ensure_referenced_properties, CbaseDocument,
+};
 pub use error::CbaseError;
 pub use frontmatter::set_property as set_frontmatter_property;
 pub use index_cache::CbaseIndexCache;
@@ -78,6 +80,37 @@ pub fn query_cached(
     Ok(build_document(&definition, &rows, is_query_language))
 }
 
+/// Cached query variant that executes and returns only one bounded view page.
+///
+/// Use this for interactive UI requests. Keeping the unpaged [`query_cached`]
+/// API preserves the crate's full-materialization behavior for callers that
+/// explicitly need it.
+pub fn query_cached_page(
+    root: &Path,
+    content: &str,
+    base_path: Option<&str>,
+    cache: &CbaseIndexCache,
+    view_id: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<CbaseDocument, CbaseError> {
+    let is_query_language = query_language::looks_like_query_language(content);
+    let definition = match parse_cbase(content, base_path) {
+        Ok(definition) => definition,
+        Err(CbaseError::Parse(message)) => return Ok(CbaseDocument::parse_error(message)),
+        Err(other) => return Err(other),
+    };
+    let rows = cache.index_project(root, &definition.dataset)?;
+    Ok(build_document_page(
+        &definition,
+        &rows,
+        is_query_language,
+        view_id,
+        offset,
+        limit.max(1),
+    ))
+}
+
 /// Request payload for persisting UI-driven changes to a `.cbase` file.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +121,9 @@ pub struct PersistInput {
     pub definition: CbaseDefinition,
     /// The effective property schema, used to backfill referenced properties.
     pub properties: IndexMap<String, CbaseProperty>,
+    /// View to materialize in the bounded response after persisting.
+    #[serde(default)]
+    pub view_id: Option<String>,
 }
 
 /// Backfill any referenced-but-undeclared properties from the effective schema,

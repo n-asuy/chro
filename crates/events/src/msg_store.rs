@@ -6,7 +6,7 @@ use log_types::{LogEntry, LogEntryPusher};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
-const HISTORY_BYTES: usize = 100 * 1024 * 1024;
+const HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
 struct StoredEntry {
     entry: LogEntry,
@@ -40,6 +40,11 @@ impl MsgStore {
         let _ = self.sender.send(entry.clone());
         let bytes = entry.approx_bytes();
         let mut inner = self.inner.write().expect("msg store poisoned");
+        if bytes > HISTORY_BYTES {
+            // The live subscriber still receives the entry, but one anomalous
+            // payload must not make the bounded history exceed its contract.
+            return;
+        }
         while inner.total_bytes + bytes > HISTORY_BYTES {
             if let Some(front) = inner.history.pop_front() {
                 inner.total_bytes = inner.total_bytes.saturating_sub(front.bytes);
@@ -105,5 +110,17 @@ mod tests {
         store.push(LogEntry::Stderr("err".into()));
         let history = store.history();
         assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn oversized_entry_is_broadcast_but_not_retained() {
+        let store = MsgStore::new();
+        let mut subscriber = store.subscribe();
+        store.push(LogEntry::Stdout("x".repeat(HISTORY_BYTES + 1)));
+        assert!(store.history().is_empty());
+        assert!(matches!(
+            subscriber.try_recv(),
+            Ok(LogEntry::Stdout(value)) if value.len() == HISTORY_BYTES + 1
+        ));
     }
 }

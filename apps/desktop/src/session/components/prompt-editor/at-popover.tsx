@@ -247,6 +247,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
               is_file: true,
               match_type: "FileName",
               line_matches: [],
+              modified_at: null,
             }));
           setDefaultFiles(files);
         })

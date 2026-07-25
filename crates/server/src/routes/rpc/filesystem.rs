@@ -1,9 +1,7 @@
 //! Filesystem API routes for directory browsing.
 
 use axum::{
-    body::Body,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
     response::Response,
     routing::get,
     Json, Router,
@@ -17,7 +15,7 @@ use runtime::ProjectFileService;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::path_resolve::{read_binary_resolving, read_text_resolving};
+use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
 use crate::{format_system_time, ApiError, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +94,7 @@ struct WorkspaceFileResponse {
     relative_path: String,
     content: String,
     size: u64,
+    truncated: bool,
     modified_at: Option<String>,
 }
 
@@ -127,6 +126,7 @@ impl From<WorkspaceFile> for WorkspaceFileResponse {
             relative_path: file.relative_path,
             content: file.content,
             size: file.size,
+            truncated: file.truncated,
             modified_at: format_system_time(file.modified),
         }
     }
@@ -231,13 +231,7 @@ async fn read_workspace_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &[root_str.as_str()]).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "private, max-age=3600")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "private, max-age=3600").await
 }
 
 /// Path-based asset endpoint for HTML preview from arbitrary workspace roots.
@@ -260,13 +254,7 @@ async fn read_workspace_asset(
     let service = ProjectFileService::new(state.runtime(), abs_path);
     let binary_file = read_binary_resolving(&service, &relative_path, &[root_str.as_str()]).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "no-cache").await
 }
 
 pub(super) fn router() -> Router<AppState> {

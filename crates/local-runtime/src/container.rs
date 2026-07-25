@@ -53,6 +53,13 @@ use executor_approval_bridge::ExecutorApprovalBridge;
 /// wake); injected from the runtime because the container cannot depend on it.
 pub type RunFinishedHook = Arc<dyn Fn(Uuid) + Send + Sync>;
 
+/// Broker callback fired when a run suspends on an approval (arguments:
+/// `run_id`, `approval_id`, `tool_name`). Used for the delegation loop's
+/// early-wake half — a gated delegated child would otherwise never complete,
+/// so the barrier would never fire. Injected from the runtime, same as
+/// [`RunFinishedHook`].
+pub type RunApprovalPendingHook = Arc<dyn Fn(Uuid, String, String) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -66,6 +73,7 @@ pub struct LocalContainerService {
     logs_dir: PathBuf,
     worktree_watchers: filesystem::WorktreeWatcherService,
     run_finished_hook: Arc<RwLock<Option<RunFinishedHook>>>,
+    approval_pending_hook: Arc<RwLock<Option<RunApprovalPendingHook>>>,
 }
 
 struct ExecutionHandle {
@@ -103,6 +111,7 @@ impl LocalContainerService {
             logs_dir,
             worktree_watchers,
             run_finished_hook: Arc::new(RwLock::new(None)),
+            approval_pending_hook: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -110,6 +119,12 @@ impl LocalContainerService {
     /// runs that finish before it is installed simply skip it.
     pub async fn set_run_finished_hook(&self, hook: RunFinishedHook) {
         *self.run_finished_hook.write().await = Some(hook);
+    }
+
+    /// Install the broker's approval-pending callback. Set once at bootstrap;
+    /// approvals raised before it is installed simply skip the early wake.
+    pub async fn set_approval_pending_hook(&self, hook: RunApprovalPendingHook) {
+        *self.approval_pending_hook.write().await = Some(hook);
     }
 
     async fn current_profile(&self) -> ExecutorProfileId {
@@ -454,10 +469,8 @@ impl LocalContainerService {
     /// produced no assistant prose (e.g. it only ran tools).
     async fn record_run_outcome(&self, run_id: Uuid, task_id: Uuid) -> Result<(), ContainerError> {
         let entries = self.fetch_logs(run_id).await?;
-        let Some(summary) =
-            crate::transcript::last_assistant_text(&entries).and_then(|text| {
-                crate::transcript::outcome_summary(&text)
-            })
+        let Some(summary) = crate::transcript::last_assistant_text(&entries)
+            .and_then(|text| crate::transcript::outcome_summary(&text))
         else {
             return Ok(());
         };
@@ -561,6 +574,7 @@ impl LocalContainerService {
                 params.task_run_id,
                 task_id,
                 self.db.clone(),
+                self.approval_pending_hook.read().await.clone(),
             )
         } else {
             Arc::new(NoopExecutorApprovalService)

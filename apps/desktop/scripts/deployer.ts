@@ -21,12 +21,18 @@ import { fileURLToPath } from "node:url";
 
 import { redistCrtImports } from "./pe-imports";
 
-// Tauri replacement for the old electron-builder-driven deployer. The high
-// level shape (parseArgs / package / release / tag / upload) is preserved so
-// CI calling conventions stay the same. The interior switches to running
+// Tauri replacement for the old electron-builder-driven deployer, running
 // `tauri build` and staging chro-server as a Tauri sidecar.
+//
+// Publishing is a CI-only path, and the commands are split so that no single
+// invocation can both build and publish: `tag` (run locally) bumps the version
+// and pushes the tag, which is what starts CI, while `package` / `upload` /
+// `updater-manifest` run on CI runners after the release gate has passed.
+// Building and publishing from a developer machine would bypass the export
+// sanitization, provenance, and signing checks that gate a release, so there
+// is deliberately no command that does it.
 
-type Command = "package" | "release" | "upload" | "tag" | "updater-manifest";
+type Command = "package" | "upload" | "tag" | "updater-manifest";
 
 const PROJECT_NAMES = ["desktop"] as const;
 type ProjectName = (typeof PROJECT_NAMES)[number];
@@ -144,7 +150,6 @@ function parseArgs(rawArgs: string[]): Options {
     const candidate = args.shift()!;
     if (
       candidate === "package" ||
-      candidate === "release" ||
       candidate === "upload" ||
       candidate === "tag" ||
       candidate === "updater-manifest"
@@ -237,17 +242,13 @@ function parseArgs(rawArgs: string[]): Options {
 }
 
 function ensureGhRepoConfigured(command: Command) {
-  if (
-    command !== "release" &&
-    command !== "upload" &&
-    command !== "updater-manifest"
-  ) {
+  if (command !== "upload" && command !== "updater-manifest") {
     return;
   }
   const ghRepo = process.env.GH_REPO?.trim();
   if (!ghRepo) {
     throw new Error(
-      "GH_REPO environment variable must be set (e.g. export GH_REPO=owner/repo) before running the release/upload command.",
+      "GH_REPO environment variable must be set (e.g. export GH_REPO=owner/repo) before running the upload command.",
     );
   }
   console.log(
@@ -999,47 +1000,6 @@ function collectReleaseArtifacts(
   }));
 }
 
-function createGithubRelease(
-  configs: ProjectConfig[],
-  tagName: string,
-  version: string,
-  title: string,
-) {
-  const ghRepo = process.env.GH_REPO;
-  const artifactSet = new Set<string>();
-  const artifacts: ReleaseArtifact[] = [];
-
-  for (const config of configs) {
-    for (const artifact of collectReleaseArtifacts(config, version)) {
-      if (!artifactSet.has(artifact.path)) {
-        artifactSet.add(artifact.path);
-        artifacts.push(artifact);
-      }
-    }
-  }
-
-  const args = [
-    "release",
-    "create",
-    tagName,
-    "--title",
-    title,
-    "--generate-notes",
-  ];
-  if (ghRepo) {
-    args.push("--repo", ghRepo);
-  }
-  runCommand("gh", args, { cwd: repoRoot });
-
-  for (const artifact of artifacts) {
-    const uploadArgs = ["release", "upload", tagName, artifact.path, "--clobber"];
-    if (ghRepo) {
-      uploadArgs.push("--repo", ghRepo);
-    }
-    runCommand("gh", uploadArgs, { cwd: repoRoot });
-  }
-}
-
 function uploadToExistingRelease(
   configs: ProjectConfig[],
   tagName: string,
@@ -1252,17 +1212,10 @@ function main(options: Options) {
   const projects = options.projects;
   const configs = projects.map(getProjectConfig);
   const packageInfos = configs.map(readPackageInfo);
-  const multiProject = configs.length > 1;
 
-  if (
-    options.command !== "release" &&
-    options.command !== "upload" &&
-    options.command !== "tag" &&
-    options.command !== "updater-manifest" &&
-    options.version
-  ) {
+  if (options.command === "package" && options.version) {
     throw new Error(
-      "--version is only supported for the release/upload/tag/updater-manifest command.",
+      "--version is only supported for the upload/tag/updater-manifest command; `package` builds the version already in the working tree.",
     );
   }
 
@@ -1289,74 +1242,14 @@ function main(options: Options) {
     return;
   }
 
-  let targetVersion: string | null = null;
-  let releaseNotes: string | null = null;
-  const configsWithVersionChange: ProjectConfig[] = [];
-
-  if (options.command === "release") {
-    const baseVersion = packageInfos[0].version;
-    const requestedVersion = options.version
-      ? normaliseVersionInput(options.version)
-      : incrementPatchVersion(baseVersion);
-    assertSemver(requestedVersion);
-    releaseNotes = extractChangelogEntry(requestedVersion);
-    ensureCleanWorkingTree();
-
-    console.log(`Bumping version ${baseVersion} → ${requestedVersion}…`);
-    configs.forEach((config, index) => {
-      updatePackageVersion(config, requestedVersion);
-      configsWithVersionChange.push(config);
-      packageInfos[index] = {
-        ...packageInfos[index],
-        version: requestedVersion,
-      };
-    });
-    updateTauriConfVersion(requestedVersion);
-    updateCargoTomlVersion(tauriCargoTomlPath, requestedVersion);
-    updateCargoTomlVersion(rustServerManifestPath, requestedVersion);
-    updateNpxCliVersion(requestedVersion);
-
-    console.log("Updating Cargo.lock…");
-    updateCargoLock();
-    targetVersion = requestedVersion;
-  }
-
   const builderArgs = options.builderArgs;
   configs.forEach((config, index) => {
     const info = packageInfos[index];
-    const versionForPackaging =
-      options.command === "release" && targetVersion
-        ? targetVersion
-        : info.version;
-    console.log(`Packaging ${info.name} (${versionForPackaging})…`);
-    packageProject(config, builderArgs, versionForPackaging, info, {
+    console.log(`Packaging ${info.name} (${info.version})…`);
+    packageProject(config, builderArgs, info.version, info, {
       skipSigning: options.skipSigning,
     });
   });
-
-  if (options.command === "release" && targetVersion) {
-    if (configsWithVersionChange.length > 0) {
-      console.log("Committing version bump…");
-      commitUnifiedVersionBump(targetVersion);
-      console.log("Pushing current branch to origin…");
-      pushCurrentBranch();
-    }
-
-    const tagName = normaliseTag(options.tag ?? targetVersion);
-    console.log(`Creating git tag ${tagName}…`);
-    createGitTag(tagName, releaseNotes);
-    console.log(`Pushing tag ${tagName} to origin…`);
-    pushGitTag(tagName);
-
-    const productNames = packageInfos.map((info) => info.productName);
-    const releaseTitleBase = multiProject
-      ? productNames.join(" + ")
-      : productNames[0];
-    const releaseTitle = `${releaseTitleBase} v${targetVersion}`;
-
-    console.log(`Creating GitHub release for ${tagName}…`);
-    createGithubRelease(configs, tagName, targetVersion, releaseTitle);
-  }
 
   console.log("Done.");
 }

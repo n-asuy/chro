@@ -655,7 +655,7 @@ function defaultTitle(kind: TabKind): string {
     case "file":
       return kind.path.split("/").pop() ?? kind.path;
     case "diff":
-      return kind.path ? `Diff: ${kind.path.split("/").pop()}` : "Diff";
+      return "Diff";
     case "project-diff":
       return "Working changes";
     case "browser":

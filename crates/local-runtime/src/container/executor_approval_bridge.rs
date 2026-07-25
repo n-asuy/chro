@@ -8,6 +8,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::RunApprovalPendingHook;
+
 /// Bridges runtime approval storage with the executor approval interface.
 pub struct ExecutorApprovalBridge {
     approvals: Approvals<MsgStore>,
@@ -18,6 +20,9 @@ pub struct ExecutorApprovalBridge {
     task_id: Option<Uuid>,
     db: DBService,
     waiters: Mutex<HashMap<String, ApprovalWaiter>>,
+    /// Fired whenever this run raises an approval, so the delegation broker can
+    /// early-wake a sleeping parent. `None` outside a wired runtime (tests).
+    on_pending: Option<RunApprovalPendingHook>,
 }
 
 impl ExecutorApprovalBridge {
@@ -26,6 +31,7 @@ impl ExecutorApprovalBridge {
         task_run_id: Uuid,
         task_id: Option<Uuid>,
         db: DBService,
+        on_pending: Option<RunApprovalPendingHook>,
     ) -> Arc<Self> {
         Arc::new(Self {
             approvals,
@@ -33,6 +39,7 @@ impl ExecutorApprovalBridge {
             task_id,
             db,
             waiters: Mutex::new(HashMap::new()),
+            on_pending,
         })
     }
 
@@ -71,6 +78,15 @@ impl ExecutorApprovalBridge {
             .map_err(ExecutorApprovalError::request_failed)?;
 
         self.waiters.lock().await.insert(request.id.clone(), waiter);
+
+        // Rouse a delegating parent that may be asleep: a gated delegated child
+        // never completes, so the completion barrier alone would deadlock it.
+        // Best-effort and fire-and-forget; the approval round-trip does not
+        // depend on it.
+        if let Some(on_pending) = &self.on_pending {
+            on_pending(self.task_run_id, request.id.clone(), tool_name.to_string());
+        }
+
         Ok(request.id)
     }
 
@@ -151,7 +167,7 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approvals::{ApprovalResponse, ApprovalStatus};
+    use approvals::{ApprovalActor, ApprovalResponse, ApprovalStatus};
     use tokio::sync::RwLock;
 
     /// Insert a project + task + run so the bridge has a real task row to flag.
@@ -200,8 +216,13 @@ mod tests {
         let msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let approvals = Approvals::new(msg_stores);
-        let bridge =
-            ExecutorApprovalBridge::new(approvals.clone(), task_run_id, Some(task_id), db.clone());
+        let bridge = ExecutorApprovalBridge::new(
+            approvals.clone(),
+            task_run_id,
+            Some(task_id),
+            db.clone(),
+            None,
+        );
         (bridge, approvals)
     }
 
@@ -256,6 +277,7 @@ mod tests {
                 ApprovalResponse {
                     status: ApprovalStatus::Approved,
                     answers: Some(answers),
+                    responded_by: ApprovalActor::User,
                 },
             )
             .await

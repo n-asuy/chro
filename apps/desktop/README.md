@@ -113,17 +113,25 @@ TanStack Router with file-based routing in `src/routes/`. Dynamic segments use `
 ## Building & Packaging
 
 ```bash
-bun run build            # Vite build + Electron TypeScript compilation
-bun run package          # Package with electron-builder
-bun run package:release  # Build, package, and publish
+bun run build             # Vite build + tauri build
+bun run package:mac:nosign  # Local unsigned macOS bundle, for QA
+bun run package:win:nosign  # Local unsigned Windows bundle, for QA
 ```
 
-`electron-builder` is configured for:
-- **macOS** — dmg (signed and notarized)
-- **Windows** — nsis + zip
-- **Linux** — AppImage
+The `:nosign` scripts exist to reproduce problems that only appear in a
+packaged app (updater behaviour, sidecar resolution, the packaged webview's
+origin) without needing signing credentials. They stay local: nothing here
+publishes.
+
+Releases are cut with `bun run release` (see `.claude/commands/release.md`),
+which only bumps the version and pushes a `v*` tag. Everything after that —
+building, signing, and publishing every platform — happens in CI, so a release
+cannot skip the export-sanitization, provenance, and signing gates.
+
+Tauri is configured for:
+- **macOS** — dmg + app (signed and notarized)
+- **Windows** — nsis (signed via SSL.com eSigner in CI)
 
 The packaged app bundles:
 - Compiled Vite output (`dist-vite/`)
-- Compiled Electron code (`dist-electron/`)
-- Rust server binary (`chro-server`)
+- Rust server binary (`chro-server`) as a Tauri sidecar

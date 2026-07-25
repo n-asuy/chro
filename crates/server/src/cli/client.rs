@@ -15,7 +15,10 @@ pub enum ClientError {
     ServerNotRunning,
     NoGitRepo,
     Http(String),
-    Api { status: u16, body: String },
+    Api {
+        status: u16,
+        body: String,
+    },
     /// The command was invoked in a way that cannot be resolved (bad or
     /// missing arguments); the message is shown to the user verbatim.
     Usage(String),

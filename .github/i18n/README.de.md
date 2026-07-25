@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../../banner.jpg" alt="Chro — Deine Ideen laufen parallel" width="100%">
+  <img src="../../banner.jpg" alt="Chro – Füttere dein Wissen, erschaffe parallel" width="100%">
 </p>
 
 <div align="center">
@@ -28,34 +28,55 @@ Starte Agenten parallel in isolierten Worktrees, verfolge Diffs live und merge n
 
 ## Was ist Chro?
 
-Chro verwandelt deine Notizen, Recherchen und deinen Projektkontext in parallele KI-Ausführung. Von einer einzigen Aufgabenansicht aus startest du mehrere Coding-Agenten, die jeweils in ihrem eigenen Git-Worktree laufen. Dein Hauptbranch bleibt unangetastet, bis du bereit bist.
+Chro ist ein Workspace, in dem du Coding-Agents parallel laufen lässt und entscheidest, was ihre Arbeit wert ist. Du beschreibst das gewünschte Ergebnis, Agenten arbeiten in isolierten Git-Worktrees, und ihre Änderungen kommen als Live-Diffs zurück. Nichts erreicht deinen Branch, bevor du es freigibst.
 
-Kein Hin- und Herwechseln zwischen Terminals. Kein manuelles Verwalten von Worktrees. Deine Agenten streamen Logs und Diffs live in einen gemeinsamen Editor, und ohne deine ausdrückliche Freigabe landet nichts im Hauptbranch. Funktioniert mit deinem bestehenden **Claude Code**- oder **Codex**-Abo.
+Chro funktioniert mit den Agent-Abos, die du bereits hast (**Claude Code**, **Codex**), und behält alles auf deinem Rechner: deine Notizen, deine Repositories, deine Historie.
 
-<p align="center">
-  <img src="../../assets/demo1.png" alt="Chro Workspace 1" width="49%">
-  <img src="../../assets/demo2.png" alt="Chro Workspace 2" width="49%">
-</p>
-<p align="center">
-  <img src="../../assets/demo3.png" alt="Chro Workspace 3" width="49%">
-  <img src="../../assets/demo4.png" alt="Chro Workspace 4" width="49%">
-</p>
+## Designprinzipien
+
+Chro hat eine klare Haltung. Das sind die Überzeugungen dahinter.
+
+### Agenten editieren, du entscheidest
+
+Chro ist kein Editor und konkurriert nicht mit deiner IDE. In Chro besteht die menschliche Arbeit darin, Agenten zu steuern, ihre Ergebnisse zu prüfen und das Wissen zu kuratieren, aus dem sie schöpfen. Dateien von Hand zu bearbeiten ist die Ausnahme, nicht die Prämisse. Jede Designentscheidung unten folgt aus dieser Umkehrung.
+
+### Die Arbeitseinheit ist die Session, nicht die Datei
+
+Eine IDE stellt den Dateibaum an die erste Stelle, weil Dateien das sind, worauf du operierst. In Chro ist das primäre Objekt die laufende Session, deshalb liest sich der Bildschirm von links nach rechts als *wer → Dialog → Belege*:
+
+- **Links: wer arbeitet.** Sessions und Agenten über alle Projekte hinweg. Das ist die Navigation, die du am häufigsten berührst, deshalb bekommt sie die primäre Position.
+- **Mitte: der Dialog.** Das Gespräch mit dem Agenten ist die Arbeit selbst, kein Nebenkanal.
+- **Rechts: die Belege.** Dateien, Suche und Git leben in einem gemeinsamen Inspektions-Dock. Du greifst danach, um zu verifizieren, was ein Agent getan hat, nicht als Ausgangspunkt der Arbeit.
+
+### Sandboxes gehören den Agenten, der kanonische Branch gehört dir
+
+Jeder Agent läuft in einem wegwerfbaren Worktree, sodass dein Branch unangetastet bleibt, während beliebig viele Agenten gleichzeitig arbeiten. Diese Unterscheidung ist ein Ausführungsdetail und darf nicht in dein mentales Modell durchsickern:
+
+- **Du betrittst eine Sandbox zum Review**, vor allem über Diffs und Commits. Sie ist eine Oberfläche, auf der überwiegend gelesen wird.
+- **Alles, was du selbst verfasst, landet auf der kanonischen Seite**: Notizen, Dokumente, strukturierte Ansichten (`.cbase`), Diagramme. Eine Notiz zu schreiben sollte nie die Entscheidung erfordern, zu welchem Worktree sie gehört.
+
+### Wissen sind Dateien unter Versionskontrolle
+
+Dein Kontext besteht aus einfachen Dateien in einem Git-Repository: Markdown-Notizen, Frontmatter, strukturierte Ansichten, Diagramme. Kein proprietäres Silo, kein Exportschritt. Genau das macht das Wissen dauerhaft (es wird versioniert wie Code), portabel (es lässt sich klonen wie Code) und nützlich (Agenten lesen es genauso wie du).
+
+### Nichts landet ohne Zustimmung
+
+Agenten schlagen vor, du entscheidest. Sensible Befehle und Dateioperationen warten hinter Freigabeschritten, Diffs sind sichtbar, während der Agent noch läuft, und Mergen ist immer ein expliziter Akt. Parallelität ist nur deshalb sicher, weil jedes Ergebnis bis zum Review in Quarantäne bleibt.
 
 ## Funktionen
 
-- **Parallele Agent-Orchestrierung** — starte mehrere Agenten von einer einzigen Aufgabenansicht aus. Jeder hat seine eigene Worktree-Sandbox und eine Timeline in Echtzeit.
-- **Worktree-Isolation** — jeder Agent läuft in einem dedizierten Git-Worktree, sodass dein Hauptbranch bis zum Merge geschützt bleibt.
-- **Local-first-Wissen** — deine Ideen, Notizen und Recherchen bleiben als Dateien in deinem Besitz. Dieser Kontext prägt, wie Agenten denken und arbeiten.
-- **Gemeinsamer Editor** — prüfe Commits, Logs und Assets aller Agenten an einem Ort mit Inline-Diffs.
-- **Freigabeschritte** — bevor Agenten sensible Befehle oder Dateioperationen ausführen, ist deine ausdrückliche Freigabe erforderlich.
-- **Kanban-Board** — organisiere Arbeit visuell mit Fokus- und Vorschau-Modi.
-- **Integrierter Git-Workflow** — gehe Diffs und PRs durch, ohne die App zu verlassen.
+- **Parallele Agent-Orchestrierung**: starte mehrere Agenten aus einer einzigen Aufgabe. Jeder bekommt seine eigene Worktree-Sandbox und eine Timeline in Echtzeit.
+- **Worktree-Isolation**: jeder Agent läuft in einem dedizierten Git-Worktree, sodass dein Branch bis zum Merge geschützt bleibt.
+- **Local-first-Wissen**: deine Ideen, Notizen und Recherchen bleiben als Dateien in deinem Besitz und prägen, wie Agenten denken.
+- **Vereinheitlichtes Review**: die Commits, Logs und Diffs aller Agenten an einem Ort.
+- **Freigabeschritte**: ausdrückliche Freigabe, bevor Agenten sensible Befehle oder Dateioperationen ausführen.
+- **Integrierter Git-Workflow**: vollständiger Diff- und PR-Workflow, ohne die App zu verlassen.
 
 ## Erste Schritte
 
 ### Desktop-App
 
-Herunterladen und installieren. Während der Beta ist die App kostenlos und funktioniert mit deinem Claude Code / Codex-Abonnement.
+Herunterladen und installieren, während der Beta kostenlos. Funktioniert mit deinem Claude Code / Codex-Abonnement.
 
 | Plattform | Link |
 |-----------|------|
@@ -85,32 +106,32 @@ Führe `npx @chro-ai/cli --help` für die vollständige Befehlsreferenz aus.
 
 ### 1. Projekt öffnen
 
-Starte Chro und öffne ein beliebiges Git-Repository als Workspace. Deine lokalen Dateien werden zum Kontext, auf den sich die Agenten bei der Arbeit stützen.
+Starte Chro und öffne ein beliebiges Git-Repository als Workspace. Deine lokalen Dateien werden zum Wissenskontext für die Agenten.
 
 ### 2. Aufgabe erstellen
 
-Erstelle eine Aufgabe im Kanban-Board. Beschreibe, was du möchtest: ein Feature, einen Bugfix oder ein Refactoring. Bei Bedarf kannst du Notizen oder Dateien als zusätzlichen Kontext anhängen.
+Starte eine neue Session und beschreibe, was du möchtest: ein Feature, einen Bugfix oder ein Refactoring. Hänge bei Bedarf Notizen oder Dateien als zusätzlichen Kontext an.
 
 ### 3. Agents starten
 
-Weise der Aufgabe einen oder mehrere Agents zu. Jeder Agent beginnt sofort in seinem eigenen Git-Worktree zu arbeiten. Verfolge den Fortschritt in Echtzeit über die Timeline.
+Weise der Aufgabe einen oder mehrere Agents zu. Jeder Agent startet in seinem eigenen Git-Worktree und beginnt sofort zu arbeiten. Verfolge den Fortschritt in Echtzeit über die Timeline.
 
 ### 4. Überprüfen und mergen
 
-Gehe die Commits und Diffs jedes Agenten im gemeinsamen Editor durch. Gib die gewünschten Teile frei, verwerfe den Rest und merge alles, ohne Chro zu verlassen.
+Gehe die Commits und Diffs jedes Agenten durch. Gib die gewünschten Teile frei, verwerfe den Rest und merge alles, ohne Chro zu verlassen.
 
 ## Architektur
 
 ```
 apps/
-  desktop/   → Electron + Vite + React (main product)
+  desktop/   → Electron + Vite + React + Markdown-first workspace UI
   api/       → Cloudflare Workers (Rust → WASM, D1)
   cli/       → CLI for browser mode + task management (Rust)
 packages/
   ui/        → Shared UI components (Radix UI, Tailwind CSS)
 crates/      → Rust backend (17 crates)
-  server/    → Axum web server (SQLite, JSON-RPC, WebSocket)
-  db/        → SQLx + SQLite ORM
+  server/    → Axum web server (JSON-RPC, WebSocket, worktrees, local DB)
+  db/        → SQLx + SQLite persistence layer
   ...        → worktree, git, executors, events, etc.
 tooling/     → Build scripts, TS config, licenses
 ```
@@ -128,22 +149,23 @@ tooling/     → Build scripts, TS config, licenses
                                   │ JSON-RPC / WebSocket
                          ┌────────▼─────────┐
                          │  Rust Backend    │
-                         │  (Axum + SQLite) │
-                         └────────┬─────────┘
-                                  │
-                         ┌────────▼─────────┐
-                         │  Git Worktrees   │
-                         │  (agent sandboxes)│
-                         └──────────────────┘
+                         │   (Axum RPC)     │
+                         └───────┬────┬─────┘
+                                 │    │
+                  ┌──────────────▼────────┐  ┌▼───────────────┐
+                  │    Git Worktrees      │  │  SQLite / D1   │
+                  │   (agent sandboxes)   │  │ tasks, state,  │
+                  └───────────────────────┘  │  metadata      │
+                                             └────────────────┘
 ```
 
 | Schicht | Stack |
 |---------|-------|
 | Desktop | Electron 38 |
 | Frontend | React 19, TanStack Router, Vite 7, Tailwind CSS, Zustand |
-| Editor | CodeMirror 6, Monaco Editor |
-| Backend (lokal) | Rust, Axum 0.7, Tokio, SQLx (SQLite) |
-| Backend (Cloud) | Rust → WASM, Cloudflare Workers, D1 |
+| Inhalte | Markdown-first-Dateien, Frontmatter, CodeMirror 6 WYSIWYG, Monaco Editor |
+| Daten | SQLite + SQLx lokal, D1 in der Cloud |
+| Backend | Rust, Axum 0.7, Tokio, JSON-RPC, WebSocket |
 | Build | Bun, Turborepo, Biome |
 
 ## Entwicklung
@@ -153,6 +175,7 @@ tooling/     → Build scripts, TS config, licenses
 ```bash
 bun install          # Abhängigkeiten installieren
 bun dev:desktop      # Vollständige Desktop-App starten (Rust + Vite + Electron)
+bun dev:cli          # CLI-Flow starten (Browser-UI + lokaler Server)
 ```
 
 ```bash
@@ -163,7 +186,7 @@ bun typecheck        # TypeScript-Typprüfung
 
 ## Sicherheit und Datenschutz
 
-Chro ist nach dem Local-first-Prinzip gebaut. Dein Wissen, deine Notizen und dein Code bleiben auf deinem Rechner. Agenten laufen in isolierten Worktrees, und ohne deine ausdrückliche Zustimmung gelangt nichts in deinen Hauptbranch. Chro ist nicht mit Anthropic verbunden. Siehe [SECURITY.md](../../SECURITY.md) für Schwachstellenmeldungen.
+Chro ist von Grund auf local-first. Dein Wissen, deine Notizen und dein Code bleiben auf deinem Rechner. Agenten laufen in isolierten Worktrees mit expliziten Freigaben, und ohne deine Zustimmung gelangt nichts in deinen Hauptbranch. Chro ist nicht mit Anthropic verbunden. Siehe [SECURITY.md](../../SECURITY.md) für Schwachstellenmeldungen.
 
 ## Lizenz
 

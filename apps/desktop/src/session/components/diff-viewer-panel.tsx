@@ -1,6 +1,6 @@
 import { isImagePath } from "@/files/media-types";
+import { useFilesStore } from "@/files/state/files-store";
 import { useLanguage } from "@/i18n";
-import { cn } from "@/lib/cn";
 import { getTaskRunBinaryFileUrl } from "@/lib/project-client";
 import { useTheme } from "@/settings/hooks/use-theme";
 import { Button } from "@chro/ui/button";
@@ -12,18 +12,27 @@ import {
 } from "@chro/ui/tooltip";
 import { generateDiffFile } from "@git-diff-view/file";
 import { DiffModeEnum, DiffView } from "@git-diff-view/react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  ChevronDown,
   ChevronRight,
   ChevronUp,
   FileText,
-  Folder,
   Image as ImageIcon,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DiffChangeKind, DiffContent } from "../hooks";
+import { useAnchorScroll } from "../hooks/use-anchor-scroll";
+import {
+  DIFF_EXPAND_BATCH_SIZE,
+  MAX_RENDERED_DIFF_BYTES,
+  bulkExpandedDiffIds,
+  shouldBuildInlineDiff,
+} from "../lib/diff-render-policy";
+import { resolveDiffReveal } from "../lib/diff-reveal";
 import "@/styles/diff-style-overrides.css";
+
+const DIFF_ROW_OVERSCAN = 2;
 
 type DiffViewerPanelProps = {
   onClose: () => void;
@@ -64,188 +73,6 @@ const getLanguageFromPath = (path?: string | null): string => {
   return LANGUAGE_MAP[extension] ?? "plaintext";
 };
 
-// File tree types and builder
-type TreeNode =
-  | { key: string; name: string; type: "dir"; children: TreeNode[] }
-  | {
-      key: string;
-      name: string;
-      type: "file";
-      diffId: string;
-      change: DiffChangeKind;
-      additions: number;
-      deletions: number;
-    };
-
-function buildTree(
-  items: { id: string; path: string; diff: DiffContent }[],
-): TreeNode[] {
-  const root: TreeNode & { type: "dir" } = {
-    key: "",
-    name: "",
-    type: "dir",
-    children: [],
-  };
-
-  for (const item of items) {
-    const segments = item.path.split("/").filter(Boolean);
-    if (segments.length === 0) segments.push(item.path || "unknown");
-
-    let current = root;
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i]!;
-      const isLast = i === segments.length - 1;
-      const key = current.key ? `${current.key}/${segment}` : segment;
-
-      if (isLast) {
-        current.children.push({
-          key,
-          name: segment,
-          type: "file",
-          diffId: item.id,
-          change: item.diff.change,
-          additions: item.diff.additions ?? 0,
-          deletions: item.diff.deletions ?? 0,
-        });
-      } else {
-        let next = current.children.find(
-          (c) => c.type === "dir" && c.name === segment,
-        );
-        if (!next) {
-          next = { key, name: segment, type: "dir", children: [] };
-          current.children.push(next);
-        }
-        if (next.type === "dir") current = next;
-      }
-    }
-  }
-
-  const sortNodes = (nodes: TreeNode[]) => {
-    nodes.sort((a, b) => {
-      if (a.type === b.type) return a.name.localeCompare(b.name);
-      return a.type === "dir" ? -1 : 1;
-    });
-    for (const n of nodes) if (n.type === "dir") sortNodes(n.children);
-  };
-  sortNodes(root.children);
-  return root.children;
-}
-
-function StatBadge({
-  value,
-  type,
-}: {
-  value: number;
-  type: "add" | "del";
-}) {
-  if (!value) return null;
-  return (
-    <span
-      className={cn(
-        "text-[11px] font-medium tabular-nums",
-        type === "add"
-          ? "text-emerald-500 dark:text-emerald-400"
-          : "text-rose-500 dark:text-rose-400",
-      )}
-    >
-      {type === "add" ? "+" : "-"}
-      {value}
-    </span>
-  );
-}
-
-type FileTreeProps = {
-  items: { id: string; path: string; diff: DiffContent }[];
-  activeId: string | null;
-  onSelect: (id: string) => void;
-};
-
-function FileTree({ items, activeId, onSelect }: FileTreeProps) {
-  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
-  const tree = useMemo(() => buildTree(items), [items]);
-
-  useEffect(() => {
-    setCollapsedDirs(new Set());
-  }, [items]);
-
-  const toggleDir = (key: string) => {
-    setCollapsedDirs((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const renderNodes = (nodes: TreeNode[], depth: number) =>
-    nodes.map((node) => {
-      if (node.type === "dir") {
-        const isCollapsed = collapsedDirs.has(node.key);
-        return (
-          <li key={node.key}>
-            <button
-              type="button"
-              onClick={() => toggleDir(node.key)}
-              className={cn(
-                "flex w-full items-center gap-2 py-1 text-left text-xs text-muted-foreground hover:text-foreground",
-                depth === 0 ? "px-2" : "pl-2 pr-2",
-              )}
-              style={{ paddingLeft: depth === 0 ? 8 : 8 + depth * 12 }}
-            >
-              {isCollapsed ? (
-                <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-              )}
-              <Folder className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <span className="truncate font-medium text-foreground">
-                {node.name}
-              </span>
-            </button>
-            {!isCollapsed && node.children.length > 0 && (
-              <ul>{renderNodes(node.children, depth + 1)}</ul>
-            )}
-          </li>
-        );
-      }
-
-      const isActive = node.diffId === activeId;
-      return (
-        <li key={node.key}>
-          <button
-            type="button"
-            onClick={() => onSelect(node.diffId)}
-            className={cn(
-              "flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors",
-              isActive
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-            )}
-            style={{ paddingLeft: 8 + depth * 12 }}
-          >
-            <FileText className="h-3 w-3 shrink-0" />
-            <span className="truncate flex-1">{node.name}</span>
-            <span className="flex shrink-0 items-center gap-1.5">
-              <StatBadge value={node.additions} type="add" />
-              <StatBadge value={node.deletions} type="del" />
-            </span>
-          </button>
-        </li>
-      );
-    });
-
-  if (tree.length === 0) return null;
-
-  return (
-    <nav
-      className="w-64 shrink-0 overflow-y-auto border-l border-custom-border-200 pt-2 pb-4 pl-1"
-      aria-label="Changed files"
-    >
-      <ul className="space-y-0.5">{renderNodes(tree, 0)}</ul>
-    </nav>
-  );
-}
-
 type DiffCardProps = {
   item: { id: string; path: string; diff: DiffContent };
   expanded: boolean;
@@ -277,7 +104,9 @@ function ImageDiffPreview({
   return (
     <div className="flex items-center justify-center p-6 bg-custom-background-90">
       {error ? (
-        <div className="text-xs text-custom-text-300">Failed to load image preview.</div>
+        <div className="text-xs text-custom-text-300">
+          Failed to load image preview.
+        </div>
       ) : (
         <img
           src={imageUrl}
@@ -291,7 +120,13 @@ function ImageDiffPreview({
   );
 }
 
-function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardProps) {
+function DiffCard({
+  item,
+  expanded,
+  onToggle,
+  viewMode,
+  taskRunId,
+}: DiffCardProps) {
   const path = item.path;
   const lang = getLanguageFromPath(path);
   const diff = item.diff;
@@ -302,27 +137,44 @@ function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardPro
   const newContent = diff.new_content ?? "";
   const isContentEqual = oldContent === newContent;
   const isOmitted = diff.content_omitted ?? false;
+  const shouldBuild = shouldBuildInlineDiff({
+    expanded,
+    isImage,
+    isContentEqual,
+    isOmitted,
+    oldContent,
+    newContent,
+  });
+  const isTooLargeToRender =
+    oldContent.length + newContent.length > MAX_RENDERED_DIFF_BYTES;
 
   const diffFile = useMemo(() => {
-    if (isImage || isContentEqual || isOmitted || (!oldContent && !newContent)) {
+    if (!shouldBuild) {
       return null;
     }
     try {
-      const file = generateDiffFile(path, oldContent, path, newContent, lang, lang);
+      const file = generateDiffFile(
+        path,
+        oldContent,
+        path,
+        newContent,
+        lang,
+        lang,
+      );
       file.initRaw();
       return file;
     } catch (e) {
       console.error("Failed to build diff", e);
       return null;
     }
-  }, [isImage, isContentEqual, isOmitted, oldContent, newContent, path, lang]);
+  }, [shouldBuild, oldContent, newContent, path, lang]);
 
   const add = diffFile?.additionLength ?? diff.additions ?? 0;
   const del = diffFile?.deletionLength ?? diff.deletions ?? 0;
   const PathIcon = isImage ? ImageIcon : FileText;
 
   return (
-    <div className="my-4 border border-custom-border-200 bg-custom-background-100">
+    <div className="border border-custom-border-200 bg-custom-background-100">
       <div className="flex items-center px-4 py-2">
         <Button
           variant="ghost"
@@ -348,7 +200,9 @@ function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardPro
               <span className="ml-3 text-emerald-600 dark:text-emerald-400">
                 +{add}
               </span>
-              <span className="ml-2 text-rose-600 dark:text-rose-400">-{del}</span>
+              <span className="ml-2 text-rose-600 dark:text-rose-400">
+                -{del}
+              </span>
             </>
           )}
         </p>
@@ -377,19 +231,19 @@ function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardPro
             diffViewWrap={false}
             diffViewHighlight
             diffViewTheme={theme}
-            diffViewMode={viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified}
+            diffViewMode={
+              viewMode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified
+            }
             diffViewFontSize={12}
           />
         </div>
       )}
 
       {expanded && !isImage && !diffFile && (
-        <div
-          className="px-4 pb-4 text-xs font-mono border-t border-custom-border-200 pt-2 text-custom-text-300"
-        >
+        <div className="px-4 pb-4 text-xs font-mono border-t border-custom-border-200 pt-2 text-custom-text-300">
           {diff.is_binary
             ? "Binary file changed."
-            : isOmitted
+            : isOmitted || isTooLargeToRender
               ? "Content omitted due to file size. Open in editor to view."
               : isContentEqual
                 ? diff.change === "renamed"
@@ -402,25 +256,37 @@ function DiffCard({ item, expanded, onToggle, viewMode, taskRunId }: DiffCardPro
   );
 }
 
-export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelProps) {
+export function DiffViewerPanel({
+  onClose,
+  diffs,
+  taskRunId,
+}: DiffViewerPanelProps) {
   const { t } = useLanguage();
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
-  const [activeId, setActiveId] = useState<string | null>(null);
+  // Diff bodies are opt-in. Mounting every body on the first frame caused the
+  // renderer to synchronously parse every changed file before the user could
+  // interact with the tab.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<"unified" | "split">("unified");
   const diffRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollToAnchor = useAnchorScroll(scrollRef);
+  const diffReveal = useFilesStore((s) => s.diffReveal);
 
   // Create keyed items with stable IDs
   const keyedItems = useMemo(
     () =>
-      diffs.map((d, index) => ({
-        id: `${d.path}#${index}`,
+      diffs.map((d) => ({
+        id: d.path,
         path: d.path,
         diff: d.diff,
       })),
     [diffs],
   );
 
-  const diffIds = useMemo(() => keyedItems.map((item) => item.id), [keyedItems]);
+  const diffIds = useMemo(
+    () => keyedItems.map((item) => item.id),
+    [keyedItems],
+  );
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -430,26 +296,15 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  // Set initial active ID and reset collapse state when diffs change
+  // Drop expansion state only for files that disappeared. Incoming stream
+  // patches must not reopen every diff card.
   useEffect(() => {
-    setCollapsedIds(new Set());
-    setActiveId((prev) => {
-      if (prev && keyedItems.some((item) => item.id === prev)) return prev;
-      return keyedItems[0]?.id ?? null;
+    const validIds = new Set(diffIds);
+    setExpandedIds((previous) => {
+      const next = new Set([...previous].filter((id) => validIds.has(id)));
+      return next.size === previous.size ? previous : next;
     });
-  }, [keyedItems]);
-
-  // Default-collapse certain change kinds on first load
-  useEffect(() => {
-    if (keyedItems.length === 0) return;
-    const kindsToCollapse = new Set(["deleted", "renamed", "copied", "permission_change"]);
-    const initial = new Set(
-      keyedItems
-        .filter((item) => kindsToCollapse.has(item.diff.change))
-        .map((item) => item.id),
-    );
-    if (initial.size > 0) setCollapsedIds(initial);
-  }, [keyedItems]);
+  }, [diffIds]);
 
   const totalAdditions = diffs.reduce(
     (sum, d) => sum + (d.diff.additions ?? 0),
@@ -461,7 +316,7 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
   );
 
   const toggle = useCallback((id: string) => {
-    setCollapsedIds((prev) => {
+    setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -470,37 +325,79 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
   }, []);
 
   const setExpanded = useCallback((id: string, expanded: boolean) => {
-    setCollapsedIds((prev) => {
+    setExpandedIds((prev) => {
       const next = new Set(prev);
-      if (expanded) next.delete(id);
-      else next.add(id);
+      if (expanded) next.add(id);
+      else next.delete(id);
       return next;
     });
   }, []);
 
-  const handleSelectFromTree = useCallback(
-    (id: string) => {
-      setActiveId(id);
-      setExpanded(id, true);
-      const ref = diffRefs.current[id];
-      if (ref) {
-        ref.scrollIntoView({ behavior: "smooth", block: "start" });
+  const rowVirtualizer = useVirtualizer({
+    count: keyedItems.length,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => keyedItems[index]?.id ?? index,
+    estimateSize: (index) =>
+      expandedIds.has(keyedItems[index]?.id ?? "") ? 640 : 58,
+    overscan: DIFF_ROW_OVERSCAN,
+  });
+
+  useEffect(() => {
+    rowVirtualizer.measure();
+  }, [expandedIds, rowVirtualizer, viewMode]);
+
+  // Scroll to the file the right dock asked for. The index of changed files
+  // lives there, so the request arrives from outside this tab; handled-token
+  // tracking keeps unrelated re-renders (a diff patch landing) from scrolling
+  // again, while an unresolved request stays pending until its file streams in.
+  const handledRevealTokenRef = useRef(0);
+  useEffect(() => {
+    const target = resolveDiffReveal({
+      request: diffReveal,
+      scopeTaskRunId: taskRunId ?? null,
+      paths: keyedItems.map((item) => item.path),
+      handledToken: handledRevealTokenRef.current,
+    });
+    if (!target) return;
+
+    const index = keyedItems.findIndex(
+      (candidate) => candidate.path === target.path,
+    );
+    const item = keyedItems[index];
+    if (!item || index < 0) return;
+
+    handledRevealTokenRef.current = target.token;
+    setExpanded(item.id, true);
+    // The target may not exist in the DOM yet because only visible rows are
+    // mounted. Ask the virtualizer to mount it, then let the anchor helper keep
+    // it aligned while the expanded diff finishes rendering and measuring.
+    let raf = 0;
+    const deadline = performance.now() + 2000;
+    const reveal = () => {
+      rowVirtualizer.scrollToIndex(index, { align: "start" });
+      const element = diffRefs.current[item.id];
+      if (element) {
+        scrollToAnchor(element);
+        return;
       }
-    },
-    [setExpanded],
-  );
+      if (performance.now() < deadline) {
+        raf = requestAnimationFrame(reveal);
+      }
+    };
+    raf = requestAnimationFrame(reveal);
+    return () => cancelAnimationFrame(raf);
+  }, [
+    diffReveal,
+    keyedItems,
+    rowVirtualizer,
+    taskRunId,
+    setExpanded,
+    scrollToAnchor,
+  ]);
 
-  const handleToggle = useCallback(
-    (id: string) => {
-      setActiveId(id);
-      toggle(id);
-    },
-    [toggle],
-  );
-
-  const allCollapsed = collapsedIds.size === keyedItems.length;
+  const allCollapsed = expandedIds.size === 0;
   const handleCollapseAll = useCallback(() => {
-    setCollapsedIds(allCollapsed ? new Set() : new Set(diffIds));
+    setExpandedIds(allCollapsed ? bulkExpandedDiffIds(diffIds) : new Set());
   }, [allCollapsed, diffIds]);
 
   return (
@@ -550,7 +447,11 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
             onClick={handleCollapseAll}
             aria-pressed={allCollapsed}
           >
-            {allCollapsed ? "Expand All" : "Collapse All"}
+            {allCollapsed
+              ? keyedItems.length > DIFF_EXPAND_BATCH_SIZE
+                ? `Expand First ${DIFF_EXPAND_BATCH_SIZE}`
+                : "Expand All"
+              : "Collapse All"}
           </Button>
           <TooltipProvider delayDuration={120}>
             <Tooltip>
@@ -574,43 +475,49 @@ export function DiffViewerPanel({ onClose, diffs, taskRunId }: DiffViewerPanelPr
         </div>
       </header>
 
-      {/* Content */}
-      <div className="flex min-h-0 flex-1 overflow-hidden px-3 gap-4">
-        {/* Scrollable diff cards */}
-        <div className="flex-1 overflow-y-auto">
+      {/* Content: diff cards only. The index of changed files is the right
+          dock's job; clicking a row there reveals the file here. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden px-3">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {keyedItems.length === 0 ? (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground h-full">
-              {t("diffViewerSelectFile")}
+              {t("diffViewerEmpty")}
             </div>
           ) : (
-            keyedItems.map((item) => (
-              <div
-                key={item.id}
-                ref={(el) => {
-                  if (el) diffRefs.current[item.id] = el;
-                  else delete diffRefs.current[item.id];
-                }}
-              >
-                <DiffCard
-                  item={item}
-                  expanded={!collapsedIds.has(item.id)}
-                  onToggle={() => handleToggle(item.id)}
-                  viewMode={viewMode}
-                  taskRunId={taskRunId}
-                />
-              </div>
-            ))
+            <div
+              className="relative w-full"
+              style={{ height: rowVirtualizer.getTotalSize() }}
+            >
+              {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+                const item = keyedItems[virtualItem.index];
+                if (!item) return null;
+                return (
+                  <div
+                    key={item.id}
+                    data-index={virtualItem.index}
+                    ref={(element) => {
+                      rowVirtualizer.measureElement(element);
+                      if (element) diffRefs.current[item.id] = element;
+                      else delete diffRefs.current[item.id];
+                    }}
+                    className="absolute left-0 top-0 w-full py-2"
+                    style={{
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <DiffCard
+                      item={item}
+                      expanded={expandedIds.has(item.id)}
+                      onToggle={() => toggle(item.id)}
+                      viewMode={viewMode}
+                      taskRunId={taskRunId}
+                    />
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
-
-        {/* File tree sidebar */}
-        {keyedItems.length > 0 && (
-          <FileTree
-            items={keyedItems}
-            activeId={activeId}
-            onSelect={handleSelectFromTree}
-          />
-        )}
       </div>
     </div>
   );

@@ -13,10 +13,18 @@
 //! Mutating endpoints (write/delete) reject external paths to preserve
 //! workspace containment.
 
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 
-use filesystem::{WorkspaceBinaryFile, WorkspaceFile};
+use axum::{
+    body::Body,
+    http::{header, StatusCode},
+    response::Response,
+};
+use filesystem::{FilesystemError, WorkspaceBinaryFile, WorkspaceFile};
 use runtime::{ProjectFileService, Runtime, RuntimeError};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
 use crate::ApiError;
 
@@ -128,12 +136,41 @@ pub(crate) async fn read_binary_resolving<R: Runtime>(
     candidates: &[&str],
 ) -> Result<WorkspaceBinaryFile, RuntimeError> {
     match resolve_workspace_path(raw, candidates.iter().copied()) {
-        WorkspacePath::Internal(relative) => service.read_binary_file(&relative).await,
+        WorkspacePath::Internal(relative) => {
+            first_readable_root(candidates, |root| service.read_binary_file_in(root, &relative))
+                .await
+        }
         WorkspacePath::Scoped { root, relative } => {
             service.read_binary_file_in(&root, &relative).await
         }
         WorkspacePath::External(absolute) => service.read_binary_file_absolute(absolute).await,
     }
+}
+
+/// Stream a validated binary file instead of first copying the entire payload
+/// into a `Vec<u8>`. This keeps large media/PDF responses bounded by the I/O
+/// buffers and lets backpressure from the webview reach the filesystem read.
+pub(crate) async fn stream_binary_response(
+    binary_file: WorkspaceBinaryFile,
+    cache_control: &'static str,
+) -> Result<Response, ApiError> {
+    let file = File::open(&binary_file.path)
+        .await
+        .map_err(filesystem::FilesystemError::Io)?;
+    let size = file
+        .metadata()
+        .await
+        .map_err(filesystem::FilesystemError::Io)?
+        .len();
+    let body = Body::from_stream(ReaderStream::new(file));
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, binary_file.mime_type)
+        .header(header::CONTENT_LENGTH, size)
+        .header(header::CACHE_CONTROL, cache_control)
+        .body(body)
+        .map_err(|error| ApiError::Internal(format!("failed to build binary response: {error}")))
 }
 
 /// Read a text file referenced by `raw`, resolving it against `candidates` and
@@ -144,10 +181,51 @@ pub(crate) async fn read_text_resolving<R: Runtime>(
     candidates: &[&str],
 ) -> Result<WorkspaceFile, RuntimeError> {
     match resolve_workspace_path(raw, candidates.iter().copied()) {
-        WorkspacePath::Internal(relative) => service.read_file(&relative).await,
+        WorkspacePath::Internal(relative) => {
+            first_readable_root(candidates, |root| service.read_file_in(root, &relative)).await
+        }
         WorkspacePath::Scoped { root, relative } => service.read_file_in(&root, &relative).await,
         WorkspacePath::External(absolute) => service.read_file_absolute(absolute).await,
     }
+}
+
+/// Whether a read error means "this root does not have the file" (`NotFound` /
+/// `NotFile`), as opposed to a hard failure (containment violation, IO error).
+/// Only a missing-file error may fall through to the next candidate root.
+fn is_missing(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Filesystem(FilesystemError::NotFound | FilesystemError::NotFile)
+    )
+}
+
+/// Read a relative path against `candidates` in order, returning the first root
+/// that has the file. A relative reference carries no project identity, so a
+/// path shown in one project's session may name a file that lives in another
+/// project's checkout; trying each candidate root (the run's own worktree
+/// first, then sibling project roots) lets it resolve instead of failing under
+/// the caller's root alone. A missing file falls through to the next root; any
+/// other error stops immediately. If every root is missing, the first
+/// missing-file error is surfaced (preserving the original "File not found").
+async fn first_readable_root<'c, T, F, Fut>(
+    candidates: &'c [&'c str],
+    mut read_in: F,
+) -> Result<T, RuntimeError>
+where
+    F: FnMut(&'c Path) -> Fut,
+    Fut: Future<Output = Result<T, RuntimeError>> + Send,
+{
+    let mut first_missing: Option<RuntimeError> = None;
+    for &root in candidates {
+        match read_in(Path::new(root)).await {
+            Ok(value) => return Ok(value),
+            Err(error) if is_missing(&error) => {
+                first_missing.get_or_insert(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(first_missing.unwrap_or(RuntimeError::Filesystem(FilesystemError::NotFound)))
 }
 
 /// Resolve `raw` for a mutating endpoint (write/delete), which must stay inside
@@ -440,5 +518,78 @@ mod tests {
             resolve_workspace_path("/private/etc/passwd", ["/etc"]),
             "/private/etc/passwd",
         );
+    }
+
+    /// Only a genuinely missing file (`NotFound` / `NotFile`) may fall through
+    /// to the next candidate root; every other error is a hard stop.
+    #[test]
+    fn is_missing_only_covers_absent_file_errors() {
+        assert!(is_missing(&RuntimeError::Filesystem(
+            FilesystemError::NotFound
+        )));
+        assert!(is_missing(&RuntimeError::Filesystem(FilesystemError::NotFile)));
+        assert!(!is_missing(&RuntimeError::Filesystem(
+            FilesystemError::OutsideWorkspace
+        )));
+        assert!(!is_missing(&RuntimeError::NotFound("run")));
+    }
+
+    fn missing() -> RuntimeError {
+        RuntimeError::Filesystem(FilesystemError::NotFound)
+    }
+
+    /// A relative path missing under the first roots resolves against a later
+    /// sibling root — the cross-project open. The matched root is the one that
+    /// actually has the file, not merely the first candidate.
+    #[tokio::test]
+    async fn first_readable_root_falls_through_to_sibling() {
+        let candidates = ["/worktree", "/own-project", "/sibling"];
+        let result = first_readable_root(&candidates, |root| {
+            let root = root.to_string_lossy().into_owned();
+            async move {
+                if root == "/sibling" {
+                    Ok::<_, RuntimeError>(format!("read@{root}"))
+                } else {
+                    Err(missing())
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "read@/sibling");
+    }
+
+    /// A hard error (e.g. containment violation) at an early root stops the
+    /// walk immediately instead of masking it by reading a later root's copy.
+    #[tokio::test]
+    async fn first_readable_root_stops_on_hard_error() {
+        let candidates = ["/a", "/b"];
+        let result = first_readable_root(&candidates, |root| {
+            let root = root.to_string_lossy().into_owned();
+            async move {
+                if root == "/a" {
+                    Err::<String, _>(RuntimeError::Filesystem(FilesystemError::OutsideWorkspace))
+                } else {
+                    Ok("must-not-reach".to_string())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Filesystem(FilesystemError::OutsideWorkspace))
+        ));
+    }
+
+    /// When no root has the file, the missing-file error is surfaced so the UI
+    /// still shows the original "File not found".
+    #[tokio::test]
+    async fn first_readable_root_all_missing_reports_not_found() {
+        let candidates = ["/a", "/b"];
+        let result: Result<String, _> =
+            first_readable_root(&candidates, |_root| async move { Err(missing()) }).await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Filesystem(FilesystemError::NotFound))
+        ));
     }
 }

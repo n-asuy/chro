@@ -39,4 +39,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: crate::cli::TaskCommand,
     },
+    /// Approval workflow: list, inspect, and respond to pending approvals
+    Approvals {
+        #[command(subcommand)]
+        command: crate::cli::ApprovalCommand,
+    },
 }

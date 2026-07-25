@@ -24,7 +24,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
-const MAX_CUMULATIVE_DIFF_BYTES: usize = 200 * 1024 * 1024;
+const MAX_CUMULATIVE_DIFF_BYTES: usize = 16 * 1024 * 1024;
 const DIFF_STREAM_CHANNEL_CAPACITY: usize = 1024;
 
 /// How often to re-check for an in-progress rebase to finish, and the ceiling on
@@ -333,11 +333,19 @@ pub async fn create(
         while let Some(result) = stream.next().await {
             match result {
                 Ok(batch) => {
+                    let force_full_recompute =
+                        batch.iter().any(|event| event.relative_path.is_empty());
                     let changed_paths: Vec<String> = batch
                         .iter()
                         .map(|event| event.relative_path.clone())
                         .filter(|path| !path.is_empty())
                         .collect();
+                    if force_full_recompute {
+                        if !ctx.handle_change(Vec::new()).await {
+                            return;
+                        }
+                        continue;
+                    }
                     if changed_paths.is_empty() {
                         continue;
                     }
@@ -425,13 +433,15 @@ pub fn apply_stream_omit_policy(diff: &mut Diff, sent_bytes: &Arc<AtomicUsize>, 
         return;
     }
 
-    let current = sent_bytes.load(Ordering::Relaxed);
-    if current.saturating_add(size) > MAX_CUMULATIVE_DIFF_BYTES {
+    let reserved = sent_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current
+            .checked_add(size)
+            .filter(|next| *next <= MAX_CUMULATIVE_DIFF_BYTES)
+    });
+    if reserved.is_err() {
         diff.old_content = None;
         diff.new_content = None;
         diff.content_omitted = true;
-    } else {
-        let _ = sent_bytes.fetch_add(size, Ordering::Relaxed);
     }
 }
 
@@ -516,6 +526,33 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc as StdArc;
 
+    fn inline_diff(content: &str) -> Diff {
+        Diff {
+            change: DiffChangeKind::Modified,
+            old_path: Some("file.txt".into()),
+            new_path: Some("file.txt".into()),
+            old_content: Some(content.into()),
+            new_content: None,
+            content_omitted: false,
+            additions: None,
+            deletions: None,
+            is_binary: false,
+        }
+    }
+
+    #[test]
+    fn stream_omits_content_that_would_exceed_budget() {
+        let sent = Arc::new(AtomicUsize::new(MAX_CUMULATIVE_DIFF_BYTES - 2));
+        let mut diff = inline_diff("more");
+        apply_stream_omit_policy(&mut diff, &sent, false);
+        assert!(diff.content_omitted);
+        assert!(diff.old_content.is_none());
+        assert_eq!(
+            sent.load(Ordering::Relaxed),
+            MAX_CUMULATIVE_DIFF_BYTES - 2
+        );
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .current_dir(dir)
@@ -553,9 +590,10 @@ mod tests {
             if let LogEntry::JsonPatch(value) = msg {
                 if let Some(ops) = value.as_array() {
                     for op in ops {
-                        let (Some(kind), Some(path)) =
-                            (op.get("op").and_then(|v| v.as_str()), op.get("path").and_then(|v| v.as_str()))
-                        else {
+                        let (Some(kind), Some(path)) = (
+                            op.get("op").and_then(|v| v.as_str()),
+                            op.get("path").and_then(|v| v.as_str()),
+                        ) else {
                             continue;
                         };
                         if let Some(key) = path.strip_prefix("/diffs/") {
@@ -577,9 +615,7 @@ mod tests {
         let dir = tmp.path();
         init_project(dir);
         let git_service = GitService::new();
-        let base = git_service
-            .get_base_commit(dir, "feature", "main")
-            .unwrap();
+        let base = git_service.get_base_commit(dir, "feature", "main").unwrap();
 
         // Two uncommitted changes vs the base.
         write(dir, "base.txt", "changed\n");
@@ -590,7 +626,15 @@ mod tests {
         let reported = empty_reported();
 
         let first = process_file_changes(
-            &git_service, dir, &base, &[], true, &cumulative, &full_sent, &reported, false,
+            &git_service,
+            dir,
+            &base,
+            &[],
+            true,
+            &cumulative,
+            &full_sent,
+            &reported,
+            false,
         )
         .unwrap();
         let adds: HashSet<String> = diff_keys(&first)
@@ -606,7 +650,15 @@ mod tests {
         std::fs::remove_file(dir.join("new.txt")).unwrap();
 
         let second = process_file_changes(
-            &git_service, dir, &base, &[], true, &cumulative, &full_sent, &reported, false,
+            &git_service,
+            dir,
+            &base,
+            &[],
+            true,
+            &cumulative,
+            &full_sent,
+            &reported,
+            false,
         )
         .unwrap();
         let removes: HashSet<String> = diff_keys(&second)
@@ -629,9 +681,7 @@ mod tests {
         let dir = tmp.path();
         init_project(dir);
         let git_service = GitService::new();
-        let base = git_service
-            .get_base_commit(dir, "feature", "main")
-            .unwrap();
+        let base = git_service.get_base_commit(dir, "feature", "main").unwrap();
 
         write(dir, "base.txt", "changed\n");
         write(dir, "new.txt", "added\n");
@@ -639,7 +689,15 @@ mod tests {
         let full_sent = empty_reported();
         let reported = empty_reported();
         process_file_changes(
-            &git_service, dir, &base, &[], true, &cumulative, &full_sent, &reported, false,
+            &git_service,
+            dir,
+            &base,
+            &[],
+            true,
+            &cumulative,
+            &full_sent,
+            &reported,
+            false,
         )
         .unwrap();
 

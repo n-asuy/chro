@@ -98,6 +98,8 @@ interface CodeMirrorEditorProps {
    * Defaults to "prose".
    */
   mode?: "prose" | "code";
+  /** Disable wrapping for very large or minified documents. */
+  lineWrapping?: boolean;
   /**
    * File extension (without dot) for code mode syntax highlighting.
    * e.g. "ts", "sh", "json"
@@ -176,7 +178,6 @@ const DEFAULT_EDITOR_TAB_SIZE = 4;
 const DEFAULT_EDITOR_INDENT_WITH_SPACES = true;
 const DEFAULT_EDITOR_SHOW_LINE_NUMBERS = false;
 
-
 export const CodeMirrorEditor = forwardRef<
   CodeMirrorEditorHandle,
   CodeMirrorEditorProps
@@ -189,6 +190,7 @@ export const CodeMirrorEditor = forwardRef<
     disabled = false,
     placeholder,
     mode = "prose",
+    lineWrapping = DEFAULT_EDITOR_LINE_WRAPPING,
     fileExtension,
     renderBubbleMenu,
     bubbleMenuPlacement = "top",
@@ -332,13 +334,15 @@ export const CodeMirrorEditor = forwardRef<
 
     // Build extensions
     const extensions: Extension[] = [
-      DEFAULT_EDITOR_LINE_WRAPPING ? EditorView.lineWrapping : [],
+      lineWrapping ? EditorView.lineWrapping : [],
       compartments.current.fontSize.of(
         EditorView.theme({
           ".cm-content": {
             fontSize: `${isCodeMode ? initialConfig.font_size - 1 : initialConfig.font_size}px`,
             lineHeight: String(initialConfig.line_height),
-            fontFamily: isCodeMode ? codeFontFamily : DEFAULT_EDITOR_FONT_FAMILY,
+            fontFamily: isCodeMode
+              ? codeFontFamily
+              : DEFAULT_EDITOR_FONT_FAMILY,
           },
           ".cm-gutters": {
             fontSize: `${isCodeMode ? initialConfig.font_size - 1 : initialConfig.font_size}px`,

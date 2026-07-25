@@ -319,6 +319,8 @@ export const SourceControlPanel = () => {
   } = useGitStatus({ projectId, taskRunId: scopeTaskRunId });
 
   const openFileInEditor = useFilesStore((state) => state.openFile);
+  const requestDiffReveal = useFilesStore((state) => state.requestDiffReveal);
+  const clearDiffReveal = useFilesStore((state) => state.clearDiffReveal);
   const openTab = useLayoutStore((state) => state.openTab);
 
   // Scope: "all" = every change this branch introduced vs a base
@@ -397,11 +399,16 @@ export const SourceControlPanel = () => {
   // instead of offering buttons that would fail.
   const isRebaseBlocked =
     conflictCount > 0 || Boolean(branchStatus?.is_rebase_in_progress);
+  // Integration compares against the run's TARGET branch, not the upstream:
+  // `commitsAhead`/`commitsBehind` above drive Push/Pull (vs origin) and are
+  // routinely 0 while the branch still diverges from its target.
+  const targetAhead = branchStatus?.commits_ahead ?? 0;
+  const targetBehind = branchStatus?.commits_behind ?? 0;
   // Rebase only needs the branch to be behind; merge needs something to land.
   const canRebase =
-    Boolean(baseRef) && !isRebaseBlocked && !isRebasing && commitsBehind > 0;
+    Boolean(baseRef) && !isRebaseBlocked && !isRebasing && targetBehind > 0;
   const canMerge =
-    Boolean(baseRef) && !isRebaseBlocked && !isMerging && commitsAhead > 0;
+    Boolean(baseRef) && !isRebaseBlocked && !isMerging && targetAhead > 0;
 
   // The buttons stay visible even when unavailable, so each one has to say why
   // it is inert rather than leaving the user guessing.
@@ -410,14 +417,14 @@ export const SourceControlPanel = () => {
     ? "Resolve the in-progress rebase first"
     : !baseRef
       ? "Waiting for the run's target branch"
-      : commitsBehind === 0
+      : targetBehind === 0
         ? `Already up to date with ${baseLabel}`
         : `Replay this branch on top of ${baseLabel}`;
   const mergeHint = isRebaseBlocked
     ? "Resolve the in-progress rebase first"
     : !baseRef
       ? "Waiting for the run's target branch"
-      : commitsAhead === 0
+      : targetAhead === 0
         ? "No commits to merge yet"
         : `Merge this branch into ${baseLabel}`;
 
@@ -503,14 +510,22 @@ export const SourceControlPanel = () => {
 
   // Open the combined changes diff (changed regions only, every file stacked).
   // In a session worktree this is the run's diff tab; otherwise the project's
-  // working-changes tab.
-  const handleOpenDiff = useCallback(() => {
-    if (scopeTaskRunId) {
-      openTab({ type: "diff", runId: scopeTaskRunId });
-      return;
-    }
-    if (projectId) openTab({ type: "project-diff", projectId });
-  }, [openTab, projectId, scopeTaskRunId]);
+  // working-changes tab. With a path, also ask that tab to scroll to the file:
+  // this panel is the index, the diff tab is the content.
+  const handleOpenDiff = useCallback(
+    (path?: string) => {
+      if (scopeTaskRunId) {
+        openTab({ type: "diff", runId: scopeTaskRunId });
+      } else if (projectId) {
+        openTab({ type: "project-diff", projectId });
+      } else {
+        return;
+      }
+      if (path) requestDiffReveal(path, scopeTaskRunId ?? null);
+      else clearDiffReveal();
+    },
+    [openTab, projectId, scopeTaskRunId, requestDiffReveal, clearDiffReveal],
+  );
 
   const handleCommit = useCallback(async () => {
     if (!commitMessage.trim() || isCommitting) return;
@@ -565,7 +580,7 @@ export const SourceControlPanel = () => {
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  onClick={handleOpenDiff}
+                  onClick={() => handleOpenDiff()}
                   disabled={
                     isLoading ||
                     (scope === "all"
@@ -750,7 +765,7 @@ export const SourceControlPanel = () => {
           </span>
           {scope === "all" && baseRef && (
             <span className="shrink-0 text-custom-text-300">
-              vs <span className="text-custom-text-200">{baseRef}</span>
+              → <span className="text-custom-text-200">{baseRef}</span>
             </span>
           )}
         </div>
@@ -788,14 +803,14 @@ export const SourceControlPanel = () => {
                     additions={entry.diff.additions}
                     deletions={entry.diff.deletions}
                     onOpenFile={() => handleOpenFile(entry.path)}
-                    onOpenDiff={handleOpenDiff}
+                    onOpenDiff={() => handleOpenDiff(entry.path)}
                   />
                 ),
               }))}
             />
             {scopedDiffs.length === 0 && (
               <div className="px-2 py-4 text-center text-xs text-custom-text-300">
-                No changes vs {baseRef}
+                Up to date with {baseRef}
               </div>
             )}
           </CollapsibleSection>
@@ -837,7 +852,7 @@ export const SourceControlPanel = () => {
                     isStaged
                     onUnstage={() => handleUnstageFile(file.path)}
                     onOpenFile={() => handleOpenFile(file.path)}
-                    onOpenDiff={handleOpenDiff}
+                    onOpenDiff={() => handleOpenDiff(file.path)}
                   />
                 ),
               }))}
@@ -887,7 +902,7 @@ export const SourceControlPanel = () => {
                       onStage={() => handleStageFile(file.path)}
                       onDiscard={() => handleDiscardFile(file.path)}
                       onOpenFile={() => handleOpenFile(file.path)}
-                      onOpenDiff={handleOpenDiff}
+                      onOpenDiff={() => handleOpenDiff(file.path)}
                     />
                   ),
                 })),
@@ -903,7 +918,7 @@ export const SourceControlPanel = () => {
                       deletions={countsByPath.get(path)?.deletions}
                       onStage={() => handleStageFile(path)}
                       onOpenFile={() => handleOpenFile(path)}
-                      onOpenDiff={handleOpenDiff}
+                      onOpenDiff={() => handleOpenDiff(path)}
                     />
                   ),
                 })),
@@ -920,11 +935,7 @@ export const SourceControlPanel = () => {
           state is carried by the label and the disabled reason, never by hiding
           the control. */}
       {scopeTaskRunId && (
-        <div className="shrink-0 space-y-2 border-t border-custom-border-200 p-3">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-custom-text-300">
-            Integrate
-          </div>
-
+        <div className="shrink-0 space-y-2 p-3 pt-0">
           {isRebaseBlocked && (
             <div className="rounded-md bg-amber-500/10 px-2.5 py-1.5 text-[11.5px] leading-snug text-amber-700 dark:text-amber-400">
               {conflictCount > 0
@@ -938,14 +949,14 @@ export const SourceControlPanel = () => {
             onClick={handleRebase}
             disabled={!canRebase}
             title={rebaseHint}
-            className="flex w-full items-center justify-between gap-2 rounded-md border border-custom-border-200 px-2.5 py-1.5 text-[12px] text-custom-text-200 transition hover:bg-custom-background-80 disabled:pointer-events-none disabled:opacity-40"
+            className="flex w-full items-center justify-between gap-2 rounded-md border border-custom-border-200 bg-custom-background-80 px-2.5 py-1.5 text-[12px] text-custom-text-100 shadow-sm transition hover:bg-custom-background-90 disabled:pointer-events-none disabled:opacity-40"
           >
             <span>
               {isRebasing ? "Rebasing…" : `Rebase onto ${baseLabel}`}
             </span>
-            {pullCount > 0 && (
+            {targetBehind > 0 && (
               <span className="rounded bg-custom-background-80 px-1.5 py-0.5 text-[10px] tabular-nums text-custom-text-300">
-                {pullCount} behind
+                {targetBehind} behind
               </span>
             )}
           </button>
@@ -964,9 +975,9 @@ export const SourceControlPanel = () => {
                   ? "Merged"
                   : `Merge into ${baseLabel}`}
             </span>
-            {pushCount > 0 && (
+            {targetAhead > 0 && (
               <span className="rounded bg-white/20 px-1.5 py-0.5 text-[10px] tabular-nums">
-                {pushCount} ahead
+                {targetAhead} ahead
               </span>
             )}
           </button>

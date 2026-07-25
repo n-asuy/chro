@@ -69,7 +69,7 @@ function LayoutShellInner() {
       if (!path) return;
       openTab(
         taskRunId ? { type: "file", path, taskRunId } : { type: "file", path },
-        { activate: true },
+        { activate: true, returnFocusOnClose: true },
       );
     };
     useFilesStore.setState({ _onFilePathChange: handler });

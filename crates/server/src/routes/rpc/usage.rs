@@ -123,7 +123,10 @@ struct Sample {
 }
 
 fn field_u64(value: &serde_json::Value, key: &str) -> u64 {
-    value.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0)
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 fn field_str(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -495,7 +498,14 @@ impl UsageCache {
             (owned, AgentUsageResponse { providers })
         })
         .await
-        .unwrap_or_else(|_| (HashMap::new(), AgentUsageResponse { providers: Vec::new() }));
+        .unwrap_or_else(|_| {
+            (
+                HashMap::new(),
+                AgentUsageResponse {
+                    providers: Vec::new(),
+                },
+            )
+        });
         *states = owned;
         drop(states);
 
@@ -653,7 +663,10 @@ mod tests {
         assert_eq!(cursor.offset, after_first);
 
         // A half-written trailing line is not consumed until it is complete.
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).expect("append");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
         write!(file, "{}", &line(20)[..20]).expect("partial write");
         file.flush().expect("flush");
         ingest_new_bytes(&path, spec, &mut cursor);
@@ -661,7 +674,10 @@ mod tests {
         assert_eq!(cursor.offset, after_first);
 
         // Once the line is terminated it is picked up exactly once.
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).expect("append");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
         writeln!(file, "{}", &line(20)[20..]).expect("finish write");
         file.flush().expect("flush");
         ingest_new_bytes(&path, spec, &mut cursor);

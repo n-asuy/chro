@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -105,19 +106,27 @@ const BASE_MATCH_SCORE_DIRNAME: i64 = 10;
 const BASE_MATCH_SCORE_FULLPATH: i64 = 1;
 const RECENCY_WEIGHT: i64 = 2;
 const FREQUENCY_WEIGHT: i64 = 1;
+/// Approximate aggregate memory budget for cached repository indexes. Moka's
+/// capacity is expressed in KiB via `cached_repo_weight_kib`.
+const CACHE_MAX_WEIGHT_KIB: u64 = 128 * 1024;
 
 /// File search cache with FST indexing
 pub struct FileSearchCache {
-    cache: Cache<PathBuf, CachedRepo>,
-    build_queue: mpsc::UnboundedSender<PathBuf>,
+    // Cache values are shared so a lookup does not clone a repository's full
+    // FST and path vectors into a second large allocation.
+    cache: Cache<PathBuf, Arc<CachedRepo>>,
+    build_queue: mpsc::Sender<PathBuf>,
 }
 
 impl FileSearchCache {
     pub fn new() -> Self {
-        let (build_sender, build_receiver) = mpsc::unbounded_channel();
+        // A bounded queue prevents rapid watcher invalidations from retaining
+        // an unbounded number of repository paths.
+        let (build_sender, build_receiver) = mpsc::channel(64);
 
         let cache = Cache::builder()
-            .max_capacity(50)
+            .weigher(|_path: &PathBuf, repo: &Arc<CachedRepo>| cached_repo_weight_kib(repo))
+            .max_capacity(CACHE_MAX_WEIGHT_KIB)
             .time_to_live(Duration::from_secs(3600))
             .build();
 
@@ -156,8 +165,10 @@ impl FileSearchCache {
             }
         }
 
-        if let Err(e) = self.build_queue.send(repo_path_buf) {
-            warn!("Failed to enqueue cache build: {}", e);
+        if let Err(mpsc::error::TrySendError::Closed(path)) =
+            self.build_queue.try_send(repo_path_buf)
+        {
+            warn!("Cache build queue closed before enqueuing {:?}", path);
         }
 
         Err(CacheError::Miss)
@@ -171,11 +182,10 @@ impl FileSearchCache {
             ));
         }
 
-        if let Err(e) = self.build_queue.send(repo_path.to_path_buf()) {
-            error!(
-                "Failed to enqueue repo for warming: {:?} - {}",
-                repo_path, e
-            );
+        if let Err(mpsc::error::TrySendError::Closed(path)) =
+            self.build_queue.try_send(repo_path.to_path_buf())
+        {
+            error!("Cache build queue closed before warming {:?}", path);
         }
         Ok(())
     }
@@ -184,24 +194,39 @@ impl FileSearchCache {
     /// watcher when HEAD moves (branch switch, commit), so the next search
     /// hits a fresh cache instead of the slow filesystem fallback.
     pub fn invalidate(&self, repo_path: &Path) {
-        if let Err(e) = self.build_queue.send(repo_path.to_path_buf()) {
-            warn!("Failed to enqueue cache invalidation: {}", e);
+        if let Err(mpsc::error::TrySendError::Closed(path)) =
+            self.build_queue.try_send(repo_path.to_path_buf())
+        {
+            warn!("Cache build queue closed before invalidating {:?}", path);
         }
     }
 
     /// Background worker for cache building
     async fn background_worker(
-        mut build_receiver: mpsc::UnboundedReceiver<PathBuf>,
-        cache: Cache<PathBuf, CachedRepo>,
+        mut build_receiver: mpsc::Receiver<PathBuf>,
+        cache: Cache<PathBuf, Arc<CachedRepo>>,
     ) {
         while let Some(repo_path) = build_receiver.recv().await {
-            match build_repo_cache(&repo_path).await {
-                Ok(cached_repo) => {
-                    cache.insert(repo_path.clone(), cached_repo).await;
-                    info!("Successfully cached repo: {:?}", repo_path);
-                }
-                Err(e) => {
-                    error!("Failed to cache repo {:?}: {}", repo_path, e);
+            // Coalesce duplicate invalidations already waiting in the queue.
+            let mut pending = HashSet::from([repo_path]);
+            while let Ok(path) = build_receiver.try_recv() {
+                pending.insert(path);
+            }
+            for repo_path in pending {
+                let build_path = repo_path.clone();
+                let built =
+                    tokio::task::spawn_blocking(move || build_repo_cache(&build_path)).await;
+                match built {
+                    Ok(Ok(cached_repo)) => {
+                        cache.insert(repo_path.clone(), Arc::new(cached_repo)).await;
+                        info!("Successfully cached repo: {:?}", repo_path);
+                    }
+                    Ok(Err(e)) => {
+                        error!("Failed to cache repo {:?}: {}", repo_path, e);
+                    }
+                    Err(e) => {
+                        error!("Cache worker failed for {:?}: {}", repo_path, e);
+                    }
                 }
             }
         }
@@ -224,8 +249,38 @@ impl Default for FileSearchCache {
     }
 }
 
+fn cached_repo_weight_kib(repo: &CachedRepo) -> u32 {
+    let indexed_bytes = repo.indexed_files.iter().fold(0usize, |total, file| {
+        total
+            .saturating_add(std::mem::size_of::<IndexedFile>())
+            .saturating_add(file.path.len())
+            .saturating_add(file.path_lowercase.len())
+    });
+    let stats_bytes = repo.stats.iter().fold(0usize, |total, (path, _stat)| {
+        total
+            .saturating_add(std::mem::size_of::<FileStat>())
+            .saturating_add(path.len())
+    });
+    // The FST stores another compact copy of every lowercase path. Counting
+    // path_lowercase a second time is a conservative proxy for that buffer.
+    let bytes = indexed_bytes
+        .saturating_add(stats_bytes)
+        .saturating_add(
+            repo.indexed_files
+                .iter()
+                .map(|file| file.path_lowercase.len())
+                .sum::<usize>(),
+        )
+        .saturating_add(repo.head_sha.len());
+    bytes
+        .div_ceil(1024)
+        .clamp(1, u32::MAX as usize)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 /// Build cache entry for a repository
-async fn build_repo_cache(repo_path: &Path) -> Result<CachedRepo, FileSearchError> {
+fn build_repo_cache(repo_path: &Path) -> Result<CachedRepo, FileSearchError> {
     info!("Building cache for repo: {:?}", repo_path);
 
     let head_sha = get_head_sha(repo_path)?;
@@ -464,25 +519,89 @@ pub struct LineMatch {
 pub struct FileContentHit {
     pub path: String,
     pub matches: Vec<LineMatch>,
+    /// Last-modified time as an RFC3339 string, or `None` when unavailable.
+    pub modified_at: Option<String>,
+}
+
+/// How to order content-search results. `Relevance` is the default; the rest
+/// mirror the file-name / path / modified-time axes offered in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchSort {
+    #[default]
+    Relevance,
+    ModifiedDesc,
+    ModifiedAsc,
+    NameAsc,
+    NameDesc,
+    PathAsc,
+    PathDesc,
+}
+
+/// Result of a content search: the top-N rendered hits plus totals describing
+/// the full collected set (which may be larger than what is returned).
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentSearchOutcome {
+    pub hits: Vec<FileContentHit>,
+    /// Number of files collected before the cap stopped the walk.
+    pub total_files: usize,
+    /// Total matching lines across collected files (before the per-file cap).
+    pub total_line_matches: usize,
+    /// True when the walk stopped at the collect cap, so totals are lower bounds.
+    pub truncated: bool,
+}
+
+/// Upper bound on files collected before sorting, so a broad `content:` query
+/// cannot hold the whole repository's highlights in memory. Beyond this the
+/// user is better served by narrowing the query than by an exact global order.
+const CONTENT_COLLECT_CAP: usize = 500;
+/// Generated logs and minified bundles should not be loaded wholesale merely
+/// because a live search query changed.
+const CONTENT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// A newline-only generated file can turn a modest byte buffer into millions
+/// of fat `&str` pointers. Stop constructing the line index before that point.
+const CONTENT_MAX_SCANNED_LINES_PER_FILE: usize = 100_000;
+/// Preserve enough matching lines for useful relevance sorting while bounding
+/// temporary query-evaluation maps for generated files.
+const CONTENT_MAX_EVALUATED_LINES_PER_FILE: usize = 1_000;
+
+/// A file that matched, held between the collect and sort stages. Snippets are
+/// windowed before storage so one minified line cannot retain a multi-megabyte
+/// string for every collected file.
+struct RankedHit {
+    path: String,
+    /// Basename lowercased, precomputed for name sorting.
+    name_lower: String,
+    /// Whether the file *name* satisfies the query (relevance signal).
+    name_match: bool,
+    /// Matching line count before the per-file cap (relevance + totals signal).
+    match_count: usize,
+    modified: Option<DateTime<Utc>>,
+    /// Up to `max_lines_per_file` bounded display snippets.
+    matches: Vec<LineMatch>,
 }
 
 /// Full-text search across file contents using the boolean query language,
-/// grouped by file.
+/// grouped by file and ordered by `sort`.
 ///
 /// The query supports `AND`/`OR`/`-`/`()`, `"phrases"`, `/regex/`, the field
 /// prefixes `file:`/`path:`/`content:`/`tag:`, `line:(…)` scoping, and
 /// `match-case:`/`ignore-case:` (see [`query`]). `case_sensitive` sets the
 /// default when a term has no explicit case operator: `Some(true/false)` forces
-/// it, `None` applies smart-case. Each returned file carries up to
-/// `max_lines_per_file` matching lines; scanning stops after `max_files` files
-/// have matched. Queries that only test names/paths skip reading file contents.
+/// it, `None` applies smart-case.
+///
+/// Files are collected up to [`CONTENT_COLLECT_CAP`], sorted per `sort`, then
+/// the top `max_files` are rendered with up to `max_lines_per_file` matching
+/// lines each. The returned [`ContentSearchOutcome`] carries totals for the
+/// whole collected set and a `truncated` flag when the cap was hit. Queries
+/// that only test names/paths skip reading file contents.
 pub fn search_content_grouped(
     repo_path: &Path,
     pattern: &str,
     case_sensitive: Option<bool>,
+    sort: SearchSort,
     max_files: usize,
     max_lines_per_file: usize,
-) -> Result<Vec<FileContentHit>, FileSearchError> {
+) -> Result<ContentSearchOutcome, FileSearchError> {
     if !repo_path.exists() {
         return Err(FileSearchError::RepoMissing(
             repo_path.display().to_string(),
@@ -492,11 +611,19 @@ pub fn search_content_grouped(
     let compiled = query::CompiledQuery::parse(pattern, case_sensitive)
         .map_err(|e| FileSearchError::InvalidRepository(e.0))?;
 
+    let empty = ContentSearchOutcome {
+        hits: Vec::new(),
+        total_files: 0,
+        total_line_matches: 0,
+        truncated: false,
+    };
     if compiled.is_empty() || max_files == 0 || max_lines_per_file == 0 {
-        return Ok(Vec::new());
+        return Ok(empty);
     }
 
-    let mut hits: Vec<FileContentHit> = Vec::new();
+    // ---- Stage 1: collect ---------------------------------------------------
+    let mut collected: Vec<RankedHit> = Vec::new();
+    let mut truncated = false;
 
     let walker = WalkBuilder::new(repo_path)
         .hidden(false)
@@ -513,7 +640,8 @@ pub fn search_content_grouped(
         .build();
 
     for entry in walker.flatten() {
-        if hits.len() >= max_files {
+        if collected.len() >= CONTENT_COLLECT_CAP {
+            truncated = true;
             break;
         }
 
@@ -528,10 +656,25 @@ pub fn search_content_grouped(
             .to_string_lossy()
             .to_string();
 
+        let metadata = entry.metadata().ok();
+        let modified = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .map(DateTime::<Utc>::from);
+        let name_lower = relative_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&relative_path)
+            .to_lowercase();
+
         // Name/path-only queries never touch file contents.
         if !compiled.reads_content {
             if compiled.evaluate(&relative_path, &[]).is_some() {
-                hits.push(FileContentHit {
+                collected.push(RankedHit {
+                    name_match: true,
+                    match_count: 0,
+                    modified,
+                    name_lower,
                     path: relative_path,
                     matches: Vec::new(),
                 });
@@ -539,16 +682,58 @@ pub fn search_content_grouped(
             continue;
         }
 
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
+        if metadata
+            .as_ref()
+            .is_some_and(|value| value.len() > CONTENT_MAX_FILE_BYTES)
+        {
+            truncated = true;
+            continue;
+        }
+
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let mut bytes = Vec::with_capacity(
+            metadata
+                .as_ref()
+                .map(|value| value.len().min(CONTENT_MAX_FILE_BYTES) as usize)
+                .unwrap_or(0),
+        );
+        if file
+            .take(CONTENT_MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            continue;
+        }
+        if bytes.len() > CONTENT_MAX_FILE_BYTES as usize {
+            // The file grew beyond the metadata size while this search was
+            // running. Preserve the same hard cap in that race.
+            truncated = true;
+            continue;
+        }
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
             Err(_) => continue, // unreadable or non-UTF-8: treat as no match
         };
-        let lines: Vec<&str> = content.lines().collect();
-        let Some(highlights) = compiled.evaluate(&relative_path, &lines) else {
+        let mut lines: Vec<&str> = content
+            .lines()
+            .take(CONTENT_MAX_SCANNED_LINES_PER_FILE + 1)
+            .collect();
+        if lines.len() > CONTENT_MAX_SCANNED_LINES_PER_FILE {
+            lines.truncate(CONTENT_MAX_SCANNED_LINES_PER_FILE);
+            truncated = true;
+        }
+        let Some((highlights, highlights_truncated)) =
+            compiled.evaluate_limited(&relative_path, &lines, CONTENT_MAX_EVALUATED_LINES_PER_FILE)
+        else {
             continue;
         };
+        truncated |= highlights_truncated;
 
-        let mut matches: Vec<LineMatch> = Vec::new();
+        let match_count = highlights.len();
+        let mut matches = Vec::new();
         for (line_number, mut ranges) in highlights {
             if matches.len() >= max_lines_per_file {
                 break;
@@ -557,21 +742,91 @@ pub fn search_content_grouped(
                 continue;
             };
             merge_ranges(&mut ranges);
-            let (snippet, utf16_ranges) = build_snippet(line, &ranges);
+            let (line_content, ranges) = build_snippet(line, &ranges);
             matches.push(LineMatch {
                 line_number,
-                line_content: snippet,
-                ranges: utf16_ranges,
+                line_content,
+                ranges,
             });
         }
 
-        hits.push(FileContentHit {
+        collected.push(RankedHit {
+            name_match: compiled.matches_name(&relative_path),
+            match_count,
+            modified,
+            name_lower,
             path: relative_path,
             matches,
         });
     }
 
-    Ok(hits)
+    let total_files = collected.len();
+    let total_line_matches = collected.iter().map(|h| h.match_count).sum();
+
+    // ---- Stage 2: sort ------------------------------------------------------
+    sort_ranked(&mut collected, sort);
+
+    // ---- Stage 3: render top-N ---------------------------------------------
+    let hits = collected
+        .into_iter()
+        .take(max_files)
+        .map(|hit| FileContentHit {
+            path: hit.path,
+            matches: hit.matches,
+            modified_at: hit.modified.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+
+    Ok(ContentSearchOutcome {
+        hits,
+        total_files,
+        total_line_matches,
+        truncated,
+    })
+}
+
+/// Order modified times with `None` always last, in the given direction.
+/// `desc` = newest first.
+fn cmp_modified(
+    a: &Option<DateTime<Utc>>,
+    b: &Option<DateTime<Utc>>,
+    desc: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            if desc {
+                y.cmp(x)
+            } else {
+                x.cmp(y)
+            }
+        }
+        (Some(_), None) => Ordering::Less, // present sorts before missing
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Sort collected hits per `sort`. Every ordering ends with `path` ascending so
+/// the result is deterministic regardless of walk order.
+fn sort_ranked(hits: &mut [RankedHit], sort: SearchSort) {
+    hits.sort_by(|a, b| {
+        let by_path = a.path.cmp(&b.path);
+        match sort {
+            SearchSort::Relevance => b
+                .name_match
+                .cmp(&a.name_match)
+                .then_with(|| b.match_count.cmp(&a.match_count))
+                .then_with(|| cmp_modified(&a.modified, &b.modified, true))
+                .then(by_path),
+            SearchSort::ModifiedDesc => cmp_modified(&a.modified, &b.modified, true).then(by_path),
+            SearchSort::ModifiedAsc => cmp_modified(&a.modified, &b.modified, false).then(by_path),
+            SearchSort::NameAsc => a.name_lower.cmp(&b.name_lower).then(by_path),
+            SearchSort::NameDesc => b.name_lower.cmp(&a.name_lower).then(by_path),
+            SearchSort::PathAsc => by_path,
+            SearchSort::PathDesc => b.path.cmp(&a.path),
+        }
+    });
 }
 
 /// Sort byte ranges by start and merge overlapping/adjacent ones, so the
@@ -828,8 +1083,14 @@ mod tests {
         let raw = format!("{prefix}NEEDLE tail");
         let match_start = prefix.len();
         let (snippet, ranges) = build_snippet(&raw, &[(match_start, match_start + 6)]);
-        assert!(snippet.starts_with('…'), "windowed snippet should lead with ellipsis");
-        assert!(snippet.len() < raw.len(), "snippet should be shorter than the raw line");
+        assert!(
+            snippet.starts_with('…'),
+            "windowed snippet should lead with ellipsis"
+        );
+        assert!(
+            snippet.len() < raw.len(),
+            "snippet should be shorter than the raw line"
+        );
         assert_eq!(ranges.len(), 1);
         assert_eq!(highlight(&snippet, ranges[0]), "NEEDLE");
     }
@@ -842,18 +1103,33 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// Set a file's mtime so modified-time ordering is deterministic.
+    fn set_mtime(dir: &TempDir, rel: &str, secs_since_epoch: u64) {
+        let file = fs::File::options()
+            .write(true)
+            .open(dir.path().join(rel))
+            .unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_since_epoch))
+            .unwrap();
+    }
+
     #[test]
     fn content_search_groups_lines_by_file() {
         let dir = TempDir::new().unwrap();
-        write(&dir, "a.rs", "fn alpha() {}\nlet needle = 1;\nneedle again\n");
+        write(
+            &dir,
+            "a.rs",
+            "fn alpha() {}\nlet needle = 1;\nneedle again\n",
+        );
         write(&dir, "b.rs", "no match here\n");
 
-        let hits = search_content_grouped(dir.path(), "needle", None, 10, 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].path, "a.rs");
-        assert_eq!(hits[0].matches.len(), 2);
-        assert_eq!(hits[0].matches[0].line_number, 2);
-        assert_eq!(hits[0].matches[1].line_number, 3);
+        let out = search_content_grouped(dir.path(), "needle", None, SearchSort::Relevance, 10, 10)
+            .unwrap();
+        assert_eq!(out.hits.len(), 1);
+        assert_eq!(out.hits[0].path, "a.rs");
+        assert_eq!(out.hits[0].matches.len(), 2);
+        assert_eq!(out.hits[0].matches[0].line_number, 2);
+        assert_eq!(out.hits[0].matches[1].line_number, 3);
     }
 
     #[test]
@@ -862,13 +1138,17 @@ mod tests {
         write(&dir, "a.rs", "Needle\nneedle\n");
 
         // Lowercase query matches case-insensitively.
-        let lower = search_content_grouped(dir.path(), "needle", None, 10, 10).unwrap();
-        assert_eq!(lower[0].matches.len(), 2);
+        let lower =
+            search_content_grouped(dir.path(), "needle", None, SearchSort::Relevance, 10, 10)
+                .unwrap();
+        assert_eq!(lower.hits[0].matches.len(), 2);
 
         // A query with an uppercase letter becomes case-sensitive.
-        let upper = search_content_grouped(dir.path(), "Needle", None, 10, 10).unwrap();
-        assert_eq!(upper[0].matches.len(), 1);
-        assert_eq!(upper[0].matches[0].line_number, 1);
+        let upper =
+            search_content_grouped(dir.path(), "Needle", None, SearchSort::Relevance, 10, 10)
+                .unwrap();
+        assert_eq!(upper.hits[0].matches.len(), 1);
+        assert_eq!(upper.hits[0].matches[0].line_number, 1);
     }
 
     #[test]
@@ -877,15 +1157,29 @@ mod tests {
         write(&dir, "a.rs", "Needle\nneedle\n");
 
         // Force case-sensitive on an all-lowercase query.
-        let sensitive =
-            search_content_grouped(dir.path(), "needle", Some(true), 10, 10).unwrap();
-        assert_eq!(sensitive[0].matches.len(), 1);
-        assert_eq!(sensitive[0].matches[0].line_number, 2);
+        let sensitive = search_content_grouped(
+            dir.path(),
+            "needle",
+            Some(true),
+            SearchSort::Relevance,
+            10,
+            10,
+        )
+        .unwrap();
+        assert_eq!(sensitive.hits[0].matches.len(), 1);
+        assert_eq!(sensitive.hits[0].matches[0].line_number, 2);
 
         // Force case-insensitive on a mixed-case query.
-        let insensitive =
-            search_content_grouped(dir.path(), "Needle", Some(false), 10, 10).unwrap();
-        assert_eq!(insensitive[0].matches.len(), 2);
+        let insensitive = search_content_grouped(
+            dir.path(),
+            "Needle",
+            Some(false),
+            SearchSort::Relevance,
+            10,
+            10,
+        )
+        .unwrap();
+        assert_eq!(insensitive.hits[0].matches.len(), 2);
     }
 
     #[test]
@@ -895,12 +1189,118 @@ mod tests {
         write(&dir, "b.rs", "hit\n");
         write(&dir, "c.rs", "hit\n");
 
-        let capped_files = search_content_grouped(dir.path(), "hit", None, 2, 10).unwrap();
-        assert_eq!(capped_files.len(), 2);
+        // max_files caps the returned hits, but totals reflect the whole set.
+        let capped_files =
+            search_content_grouped(dir.path(), "hit", None, SearchSort::Relevance, 2, 10).unwrap();
+        assert_eq!(capped_files.hits.len(), 2);
+        assert_eq!(capped_files.total_files, 3);
+        assert!(!capped_files.truncated);
 
-        let capped_lines = search_content_grouped(dir.path(), "hit", None, 10, 2).unwrap();
-        let a = capped_lines.iter().find(|h| h.path == "a.rs").unwrap();
+        let capped_lines =
+            search_content_grouped(dir.path(), "hit", None, SearchSort::Relevance, 10, 2).unwrap();
+        let a = capped_lines.hits.iter().find(|h| h.path == "a.rs").unwrap();
         assert_eq!(a.matches.len(), 2);
+    }
+
+    #[test]
+    fn relevance_ranks_name_matches_then_match_count() {
+        let dir = TempDir::new().unwrap();
+        // Name contains the term (and one body match): outranks body-only files
+        // even though it has the fewest content matches.
+        write(&dir, "needle.rs", "needle\n");
+        // Most content matches among the body-only files.
+        write(&dir, "many.rs", "needle\nneedle\nneedle\n");
+        // Fewest content matches.
+        write(&dir, "few.rs", "needle\n");
+
+        let out = search_content_grouped(dir.path(), "needle", None, SearchSort::Relevance, 10, 10)
+            .unwrap();
+        let order: Vec<&str> = out.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(order, vec!["needle.rs", "many.rs", "few.rs"]);
+    }
+
+    #[test]
+    fn modified_sort_orders_by_mtime_with_none_last() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "old.rs", "hit\n");
+        write(&dir, "new.rs", "hit\n");
+        set_mtime(&dir, "old.rs", 1_000);
+        set_mtime(&dir, "new.rs", 2_000);
+
+        let desc =
+            search_content_grouped(dir.path(), "hit", None, SearchSort::ModifiedDesc, 10, 10)
+                .unwrap();
+        let desc_order: Vec<&str> = desc.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(desc_order, vec!["new.rs", "old.rs"]);
+
+        let asc = search_content_grouped(dir.path(), "hit", None, SearchSort::ModifiedAsc, 10, 10)
+            .unwrap();
+        let asc_order: Vec<&str> = asc.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(asc_order, vec!["old.rs", "new.rs"]);
+
+        // Every content hit carries an RFC3339 modified time.
+        assert!(desc.hits.iter().all(|h| h.modified_at.is_some()));
+    }
+
+    #[test]
+    fn total_line_matches_counts_before_per_file_cap() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a.rs", "hit\nhit\nhit\nhit\nhit\n");
+
+        let out =
+            search_content_grouped(dir.path(), "hit", None, SearchSort::Relevance, 10, 2).unwrap();
+        // Rendered lines are capped at 2, but the total reflects all 5.
+        assert_eq!(out.hits[0].matches.len(), 2);
+        assert_eq!(out.total_line_matches, 5);
+    }
+
+    #[test]
+    fn collect_cap_marks_truncated() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..(CONTENT_COLLECT_CAP + 5) {
+            write(&dir, &format!("f{i}.txt"), "hit\n");
+        }
+
+        let out =
+            search_content_grouped(dir.path(), "hit", None, SearchSort::Relevance, 10, 10).unwrap();
+        assert!(out.truncated);
+        assert_eq!(out.total_files, CONTENT_COLLECT_CAP);
+        assert_eq!(out.hits.len(), 10);
+    }
+
+    #[test]
+    fn content_search_skips_oversized_files() {
+        let dir = TempDir::new().unwrap();
+        write(
+            &dir,
+            "generated.log",
+            &format!("needle{}", "x".repeat(CONTENT_MAX_FILE_BYTES as usize)),
+        );
+        write(&dir, "small.txt", "needle\n");
+
+        let out = search_content_grouped(dir.path(), "needle", None, SearchSort::Relevance, 10, 10)
+            .unwrap();
+        assert!(out.truncated);
+        assert_eq!(out.hits.len(), 1);
+        assert_eq!(out.hits[0].path, "small.txt");
+    }
+
+    #[test]
+    fn content_search_caps_generated_line_indexes() {
+        let dir = TempDir::new().unwrap();
+        write(
+            &dir,
+            "many-lines.log",
+            &format!(
+                "{}needle\n",
+                "\n".repeat(CONTENT_MAX_SCANNED_LINES_PER_FILE + 1)
+            ),
+        );
+
+        let out = search_content_grouped(dir.path(), "needle", None, SearchSort::Relevance, 10, 10)
+            .unwrap();
+        assert!(out.truncated);
+        assert!(out.hits.is_empty());
     }
 
     #[test]

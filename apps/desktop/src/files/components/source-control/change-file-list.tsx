@@ -1,9 +1,11 @@
 import { cn } from "@/lib/cn";
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /** Flat list of file rows, or nested by their parent folders (VSCode-style). */
 export type ChangeListViewMode = "list" | "tree";
+const INITIAL_VISIBLE_FILES = 300;
+const FILES_PER_PAGE = 300;
 
 /**
  * A single changed file. `path` is repo-relative and drives folder nesting in
@@ -144,6 +146,15 @@ export function ChangeFileList({
   viewMode: ChangeListViewMode;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_FILES);
+  useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE_FILES);
+  }, [entries.length, viewMode]);
+  const visibleEntries = useMemo(
+    () => entries.slice(0, visibleCount),
+    [entries, visibleCount],
+  );
+  const remaining = entries.length - visibleEntries.length;
   const toggle = (key: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -152,15 +163,32 @@ export function ChangeFileList({
       return next;
     });
 
-  if (viewMode === "list") {
-    return <>{entries.map((entry) => entry.render(0))}</>;
-  }
   return (
-    <TreeRows
-      nodes={buildTree(entries)}
-      depth={0}
-      collapsed={collapsed}
-      onToggle={toggle}
-    />
+    <>
+      {viewMode === "list" ? (
+        visibleEntries.map((entry) => entry.render(0))
+      ) : (
+        <TreeRows
+          nodes={buildTree(visibleEntries)}
+          depth={0}
+          collapsed={collapsed}
+          onToggle={toggle}
+        />
+      )}
+      {remaining > 0 && (
+        <button
+          type="button"
+          className="mt-1 w-full rounded px-2 py-1.5 text-xs text-custom-text-300 hover:bg-custom-background-80 hover:text-custom-text-100"
+          onClick={() =>
+            setVisibleCount((count) =>
+              Math.min(entries.length, count + FILES_PER_PAGE),
+            )
+          }
+        >
+          Show {Math.min(remaining, FILES_PER_PAGE)} more ({remaining}{" "}
+          remaining)
+        </button>
+      )}
+    </>
   );
 }

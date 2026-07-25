@@ -23,7 +23,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -47,6 +47,7 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Broadcast backlog. Each item is a coalesced batch of at most a handful of
 /// distinct (kind, scope) pairs, so this is generous.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+const INGEST_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GitStateEventKind {
@@ -210,10 +211,7 @@ impl GitStateWatcherService {
 
     fn remove_if_matching(&self, common_dir: &Path, id: u64) {
         let mut watchers = self.watchers.lock().unwrap();
-        if watchers
-            .get(common_dir)
-            .is_some_and(|entry| entry.id == id)
-        {
+        if watchers.get(common_dir).is_some_and(|entry| entry.id == id) {
             watchers.remove(common_dir);
         }
     }
@@ -227,28 +225,32 @@ impl GitStateWatcherService {
         let this = self.clone();
 
         tokio::spawn(async move {
-            let (ingest_tx, mut ingest_rx) = mpsc::unbounded_channel::<GitStateEvent>();
+            let (ingest_tx, mut ingest_rx) =
+                mpsc::channel::<GitStateEvent>(INGEST_CHANNEL_CAPACITY);
+            let overflowed = Arc::new(AtomicBool::new(false));
 
             let build_dir = common_dir.clone();
-            let watcher =
-                match tokio::task::spawn_blocking(move || build_watcher(&build_dir, ingest_tx))
-                    .await
-                {
-                    Ok(Ok(watcher)) => watcher,
-                    Ok(Err(err)) => {
-                        tracing::error!(
-                            common_dir = %common_dir.display(),
-                            "failed to build git state watcher: {err}"
-                        );
-                        this.remove_if_matching(&common_dir, id);
-                        return;
-                    }
-                    Err(join_err) => {
-                        tracing::error!("git state watcher build join error: {join_err}");
-                        this.remove_if_matching(&common_dir, id);
-                        return;
-                    }
-                };
+            let callback_overflowed = overflowed.clone();
+            let watcher = match tokio::task::spawn_blocking(move || {
+                build_watcher(&build_dir, ingest_tx, callback_overflowed)
+            })
+            .await
+            {
+                Ok(Ok(watcher)) => watcher,
+                Ok(Err(err)) => {
+                    tracing::error!(
+                        common_dir = %common_dir.display(),
+                        "failed to build git state watcher: {err}"
+                    );
+                    this.remove_if_matching(&common_dir, id);
+                    return;
+                }
+                Err(join_err) => {
+                    tracing::error!("git state watcher build join error: {join_err}");
+                    this.remove_if_matching(&common_dir, id);
+                    return;
+                }
+            };
             // Keep the watcher alive for as long as this task runs.
             let _watcher = watcher;
 
@@ -269,14 +271,32 @@ impl GitStateWatcherService {
                         }
                     }
                     _ = flush.tick() => {
-                        if pending.is_empty() {
+                        let did_overflow = overflowed.swap(false, Ordering::AcqRel);
+                        if pending.is_empty() && !did_overflow {
                             continue;
+                        }
+                        if did_overflow {
+                            pending.insert(GitStateEvent {
+                                kind: GitStateEventKind::HeadMoved,
+                                scope: GitEventScope::Shared,
+                            });
+                            pending.insert(GitStateEvent {
+                                kind: GitStateEventKind::IndexChanged,
+                                scope: GitEventScope::Shared,
+                            });
+                            pending.insert(GitStateEvent {
+                                kind: GitStateEventKind::OperationChanged,
+                                scope: GitEventScope::Shared,
+                            });
                         }
                         let batch: Vec<GitStateEvent> = pending.drain().collect();
                         let _ = sender.send(Arc::new(batch));
                     }
                     _ = idle.tick() => {
-                        if pending.is_empty() && sender.receiver_count() == 0 {
+                        if pending.is_empty()
+                            && !overflowed.load(Ordering::Acquire)
+                            && sender.receiver_count() == 0
+                        {
                             break;
                         }
                     }
@@ -297,7 +317,8 @@ impl GitStateWatcherService {
 /// events through the whitelist before they reach the debounce buffer.
 fn build_watcher(
     common_dir: &Path,
-    ingest_tx: mpsc::UnboundedSender<GitStateEvent>,
+    ingest_tx: mpsc::Sender<GitStateEvent>,
+    overflowed: Arc<AtomicBool>,
 ) -> Result<RecommendedWatcher, FilesystemWatcherError> {
     let root = common_dir.to_path_buf();
 
@@ -320,7 +341,12 @@ fn build_watcher(
                     continue;
                 };
                 // Channel only closes once this watcher is dropped; ignore errors.
-                let _ = ingest_tx.send(event);
+                if matches!(
+                    ingest_tx.try_send(event),
+                    Err(mpsc::error::TrySendError::Full(_))
+                ) {
+                    overflowed.store(true, Ordering::Release);
+                }
             }
         },
         NotifyConfig::default(),
@@ -335,10 +361,12 @@ fn build_watcher(
 /// events; everything else (`objects/`, `logs/`, `*.lock`, temp files) is
 /// dropped here, on the watcher callback thread.
 fn classify(common_dir: &Path, relative: &Path) -> Option<GitStateEvent> {
-    let mut components = relative.components().filter_map(|component| match component {
-        Component::Normal(name) => name.to_str(),
-        _ => None,
-    });
+    let mut components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        });
     let first = components.next()?;
 
     // git writes state files via `<name>.lock` + rename; the lock churn is
@@ -380,9 +408,7 @@ fn classify_local(name: &str) -> Option<GitStateEventKind> {
     match name {
         "HEAD" => Some(GitStateEventKind::HeadMoved),
         "index" => Some(GitStateEventKind::IndexChanged),
-        "MERGE_HEAD" | "rebase-merge" | "rebase-apply" => {
-            Some(GitStateEventKind::OperationChanged)
-        }
+        "MERGE_HEAD" | "rebase-merge" | "rebase-apply" => Some(GitStateEventKind::OperationChanged),
         _ => None,
     }
 }
@@ -515,13 +541,23 @@ mod tests {
         let linked = root.join("wt1");
         git(
             &repo,
-            &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "wt1"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                linked.to_str().unwrap(),
+                "-b",
+                "wt1",
+            ],
         );
         let resolved = resolve_git_dirs(&linked).expect("linked worktree should resolve");
         assert_eq!(resolved.git_dir, repo.join(".git/worktrees/wt1"));
         assert_eq!(resolved.common_dir, repo.join(".git"));
 
-        assert!(resolve_git_dirs(&root).is_none(), "non-repo dir resolves to None");
+        assert!(
+            resolve_git_dirs(&root).is_none(),
+            "non-repo dir resolves to None"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

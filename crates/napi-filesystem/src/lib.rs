@@ -29,6 +29,7 @@ struct ProjectFileResponse {
     relative_path: String,
     content: String,
     size: u64,
+    truncated: bool,
     modified_at: Option<String>,
 }
 
@@ -83,6 +84,7 @@ impl From<WorkspaceFile> for ProjectFileResponse {
             relative_path: file.relative_path,
             content: file.content,
             size: file.size,
+            truncated: file.truncated,
             modified_at: format_system_time(file.modified),
         }
     }
@@ -106,11 +108,7 @@ pub fn list_workspace_entries(
             include_hidden,
         )
     } else {
-        service.list_workspace_entries(
-            &workspace_root,
-            relative_path.as_deref(),
-            include_hidden,
-        )
+        service.list_workspace_entries(&workspace_root, relative_path.as_deref(), include_hidden)
     }
     .map_err(map_error)?;
 

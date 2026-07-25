@@ -1,8 +1,8 @@
+import { useFilesStore } from "@/files/state/files-store";
+import { useDocumentTitle } from "@/hooks/use-document-title";
+import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo } from "react";
-import { useDocumentTitle } from "@/hooks/use-document-title";
-import { useFilesStore } from "@/files/state/files-store";
-import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 
 type FilesSearchParams = {
   path?: string;
@@ -31,7 +31,10 @@ function FilesPage() {
 
   useEffect(() => {
     if (search.path) {
-      openTab({ type: "file", path: search.path }, { activate: true });
+      openTab(
+        { type: "file", path: search.path },
+        { activate: true, returnFocusOnClose: true },
+      );
     }
   }, [search.path, openTab]);
 

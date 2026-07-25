@@ -15,8 +15,8 @@ use codex_app_server_protocol::{
     ExecCommandApprovalResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAuthStatusParams, GetAuthStatusResponse, InitializeCapabilities, InitializeParams,
     InitializeResponse, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    RequestId, ServerRequest, ThreadForkParams, ThreadStartParams, ThreadStartResponse,
-    TurnStartParams, TurnStartResponse, UserInput,
+    RequestId, ServerRequest, ThreadForkParams, ThreadStartParams, TurnStartParams,
+    TurnStartResponse, UserInput,
 };
 use codex_protocol::{openai_models::ReasoningEffort, protocol::ReviewDecision};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -45,24 +45,24 @@ pub struct AppServerClient {
     cancel: CancellationToken,
 }
 
-/// The subset of `ThreadForkResponse` that Chro consumes.
+/// The subset of thread start/fork responses that Chro consumes.
 ///
-/// A fork response includes the forked thread's complete turn history by
-/// default. Deserializing that history through the protocol crate makes Chro
-/// fail when a newer Codex app-server adds a `ThreadItem` variant. Keeping the
-/// response shape deliberately narrow lets serde ignore those items while we
+/// Deserializing the complete protocol response makes Chro fail when a newer
+/// Codex app-server adds an enum variant to an otherwise unused field (for
+/// example `serviceTier: "default"`) or a new `ThreadItem` variant. Keeping the
+/// response shape deliberately narrow lets serde ignore those fields while we
 /// retain the metadata required by the executor and log normalizer.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompatibleThreadForkResponse {
-    pub thread: ForkedThread,
+pub struct CompatibleThreadResponse {
+    pub thread: ThreadMetadata,
     pub model: String,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ForkedThread {
+pub struct ThreadMetadata {
     pub id: String,
 }
 
@@ -116,7 +116,7 @@ impl AppServerClient {
     pub async fn new_conversation(
         &self,
         params: ThreadStartParams,
-    ) -> Result<ThreadStartResponse, ExecutorError> {
+    ) -> Result<CompatibleThreadResponse, ExecutorError> {
         let request = ClientRequest::ThreadStart {
             request_id: self.next_request_id(),
             params,
@@ -127,7 +127,7 @@ impl AppServerClient {
     pub async fn fork_conversation(
         &self,
         params: ThreadForkParams,
-    ) -> Result<CompatibleThreadForkResponse, ExecutorError> {
+    ) -> Result<CompatibleThreadResponse, ExecutorError> {
         let request = ClientRequest::ThreadFork {
             request_id: self.next_request_id(),
             params,
@@ -483,8 +483,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn thread_start_response_ignores_unknown_service_tier() {
+        let response = serde_json::from_value::<CompatibleThreadResponse>(serde_json::json!({
+            "thread": {
+                "id": "started-thread",
+                "turns": []
+            },
+            "model": "gpt-5.6",
+            "modelProvider": "openai",
+            "serviceTier": "default",
+            "cwd": "C:\\workspace",
+            "reasoningEffort": "high"
+        }))
+        .expect("unknown service tier should not prevent decoding thread metadata");
+
+        assert_eq!(response.thread.id, "started-thread");
+        assert_eq!(response.model, "gpt-5.6");
+        assert_eq!(response.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
     fn fork_response_ignores_unknown_thread_items() {
-        let response = serde_json::from_value::<CompatibleThreadForkResponse>(serde_json::json!({
+        let response = serde_json::from_value::<CompatibleThreadResponse>(serde_json::json!({
             "thread": {
                 "id": "forked-thread",
                 "turns": [{

@@ -97,7 +97,7 @@ export function GalleryPanel({ taskRunId }: { taskRunId?: string }) {
   const openItem = (item: WorkspaceMediaItem): void => {
     openTab(
       { type: "file", path: item.relativePath, taskRunId },
-      { activate: true },
+      { activate: true, returnFocusOnClose: true },
     );
   };
 

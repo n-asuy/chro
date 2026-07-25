@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -40,6 +40,9 @@ const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Broadcast backlog. Each item is a coalesced batch, so this is generous.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Raw notify callbacks can outpace an async consumer during a build storm.
+/// Bounding this queue keeps that storm from becoming an unbounded heap.
+const INGEST_CHANNEL_CAPACITY: usize = 8192;
 /// Directories whose churn is never relevant and is dropped before debouncing.
 /// `.git` is git's own metadata (never in `.gitignore`); the others are the
 /// usual heavy build/dependency trees and act as a fast guard even when a repo
@@ -142,28 +145,31 @@ impl WorktreeWatcherService {
 
         tokio::spawn(async move {
             let (ingest_tx, mut ingest_rx) =
-                mpsc::unbounded_channel::<(WorktreeEventKind, String, PathBuf)>();
+                mpsc::channel::<(WorktreeEventKind, String, PathBuf)>(INGEST_CHANNEL_CAPACITY);
+            let overflowed = Arc::new(AtomicBool::new(false));
 
             let build_root = canonical_root.clone();
-            let watcher =
-                match tokio::task::spawn_blocking(move || build_watcher(&build_root, ingest_tx))
-                    .await
-                {
-                    Ok(Ok(watcher)) => watcher,
-                    Ok(Err(err)) => {
-                        tracing::error!(
-                            root = %canonical_root.display(),
-                            "failed to build worktree watcher: {err}"
-                        );
-                        this.remove_if_matching(&canonical_root, id);
-                        return;
-                    }
-                    Err(join_err) => {
-                        tracing::error!("worktree watcher build join error: {join_err}");
-                        this.remove_if_matching(&canonical_root, id);
-                        return;
-                    }
-                };
+            let callback_overflowed = overflowed.clone();
+            let watcher = match tokio::task::spawn_blocking(move || {
+                build_watcher(&build_root, ingest_tx, callback_overflowed)
+            })
+            .await
+            {
+                Ok(Ok(watcher)) => watcher,
+                Ok(Err(err)) => {
+                    tracing::error!(
+                        root = %canonical_root.display(),
+                        "failed to build worktree watcher: {err}"
+                    );
+                    this.remove_if_matching(&canonical_root, id);
+                    return;
+                }
+                Err(join_err) => {
+                    tracing::error!("worktree watcher build join error: {join_err}");
+                    this.remove_if_matching(&canonical_root, id);
+                    return;
+                }
+            };
             // Keep the watcher alive for as long as this task runs.
             let _watcher = watcher;
 
@@ -185,10 +191,11 @@ impl WorktreeWatcherService {
                         }
                     }
                     _ = flush.tick() => {
-                        if pending.is_empty() {
+                        let did_overflow = overflowed.swap(false, Ordering::AcqRel);
+                        if pending.is_empty() && !did_overflow {
                             continue;
                         }
-                        let batch: Vec<WorktreeEvent> = pending
+                        let mut batch: Vec<WorktreeEvent> = pending
                             .drain()
                             .map(|(relative_path, (kind, absolute_path))| WorktreeEvent {
                                 kind,
@@ -196,10 +203,22 @@ impl WorktreeWatcherService {
                                 relative_path,
                             })
                             .collect();
+                        if did_overflow {
+                            // Empty path is an internal resync marker. Consumers
+                            // that maintain derived state perform a full refresh.
+                            batch.push(WorktreeEvent {
+                                kind: WorktreeEventKind::Modified,
+                                relative_path: String::new(),
+                                is_dir: true,
+                            });
+                        }
                         let _ = sender.send(Arc::new(batch));
                     }
                     _ = idle.tick() => {
-                        if pending.is_empty() && sender.receiver_count() == 0 {
+                        if pending.is_empty()
+                            && !overflowed.load(Ordering::Acquire)
+                            && sender.receiver_count() == 0
+                        {
                             break;
                         }
                     }
@@ -220,7 +239,8 @@ impl WorktreeWatcherService {
 /// reach the debounce buffer, forwarding survivors on `ingest_tx`.
 fn build_watcher(
     canonical_root: &Path,
-    ingest_tx: mpsc::UnboundedSender<(WorktreeEventKind, String, PathBuf)>,
+    ingest_tx: mpsc::Sender<(WorktreeEventKind, String, PathBuf)>,
+    overflowed: Arc<AtomicBool>,
 ) -> Result<RecommendedWatcher, FilesystemWatcherError> {
     let gitignore = build_gitignore_set(canonical_root)?;
     let root = canonical_root.to_path_buf();
@@ -247,7 +267,12 @@ fn build_watcher(
                 }
                 let relative_path = relative.to_string_lossy().replace('\\', "/");
                 // Channel only closes once this watcher is dropped; ignore errors.
-                let _ = ingest_tx.send((kind, relative_path, absolute_path));
+                if matches!(
+                    ingest_tx.try_send((kind, relative_path, absolute_path)),
+                    Err(mpsc::error::TrySendError::Full(_))
+                ) {
+                    overflowed.store(true, Ordering::Release);
+                }
             }
         },
         NotifyConfig::default(),

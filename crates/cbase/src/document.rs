@@ -1,15 +1,15 @@
 //! The materialized view document handed to the UI.
 //!
 //! Combines the parsed definition, the effective (inferred) property schema, and
-//! the executed result of every view into a single payload, so the frontend can
-//! render and switch views without re-querying.
+//! a materialized view result. The paged builder executes only the active view
+//! so large datasets and multi-view definitions stay bounded.
 
 use std::collections::HashSet;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::execute_view;
+use crate::engine::{execute_view, execute_view_page};
 use crate::property_inference::merge_inferred_properties;
 use crate::types::{CbaseDefinition, CbaseFilter, CbaseProperty, CbaseRow, CbaseViewResult};
 
@@ -60,6 +60,54 @@ pub fn build_document(
                 definition.sort.as_deref(),
             )
         })
+        .collect();
+
+    CbaseDocument {
+        definition: Some(definition.clone()),
+        properties,
+        views,
+        is_query_language,
+        parse_error: None,
+    }
+}
+
+/// Build one bounded page of one view.
+///
+/// The definition still carries every view so the UI can render its tabs, but
+/// only the selected (or default) view is executed and serialized. This avoids
+/// multiplying row clones and response size by the number of views.
+pub fn build_document_page(
+    definition: &CbaseDefinition,
+    rows: &[CbaseRow],
+    is_query_language: bool,
+    view_id: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> CbaseDocument {
+    let properties = merge_inferred_properties(&definition.properties, rows);
+    let selected = view_id
+        .and_then(|id| definition.views.iter().find(|view| view.id == id))
+        .or_else(|| {
+            definition
+                .views
+                .iter()
+                .find(|view| view.default == Some(true))
+        })
+        .or_else(|| definition.views.first());
+
+    let views = selected
+        .map(|view| {
+            execute_view_page(
+                rows,
+                view,
+                &properties,
+                definition.filters.as_deref(),
+                definition.sort.as_deref(),
+                offset,
+                limit,
+            )
+        })
+        .into_iter()
         .collect();
 
     CbaseDocument {
@@ -166,6 +214,28 @@ mod tests {
         // Effective schema gains built-ins and the inferred `title` property.
         assert!(document.properties.values().any(|p| p.key == "title"));
         assert!(document.properties.values().any(|p| p.key == "file.name"));
+    }
+
+    #[test]
+    fn build_document_page_executes_only_the_selected_view() {
+        let mut definition = parse_cbase(BASE_YAML, None).unwrap();
+        let mut second = definition.views[0].clone();
+        second.id = "second".to_string();
+        second.name = "Second".to_string();
+        definition.views.push(second);
+        let rows = vec![
+            row("a.md", vec![]),
+            row("b.md", vec![]),
+            row("c.md", vec![]),
+        ];
+
+        let document = build_document_page(&definition, &rows, false, Some("second"), 1, 1);
+        assert_eq!(document.definition.as_ref().unwrap().views.len(), 2);
+        assert_eq!(document.views.len(), 1);
+        assert_eq!(document.views[0].view.id, "second");
+        assert_eq!(document.views[0].rows[0].file_path, "b.md");
+        assert_eq!(document.views[0].page_offset, 1);
+        assert!(document.views[0].has_more);
     }
 
     #[test]

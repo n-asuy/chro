@@ -94,15 +94,11 @@ import {
   useState,
 } from "react";
 import { AgentUserQuestion } from "./components/agent-user-question";
-import type { GitBranch as GitBranchType } from "./components/branch-selector";
 import { ConflictBanner } from "./components/conflict-banner";
 import { ConversationFindBar } from "./components/conversation-find-bar";
 import { ConversationMessageNav } from "./components/conversation-message-nav";
-import {
-  EnvironmentPopover,
-  type RebaseConfirmResult,
-} from "./components/environment-popover";
 import { NewSessionExecutionControls } from "./components/execution-options-controls";
+import { RunStatusPill } from "./components/run-status-pill";
 // DiffViewerPanel is no longer rendered inline; the "Open Diff" header
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
@@ -316,13 +312,8 @@ export function SingleAgentSessionView({
     [editor, setPromptPopover],
   );
   const referencesPopoverEnabled = useFlag("session_references_popover");
-  const [environmentPopoverOpen, setEnvironmentPopoverOpen] = useState(false);
-  const [isMergingDiffs, setIsMergingDiffs] = useState(false);
-  const [mergeSuccess, setMergeSuccess] = useState(false);
   const [isAbortingConflicts, setIsAbortingConflicts] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
-  const [branches, setBranches] = useState<GitBranchType[]>([]);
-  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [executorProfileId, setExecutorProfileId] =
     useState<ExecutorProfileId | null>(null);
   const [executorConfigs, setExecutorConfigs] =
@@ -1429,46 +1420,6 @@ export function SingleAgentSessionView({
       enabled: Boolean(taskRunId),
     });
 
-  // Merge diffs handler
-  const handleMergeDiffs = useCallback(async () => {
-    if (!taskRunId) {
-      addErrorMessage(t("diffMergeErrorMessage"));
-      return;
-    }
-    setIsMergingDiffs(true);
-    try {
-      await desktopFetch<{
-        merge_commit: string;
-        target_branch: string;
-      }>(`/rpc/task-runs/${encodeURIComponent(taskRunId)}/merge`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      // Set success state temporarily
-      setMergeSuccess(true);
-      setTimeout(() => setMergeSuccess(false), 2000);
-      // Refetch branch status to update commits_ahead immediately
-      void refetchBranchStatus();
-    } catch (error) {
-      console.error("[mergeDiffs] failed to merge diffs", error);
-      if (error instanceof Error && error.message) {
-        addErrorMessage(error.message);
-      } else {
-        addErrorMessage(t("diffMergeErrorMessage"));
-      }
-    } finally {
-      setIsMergingDiffs(false);
-    }
-  }, [addErrorMessage, refetchBranchStatus, t, taskRunId]);
-
-  // Rebase handlers
-  const handleRebaseSuccess = useCallback(() => {
-    setEnvironmentPopoverOpen(false);
-    // Refetch branch status to update commits_behind immediately
-    void refetchBranchStatus();
-  }, [refetchBranchStatus]);
-
   const handleRebaseError = useCallback(
     (error: Error) => {
       addErrorMessage(error.message || t("rebaseErrorMessage"));
@@ -1476,42 +1427,11 @@ export function SingleAgentSessionView({
     [addErrorMessage, t],
   );
 
-  const { rebase, isRebasing } = useRebase({
+  const { isRebasing } = useRebase({
     taskRunId,
-    onSuccess: handleRebaseSuccess,
+    onSuccess: () => void refetchBranchStatus(),
     onError: handleRebaseError,
   });
-
-  // Fetch branches when the environment popover opens (powers the rebase form)
-  useEffect(() => {
-    if (!environmentPopoverOpen || !taskRunId) {
-      return;
-    }
-
-    const fetchBranches = async () => {
-      setIsLoadingBranches(true);
-      try {
-        const response = await desktopFetch<{ branches: GitBranchType[] }>(
-          `/rpc/task-runs/${encodeURIComponent(taskRunId)}/branches`,
-        );
-        setBranches(response.branches ?? []);
-      } catch (error) {
-        console.error("Failed to fetch branches", error);
-        setBranches([]);
-      } finally {
-        setIsLoadingBranches(false);
-      }
-    };
-
-    void fetchBranches();
-  }, [environmentPopoverOpen, taskRunId]);
-
-  const handleRebaseConfirm = useCallback(
-    (result: RebaseConfirmResult) => {
-      void rebase(result.targetBranch, result.upstreamBranch);
-    },
-    [rebase],
-  );
 
   // Conflict handlers
   const handleAbortConflicts = useCallback(async () => {
@@ -1682,7 +1602,6 @@ export function SingleAgentSessionView({
     [diffItems],
   );
 
-  const hasDiffs = diffItems.length > 0;
   const diffAdditions = useMemo(
     () => diffItems.reduce((sum, item) => sum + (item.entry.additions ?? 0), 0),
     [diffItems],
@@ -1699,24 +1618,6 @@ export function SingleAgentSessionView({
   const isRebaseInProgress = branchStatus?.is_rebase_in_progress ?? false;
   const conflictOp = branchStatus?.conflict_op ?? null;
   const conflictedFiles = branchStatus?.conflicted_files ?? [];
-
-  // Keep merge/rebase availability checks aligned with branch status.
-  // Merge: disabled only during mutation
-  const canMergeDiffs = Boolean(
-    taskRunId &&
-      hasDiffs &&
-      !isMergingDiffs &&
-      (commitsAhead > 0 || mergeSuccess),
-  );
-
-  // Rebase only needs the branch to be behind its base; local changes are not
-  // required so the worktree can be brought up to date even with no diffs.
-  const canRebase = Boolean(
-    taskRunId &&
-      branchStatus?.target_branch &&
-      !isRebasing &&
-      commitsBehind > 0,
-  );
 
   // Filter out archived tasks (now using status field)
   const sortedTasks = useMemo(() => {
@@ -2298,7 +2199,7 @@ export function SingleAgentSessionView({
               taskTitle={activeTaskTitle}
               environmentControl={
                 isScratch ? undefined : (
-                  <EnvironmentPopover
+                  <RunStatusPill
                     taskId={sidebarActiveTaskId}
                     taskBranch={activeTaskBranch}
                     runTargetBranch={
@@ -2306,37 +2207,10 @@ export function SingleAgentSessionView({
                       currentTaskRunTargetBranch ??
                       null
                     }
-                    isGitRepository={isGitRepository}
-                    isExecutorLocked={isExecutorLocked}
+                    useWorktree={useWorktree}
                     additions={diffAdditions}
                     deletions={diffDeletions}
-                    hasDiffs={hasDiffs}
-                    useWorktree={useWorktree}
-                    onUseWorktreeChange={setUseWorktree}
-                    baseBranch={baseBranch}
-                    baseBranchSearch={baseBranchSearch}
-                    onBaseBranchSearchChange={setBaseBranchSearch}
-                    filteredBaseBranches={filteredBaseBranches}
-                    onBaseBranchSelect={setBaseBranch}
-                    canRebase={canRebase}
-                    isRebasing={isRebasing}
                     commitsBehind={commitsBehind}
-                    branches={branches}
-                    isLoadingBranches={isLoadingBranches}
-                    initialTargetBranch={
-                      currentTaskRunTargetBranch ?? undefined
-                    }
-                    initialUpstreamBranch={
-                      currentTaskRunTargetBranch ?? undefined
-                    }
-                    onRebaseConfirm={handleRebaseConfirm}
-                    canMergeDiffs={canMergeDiffs}
-                    isMergingDiffs={isMergingDiffs}
-                    onMergeDiffs={handleMergeDiffs}
-                    isInitializingGit={isInitializingGit}
-                    canInitGit={Boolean(routeProjectId)}
-                    onInitGitRepo={handleInitGitRepo}
-                    onOpenChange={setEnvironmentPopoverOpen}
                   />
                 )
               }

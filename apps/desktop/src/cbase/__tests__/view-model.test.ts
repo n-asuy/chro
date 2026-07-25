@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CbaseProperty, CbaseRow, CbaseView } from "../types";
 import {
   applyOverlay,
+  createDatasetPathFilter,
   datasetFolder,
   deriveSelectOptions,
   formatDateLabel,
@@ -14,6 +15,27 @@ import {
   settleOverlay,
   toDateInputValue,
 } from "../view-model";
+
+describe("createDatasetPathFilter", () => {
+  it("matches common recursive include and exclude globs", () => {
+    const matches = createDatasetPathFilter({
+      include: ["tasks/**/*.md"],
+      exclude: ["tasks/archive/**"],
+    });
+    expect(matches("tasks/today.md")).toBe(true);
+    expect(matches("tasks/nested/tomorrow.md")).toBe(true);
+    expect(matches("tasks/archive/old.md")).toBe(false);
+    expect(matches("notes/other.md")).toBe(false);
+    expect(matches("tasks/image.png")).toBe(false);
+  });
+
+  it("falls back to match-all for unsupported include syntax", () => {
+    const matches = createDatasetPathFilter({
+      include: ["{tasks,notes}/**/*.md"],
+    });
+    expect(matches("anything.bin")).toBe(true);
+  });
+});
 
 const properties: Record<string, CbaseProperty> = {
   p_title: { key: "title", type: "text", label: "Title" },
@@ -122,7 +144,10 @@ describe("cell helpers", () => {
       type: "select",
       options: ["todo", "doing"],
     };
-    const rows = [row("a.md", { status: "done" }), row("b.md", { status: "todo" })];
+    const rows = [
+      row("a.md", { status: "done" }),
+      row("b.md", { status: "todo" }),
+    ];
     expect(deriveSelectOptions(property, rows)).toEqual([
       "todo",
       "doing",

@@ -17,7 +17,6 @@
     "setup:mobile": "bun run --filter=@chro/mobile setup",
     "test": "turbo test --parallel",
     "package:local:cli": "bun run --filter=@chro/cli package:local",
-    "package:release:cli": "bun run --filter=@chro/cli package:release",
     "format": "biome format --write .",
     "lint": "turbo lint && bun lint:repo",
     "lint:repo": "bunx sherif@latest -i tailwindcss",

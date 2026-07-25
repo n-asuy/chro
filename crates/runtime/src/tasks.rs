@@ -418,8 +418,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         match reuse_dir {
             Some(shared_dir) if is_git => {
                 // Continue in the source's own worktree, on its branch.
-                TaskRecord::update_worktree_state(self.pool(), task.id, Some(shared_dir), false, true)
-                    .await?;
+                TaskRecord::update_worktree_state(
+                    self.pool(),
+                    task.id,
+                    Some(shared_dir),
+                    false,
+                    true,
+                )
+                .await?;
                 TaskRecord::update_branch(self.pool(), task.id, source_task.branch.clone()).await?;
             }
             _ if is_git => {
@@ -458,8 +464,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                     .clone()
                     .filter(|path| Path::new(path).is_dir())
                     .unwrap_or_else(|| project.git_repo_path.clone());
-                TaskRecord::update_worktree_state(self.pool(), task.id, Some(shared_dir), false, true)
-                    .await?;
+                TaskRecord::update_worktree_state(
+                    self.pool(),
+                    task.id,
+                    Some(shared_dir),
+                    false,
+                    true,
+                )
+                .await?;
                 TaskRecord::update_branch(self.pool(), task.id, source_task.branch.clone()).await?;
             }
         }
@@ -554,11 +566,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         task: &TaskRecord,
         executor: &ExecutorProfileId,
     ) -> Option<ForkStart> {
-        let already_ran: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE task_id = ?")
-            .bind(task.id)
-            .fetch_one(self.pool())
-            .await
-            .unwrap_or(1);
+        let already_ran: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE task_id = ?")
+                .bind(task.id)
+                .fetch_one(self.pool())
+                .await
+                .unwrap_or(1);
         if already_ran > 1 {
             return None;
         }
@@ -796,12 +809,13 @@ impl<'a, R: Runtime> TaskService<'a, R> {
     async fn try_delegation_barrier_wake(&self, parent: &TaskRecord) -> Result<(), RuntimeError> {
         // The barrier: every delegate edge pointing at this parent belongs to
         // a child that is no longer running.
-        let child_task_ids: Vec<Uuid> = TaskContextRef::list_referencing_task_id(self.pool(), parent.id)
-            .await?
-            .into_iter()
-            .filter(|r| r.kind == "delegate")
-            .map(|r| r.task_id)
-            .collect();
+        let child_task_ids: Vec<Uuid> =
+            TaskContextRef::list_referencing_task_id(self.pool(), parent.id)
+                .await?
+                .into_iter()
+                .filter(|r| r.kind == "delegate")
+                .map(|r| r.task_id)
+                .collect();
         for child_task_id in &child_task_ids {
             let active: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM task_runs \
@@ -826,7 +840,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .into_iter()
                 .filter(|r| r.kind == "handoff")
                 .filter_map(|r| {
-                    let info: HandoffInfo = serde_json::from_str(r.metadata_json.as_deref()?).ok()?;
+                    let info: HandoffInfo =
+                        serde_json::from_str(r.metadata_json.as_deref()?).ok()?;
                     (!info.delivered).then_some((r, info))
                 })
                 .collect();
@@ -867,13 +882,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                     .filter(|text| !text.trim().is_empty()),
                 None => None,
             };
-            let workspace_path: Option<String> = sqlx::query_scalar(
-                "SELECT workspace_path FROM task_runs WHERE id = ?",
-            )
-            .bind(info.run_id)
-            .fetch_optional(self.pool())
-            .await?
-            .flatten();
+            let workspace_path: Option<String> =
+                sqlx::query_scalar("SELECT workspace_path FROM task_runs WHERE id = ?")
+                    .bind(info.run_id)
+                    .fetch_optional(self.pool())
+                    .await?
+                    .flatten();
             packets.push(build_handoff_packet(
                 &child_title,
                 info.branch.as_deref(),
@@ -920,6 +934,77 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         info!(
             parent_task_id = %parent.id,
             "delegation barrier met; woke the delegating session"
+        );
+        Ok(())
+    }
+
+    /// Early-wake half of the delegation loop: when a delegated child suspends
+    /// on an approval, rouse the (sleeping) delegating parent so it can respond
+    /// via `chro approvals`. Without this a gated child never completes, the
+    /// barrier never fires, and an unattended parent deadlocks.
+    ///
+    /// Best-effort: a run that is not a delegated child settles nothing. A
+    /// mid-turn parent is left alone (it can see the pending approval via
+    /// `chro approvals list`); only a sleeping parent is woken. The busy guard
+    /// then suppresses repeat wakes once the parent is roused, so N pending
+    /// approvals do not produce N turns.
+    pub async fn notify_delegation_approval_pending(
+        &self,
+        run_id: Uuid,
+        approval_id: String,
+        tool_name: String,
+    ) -> Result<(), RuntimeError> {
+        let run = TaskRun::get(self.pool(), run_id).await?;
+        let child = TaskRecord::get(self.pool(), run.task_id).await?;
+        let Some(edge) = TaskContextRef::list_by_task_id(self.pool(), child.id)
+            .await?
+            .into_iter()
+            .find(|r| r.kind == "delegate")
+        else {
+            return Ok(());
+        };
+        let Some(parent_task_id) = edge.target_task_id else {
+            return Ok(());
+        };
+        let parent = match TaskRecord::get(self.pool(), parent_task_id).await {
+            Ok(parent) => parent,
+            Err(err) => {
+                warn!(
+                    child_task_id = %child.id,
+                    parent_task_id = %parent_task_id,
+                    error = %err,
+                    "delegating task is gone; dropping the approval-pending wake"
+                );
+                return Ok(());
+            }
+        };
+
+        // Only rouse a sleeping parent. A mid-turn parent needs no wake — it
+        // would see the pending approval on its next action anyway, and a
+        // follow-up cannot be injected while it is busy.
+        let busy: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_runs \
+             WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
+        )
+        .bind(parent.id)
+        .fetch_one(self.pool())
+        .await?;
+        if busy > 0 {
+            info!(
+                parent_task_id = %parent.id,
+                child_task_id = %child.id,
+                "delegating session is mid-turn; approval-pending wake deferred"
+            );
+            return Ok(());
+        }
+
+        let prompt = build_approval_pending_wake_prompt(&child.title, &tool_name, &approval_id);
+        self.follow_up_by_task(parent.id, prompt).await?;
+        info!(
+            parent_task_id = %parent.id,
+            child_task_id = %child.id,
+            %approval_id,
+            "woke delegating session for a child's pending approval"
         );
         Ok(())
     }
@@ -2623,6 +2708,21 @@ fn build_handoff_packet(
 /// This text is exactly what the woken model reads, and exactly what its
 /// conversation shows as the turn's prompt: the surface and the model see the
 /// same thing.
+fn build_approval_pending_wake_prompt(
+    child_title: &str,
+    tool_name: &str,
+    approval_id: &str,
+) -> String {
+    format!(
+        "A task you delegated (\"{child_title}\") is paused waiting for approval to use {tool_name}. \
+It cannot proceed until someone responds.\n\n\
+Review it with `chro approvals show {approval_id}`, then respond with \
+`chro approvals respond {approval_id} --approve` or `--deny --reason \"...\"`. \
+For an AskUserQuestion prompt, answer with `--answer \"question=option\"`.\n\n\
+If this is outside what you were asked to oversee, leave it for the user instead."
+    )
+}
+
 fn build_barrier_wake_prompt(packets: &[String]) -> String {
     let header = if packets.len() == 1 {
         "A task you delegated has finished.".to_string()
@@ -2776,13 +2876,29 @@ mod tests {
     }
 
     #[test]
+    fn approval_pending_wake_prompt_carries_actionable_cli() {
+        let prompt = build_approval_pending_wake_prompt("indexer rewrite", "Bash", "appr-123");
+        // The parent must know which child, what it is blocked on, and the
+        // exact commands to unblock it — otherwise the wake is not actionable.
+        assert!(prompt.contains("indexer rewrite"));
+        assert!(prompt.contains("Bash"));
+        assert!(prompt.contains("chro approvals show appr-123"));
+        assert!(prompt.contains("chro approvals respond appr-123 --approve"));
+        assert!(prompt.contains("--deny"));
+        assert!(prompt.contains("--answer"));
+    }
+
+    #[test]
     fn fork_title_numbers_repeated_forks() {
         assert_eq!(fork_title("retry policy"), "retry policy (2)");
         // Forking a fork continues the count rather than nesting suffixes.
         assert_eq!(fork_title("retry policy (2)"), "retry policy (3)");
         assert_eq!(fork_title("retry policy (9)"), "retry policy (10)");
         // A parenthetical that isn't a counter is left intact.
-        assert_eq!(fork_title("retry policy (draft)"), "retry policy (draft) (2)");
+        assert_eq!(
+            fork_title("retry policy (draft)"),
+            "retry policy (draft) (2)"
+        );
         assert_eq!(fork_title("  spaced  "), "spaced (2)");
     }
 

@@ -78,7 +78,6 @@ pub enum TaskCommand {
         id: String,
     },
 
-
     /// Delegate part of a session's work to a new session. The child starts
     /// immediately with a digest of the delegating session in its boot
     /// prompt; when every task delegated by that session has finished, the
@@ -100,6 +99,15 @@ pub enum TaskCommand {
         /// Commit message
         #[arg(short, long)]
         message: Option<String>,
+    },
+
+    /// Rebase a task run onto a new base branch
+    Rebase {
+        /// Task run ID or slug
+        id: String,
+        /// New base branch. Defaults to the run's current target branch.
+        #[arg(long, value_name = "BRANCH")]
+        onto: Option<String>,
     },
 }
 
@@ -143,6 +151,7 @@ pub fn run(
         TaskCommand::Cancel { id } => cancel(client, id),
         TaskCommand::Diff { id } => diff(client, id),
         TaskCommand::Merge { id, message } => merge(client, id, message.as_deref()),
+        TaskCommand::Rebase { id, onto } => rebase(client, id, onto.as_deref()),
         TaskCommand::Delegate { prompt, from } => delegate(client, prompt, from.as_deref()),
     }
 }
@@ -516,6 +525,34 @@ fn merge(
     Ok(())
 }
 
+fn rebase(client: &ServerClient, id: &str, onto: Option<&str>) -> Result<(), client::ClientError> {
+    let new_base = match onto {
+        Some(branch) => branch.to_string(),
+        None => {
+            // Default to the run's current target branch.
+            let resp = client.get(&format!("/rpc/task-runs/{id}/with-task"))?;
+            resp.get("task_run")
+                .and_then(|r| r.get("target_branch"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("main")
+                .to_string()
+        }
+    };
+
+    let body = serde_json::json!({ "new_base_branch": new_base });
+    let resp = client.post(&format!("/rpc/task-runs/{id}/rebase"), &body)?;
+
+    if resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        println!("Rebased {id} onto {new_base}");
+        Ok(())
+    } else {
+        Err(client::ClientError::Http(format!("Rebase failed for {id}")))
+    }
+}
 
 fn delegate(
     client: &ServerClient,

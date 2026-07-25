@@ -3,12 +3,11 @@
 use std::{path::PathBuf, time::Instant};
 
 use axum::{
-    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
@@ -31,7 +30,7 @@ use uuid::Uuid;
 
 use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use super::images::{ImageListResponse, ImageResponse};
-use super::path_resolve::{read_binary_resolving, read_text_resolving};
+use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
     perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES,
@@ -1269,7 +1268,38 @@ async fn task_run_path_candidates(
             }
         }
     }
+    // Extend with every other registered project's checkout so a relative path
+    // that names a file living in a *different* project (e.g. an asset path
+    // shown in this run's conversation) still resolves. The workspace spans all
+    // projects, not just this run's own checkout. Reads try candidates in order
+    // (see `first_readable_root`); mutations stay confined to the worktree via
+    // `resolve_task_run_full_path`, which ignores these extra candidates.
+    candidates.extend(workspace_extra_roots(state, &candidates).await);
     Ok((worktree, candidates))
+}
+
+/// Every registered project's git checkout root, excluding any already in
+/// `existing`. Backs multi-root path resolution: a relative reference with no
+/// project identity resolves against the whole workspace of projects. A DB
+/// failure degrades to no extra roots (single-project behavior) rather than
+/// failing the read.
+async fn workspace_extra_roots(state: &AppState, existing: &[String]) -> Vec<String> {
+    let projects = match ProjectRecord::list_all(state.pool()).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list projects for multi-root path resolution");
+            return Vec::new();
+        }
+    };
+    let mut roots: Vec<String> = Vec::new();
+    for project in projects {
+        let root = project.git_repo_path;
+        if root.is_empty() || existing.contains(&root) || roots.contains(&root) {
+            continue;
+        }
+        roots.push(root);
+    }
+    roots
 }
 
 async fn read_task_run_binary_file(
@@ -1290,13 +1320,7 @@ async fn read_task_run_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &candidate_refs).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "no-cache").await
 }
 
 /// Path-based asset endpoint for HTML preview. See `read_project_asset`.
@@ -1314,13 +1338,7 @@ async fn read_task_run_asset(
     let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
     let binary_file = read_binary_resolving(&service, &relative_path, &candidate_refs).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "no-cache").await
 }
 
 #[derive(Debug, Serialize)]
@@ -1333,6 +1351,7 @@ struct TaskRunFileResponse {
     relative_path: String,
     content: String,
     size: u64,
+    truncated: bool,
     modified_at: Option<String>,
 }
 
@@ -1358,6 +1377,7 @@ async fn read_task_run_file(
             relative_path: file.relative_path,
             content: file.content,
             size: file.size,
+            truncated: file.truncated,
             modified_at: crate::format_system_time(file.modified),
         },
     }))

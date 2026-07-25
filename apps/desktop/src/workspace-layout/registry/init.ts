@@ -56,11 +56,7 @@ export function ensurePaneItemsRegistered(): void {
     type: "diff",
     iconName: "diff",
     Content: DiffTabBody,
-    resolveTitle: (kind) => {
-      if (kind.type !== "diff") return undefined;
-      const file = kind.path?.split("/").pop();
-      return file ? `Diff: ${file}` : "Diff";
-    },
+    resolveTitle: (kind) => (kind.type === "diff" ? "Diff" : undefined),
   });
 
   registerPaneItem({

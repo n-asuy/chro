@@ -15,6 +15,11 @@ use crate::types::{
 };
 use crate::value::{compare, contains_value, is_empty, search_string};
 
+/// Aggregate row payload guard for one interactive page. The HTTP envelope adds
+/// a little overhead, but bounding serialized rows prevents a handful of very
+/// large frontmatter blocks from defeating the row-count page limit.
+const MAX_VIEW_PAGE_ROW_BYTES: usize = 8 * 1024 * 1024;
+
 /// Resolve a property's value for a row, including `file.*` built-ins.
 pub fn resolve_property_value(
     row: &CbaseRow,
@@ -179,6 +184,94 @@ pub fn execute_view(
         view: view.clone(),
         rows: result,
         total_count,
+        page_offset: 0,
+        has_more: false,
+    }
+}
+
+/// Execute one bounded page while keeping source rows borrowed until the final
+/// page is known. This avoids cloning every indexed row merely to discard most
+/// of them at the response boundary.
+pub(crate) fn execute_view_page(
+    rows: &[CbaseRow],
+    view: &CbaseView,
+    properties: &IndexMap<String, CbaseProperty>,
+    global_filters: Option<&[CbaseFilter]>,
+    global_sort: Option<&[CbaseSort]>,
+    offset: usize,
+    limit: usize,
+) -> CbaseViewResult {
+    let mut result: Vec<&CbaseRow> = rows
+        .iter()
+        .filter(|row| {
+            global_filters
+                .filter(|filters| !filters.is_empty())
+                .is_none_or(|filters| {
+                    filters
+                        .iter()
+                        .all(|filter| evaluate_filter(row, filter, properties))
+                })
+        })
+        .filter(|row| {
+            view.filters
+                .as_deref()
+                .filter(|filters| !filters.is_empty())
+                .is_none_or(|filters| {
+                    filters
+                        .iter()
+                        .all(|filter| evaluate_filter(row, filter, properties))
+                })
+        })
+        .collect();
+    let total_count = result.len() as i64;
+
+    let view_sort = view.sort.as_deref().filter(|sort| !sort.is_empty());
+    let sort = view_sort.or_else(|| global_sort.filter(|sort| !sort.is_empty()));
+    if let Some(sort_specs) = sort {
+        result.sort_by(|a, b| {
+            for spec in sort_specs {
+                let a_val = resolve_property_value(a, &spec.by, properties);
+                let b_val = resolve_property_value(b, &spec.by, properties);
+                let ordering = compare(&a_val, &b_val);
+                if ordering != Ordering::Equal {
+                    return match spec.dir {
+                        SortDirection::Desc => ordering.reverse(),
+                        SortDirection::Asc => ordering,
+                    };
+                }
+            }
+            a.file_path.cmp(&b.file_path)
+        });
+    }
+
+    let available = view
+        .limit
+        .filter(|limit| *limit > 0)
+        .map_or(result.len(), |view_limit| {
+            result.len().min(view_limit as usize)
+        });
+    let start = offset.min(available);
+    let requested_end = start.saturating_add(limit.max(1)).min(available);
+    let mut rows = Vec::with_capacity(requested_end.saturating_sub(start));
+    let mut row_bytes = 0usize;
+    let mut end = start;
+    while end < requested_end {
+        let row = result[end];
+        let estimated = serde_json::to_vec(row).map_or(0, |encoded| encoded.len());
+        if !rows.is_empty() && row_bytes.saturating_add(estimated) > MAX_VIEW_PAGE_ROW_BYTES {
+            break;
+        }
+        row_bytes = row_bytes.saturating_add(estimated);
+        rows.push((*row).clone());
+        end += 1;
+    }
+
+    CbaseViewResult {
+        view: view.clone(),
+        rows,
+        total_count,
+        page_offset: start as i64,
+        has_more: end < available,
     }
 }
 
@@ -604,6 +697,35 @@ mod tests {
         let result = execute_view(&execute_data(), &base_view(), &props, None, None);
         assert_eq!(result.rows.len(), 4);
         assert_eq!(result.total_count, 4);
+    }
+
+    #[test]
+    fn execute_view_page_returns_only_the_requested_window() {
+        let props = properties();
+        let result = execute_view_page(&execute_data(), &base_view(), &props, None, None, 1, 2);
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.file_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2.md", "3.md"]
+        );
+        assert_eq!(result.total_count, 4);
+        assert_eq!(result.page_offset, 1);
+        assert!(result.has_more);
+    }
+
+    #[test]
+    fn execute_view_page_respects_the_definition_limit() {
+        let props = properties();
+        let mut view = base_view();
+        view.limit = Some(2);
+        let result = execute_view_page(&execute_data(), &view, &props, None, None, 1, 2);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].file_path, "2.md");
+        assert_eq!(result.total_count, 4);
+        assert!(!result.has_more);
     }
 
     #[test]

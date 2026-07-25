@@ -1,7 +1,10 @@
 use std::{future::Future, io, path::Path, pin::Pin, sync::Arc, time::Duration};
 
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions},
+    sqlite::{
+        SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
+        SqliteSynchronous,
+    },
     Error, Pool, Sqlite,
 };
 use tokio::io::AsyncWriteExt;
@@ -160,7 +163,11 @@ impl DBService {
             .filename(db_path)
             .create_if_missing(true)
             .busy_timeout(Duration::from_secs(15))
-            .journal_mode(SqliteJournalMode::Delete);
+            // Readers no longer block the single writer during large initial
+            // snapshots; NORMAL is SQLite's recommended durability trade-off
+            // for WAL and avoids an fsync on every small event write.
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
 
         let pool = if let Some(hook) = hook {
             SqlitePoolOptions::new()

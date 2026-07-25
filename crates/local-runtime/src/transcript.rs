@@ -269,11 +269,14 @@ fn render_claude_json(out: &mut String, json: &ClaudeJson, has_content: &mut boo
             }
         }
         // Skip system init, stream events (deltas), tool_use/tool_result
-        // (these are embedded in Assistant/User messages)
+        // (these are embedded in Assistant/User messages) and progress
+        // heartbeats (no content of their own; the tool call is already
+        // rendered from the message that carries it)
         ClaudeJson::System { .. }
         | ClaudeJson::StreamEvent { .. }
         | ClaudeJson::ToolUse { .. }
         | ClaudeJson::ToolResult { .. }
+        | ClaudeJson::ToolProgress { .. }
         | ClaudeJson::RateLimitEvent { .. }
         | ClaudeJson::ApprovalResponse { .. }
         | ClaudeJson::Unknown { .. } => {}

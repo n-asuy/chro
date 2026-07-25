@@ -50,7 +50,7 @@ const CODEX_EFFORT_LEVELS: ReasoningEffort[] = [
 
 // `value` is passed to the Claude Code CLI via `--model`. The short aliases
 // (`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current model
-// snapshot, so `label` carries the human-facing generation (Opus 4.8 /
+// snapshot, so `label` carries the human-facing generation (Opus 5 /
 // Sonnet 5 / Haiku 4.5) so the selector shows which model the alias points at.
 // Fable 5 has no short alias, so it uses its pinned model id directly.
 const CLAUDE_MODELS: ModelOption[] = [
@@ -62,7 +62,7 @@ const CLAUDE_MODELS: ModelOption[] = [
   },
   {
     value: "opus",
-    label: "Opus 4.8",
+    label: "Opus 5",
     executor: "CLAUDE_CODE",
     description: "Highly capable model for complex agentic coding.",
     // Fast mode is Opus-only; other Claude models have no speed toggle.

@@ -25,6 +25,7 @@ type ProjectFileResponse = {
   relative_path: string;
   content: string;
   size: number;
+  truncated?: boolean;
   modified_at?: string | null;
 };
 
@@ -55,6 +56,7 @@ const toDesktopFile = (file: ProjectFileResponse): DesktopWorkspaceFile => ({
   relativePath: file.relative_path,
   content: file.content,
   size: file.size,
+  truncated: file.truncated ?? false,
   modifiedAt: file.modified_at ?? null,
 });
 
@@ -597,6 +599,8 @@ export type ProjectSearchResult = {
   match_type: SearchMatchType;
   /** Matching lines for content search; empty for name/path results. */
   line_matches: SearchLineMatch[];
+  /** Last-modified time (RFC3339) for content results; null for name search. */
+  modified_at: string | null;
 };
 
 type SearchMode = "taskform" | "settings";
@@ -607,11 +611,35 @@ export type SearchKind = "name" | "content";
 /** Case handling for content search; omit for smart-case (uppercase = sensitive). */
 export type SearchCase = "sensitive" | "insensitive";
 
+/** Content-search ordering; "relevance" is the default. */
+export type ContentSortOrder =
+  | "relevance"
+  | "modified-desc"
+  | "modified-asc"
+  | "name-asc"
+  | "name-desc"
+  | "path-asc"
+  | "path-desc";
+
 type ProjectSearchResponse = {
   results: ProjectSearchResult[];
+  total_files: number;
+  total_line_matches: number;
+  truncated: boolean;
 };
 
-export const searchProjectFiles = async (
+/** Content search results plus totals describing the full collected set. */
+export type ProjectContentSearchOutcome = {
+  results: ProjectSearchResult[];
+  /** Files matched before the server's collect cap (>= results.length). */
+  totalFiles: number;
+  /** Matching lines across all collected files (before the per-file cap). */
+  totalLineMatches: number;
+  /** True when the collect cap was hit, so the totals are lower bounds. */
+  truncated: boolean;
+};
+
+const runProjectSearch = (
   projectId: string,
   query: string,
   options?: {
@@ -619,12 +647,10 @@ export const searchProjectFiles = async (
     limit?: number;
     kind?: SearchKind;
     case?: SearchCase;
+    sort?: ContentSortOrder;
+    signal?: AbortSignal;
   },
-): Promise<ProjectSearchResult[]> => {
-  if (!query.trim()) {
-    return [];
-  }
-
+): Promise<ProjectSearchResponse> => {
   const params = new URLSearchParams({ q: query });
   if (options?.mode) {
     params.set("mode", options.mode);
@@ -638,11 +664,67 @@ export const searchProjectFiles = async (
   if (options?.case) {
     params.set("case", options.case);
   }
+  if (options?.sort) {
+    params.set("sort", options.sort);
+  }
 
-  const { results } = await desktopFetch<ProjectSearchResponse>(
+  return desktopFetch<ProjectSearchResponse>(
     `/rpc/projects/${projectId}/search?${params.toString()}`,
+    { signal: options?.signal },
   );
+};
+
+export const searchProjectFiles = async (
+  projectId: string,
+  query: string,
+  options?: {
+    mode?: SearchMode;
+    limit?: number;
+    kind?: SearchKind;
+    case?: SearchCase;
+    signal?: AbortSignal;
+  },
+): Promise<ProjectSearchResult[]> => {
+  if (!query.trim()) {
+    return [];
+  }
+  const { results } = await runProjectSearch(projectId, query, options);
   return results;
+};
+
+/**
+ * Full-text content search that also returns totals and the truncation flag,
+ * so the caller can show "N files · M matches" and flag a capped result set.
+ * Ordering happens server-side per `sort`.
+ */
+export const searchProjectContent = async (
+  projectId: string,
+  query: string,
+  options?: {
+    limit?: number;
+    case?: SearchCase;
+    sort?: ContentSortOrder;
+    signal?: AbortSignal;
+  },
+): Promise<ProjectContentSearchOutcome> => {
+  if (!query.trim()) {
+    return {
+      results: [],
+      totalFiles: 0,
+      totalLineMatches: 0,
+      truncated: false,
+    };
+  }
+  const response = await runProjectSearch(projectId, query, {
+    ...options,
+    kind: "content",
+  });
+  return {
+    results: response.results,
+    totalFiles: response.total_files,
+    totalLineMatches: response.total_line_matches,
+    truncated: response.truncated,
+  };
 };
 
 export const revealInFinder = async (

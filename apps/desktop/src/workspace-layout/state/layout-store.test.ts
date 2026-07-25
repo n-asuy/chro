@@ -78,4 +78,23 @@ describe("useLayoutStore", () => {
 
     expect(focusedLeaf?.activeTabId).toBe(sessionId);
   });
+
+  it("returns to the previous screen after a transient file tab closes", () => {
+    const store = useLayoutStore.getState();
+    const sessionId = store.openTab({ type: "session", taskId: "task-1" });
+    const fileId = store.openTab(
+      { type: "file", path: "preview.html" },
+      { returnFocusOnClose: true },
+    );
+
+    useLayoutStore.getState().closeTab(fileId);
+
+    const { layout } = useLayoutStore.getState();
+    const focusedLeaf = allLeaves(layout.root).find(
+      (leaf) => leaf.id === layout.focusedPaneId,
+    );
+
+    expect(focusedLeaf?.activeTabId).toBe(sessionId);
+    expect(focusedLeaf?.tabs.some((tab) => tab.id === fileId)).toBe(false);
+  });
 });

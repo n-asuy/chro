@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../../banner.jpg" alt="Chro — Ý tưởng của bạn chạy song song" width="100%">
+  <img src="../../banner.jpg" alt="Chro: Nạp tri thức của bạn, sáng tạo song song" width="100%">
 </p>
 
 <div align="center">
@@ -28,34 +28,55 @@ Khởi chạy nhiều agent song song trong các worktree tách biệt, theo dõ
 
 ## Chro là gì?
 
-Chro biến ghi chú, tài liệu nghiên cứu và bối cảnh dự án của bạn thành khả năng thực thi AI song song. Từ một màn hình tác vụ duy nhất, bạn có thể khởi chạy nhiều agent lập trình; mỗi agent chạy trong worktree Git riêng, nên nhánh chính vẫn nguyên vẹn cho đến khi bạn sẵn sàng.
+Chro là không gian làm việc để chạy các agent lập trình song song và quyết định xem thành quả của chúng đáng giá đến đâu. Bạn mô tả kết quả mình muốn, các agent thực thi trong những worktree Git tách biệt, và các thay đổi của chúng được truyền về dưới dạng diff trực tiếp. Không có gì chạm đến nhánh của bạn cho đến khi bạn phê duyệt.
 
-Không cần liên tục chuyển ngữ cảnh giữa các terminal. Không cần tự quản lý worktree bằng tay. Các agent gửi log và diff theo thời gian thực vào một trình soạn thảo hợp nhất, và sẽ không có thay đổi nào chạm vào nhánh chính nếu chưa có sự phê duyệt rõ ràng của bạn. Hoạt động với gói đăng ký **Claude Code** hoặc **Codex** hiện có.
+Chro hoạt động với các gói đăng ký agent bạn đang có sẵn (**Claude Code**, **Codex**) và giữ mọi thứ trên máy của bạn: ghi chú, kho mã nguồn và lịch sử làm việc.
 
-<p align="center">
-  <img src="../../assets/demo1.png" alt="Không gian làm việc Chro 1" width="49%">
-  <img src="../../assets/demo2.png" alt="Không gian làm việc Chro 2" width="49%">
-</p>
-<p align="center">
-  <img src="../../assets/demo3.png" alt="Không gian làm việc Chro 3" width="49%">
-  <img src="../../assets/demo4.png" alt="Không gian làm việc Chro 4" width="49%">
-</p>
+## Nguyên tắc thiết kế
+
+Chro có chính kiến rõ ràng. Đây là những chính kiến đó.
+
+### Agent chỉnh sửa, bạn quyết định
+
+Chro không phải là một trình soạn thảo và không cạnh tranh với IDE của bạn. Trong Chro, công việc của con người là điều hướng agent, xem xét những gì chúng tạo ra, và chăm chút nguồn tri thức mà chúng dựa vào. Tự tay chỉnh sửa file là ngoại lệ, không phải tiền đề. Mọi quyết định thiết kế bên dưới đều bắt nguồn từ sự đảo ngược này.
+
+### Đơn vị công việc là session, không phải file
+
+Một IDE đặt cây file lên hàng đầu vì file là thứ bạn thao tác. Trong Chro, đối tượng chính là session đang chạy, nên màn hình được đọc từ trái sang phải theo trình tự *ai → đối thoại → bằng chứng*:
+
+- **Bên trái: ai đang làm việc.** Các session và agent trên mọi dự án. Đây là phần điều hướng bạn chạm vào nhiều nhất, nên nó chiếm vị trí chính.
+- **Ở giữa: cuộc đối thoại.** Cuộc trò chuyện với agent chính là công việc, không phải một kênh phụ.
+- **Bên phải: bằng chứng.** File, tìm kiếm và Git nằm chung trong một khoang kiểm chứng. Bạn tìm đến chúng để xác minh những gì agent đã làm, chứ không phải làm điểm khởi đầu của công việc.
+
+### Sandbox thuộc về agent, nhánh chính thức thuộc về bạn
+
+Mỗi agent chạy trong một worktree dùng xong có thể vứt bỏ, nên nhánh của bạn vẫn nguyên vẹn trong khi bao nhiêu agent làm việc cùng lúc cũng được. Sự phân tách đó là chi tiết thực thi, và nó không được phép rò rỉ vào mô hình tư duy của bạn:
+
+- **Bạn bước vào sandbox để xem xét**, chủ yếu thông qua diff và commit. Đó là bề mặt chủ yếu để đọc.
+- **Bất cứ thứ gì bạn tự tay viết ra đều nằm ở phía chính thức**: ghi chú, tài liệu, các view có cấu trúc (`.cbase`), sơ đồ. Việc viết một ghi chú không bao giờ nên đòi hỏi bạn phải quyết định nó thuộc về worktree nào.
+
+### Tri thức là các file được quản lý phiên bản
+
+Ngữ cảnh của bạn là những file thuần túy trong một kho Git: ghi chú Markdown, frontmatter, các view có cấu trúc, sơ đồ. Không có silo độc quyền, không có bước export. Chính điều này làm cho tri thức trở nên bền vững (được quản lý phiên bản như code), khả chuyển (được clone như code) và hữu ích (agent đọc nó theo đúng cách bạn đọc).
+
+### Không gì được hợp nhất khi chưa có sự đồng ý
+
+Agent đề xuất, bạn định đoạt. Các lệnh nhạy cảm và thao tác trên file phải chờ sau cổng phê duyệt, diff hiển thị ngay cả khi agent còn đang chạy, và merge luôn là một hành động chủ động rõ ràng. Sự song song chỉ an toàn vì mọi kết quả đều được cách ly cho đến khi được xem xét.
 
 ## Tính năng
 
-- **Điều phối agent song song** — khởi chạy nhiều agent từ một màn hình tác vụ duy nhất. Mỗi agent có sandbox worktree riêng và timeline thời gian thực.
-- **Cô lập bằng worktree** — mỗi agent chạy trong một worktree Git chuyên biệt, giúp nhánh chính an toàn cho đến khi merge.
-- **Tri thức local-first** — ý tưởng, ghi chú và nghiên cứu của bạn vẫn nằm trong các file do bạn sở hữu. Ngữ cảnh đó định hình cách agent suy nghĩ và tạo ra kết quả.
-- **Trình soạn thảo hợp nhất** — xem commit, log và tài nguyên của mọi agent tại một nơi, với diff inline.
-- **Bước phê duyệt** — agent cần được bạn phê duyệt rõ ràng trước khi chạy lệnh nhạy cảm hoặc thao tác trên file.
-- **Bảng Kanban** — sắp xếp công việc trực quan với chế độ tập trung và xem nhanh.
-- **Quy trình Git tích hợp** — theo dõi diff và PR mà không cần rời ứng dụng.
+- **Điều phối agent song song**: khởi chạy nhiều agent từ một tác vụ duy nhất. Mỗi agent có sandbox worktree riêng và timeline thời gian thực.
+- **Cô lập bằng worktree**: mỗi agent chạy trong một worktree Git chuyên biệt, giúp nhánh của bạn an toàn cho đến khi merge.
+- **Tri thức local-first**: ý tưởng, ghi chú và nghiên cứu của bạn vẫn nằm trong các file do bạn sở hữu, và định hình cách agent suy nghĩ.
+- **Xem xét hợp nhất**: commit, log và diff của mọi agent tại một nơi.
+- **Cổng phê duyệt**: agent cần được phê duyệt rõ ràng trước khi chạy lệnh nhạy cảm hoặc thao tác trên file.
+- **Quy trình Git tích hợp**: quy trình diff và PR đầy đủ mà không cần rời ứng dụng.
 
 ## Bắt đầu
 
 ### Ứng dụng Desktop
 
-Tải và cài đặt ứng dụng. Miễn phí trong giai đoạn beta và hoạt động với đăng ký Claude Code / Codex.
+Tải và cài đặt. Miễn phí trong giai đoạn beta. Hoạt động với đăng ký Claude Code / Codex của bạn.
 
 | Nền tảng | Liên kết |
 |----------|----------|
@@ -85,32 +106,32 @@ Chạy `npx @chro-ai/cli --help` để xem tham chiếu đầy đủ các lệnh
 
 ### 1. Mở dự án
 
-Khởi chạy Chro và mở bất kỳ kho Git nào làm workspace. Các file cục bộ sẽ trở thành ngữ cảnh mà agent dùng để làm việc.
+Khởi chạy Chro và mở bất kỳ kho Git nào làm workspace. Các file cục bộ sẽ trở thành ngữ cảnh tri thức cho agent.
 
 ### 2. Tạo tác vụ
 
-Sử dụng bảng Kanban để tạo tác vụ. Mô tả điều bạn muốn thực hiện: tính năng mới, sửa lỗi hay tái cấu trúc. Nếu cần, bạn có thể đính kèm ghi chú hoặc file làm ngữ cảnh.
+Bắt đầu một session mới và mô tả điều bạn muốn: tính năng mới, sửa lỗi hay tái cấu trúc. Đính kèm ghi chú hoặc file để bổ sung ngữ cảnh.
 
 ### 3. Khởi chạy agent
 
-Gán một hoặc nhiều agent cho tác vụ. Mỗi agent bắt đầu ngay lập tức trong worktree Git riêng. Theo dõi tiến độ thời gian thực qua timeline.
+Gán một hoặc nhiều agent cho tác vụ. Mỗi agent khởi động trong worktree Git riêng và bắt đầu làm việc ngay lập tức. Theo dõi tiến độ thời gian thực qua timeline.
 
 ### 4. Xem xét và merge
 
-Duyệt qua commit và diff của từng agent trong trình soạn thảo hợp nhất. Giữ lại phần bạn muốn, bỏ phần còn lại rồi merge, tất cả đều diễn ra ngay trong Chro.
+Duyệt qua commit và diff của từng agent. Phê duyệt phần bạn muốn, bỏ phần còn lại rồi merge, tất cả đều diễn ra ngay trong Chro.
 
 ## Kiến trúc
 
 ```
 apps/
-  desktop/   → Electron + Vite + React (main product)
+  desktop/   → Electron + Vite + React + Markdown-first workspace UI
   api/       → Cloudflare Workers (Rust → WASM, D1)
   cli/       → CLI for browser mode + task management (Rust)
 packages/
   ui/        → Shared UI components (Radix UI, Tailwind CSS)
 crates/      → Rust backend (17 crates)
-  server/    → Axum web server (SQLite, JSON-RPC, WebSocket)
-  db/        → SQLx + SQLite ORM
+  server/    → Axum web server (JSON-RPC, WebSocket, worktrees, local DB)
+  db/        → SQLx + SQLite persistence layer
   ...        → worktree, git, executors, events, etc.
 tooling/     → Build scripts, TS config, licenses
 ```
@@ -128,22 +149,23 @@ tooling/     → Build scripts, TS config, licenses
                                   │ JSON-RPC / WebSocket
                          ┌────────▼─────────┐
                          │  Rust Backend    │
-                         │  (Axum + SQLite) │
-                         └────────┬─────────┘
-                                  │
-                         ┌────────▼─────────┐
-                         │  Git Worktrees   │
-                         │  (agent sandboxes)│
-                         └──────────────────┘
+                         │   (Axum RPC)     │
+                         └───────┬────┬─────┘
+                                 │    │
+                  ┌──────────────▼────────┐  ┌▼───────────────┐
+                  │    Git Worktrees      │  │  SQLite / D1   │
+                  │   (agent sandboxes)   │  │ tasks, state,  │
+                  └───────────────────────┘  │  metadata      │
+                                             └────────────────┘
 ```
 
 | Lớp | Stack |
 |-----|-------|
 | Desktop | Electron 38 |
 | Frontend | React 19, TanStack Router, Vite 7, Tailwind CSS, Zustand |
-| Editor | CodeMirror 6, Monaco Editor |
-| Backend (cục bộ) | Rust, Axum 0.7, Tokio, SQLx (SQLite) |
-| Backend (đám mây) | Rust → WASM, Cloudflare Workers, D1 |
+| Nội dung | File Markdown-first, frontmatter, CodeMirror 6 WYSIWYG, Monaco Editor |
+| Dữ liệu | SQLite + SQLx cục bộ, D1 trên đám mây |
+| Backend | Rust, Axum 0.7, Tokio, JSON-RPC, WebSocket |
 | Build | Bun, Turborepo, Biome |
 
 ## Phát triển
@@ -153,6 +175,7 @@ tooling/     → Build scripts, TS config, licenses
 ```bash
 bun install          # Cài đặt dependencies
 bun dev:desktop      # Khởi động ứng dụng desktop đầy đủ (Rust + Vite + Electron)
+bun dev:cli          # Khởi động luồng CLI (UI trình duyệt + server cục bộ)
 ```
 
 ```bash
@@ -163,7 +186,7 @@ bun typecheck        # Kiểm tra kiểu TypeScript
 
 ## Bảo mật và quyền riêng tư
 
-Chro được thiết kế theo hướng local-first. Kiến thức, ghi chú và mã nguồn của bạn được lưu trên chính máy của bạn. Agent chạy trong các worktree cô lập, và sẽ không có thay đổi nào vào nhánh chính nếu chưa có sự đồng ý rõ ràng của bạn. Chro không liên kết với Anthropic. Xem [SECURITY.md](../../SECURITY.md) để báo cáo lỗ hổng.
+Chro được thiết kế theo hướng local-first. Tri thức, ghi chú và mã nguồn của bạn được lưu trên chính máy của bạn. Agent chạy trong các worktree cô lập với cơ chế phê duyệt rõ ràng, và sẽ không có thay đổi nào vào nhánh chính nếu chưa có sự đồng ý của bạn. Chro không liên kết với Anthropic. Xem [SECURITY.md](../../SECURITY.md) để báo cáo lỗ hổng.
 
 ## Giấy phép
 

@@ -9,21 +9,39 @@
 import { desktopFetch } from "@/lib/backend-client";
 import type { CbaseDefinition, CbaseDocument, CbaseProperty } from "./types";
 
-const jsonInit = (body: unknown): RequestInit => ({
+const jsonInit = (body: unknown, signal?: AbortSignal): RequestInit => ({
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
+  signal,
 });
+
+export interface QueryCbaseOptions {
+  viewId?: string;
+  offset?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}
 
 /** Parse, index, and materialize a `.cbase` file for the given project. */
 export const queryCbase = async (
   projectId: string,
   content: string,
   basePath?: string,
+  options: QueryCbaseOptions = {},
 ): Promise<CbaseDocument> =>
   desktopFetch<CbaseDocument>(
     `/rpc/projects/${projectId}/cbase/query`,
-    jsonInit({ content, basePath }),
+    jsonInit(
+      {
+        content,
+        basePath,
+        viewId: options.viewId,
+        offset: options.offset,
+        limit: options.limit,
+      },
+      options.signal,
+    ),
   );
 
 /** Response from persisting UI-driven changes back to a `.cbase` file. */
@@ -44,10 +62,11 @@ export const persistCbase = async (
   basePath: string,
   definition: CbaseDefinition,
   properties: Record<string, CbaseProperty>,
+  viewId?: string,
 ): Promise<PersistCbaseResult> =>
   desktopFetch<PersistCbaseResult>(
     `/rpc/projects/${projectId}/cbase/persist`,
-    jsonInit({ basePath, definition, properties }),
+    jsonInit({ basePath, definition, properties, viewId }),
   );
 
 /**

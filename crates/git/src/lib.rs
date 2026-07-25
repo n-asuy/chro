@@ -65,7 +65,12 @@ pub enum ConflictOp {
 #[derive(Debug, Clone, Default)]
 pub struct GitService;
 
-const MAX_INLINE_DIFF_BYTES: usize = 2 * 1024 * 1024;
+/// Upper bound for the combined before/after snapshots of one file. The UI can
+/// fetch/open the file separately; embedding larger snapshots makes both JSON
+/// serialization and renderer-side diff parsing disproportionately expensive.
+const MAX_INLINE_DIFF_BYTES: usize = 512 * 1024;
+/// Bound aggregate inline content returned by a single diff computation.
+const MAX_CUMULATIVE_INLINE_DIFF_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CommitId(git2::Oid);
@@ -475,15 +480,16 @@ impl GitService {
         let worktree_path: PathBuf = match self.worktree_for_branch(repo_path, task_branch) {
             Some(path) => path,
             None => {
-                let recorded_branch = GitCli::new()
-                    .list_worktrees(repo_path)
-                    .ok()
-                    .and_then(|worktrees| {
-                        worktrees
-                            .into_iter()
-                            .find(|wt| wt.path == worktree_path)
-                            .and_then(|wt| wt.branch)
-                    });
+                let recorded_branch =
+                    GitCli::new()
+                        .list_worktrees(repo_path)
+                        .ok()
+                        .and_then(|worktrees| {
+                            worktrees
+                                .into_iter()
+                                .find(|wt| wt.path == worktree_path)
+                                .and_then(|wt| wt.branch)
+                        });
                 if recorded_branch.as_deref() != Some(task_branch) {
                     return Err(GitServiceError::InvalidRepository(format!(
                         "no worktree currently has '{task_branch}' checked out, so it cannot be rebased"
@@ -1199,6 +1205,7 @@ fn build_worktree_diffs(
         .ok_or(GitServiceError::WorkdirMissing)?
         .to_path_buf();
     let mut files = Vec::new();
+    let mut cumulative_inline_bytes = 0usize;
     for delta in diff.deltas() {
         let change = map_status(delta.status());
         let old_path = delta.old_file().path().map(normalize_path);
@@ -1206,8 +1213,13 @@ fn build_worktree_diffs(
         let is_binary = delta.old_file().is_binary()
             || delta.new_file().is_binary()
             || is_binary_path(&old_path, &new_path);
+        let estimated_bytes = delta_inline_bytes(&delta);
+        let omit_content = !is_binary
+            && (estimated_bytes > MAX_INLINE_DIFF_BYTES
+                || cumulative_inline_bytes.saturating_add(estimated_bytes)
+                    > MAX_CUMULATIVE_INLINE_DIFF_BYTES);
 
-        let (old_content, new_content) = if is_binary {
+        let (old_content, new_content) = if is_binary || omit_content {
             (None, None)
         } else {
             let old = match change {
@@ -1227,12 +1239,18 @@ fn build_worktree_diffs(
             new_path,
             old_content,
             new_content,
-            content_omitted: false,
+            content_omitted: omit_content,
             additions: None,
             deletions: None,
             is_binary,
         };
         finalize_diff_entry(&mut entry);
+        if !entry.content_omitted {
+            cumulative_inline_bytes = cumulative_inline_bytes.saturating_add(
+                entry.old_content.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + entry.new_content.as_ref().map(|s| s.len()).unwrap_or(0),
+            );
+        }
         files.push(entry);
     }
     Ok(files)
@@ -1245,6 +1263,7 @@ fn build_tree_diffs(
     diff: &git2::Diff,
 ) -> Result<Vec<Diff>, GitServiceError> {
     let mut files = Vec::new();
+    let mut cumulative_inline_bytes = 0usize;
     for delta in diff.deltas() {
         let change = map_status(delta.status());
         let old_path = delta.old_file().path().map(normalize_path);
@@ -1252,8 +1271,13 @@ fn build_tree_diffs(
         let is_binary = delta.old_file().is_binary()
             || delta.new_file().is_binary()
             || is_binary_path(&old_path, &new_path);
+        let estimated_bytes = delta_inline_bytes(&delta);
+        let omit_content = !is_binary
+            && (estimated_bytes > MAX_INLINE_DIFF_BYTES
+                || cumulative_inline_bytes.saturating_add(estimated_bytes)
+                    > MAX_CUMULATIVE_INLINE_DIFF_BYTES);
 
-        let (old_content, new_content) = if is_binary {
+        let (old_content, new_content) = if is_binary || omit_content {
             (None, None)
         } else {
             let old = match change {
@@ -1273,12 +1297,18 @@ fn build_tree_diffs(
             new_path,
             old_content,
             new_content,
-            content_omitted: false,
+            content_omitted: omit_content,
             additions: None,
             deletions: None,
             is_binary,
         };
         finalize_diff_entry(&mut entry);
+        if !entry.content_omitted {
+            cumulative_inline_bytes = cumulative_inline_bytes.saturating_add(
+                entry.old_content.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + entry.new_content.as_ref().map(|s| s.len()).unwrap_or(0),
+            );
+        }
         files.push(entry);
     }
     Ok(files)
@@ -1293,6 +1323,14 @@ fn map_status(status: git2::Delta) -> DiffChangeKind {
         git2::Delta::Typechange => DiffChangeKind::PermissionChange,
         _ => DiffChangeKind::Modified,
     }
+}
+
+fn delta_inline_bytes(delta: &git2::DiffDelta<'_>) -> usize {
+    let total = delta
+        .old_file()
+        .size()
+        .saturating_add(delta.new_file().size());
+    usize::try_from(total).unwrap_or(usize::MAX)
 }
 
 fn read_tree_file(repo: &Repository, tree: &git2::Tree, path: Option<&Path>) -> Option<String> {
@@ -1331,6 +1369,9 @@ fn is_binary_path(old_path: &Option<String>, new_path: &Option<String>) -> bool 
 }
 
 fn finalize_diff_entry(diff: &mut Diff) {
+    if diff.content_omitted {
+        return;
+    }
     let old_len = diff.old_content.as_ref().map(|s| s.len()).unwrap_or(0);
     let new_len = diff.new_content.as_ref().map(|s| s.len()).unwrap_or(0);
     let total = old_len + new_len;
@@ -1762,5 +1803,65 @@ mod tests {
         assert_eq!(notes.old_content, None);
         assert_eq!(notes.new_content.as_deref(), Some("fresh\n"));
         assert!(notes.additions.unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn worktree_diff_omits_large_content_before_rendering() {
+        let (tmp, _repo) = init_repo();
+        let service = GitService::new();
+
+        write_file(tmp.path(), "large.txt", "base\n");
+        service.commit_all(tmp.path(), "add large file").unwrap();
+        let base = service.head_commit(tmp.path()).unwrap();
+        write_file(
+            tmp.path(),
+            "large.txt",
+            &"x".repeat(MAX_INLINE_DIFF_BYTES + 1),
+        );
+
+        let diffs = service
+            .get_diffs(
+                DiffTarget::Worktree {
+                    worktree_path: tmp.path(),
+                    base_commit: base,
+                },
+                None,
+            )
+            .unwrap();
+        let large = diffs
+            .iter()
+            .find(|d| d.path_key() == Some("large.txt"))
+            .expect("large diff present");
+        assert!(large.content_omitted);
+        assert!(large.old_content.is_none());
+        assert!(large.new_content.is_none());
+    }
+
+    #[test]
+    fn worktree_diff_omits_large_untracked_content() {
+        let (tmp, _repo) = init_repo();
+        let service = GitService::new();
+        let base = service.head_commit(tmp.path()).unwrap();
+        write_file(
+            tmp.path(),
+            "generated.log",
+            &"x".repeat(MAX_INLINE_DIFF_BYTES + 1),
+        );
+
+        let diffs = service
+            .get_diffs(
+                DiffTarget::Worktree {
+                    worktree_path: tmp.path(),
+                    base_commit: base,
+                },
+                None,
+            )
+            .unwrap();
+        let large = diffs
+            .iter()
+            .find(|d| d.path_key() == Some("generated.log"))
+            .expect("large untracked diff present");
+        assert!(large.content_omitted);
+        assert!(large.new_content.is_none());
     }
 }

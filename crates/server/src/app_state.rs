@@ -6,6 +6,7 @@ use local_runtime::LocalRuntime;
 use runtime::Runtime;
 use serde_json::json;
 use sqlx::{Pool, Sqlite};
+use tokio::sync::Semaphore;
 
 use crate::browser_session::BrowserService;
 use crate::perf;
@@ -38,6 +39,8 @@ pub(crate) struct AppState {
     /// Shared incremental frontmatter index reused across `.cbase` queries so
     /// repeated queries (tab re-activation) skip re-reading unchanged files.
     pub(crate) cbase_index: cbase::CbaseIndexCache,
+    /// Bounds filesystem walks and materialization work across all cbase tabs.
+    pub(crate) cbase_query_semaphore: Arc<Semaphore>,
     pub(crate) prewarm: Arc<PrewarmRegistry>,
 }
 
@@ -49,6 +52,7 @@ impl AppState {
             latest_release_cache: Arc::new(LatestReleaseCache::new()),
             usage_cache: Arc::new(UsageCache::new()),
             cbase_index: cbase::CbaseIndexCache::new(),
+            cbase_query_semaphore: Arc::new(Semaphore::new(2)),
             prewarm: Arc::new(PrewarmRegistry::default()),
         }
     }
@@ -65,6 +69,7 @@ impl AppState {
 
         let runtime = self.runtime.clone();
         let cbase_index = self.cbase_index.clone();
+        let cbase_query_semaphore = self.cbase_query_semaphore.clone();
         tokio::spawn(async move {
             let is_git_repo = repo_path.join(".git").exists();
             if is_git_repo {
@@ -76,7 +81,11 @@ impl AppState {
 
             let started = std::time::Instant::now();
             let walk_root = repo_path.clone();
+            let Ok(permit) = cbase_query_semaphore.acquire_owned().await else {
+                return;
+            };
             let indexed = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let dataset = cbase::CbaseDataset {
                     include: vec!["**/*.md".to_string()],
                     exclude: None,
@@ -109,6 +118,10 @@ impl AppState {
 
     pub(crate) fn cbase_index(&self) -> &cbase::CbaseIndexCache {
         &self.cbase_index
+    }
+
+    pub(crate) fn cbase_query_semaphore(&self) -> &Arc<Semaphore> {
+        &self.cbase_query_semaphore
     }
 
     pub(crate) fn latest_release_cache(&self) -> &Arc<LatestReleaseCache> {

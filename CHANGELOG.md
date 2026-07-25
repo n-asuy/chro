@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.47
+
+- Added approving agent requests from the terminal: `chro approval list` shows what is waiting (optionally for one task), `chro approval show <id>` prints the full request including the tool input and, for an AskUserQuestion prompt, its options, and `chro approval respond <id>` approves, denies with an optional reason, or answers an AskUserQuestion with `--answer "question=option"`, so a delegated or headless session can be unblocked without opening the app
+- Reworked full-text search ranking: content matches are now ordered by relevance by default (files whose name matches the query first, then by how many lines matched, newest breaking ties) and can be sorted by modified date, with all sorting done on the server so it orders the whole result set instead of only reshuffling the first 50 hits. The panel now shows total files and match counts and says when results were capped, instead of silently stopping at the first 50 files found in walk order
+- Added jumping straight to a file's changes in the diff: clicking a row in the Source Control list now scrolls the open diff to that file and holds it aligned while the remaining diffs stream in and the rows above it finish measuring, instead of leaving you to find it by hand
+- Replaced the per-run Environment popover with a compact status pill: it shows the run's worktree branch and the branch it merges back into as "worktree → target", the aggregate additions and deletions from the same source as the Git panel so the numbers always agree, how many commits the target is ahead, and doubles as the entry point to Source Control
+- Added a fullscreen preview for HTML documents that fills the app window and exits on Escape, on switching back to raw source, or when the active file changes
+- Changed opening a file from the media gallery or a search hit to return focus to where you were when its tab is closed, so reviewing an image or a match and dismissing it leaves you back in the list rather than with nothing focused
+- Guarded diff rendering against very large files: a changed file whose combined old and new content exceeds 512 KB is now reported as too large to render inline instead of blocking the panel while it parses
+
 ## 0.1.46
 
 - Fixed automatic updates on macOS never being offered: the updater feed the app polls was assembled while packaging, but each architecture builds on its own runner and so never saw the other's artifact, leaving the published feed missing and the endpoint returning a 404. The feed is now built in a separate step after both signed bundles are published, from the artifacts actually released

@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
-import { getCachedDocument, setCachedDocument } from "./cbase-document-cache";
+import {
+  clearCbaseDocumentCache,
+  getCachedDocument,
+  setCachedDocument,
+} from "./cbase-document-cache";
 import type { CbaseDocument } from "./types";
 
 const doc = (name: string): CbaseDocument => ({
@@ -17,6 +21,8 @@ const doc = (name: string): CbaseDocument => ({
 });
 
 describe("cbase-document-cache", () => {
+  beforeEach(() => clearCbaseDocumentCache());
+
   it("returns a cached document only when the content matches", () => {
     const d = doc("A");
     setCachedDocument("p1", "a.cbase", "content-v1", d);
@@ -40,5 +46,17 @@ describe("cbase-document-cache", () => {
     setCachedDocument("p1", undefined, "c", doc("A"));
     expect(getCachedDocument(null, "a.cbase", "c")).toBeNull();
     expect(getCachedDocument("p1", undefined, "c")).toBeNull();
+  });
+
+  it("evicts the least recently used document after four files", () => {
+    for (let index = 0; index < 4; index += 1) {
+      setCachedDocument("p", `${index}.cbase`, "c", doc(String(index)));
+    }
+    // Touch zero, making one the oldest entry.
+    expect(getCachedDocument("p", "0.cbase", "c")).not.toBeNull();
+    setCachedDocument("p", "4.cbase", "c", doc("4"));
+
+    expect(getCachedDocument("p", "0.cbase", "c")).not.toBeNull();
+    expect(getCachedDocument("p", "1.cbase", "c")).toBeNull();
   });
 });

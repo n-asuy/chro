@@ -26,9 +26,7 @@ use axum::{
     Router,
 };
 use db::models::{ProjectRecord, TaskRun};
-use filesystem::{
-    GitStateEventBatch, GitStateEventKind, GitStateSubscription, WorktreeEventBatch,
-};
+use filesystem::{GitStateEventBatch, GitStateEventKind, GitStateSubscription, WorktreeEventBatch};
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
@@ -144,7 +142,9 @@ fn files_message(batch: &WorktreeEventBatch) -> Option<Message> {
     if batch.is_empty() {
         return None;
     }
-    let payload = if batch.len() > MAX_ENUMERATED_PATHS {
+    let payload = if batch.len() > MAX_ENUMERATED_PATHS
+        || batch.iter().any(|event| event.relative_path.is_empty())
+    {
         json!({ "channel": "files" })
     } else {
         let paths: Vec<&str> = batch
@@ -156,10 +156,7 @@ fn files_message(batch: &WorktreeEventBatch) -> Option<Message> {
     Some(envelope(payload))
 }
 
-fn git_message(
-    subscription: &GitStateSubscription,
-    batch: &GitStateEventBatch,
-) -> Option<Message> {
+fn git_message(subscription: &GitStateSubscription, batch: &GitStateEventBatch) -> Option<Message> {
     let mut kinds: Vec<&'static str> = subscription
         .relevant_kinds(batch)
         .into_iter()
@@ -236,6 +233,13 @@ mod tests {
         assert!(
             value["payload"].get("paths").is_none(),
             "oversized batches must omit paths (match-all semantics)"
+        );
+
+        let overflow = Arc::new(vec![file_event("")]);
+        let value = message_json(files_message(&overflow).unwrap());
+        assert!(
+            value["payload"].get("paths").is_none(),
+            "overflow marker must request a full files refresh"
         );
 
         assert!(files_message(&Arc::new(Vec::new())).is_none());

@@ -6,6 +6,7 @@ import {
   uploadProjectBinaryFile,
   writeProjectFile,
 } from "@/lib/project-client";
+import type { DiffRevealRequest } from "@/session/lib/diff-reveal";
 import { create } from "zustand";
 import type { FileNode } from "../types/file-tree";
 import {
@@ -153,6 +154,19 @@ interface FilesState {
   // the same file+line is requested twice.
   editorReveal: { path: string; line: number; token: number } | null;
 
+  // A pending "scroll the open diff to this file" request. Same shape of signal
+  // as `editorReveal`, aimed at a diff tab instead of the editor: the changed
+  // files index lives in the right dock, so clicking a row there opens the diff
+  // tab and leaves this behind for the tab to consume. `taskRunId` names which
+  // diff answers (a run's combined diff, or the project working diff when null)
+  // so two open diff tabs do not both scroll.
+  diffReveal: DiffRevealRequest | null;
+
+  // Monotonic source of `diffReveal.token`. Kept across clears: a diff tab
+  // remembers the last token it handled, so reusing a token would make it skip
+  // the request.
+  diffRevealSeq: number;
+
   // File system data
   fileTree: FileNode[];
 
@@ -233,6 +247,13 @@ interface FilesActions {
   // content-search hit). Pure signal: it does not open the file, so the caller
   // controls how the tab is opened (and in which scope). Bumps `editorReveal`.
   requestEditorReveal: (path: string, line: number) => void;
+  // Ask the open diff for `taskRunId` (null = project working diff) to scroll to
+  // `path`. Pure signal like `requestEditorReveal`: the caller opens or focuses
+  // the diff tab. Bumps `diffReveal`.
+  requestDiffReveal: (path: string, taskRunId: string | null) => void;
+  // Drop a pending diff anchor, e.g. when the whole diff is opened rather than
+  // one file, so a later-mounted diff tab does not scroll to a stale request.
+  clearDiffReveal: () => void;
   closeFile: () => void;
 
   // Inline editing
@@ -269,6 +290,8 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   selectedPaths: [],
   revealRequest: null,
   editorReveal: null,
+  diffReveal: null,
+  diffRevealSeq: 0,
   fileTree: [],
   currentFilePath: null,
   _onFilePathChange: null,
@@ -962,6 +985,17 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
         token: (state.editorReveal?.token ?? 0) + 1,
       },
     }));
+  },
+  requestDiffReveal: (path, taskRunId) => {
+    if (!path) return;
+    set((state) => {
+      const token = state.diffRevealSeq + 1;
+      return { diffRevealSeq: token, diffReveal: { path, taskRunId, token } };
+    });
+  },
+  clearDiffReveal: () => {
+    if (get().diffReveal === null) return;
+    set({ diffReveal: null });
   },
   closeFile: () => {
     if (get().currentFilePath === null) return;

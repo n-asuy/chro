@@ -122,6 +122,25 @@ pub enum ClaudeJson {
         #[serde(default)]
         uuid: Option<String>,
     },
+    /// Periodic heartbeat emitted while a long-running tool call is still
+    /// executing. Carries no user-facing content of its own.
+    #[serde(rename = "tool_progress")]
+    ToolProgress {
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        elapsed_time_seconds: Option<f64>,
+        #[serde(default)]
+        heartbeat: Option<bool>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        uuid: Option<String>,
+    },
     #[serde(rename = "approval_response")]
     ApprovalResponse {
         call_id: String,
@@ -150,6 +169,7 @@ impl ClaudeJson {
             ClaudeJson::StreamEvent { .. } => None,
             ClaudeJson::Result { session_id, .. } => session_id.as_deref(),
             ClaudeJson::RateLimitEvent { session_id, .. } => session_id.as_deref(),
+            ClaudeJson::ToolProgress { session_id, .. } => session_id.as_deref(),
             ClaudeJson::ApprovalResponse { .. } => None,
             ClaudeJson::Unknown { .. } => None,
         }

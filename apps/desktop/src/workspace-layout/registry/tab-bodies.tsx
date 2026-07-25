@@ -34,13 +34,14 @@ export function SessionTabBody(_: PaneItemRenderProps) {
   return <SingleAgentSessionView />;
 }
 
-export function FileTabBody({ isActiveLeaf, kind }: PaneItemRenderProps) {
+export function FileTabBody({ isActiveLeaf, kind, tab }: PaneItemRenderProps) {
   if (kind.type !== "file") return null;
   return (
     <SingleFileEditor
       path={kind.path}
       taskRunId={kind.taskRunId}
       isActiveLeaf={isActiveLeaf}
+      tabId={tab.id}
     />
   );
 }
@@ -49,13 +50,16 @@ function SingleFileEditor({
   isActiveLeaf,
   path,
   taskRunId,
+  tabId,
 }: {
   isActiveLeaf: boolean;
   path: string;
   taskRunId?: string;
+  tabId: string;
 }) {
   const selectNode = useFilesStore((s) => s.selectNode);
   const expandToPath = useFileTreeStore((s) => s.expandToPath);
+  const closeTab = useLayoutStore((s) => s.closeTab);
 
   useEffect(() => {
     if (!isActiveLeaf) return;
@@ -71,7 +75,11 @@ function SingleFileEditor({
 
   return (
     <div className="h-full w-full">
-      <FilesEditor path={path} taskRunId={taskRunId} />
+      <FilesEditor
+        path={path}
+        taskRunId={taskRunId}
+        onHtmlFullscreenEscape={() => closeTab(tabId)}
+      />
     </div>
   );
 }

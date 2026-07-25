@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@chro/ui/select";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowUpDown,
   ChevronDown,
@@ -66,6 +67,8 @@ import { CellDisplay, CellEditor } from "./cbase-cells";
 interface BaseTableProps {
   rows: CbaseRow[];
   totalCount: number;
+  hasMore: boolean;
+  isLoadingMore: boolean;
   view: CbaseView;
   /** All views of the definition, rendered as tabs. */
   views: CbaseView[];
@@ -79,7 +82,11 @@ interface BaseTableProps {
   /** Whether row frontmatter can be edited inline. */
   canEditRows: boolean;
   onOpenFile?: (filePath: string) => void;
-  onCellEdit?: (filePath: string, frontmatterKey: string, value: unknown) => void;
+  onCellEdit?: (
+    filePath: string,
+    frontmatterKey: string,
+    value: unknown,
+  ) => void;
   /** Fires when a cell editor opens or closes (owner holds live updates). */
   onEditingChange?: (editing: boolean) => void;
   onViewFiltersChange?: (filters: CbaseFilter[]) => void;
@@ -87,6 +94,7 @@ interface BaseTableProps {
   onSortChange?: (sortKey: string | null, direction: SortDirection) => void;
   onColumnWidthsChange?: (columnWidths: Record<string, number>) => void;
   onNewNote?: () => void;
+  onLoadMore?: () => void;
 }
 
 type FilterDraft = {
@@ -189,7 +197,9 @@ function defaultSortDirection(property?: CbaseProperty): SortDirection {
   return property?.type === "date" ? "desc" : "asc";
 }
 
-function isConditionFilter(filter: CbaseFilter): filter is CbaseFilterCondition {
+function isConditionFilter(
+  filter: CbaseFilter,
+): filter is CbaseFilterCondition {
   return !("and" in filter) && !("or" in filter) && !("not" in filter);
 }
 
@@ -246,6 +256,8 @@ function createFilterEntries(filters: CbaseFilter[]) {
 export const BaseTable: FC<BaseTableProps> = ({
   rows,
   totalCount,
+  hasMore,
+  isLoadingMore,
   view,
   views,
   activeViewId,
@@ -263,13 +275,15 @@ export const BaseTable: FC<BaseTableProps> = ({
   onSortChange,
   onColumnWidthsChange,
   onNewNote,
+  onLoadMore,
 }) => {
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [draft, setDraft] = useState<FilterDraft>(createDraft());
   const [sortPopoverOpen, setSortPopoverOpen] = useState(false);
   // Local sort is the fallback for read-only definitions (query-language
   // files); persistable definitions rely on the engine's ordering.
-  const [localSortKey, setLocalSortKey] = useState<string>(QUERY_ORDER_SORT_KEY);
+  const [localSortKey, setLocalSortKey] =
+    useState<string>(QUERY_ORDER_SORT_KEY);
   const [localSortDirection, setLocalSortDirection] =
     useState<SortDirection>("asc");
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(
@@ -285,6 +299,7 @@ export const BaseTable: FC<BaseTableProps> = ({
   >(null);
 
   const tableRef = useRef<HTMLTableElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const columnWidthsRef = useRef(columnWidths);
   const resizeStateRef = useRef<{
     propertyId: string;
@@ -315,7 +330,9 @@ export const BaseTable: FC<BaseTableProps> = ({
       Object.keys(properties).map((propertyId) => ({
         propertyId,
         label:
-          properties[propertyId]?.label ?? properties[propertyId]?.key ?? propertyId,
+          properties[propertyId]?.label ??
+          properties[propertyId]?.key ??
+          propertyId,
         type: properties[propertyId]?.type ?? ("text" as const),
       })),
     [properties],
@@ -366,6 +383,26 @@ export const BaseTable: FC<BaseTableProps> = ({
     return sorted;
   }, [rows, canPersist, localSortKey, localSortDirection, properties]);
 
+  const estimatedRowHeight = Math.min(
+    Math.max(view.table?.row_height ?? 36, 24),
+    200,
+  );
+  const rowVirtualizer = useVirtualizer({
+    count: displayRows.length,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => displayRows[index]?.filePath ?? index,
+    estimateSize: () => estimatedRowHeight,
+    overscan: 12,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const virtualPaddingTop =
+    virtualRows.length > 0 ? virtualRows[0]?.start ?? 0 : 0;
+  const virtualPaddingBottom =
+    virtualRows.length > 0
+      ? rowVirtualizer.getTotalSize() -
+        (virtualRows[virtualRows.length - 1]?.end ?? 0)
+      : 0;
+
   const activeSortKey = canPersist
     ? view.sort?.[0]?.by ?? QUERY_ORDER_SORT_KEY
     : localSortKey;
@@ -374,8 +411,7 @@ export const BaseTable: FC<BaseTableProps> = ({
     : localSortDirection;
 
   const totalActiveFilterCount = useMemo(
-    () =>
-      definedFilters.length + viewFilters.length,
+    () => definedFilters.length + viewFilters.length,
     [definedFilters, viewFilters],
   );
 
@@ -511,10 +547,13 @@ export const BaseTable: FC<BaseTableProps> = ({
 
   const focusCell = (position: CellPosition) => {
     setFocused(position);
-    const cell = tableRef.current?.querySelector<HTMLTableCellElement>(
-      `td[data-cell="${position.row}:${position.col}"]`,
-    );
-    cell?.focus();
+    rowVirtualizer.scrollToIndex(position.row, { align: "auto" });
+    requestAnimationFrame(() => {
+      const cell = tableRef.current?.querySelector<HTMLTableCellElement>(
+        `td[data-cell="${position.row}:${position.col}"]`,
+      );
+      cell?.focus();
+    });
   };
 
   const commitCell = (row: CbaseRow, propertyId: string, value: unknown) => {
@@ -544,7 +583,11 @@ export const BaseTable: FC<BaseTableProps> = ({
         onOpenFile?.(row.filePath);
       } else if (column.type === "checkbox") {
         if (isCellEditable(position.col)) {
-          const current = resolvePropertyValue(row, column.propertyId, properties);
+          const current = resolvePropertyValue(
+            row,
+            column.propertyId,
+            properties,
+          );
           commitCell(row, column.propertyId, current !== true);
         }
       } else if (isCellEditable(position.col)) {
@@ -555,7 +598,11 @@ export const BaseTable: FC<BaseTableProps> = ({
     if (event.key === " " && column.type === "checkbox") {
       event.preventDefault();
       if (isCellEditable(position.col)) {
-        const current = resolvePropertyValue(row, column.propertyId, properties);
+        const current = resolvePropertyValue(
+          row,
+          column.propertyId,
+          properties,
+        );
         commitCell(row, column.propertyId, current !== true);
       }
       return;
@@ -588,7 +635,11 @@ export const BaseTable: FC<BaseTableProps> = ({
     setFocused(position);
     if (column.type === "checkbox") {
       if (isCellEditable(position.col)) {
-        const current = resolvePropertyValue(row, column.propertyId, properties);
+        const current = resolvePropertyValue(
+          row,
+          column.propertyId,
+          properties,
+        );
         commitCell(row, column.propertyId, current !== true);
       }
       return;
@@ -596,10 +647,7 @@ export const BaseTable: FC<BaseTableProps> = ({
     if (isCellEditable(position.col)) setEditing(position);
   };
 
-  const rowHeightStyle =
-    view.table?.row_height != null
-      ? { height: `${view.table.row_height}px` }
-      : undefined;
+  const rowHeightStyle = { height: `${estimatedRowHeight}px` };
 
   const sortIndicator = (propertyId: string) => {
     if (activeSortKey !== propertyId) return null;
@@ -635,7 +683,9 @@ export const BaseTable: FC<BaseTableProps> = ({
 
         <div className="flex flex-wrap items-center gap-0.5">
           <span className="mr-2 text-xs tabular-nums text-custom-text-300">
-            {totalCount.toLocaleString()} results
+            {rows.length < totalCount
+              ? `${rows.length.toLocaleString()} shown · ${totalCount.toLocaleString()} matches`
+              : `${totalCount.toLocaleString()} results`}
           </span>
 
           <Popover open={filterPopoverOpen} onOpenChange={setFilterPopoverOpen}>
@@ -650,7 +700,11 @@ export const BaseTable: FC<BaseTableProps> = ({
                 ) : null}
               </button>
             </PopoverTrigger>
-            <PopoverContent align="end" sideOffset={8} className="w-[420px] p-0">
+            <PopoverContent
+              align="end"
+              sideOffset={8}
+              className="w-[420px] p-0"
+            >
               <div className="border-b border-custom-border-200 px-3 py-2">
                 <p className="text-sm font-medium text-custom-text-100">
                   Add filter
@@ -759,7 +813,11 @@ export const BaseTable: FC<BaseTableProps> = ({
                 Sort
               </button>
             </PopoverTrigger>
-            <PopoverContent align="end" sideOffset={8} className="w-[300px] p-3">
+            <PopoverContent
+              align="end"
+              sideOffset={8}
+              className="w-[300px] p-3"
+            >
               <div className="flex items-center gap-2">
                 <Select
                   value={activeSortKey}
@@ -876,7 +934,9 @@ export const BaseTable: FC<BaseTableProps> = ({
               title={formatFilterSummary(filter, properties)}
             >
               {isConditionFilter(filter) ? (
-                <FilterChipBody chip={formatConditionChip(filter, properties)} />
+                <FilterChipBody
+                  chip={formatConditionChip(filter, properties)}
+                />
               ) : (
                 <span className="max-w-[280px] truncate">
                   {formatFilterSummary(filter, properties)}
@@ -895,7 +955,9 @@ export const BaseTable: FC<BaseTableProps> = ({
               title={formatFilterSummary(filter, properties)}
             >
               {isConditionFilter(filter) ? (
-                <FilterChipBody chip={formatConditionChip(filter, properties)} />
+                <FilterChipBody
+                  chip={formatConditionChip(filter, properties)}
+                />
               ) : (
                 <span className="max-w-[280px] truncate">
                   {formatFilterSummary(filter, properties)}
@@ -925,7 +987,12 @@ export const BaseTable: FC<BaseTableProps> = ({
         </div>
       ) : null}
 
-      <div className="show-scrollbar min-h-0 flex-1 overflow-auto">
+      <div
+        className={`show-scrollbar min-h-0 flex-1 ${
+          editing ? "overflow-hidden" : "overflow-auto"
+        }`}
+        ref={scrollRef}
+      >
         <table
           className="w-full min-w-full table-fixed border-separate border-spacing-0 bg-custom-background-100"
           ref={tableRef}
@@ -1005,114 +1072,155 @@ export const BaseTable: FC<BaseTableProps> = ({
                 </td>
               </tr>
             ) : (
-              displayRows.map((row, rowIndex) => (
-                <tr
-                  className="group/row text-[13px] hover:bg-custom-background-90"
-                  key={row.filePath}
-                  style={rowHeightStyle}
-                >
-                  {visibleColumns.map((column, colIndex) => {
-                    const position = { row: rowIndex, col: colIndex };
-                    const isEditing =
-                      editing?.row === rowIndex && editing.col === colIndex;
-                    const value = resolvePropertyValue(
-                      row,
-                      column.propertyId,
-                      properties,
-                    );
-                    const editable = isCellEditable(colIndex);
+              <>
+                {virtualPaddingTop > 0 ? (
+                  <tr aria-hidden>
+                    <td
+                      className="border-0 p-0"
+                      colSpan={Math.max(visibleColumns.length, 1)}
+                      style={{ height: `${virtualPaddingTop}px` }}
+                    />
+                  </tr>
+                ) : null}
+                {virtualRows.map((virtualRow) => {
+                  const row = displayRows[virtualRow.index];
+                  if (!row) return null;
+                  const rowIndex = virtualRow.index;
+                  return (
+                    <tr
+                      className="group/row text-[13px] hover:bg-custom-background-90"
+                      data-index={rowIndex}
+                      key={row.filePath}
+                      ref={rowVirtualizer.measureElement}
+                      style={rowHeightStyle}
+                    >
+                      {visibleColumns.map((column, colIndex) => {
+                        const position = { row: rowIndex, col: colIndex };
+                        const isEditing =
+                          editing?.row === rowIndex && editing.col === colIndex;
+                        const value = resolvePropertyValue(
+                          row,
+                          column.propertyId,
+                          properties,
+                        );
+                        const editable = isCellEditable(colIndex);
 
-                    return (
-                      <td
-                        className="relative h-9 border-b border-custom-border-100 px-0 text-custom-text-100 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-custom-primary-100"
-                        data-cell={`${rowIndex}:${colIndex}`}
-                        key={column.propertyId}
-                        onClick={() => handleCellClick(position, row)}
-                        onFocus={() => setFocused(position)}
-                        onKeyDown={(event) =>
-                          handleCellKeyDown(event, position, row)
-                        }
-                        tabIndex={
-                          focused?.row === rowIndex && focused.col === colIndex
-                            ? 0
-                            : -1
-                        }
-                      >
-                        {isEditing ? (
-                          // Clicks inside the editor must not bubble to the
-                          // cell, which would immediately re-open the editor
-                          // that a commit just closed.
-                          // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
-                          <div
-                            className="flex min-h-9 items-center px-1.5"
-                            onClick={(event) => event.stopPropagation()}
-                          >
-                            <CellEditor
-                              onCancel={() => {
-                                setEditing(null);
-                                focusCell(position);
-                              }}
-                              onCommit={(next) => {
-                                commitCell(row, column.propertyId, next);
-                                focusCell(position);
-                              }}
-                              options={
-                                selectOptionsByColumn.get(column.propertyId) ??
-                                []
-                              }
-                              type={column.type}
-                              value={value}
-                            />
-                          </div>
-                        ) : colIndex === 0 ? (
-                          <span className="flex min-h-9 cursor-pointer items-center gap-2 px-3 font-medium">
-                            <FileText className="h-3.5 w-3.5 shrink-0 text-custom-text-300" />
-                            <span className="truncate underline-offset-[3px] group-hover/row:[&:hover]:underline">
-                              {resolveRowTitle(
-                                row,
-                                column.propertyId,
-                                properties,
-                              )}
-                            </span>
-                          </span>
-                        ) : column.type === "checkbox" ? (
-                          <span className="flex min-h-9 items-center px-3">
-                            <input
-                              checked={value === true}
-                              className="h-3.5 w-3.5 accent-custom-primary-100"
-                              disabled={!editable}
-                              onChange={() => {
-                                if (editable) {
-                                  commitCell(
-                                    row,
-                                    column.propertyId,
-                                    value !== true,
-                                  );
-                                }
-                              }}
-                              onClick={(event) => event.stopPropagation()}
-                              type="checkbox"
-                            />
-                          </span>
-                        ) : (
-                          <span
-                            className={
-                              editable
-                                ? "flex min-h-9 items-center rounded-[4px] px-3 ring-inset transition-shadow group-hover/row:[&:hover]:ring-1 group-hover/row:[&:hover]:ring-custom-border-300"
-                                : "flex min-h-9 items-center px-3"
+                        return (
+                          <td
+                            className="relative h-9 border-b border-custom-border-100 px-0 text-custom-text-100 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-custom-primary-100"
+                            data-cell={`${rowIndex}:${colIndex}`}
+                            key={column.propertyId}
+                            onClick={() => handleCellClick(position, row)}
+                            onFocus={() => setFocused(position)}
+                            onKeyDown={(event) =>
+                              handleCellKeyDown(event, position, row)
+                            }
+                            tabIndex={
+                              focused?.row === rowIndex &&
+                              focused.col === colIndex
+                                ? 0
+                                : -1
                             }
                           >
-                            <CellDisplay type={column.type} value={value} />
-                          </span>
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))
+                            {isEditing ? (
+                              // Clicks inside the editor must not bubble to the
+                              // cell, which would immediately re-open the editor
+                              // that a commit just closed.
+                              // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard events are handled by the parent cell.
+                              <div
+                                className="flex min-h-9 items-center px-1.5"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <CellEditor
+                                  onCancel={() => {
+                                    setEditing(null);
+                                    focusCell(position);
+                                  }}
+                                  onCommit={(next) => {
+                                    commitCell(row, column.propertyId, next);
+                                    focusCell(position);
+                                  }}
+                                  options={
+                                    selectOptionsByColumn.get(
+                                      column.propertyId,
+                                    ) ?? []
+                                  }
+                                  type={column.type}
+                                  value={value}
+                                />
+                              </div>
+                            ) : colIndex === 0 ? (
+                              <span className="flex min-h-9 cursor-pointer items-center gap-2 px-3 font-medium">
+                                <FileText className="h-3.5 w-3.5 shrink-0 text-custom-text-300" />
+                                <span className="truncate underline-offset-[3px] group-hover/row:[&:hover]:underline">
+                                  {resolveRowTitle(
+                                    row,
+                                    column.propertyId,
+                                    properties,
+                                  )}
+                                </span>
+                              </span>
+                            ) : column.type === "checkbox" ? (
+                              <span className="flex min-h-9 items-center px-3">
+                                <input
+                                  checked={value === true}
+                                  className="h-3.5 w-3.5 accent-custom-primary-100"
+                                  disabled={!editable}
+                                  onChange={() => {
+                                    if (editable) {
+                                      commitCell(
+                                        row,
+                                        column.propertyId,
+                                        value !== true,
+                                      );
+                                    }
+                                  }}
+                                  onClick={(event) => event.stopPropagation()}
+                                  type="checkbox"
+                                />
+                              </span>
+                            ) : (
+                              <span
+                                className={
+                                  editable
+                                    ? "flex min-h-9 items-center rounded-[4px] px-3 ring-inset transition-shadow group-hover/row:[&:hover]:ring-1 group-hover/row:[&:hover]:ring-custom-border-300"
+                                    : "flex min-h-9 items-center px-3"
+                                }
+                              >
+                                <CellDisplay type={column.type} value={value} />
+                              </span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+                {virtualPaddingBottom > 0 ? (
+                  <tr aria-hidden>
+                    <td
+                      className="border-0 p-0"
+                      colSpan={Math.max(visibleColumns.length, 1)}
+                      style={{ height: `${virtualPaddingBottom}px` }}
+                    />
+                  </tr>
+                ) : null}
+              </>
             )}
           </tbody>
         </table>
+        {hasMore ? (
+          <div className="flex justify-center border-t border-custom-border-200 px-3 py-3">
+            <button
+              className="rounded-md border border-custom-border-300 bg-custom-background-100 px-3 py-1.5 text-xs font-medium text-custom-text-200 transition-colors hover:bg-custom-background-90 disabled:cursor-wait disabled:opacity-60"
+              disabled={isLoadingMore}
+              onClick={onLoadMore}
+              type="button"
+            >
+              {isLoadingMore ? "Loading…" : "Load 250 more"}
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

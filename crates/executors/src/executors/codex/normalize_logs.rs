@@ -14,7 +14,7 @@ use codex_app_server_protocol::{
     CommandExecutionStatus as AppCommandExecutionStatus, FileUpdateChange as AppFileUpdateChange,
     JSONRPCNotification, JSONRPCResponse, McpToolCallStatus as AppMcpToolCallStatus,
     PatchApplyStatus as AppPatchApplyStatus, PatchChangeKind as AppPatchChangeKind,
-    ServerNotification, ThreadItem as AppThreadItem, ThreadStartResponse,
+    ServerNotification, ThreadItem as AppThreadItem,
 };
 use codex_protocol::{
     openai_models::ReasoningEffort,
@@ -41,7 +41,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::client::CompatibleThreadForkResponse;
+use super::client::CompatibleThreadResponse;
 
 trait ToNormalizedEntry {
     fn to_normalized_entry(&self) -> NormalizedEntry;
@@ -1856,18 +1856,7 @@ fn handle_jsonrpc_response(
     msg_store: &Arc<MsgStore>,
     entry_index: &EntryIndexProvider,
 ) {
-    if let Ok(response) = serde_json::from_value::<ThreadStartResponse>(response.result.clone()) {
-        msg_store.push_session_id(response.thread.id);
-        handle_model_params(
-            response.model,
-            response.reasoning_effort,
-            msg_store,
-            entry_index,
-        );
-        return;
-    }
-
-    if let Ok(response) = serde_json::from_value::<CompatibleThreadForkResponse>(response.result) {
+    if let Ok(response) = serde_json::from_value::<CompatibleThreadResponse>(response.result) {
         msg_store.push_session_id(response.thread.id);
         handle_model_params(
             response.model,

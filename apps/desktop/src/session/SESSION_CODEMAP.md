@@ -19,11 +19,11 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/components/braille-spinner.tsx` | BrailleSpinner | - |
 | `apps/desktop/src/session/components/branch-selector.tsx` | BranchSelector, GitBranch | - |
 | `apps/desktop/src/session/components/collapsible-message.tsx` | CollapsibleMessage | - |
+| `apps/desktop/src/session/components/run-status-pill.tsx` | RunStatusPill | - |
 | `apps/desktop/src/session/components/conflict-banner.tsx` | ConflictBanner | - |
 | `apps/desktop/src/session/components/conversation-find-bar.tsx` | ConversationFindBar | - |
 | `apps/desktop/src/session/components/conversation-message-nav.tsx` | ConversationMessageNav | - |
 | `apps/desktop/src/session/components/diff-viewer-panel.tsx` | DiffViewerPanel | - |
-| `apps/desktop/src/session/components/environment-popover.tsx` | EnvironmentPopover, RebaseConfirmResult | - |
 | `apps/desktop/src/session/components/execution-options-controls.tsx` | BaseBranchDropdown, BaseBranchOption, NewSessionExecutionControls, WorktreeModeDropdown | - |
 | `apps/desktop/src/session/components/file-path-utils.ts` | looksLikeFilePath, stripLineColumnSuffix | - |
 | `apps/desktop/src/session/components/image-upload-preview-list.tsx` | ImageUploadPreviewList | - |

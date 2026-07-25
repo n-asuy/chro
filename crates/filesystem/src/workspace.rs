@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     ffi::OsStr,
     fs,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
@@ -9,6 +10,13 @@ use std::{
 use ignore::WalkBuilder;
 
 use crate::{FilesystemError, FilesystemService};
+
+/// Text files larger than this are never loaded into memory in full by the
+/// workspace APIs. The desktop editor is designed for review rather than for
+/// editing generated artifacts that can be hundreds of megabytes.
+pub const MAX_INLINE_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Keep a useful, bounded preview for oversized text files.
+pub const LARGE_TEXT_FILE_PREVIEW_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceEntryType {
@@ -106,12 +114,16 @@ pub struct WorkspaceFile {
     pub content: String,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// True when `content` is only a bounded prefix of the file.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceBinaryFile {
     pub relative_path: String,
-    pub data: Vec<u8>,
+    /// Validated path to stream from. Keeping binary payloads out of this
+    /// value prevents large videos/PDFs from being copied into the server heap.
+    pub path: PathBuf,
     pub size: u64,
     pub mime_type: String,
     pub modified: Option<SystemTime>,
@@ -361,12 +373,13 @@ impl FilesystemService {
         }
 
         let metadata = fs::metadata(&target)?;
-        let content = fs::read_to_string(&target)?;
+        let (content, truncated) = read_text_file_bounded(&target, metadata.len())?;
         Ok(WorkspaceFile {
             relative_path: relative_path_string(&normalized_relative),
             content,
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            truncated,
         })
     }
 
@@ -388,12 +401,11 @@ impl FilesystemService {
         }
 
         let metadata = fs::metadata(&target)?;
-        let data = fs::read(&target)?;
         let mime_type = infer_mime_type(&target);
 
         Ok(WorkspaceBinaryFile {
             relative_path: relative_path_string(&normalized_relative),
-            data,
+            path: target,
             size: metadata.len(),
             mime_type,
             modified: metadata.modified().ok(),
@@ -412,12 +424,13 @@ impl FilesystemService {
             return Err(FilesystemError::NotFile);
         }
         let metadata = fs::metadata(path)?;
-        let content = fs::read_to_string(path)?;
+        let (content, truncated) = read_text_file_bounded(path, metadata.len())?;
         Ok(WorkspaceFile {
             relative_path: path.to_string_lossy().to_string(),
             content,
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            truncated,
         })
     }
 
@@ -431,11 +444,10 @@ impl FilesystemService {
             return Err(FilesystemError::NotFile);
         }
         let metadata = fs::metadata(path)?;
-        let data = fs::read(path)?;
         let mime_type = infer_mime_type(path);
         Ok(WorkspaceBinaryFile {
             relative_path: path.to_string_lossy().to_string(),
-            data,
+            path: path.to_path_buf(),
             size: metadata.len(),
             mime_type,
             modified: metadata.modified().ok(),
@@ -473,6 +485,7 @@ impl FilesystemService {
             content: content.to_string(),
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            truncated: false,
         })
     }
 
@@ -506,7 +519,7 @@ impl FilesystemService {
 
         Ok(WorkspaceBinaryFile {
             relative_path: relative_path_string(&normalized_relative),
-            data: data.to_vec(),
+            path: target,
             size: metadata.len(),
             mime_type,
             modified: metadata.modified().ok(),
@@ -696,6 +709,42 @@ impl FilesystemService {
             })
         }
     }
+}
+
+fn read_text_file_bounded(path: &Path, size: u64) -> Result<(String, bool), io::Error> {
+    let file = fs::File::open(path)?;
+    let read_limit = if size > MAX_INLINE_TEXT_FILE_BYTES {
+        LARGE_TEXT_FILE_PREVIEW_BYTES
+    } else {
+        // The extra byte catches a file that grows beyond the cap after the
+        // metadata lookup, without ever allowing an unbounded read.
+        MAX_INLINE_TEXT_FILE_BYTES + 1
+    };
+    let initial_capacity = size.saturating_add(1).min(read_limit) as usize;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    file.take(read_limit).read_to_end(&mut bytes)?;
+    let truncated =
+        size > MAX_INLINE_TEXT_FILE_BYTES || bytes.len() > MAX_INLINE_TEXT_FILE_BYTES as usize;
+    if bytes.len() > LARGE_TEXT_FILE_PREVIEW_BYTES as usize && truncated {
+        bytes.truncate(LARGE_TEXT_FILE_PREVIEW_BYTES as usize);
+    }
+
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(error) => {
+            let utf8_error = error.utf8_error();
+            if utf8_error.error_len().is_some() || !truncated {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, utf8_error));
+            }
+            // The preview boundary may split the final UTF-8 code point. Keep
+            // only the valid prefix rather than inserting a replacement glyph.
+            let valid_up_to = utf8_error.valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(valid_up_to);
+            String::from_utf8(bytes).expect("validated UTF-8 prefix")
+        }
+    };
+    Ok((content, truncated))
 }
 
 fn ensure_workspace_dir(path: &Path) -> Result<(), FilesystemError> {
@@ -1164,6 +1213,40 @@ mod tests {
         assert_eq!(file.relative_path, "docs/readme.md");
         assert!(file.content.contains("Chro"));
         assert!(file.size > 0);
+        assert!(!file.truncated);
+    }
+
+    #[test]
+    fn large_workspace_file_returns_bounded_preview() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file_path = workspace.join("large.txt");
+        fs::write(
+            &file_path,
+            vec![b'a'; MAX_INLINE_TEXT_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let service = FilesystemService::new();
+        let file = service.read_workspace_file(workspace, "large.txt").unwrap();
+        assert!(file.truncated);
+        assert_eq!(file.size, MAX_INLINE_TEXT_FILE_BYTES + 1);
+        assert_eq!(file.content.len(), LARGE_TEXT_FILE_PREVIEW_BYTES as usize);
+    }
+
+    #[test]
+    fn bounded_reader_handles_file_growth_after_metadata_lookup() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("growing.txt");
+        fs::write(
+            &file_path,
+            vec![b'a'; MAX_INLINE_TEXT_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let (content, truncated) = read_text_file_bounded(&file_path, 0).unwrap();
+        assert!(truncated);
+        assert_eq!(content.len(), LARGE_TEXT_FILE_PREVIEW_BYTES as usize);
     }
 
     #[test]
@@ -1180,6 +1263,7 @@ mod tests {
         assert_eq!(read.relative_path, file_path.to_string_lossy());
         assert!(read.content.contains("crop data"));
         assert!(read.size > 0);
+        assert!(!read.truncated);
     }
 
     #[test]
@@ -1192,7 +1276,7 @@ mod tests {
         let read = service.read_absolute_binary_file(&file_path).unwrap();
         assert_eq!(read.relative_path, file_path.to_string_lossy());
         assert_eq!(read.mime_type, "image/png");
-        assert_eq!(read.data, [0x89, b'P', b'N', b'G']);
+        assert_eq!(fs::read(read.path).unwrap(), [0x89, b'P', b'N', b'G']);
         assert_eq!(read.size, 4);
     }
 

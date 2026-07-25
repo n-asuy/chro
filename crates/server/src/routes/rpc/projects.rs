@@ -1,9 +1,8 @@
 //! Project management endpoints.
 
 use axum::{
-    body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{header, StatusCode},
+    http::StatusCode,
     response::Response,
     routing::{get, post},
     Json, Router,
@@ -14,10 +13,16 @@ use filesystem::{
 };
 use runtime::{ProjectFileService, Runtime, RuntimeError};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use super::path_resolve::{read_binary_resolving, read_text_resolving, require_internal};
+use super::path_resolve::{
+    read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
+};
 use crate::{format_system_time, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
@@ -224,6 +229,7 @@ struct ProjectFileResponse {
     relative_path: String,
     content: String,
     size: u64,
+    truncated: bool,
     modified_at: Option<String>,
 }
 
@@ -255,6 +261,7 @@ impl From<WorkspaceFile> for ProjectFileResponse {
             relative_path: file.relative_path,
             content: file.content,
             size: file.size,
+            truncated: file.truncated,
             modified_at: format_system_time(file.modified),
         }
     }
@@ -405,13 +412,7 @@ async fn read_project_asset(
     let binary_file =
         read_binary_resolving(&service, &relative_path, &[project_root.as_str()]).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "no-cache").await
 }
 
 async fn read_project_binary_file(
@@ -430,13 +431,7 @@ async fn read_project_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &[project_root.as_str()]).await?;
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, binary_file.size)
-        .header(header::CACHE_CONTROL, "private, max-age=3600")
-        .body(Body::from(binary_file.data))
-        .unwrap())
+    stream_binary_response(binary_file, "private, max-age=3600").await
 }
 
 #[derive(Debug, Serialize)]
@@ -656,6 +651,10 @@ struct ProjectSearchQuery {
     /// "sensitive" / "insensitive" overrides content-search smart-case; absent = smart.
     #[serde(default)]
     case: Option<String>,
+    /// Content-search ordering: "relevance" (default), "modified-desc",
+    /// "modified-asc", "name-asc", "name-desc", "path-asc", "path-desc".
+    #[serde(default)]
+    sort: Option<String>,
     limit: Option<usize>,
 }
 
@@ -673,22 +672,34 @@ struct ProjectSearchResult {
     match_type: String,
     /// Matching lines for content search; empty for name/path results.
     line_matches: Vec<ProjectLineMatch>,
+    /// Last-modified time (RFC3339) for content results; `None` for name search.
+    modified_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ProjectSearchResponse {
     results: Vec<ProjectSearchResult>,
+    /// Content search only; name search leaves these at defaults.
+    total_files: usize,
+    total_line_matches: usize,
+    truncated: bool,
 }
 
 /// Matching lines kept per file in a content search.
 const CONTENT_MAX_LINES_PER_FILE: usize = 20;
+const MAX_CONCURRENT_REPOSITORY_SEARCHES: usize = 2;
+
+fn repository_search_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_REPOSITORY_SEARCHES)))
+}
 
 async fn search_project_files(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Query(query): Query<ProjectSearchQuery>,
 ) -> Result<Json<ProjectSearchResponse>, ApiError> {
-    use file_search_cache::{CacheError, SearchMatchType, SearchMode};
+    use file_search_cache::{CacheError, SearchMatchType, SearchMode, SearchSort};
 
     let needle = query.q.trim();
     if needle.is_empty() {
@@ -708,15 +719,43 @@ async fn search_project_files(
             Some("insensitive") => Some(false),
             _ => None,
         };
-        let hits = file_search_cache::search_content_grouped(
-            &project_path,
-            needle,
-            case_sensitive,
-            limit,
-            CONTENT_MAX_LINES_PER_FILE,
-        )?;
+        let sort = match query.sort.as_deref() {
+            None | Some("relevance") => SearchSort::Relevance,
+            Some("modified-desc") => SearchSort::ModifiedDesc,
+            Some("modified-asc") => SearchSort::ModifiedAsc,
+            Some("name-asc") => SearchSort::NameAsc,
+            Some("name-desc") => SearchSort::NameDesc,
+            Some("path-asc") => SearchSort::PathAsc,
+            Some("path-desc") => SearchSort::PathDesc,
+            Some(other) => {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown sort order '{other}'"
+                )));
+            }
+        };
+        let permit = repository_search_semaphore()
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| ApiError::Internal(format!("search semaphore closed: {error}")))?;
+        let search_path = project_path.clone();
+        let search_needle = needle.to_string();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            file_search_cache::search_content_grouped(
+                &search_path,
+                &search_needle,
+                case_sensitive,
+                sort,
+                limit,
+                CONTENT_MAX_LINES_PER_FILE,
+            )
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("content search task failed: {error}")))??;
 
-        let results = hits
+        let results = outcome
+            .hits
             .into_iter()
             .map(|hit| ProjectSearchResult {
                 path: hit.path,
@@ -731,10 +770,16 @@ async fn search_project_files(
                         ranges: m.ranges,
                     })
                     .collect(),
+                modified_at: hit.modified_at,
             })
             .collect();
 
-        return Ok(Json(ProjectSearchResponse { results }));
+        return Ok(Json(ProjectSearchResponse {
+            results,
+            total_files: outcome.total_files,
+            total_line_matches: outcome.total_line_matches,
+            truncated: outcome.truncated,
+        }));
     }
 
     // Name/path search (default): resolves a known filename without scanning
@@ -751,7 +796,24 @@ async fn search_project_files(
         .await
     {
         Ok(results) => results,
-        Err(CacheError::Miss) => file_search_cache.search_fallback(&project_path, needle, limit)?,
+        Err(CacheError::Miss) => {
+            let permit = repository_search_semaphore()
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|error| ApiError::Internal(format!("search semaphore closed: {error}")))?;
+            let fallback_cache = file_search_cache.clone();
+            let fallback_path = project_path.clone();
+            let fallback_needle = needle.to_string();
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                fallback_cache.search_fallback(&fallback_path, &fallback_needle, limit)
+            })
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!("file search fallback task failed: {error}"))
+            })??
+        }
         Err(CacheError::BuildError(e)) => {
             return Err(ApiError::Runtime(RuntimeError::Other(anyhow::anyhow!(
                 "Search cache build error: {}",
@@ -773,10 +835,16 @@ async fn search_project_files(
                 SearchMatchType::ContentMatch => "ContentMatch".to_string(),
             },
             line_matches: Vec::new(),
+            modified_at: None,
         })
         .collect();
 
-    Ok(Json(ProjectSearchResponse { results }))
+    Ok(Json(ProjectSearchResponse {
+        results,
+        total_files: 0,
+        total_line_matches: 0,
+        truncated: false,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

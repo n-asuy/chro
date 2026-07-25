@@ -165,11 +165,15 @@ export interface CbaseViewResult {
   rows: CbaseRow[];
   /** Total count before limit */
   totalCount: number;
+  /** Offset of the first row in this response page */
+  pageOffset: number;
+  /** Whether another page remains */
+  hasMore: boolean;
 }
 
 /**
  * Materialized view payload produced by the backend: the parsed definition, the
- * effective (inferred) property schema, and the executed result of every view.
+ * effective (inferred) property schema, and one bounded executed view page.
  * Mirrors the `cbase` crate's `CbaseDocument`.
  */
 export interface CbaseDocument {
@@ -177,7 +181,7 @@ export interface CbaseDocument {
   definition?: CbaseDefinition;
   /** Effective property schema (explicit + inferred), keyed by property ID */
   properties: Record<string, CbaseProperty>;
-  /** Executed result for each view in definition order */
+  /** Executed result for the requested (or default) view */
   views: CbaseViewResult[];
   /** Whether the source was written in the query language (read-only in the UI) */
   isQueryLanguage: boolean;

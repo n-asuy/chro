@@ -16,4 +16,5 @@ export type DesktopWorkspaceFile = {
   content: string;
   size?: number | null;
   modifiedAt?: string | null;
+  truncated?: boolean;
 };

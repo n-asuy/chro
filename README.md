@@ -28,27 +28,49 @@ Launch parallel agents in isolated worktrees, stream live diffs, merge only what
 
 ## What is Chro?
 
-Chro turns your notes, research, and project context into parallel AI execution. Launch multiple coding agents from a single task screen — each runs in its own Git worktree, keeping your main branch untouched until you're ready.
+Chro is a workspace for running coding agents in parallel and deciding what their work is worth. You describe the outcome you want, agents execute in isolated Git worktrees, and their changes stream back as live diffs. Nothing reaches your branch until you approve it.
 
-No context switching between terminals. No manual worktree juggling. Your agents stream live logs and diffs in a unified editor, and nothing reaches your main branch without your explicit approval. Works with your existing **Claude Code** or **Codex** subscription.
+It works with the agent subscriptions you already have (**Claude Code**, **Codex**) and keeps everything on your machine: your notes, your repositories, your history.
 
-<p align="center">
-  <img src="assets/demo1.png" alt="Chro task board" width="49%">
-  <img src="assets/demo2.png" alt="Chro file editor" width="49%">
-</p>
-<p align="center">
-  <img src="assets/demo3.png" alt="Chro session editor" width="49%">
-  <img src="assets/demo4.png" alt="Chro agent execution" width="49%">
-</p>
+## Design Principles
+
+Chro is opinionated. These are the opinions.
+
+### Agents edit, you decide
+
+Chro is not an editor and does not compete with your IDE. In Chro the human work is directing agents, reviewing what they produce, and curating the knowledge they draw from. Editing files by hand is the exception, not the premise. Every design decision below follows from this inversion.
+
+### The unit of work is the session, not the file
+
+An IDE puts the file tree first because files are what you operate on. In Chro the primary object is the running session, so the screen reads left to right as *who → dialogue → evidence*:
+
+- **Left: who is working.** Sessions and agents across all projects. This is the navigation you touch most, so it gets the primary position.
+- **Center: the dialogue.** The conversation with the agent is the work itself, not a side channel.
+- **Right: the evidence.** Files, search, and Git live in one inspection dock. You reach for them to verify what an agent did, not as the starting point of work.
+
+### Sandboxes belong to agents, the canonical branch belongs to you
+
+Every agent runs in a disposable worktree so your branch stays untouched while any number of agents work at once. That distinction is an execution detail, and it must not leak into your mental model:
+
+- **You step into a sandbox to review**, primarily through diffs and commits. It is a read-mostly surface.
+- **Anything you author yourself lands on the canonical side**: notes, documents, structured views (`.cbase`), diagrams. Writing a note should never require deciding which worktree it belongs to.
+
+### Knowledge is files under version control
+
+Your context is plain files in a Git repository: Markdown notes, frontmatter, structured views, diagrams. No proprietary silo, no export step. This is what makes the knowledge durable (it versions like code), portable (it clones like code), and useful (agents read it the same way you do).
+
+### Nothing lands without consent
+
+Agents propose, you dispose. Sensitive commands and file operations wait behind approval gates, diffs are visible while the agent is still running, and merging is always an explicit act. Parallelism is only safe because every result is quarantined until reviewed.
 
 ## Features
 
-- **Parallel Agent Orchestration** — launch multiple agents from a single task screen. Each gets its own worktree sandbox and real-time timeline.
-- **Worktree Isolation** — every agent runs in a dedicated Git worktree, keeping your main branch safe until you merge.
-- **Local-First Knowledge** — your ideas, notes, and research stay as files you own. This context shapes how agents think and create.
-- **Unified Editor** — review every agent's commits, logs, and assets in one place with inline diffs.
-- **Approval Gates** — explicit approval required before agents apply sensitive commands or file operations.
-- **Built-in Git Workflow** — full diff and PR workflow without leaving the app.
+- **Parallel agent orchestration**: launch multiple agents from a single task. Each gets its own worktree sandbox and a real-time timeline.
+- **Worktree isolation**: every agent runs in a dedicated Git worktree, keeping your branch safe until you merge.
+- **Local-first knowledge**: your ideas, notes, and research stay as files you own, and shape how agents think.
+- **Unified review**: every agent's commits, logs, and diffs in one place.
+- **Approval gates**: explicit approval before agents run sensitive commands or file operations.
+- **Built-in Git workflow**: full diff and PR workflow without leaving the app.
 
 ## Getting Started
 
@@ -88,7 +110,7 @@ Launch Chro and open any Git repository as a workspace. Your local files become 
 
 ### 2. Create a task
 
-Start a new session and describe what you want — a feature, a bug fix, a refactor. Attach notes or files for additional context.
+Start a new session and describe what you want: a feature, a bug fix, a refactor. Attach notes or files for additional context.
 
 ### 3. Launch agents
 
@@ -96,7 +118,7 @@ Assign one or more agents to the task. Each agent spins up in its own Git worktr
 
 ### 4. Review and merge
 
-Flip through each agent's commits and diffs in the unified editor. Approve the pieces you want, discard the rest, and merge — all without leaving Chro.
+Flip through each agent's commits and diffs. Approve the pieces you want, discard the rest, and merge, all without leaving Chro.
 
 ## Architecture
 

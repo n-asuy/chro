@@ -7,9 +7,11 @@ import {
 import { useFilesStore } from "@/files/state/files-store";
 import { cn } from "@/lib/cn";
 import {
+  type ContentSortOrder,
   type ProjectSearchResult,
   type SearchCase,
   type SearchLineMatch,
+  searchProjectContent,
   searchProjectFiles,
 } from "@/lib/project-client";
 import {
@@ -47,9 +49,14 @@ import { useDockSearchFocusToken } from "../dock-store-context";
 const SEARCH_DEBOUNCE_MS = 200;
 const MAX_RESULTS = 50;
 
-type SortOrder = "name-asc" | "name-desc" | "path-asc" | "path-desc";
+const SUGGESTION_LISTBOX_ID = "search-suggestion-listbox";
+const suggestionOptionId = (index: number) =>
+  `${SUGGESTION_LISTBOX_ID}-option-${index}`;
 
-const SORT_LABELS: Record<SortOrder, string> = {
+const SORT_LABELS: Record<ContentSortOrder, string> = {
+  relevance: "Relevance",
+  "modified-desc": "Modified (new to old)",
+  "modified-asc": "Modified (old to new)",
   "name-asc": "File name (A to Z)",
   "name-desc": "File name (Z to A)",
   "path-asc": "Path (A to Z)",
@@ -77,8 +84,25 @@ type ActiveOperator = {
   start: number;
 };
 
+/**
+ * Ring navigation over suggestion indices where `-1` is the "no selection"
+ * (free input) slot. Down cycles `-1 → 0 → … → last → -1`; Up reverses it, so
+ * the keyboard can always return to free input. Empty lists stay at `-1`.
+ */
+export function stepSuggestionIndex(
+  current: number,
+  length: number,
+  delta: 1 | -1,
+): number {
+  if (length === 0) return -1;
+  const next = current + delta;
+  if (next > length - 1) return -1;
+  if (next < -1) return length - 1;
+  return next;
+}
+
 /** Detect an incomplete `path:`/`file:` operator at the end of the query. */
-function parseTrailingOperator(query: string): ActiveOperator | null {
+export function parseTrailingOperator(query: string): ActiveOperator | null {
   const match = /(^|[\s(])(path|file):([^\s"()]*)$/.exec(query);
   if (!match) return null;
   const field = match[2] as AutocompleteField;
@@ -102,16 +126,24 @@ export function SearchDockPanel() {
   const [results, setResults] = useState<ProjectSearchResult[]>([]);
   const [needles, setNeedles] = useState<string[]>([]);
   const [matchCase, setMatchCase] = useState(false);
-  const [sort, setSort] = useState<SortOrder>("name-asc");
+  const [sort, setSort] = useState<ContentSortOrder>("relevance");
+  const [totalFiles, setTotalFiles] = useState(0);
+  const [totalLineMatches, setTotalLineMatches] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  // Highlighted suggestion for keyboard navigation. -1 means "no selection":
+  // the query stays free input and Enter runs the search instead of completing.
+  const [activeIndex, setActiveIndex] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
   const requestIdRef = useRef(0);
   const suggestRequestIdRef = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const suggestAbortRef = useRef<AbortController | null>(null);
   const openTab = useLayoutStore((s) => s.openTab);
   const requestEditorReveal = useFilesStore((s) => s.requestEditorReveal);
   const fileTree = useFilesStore((s) => s.fileTree);
@@ -128,6 +160,8 @@ export function SearchDockPanel() {
 
   // Fetch path/name autocomplete suggestions for a trailing `path:`/`file:`.
   useEffect(() => {
+    suggestAbortRef.current?.abort();
+    suggestAbortRef.current = null;
     if (!activeOperator || !projectId) {
       setSuggestions([]);
       return;
@@ -140,21 +174,40 @@ export function SearchDockPanel() {
       return;
     }
     const handle = setTimeout(() => {
-      searchProjectFiles(projectId, partial, { kind: "name", limit: 60 })
+      const controller = new AbortController();
+      suggestAbortRef.current = controller;
+      searchProjectFiles(projectId, partial, {
+        kind: "name",
+        limit: 60,
+        signal: controller.signal,
+      })
         .then((res) => {
           if (reqId !== suggestRequestIdRef.current) return;
           setSuggestions(buildSuggestions(field, partial, res));
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (error instanceof Error && error.name === "AbortError") return;
           if (reqId === suggestRequestIdRef.current) setSuggestions([]);
         });
     }, 120);
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      suggestAbortRef.current?.abort();
+    };
   }, [activeOperator, projectId, fileTree]);
+
+  // A fresh suggestion list (new partial, or the popup closing) clears the
+  // highlight, so typing always returns to free input.
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [suggestions]);
 
   const openResult = useCallback(
     (path: string, line?: number) => {
-      openTab({ type: "file", path }, { activate: true });
+      openTab(
+        { type: "file", path },
+        { activate: true, returnFocusOnClose: true },
+      );
       if (line !== undefined) {
         requestEditorReveal(path, line);
       }
@@ -173,10 +226,16 @@ export function SearchDockPanel() {
     async (raw: string) => {
       if (!projectId) return;
       const reqId = ++requestIdRef.current;
+      searchAbortRef.current?.abort();
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
       const term = raw.trim();
       if (!term) {
         setResults([]);
         setNeedles([]);
+        setTotalFiles(0);
+        setTotalLineMatches(0);
+        setTruncated(false);
         setIsLoading(false);
         setError(null);
         return;
@@ -187,30 +246,46 @@ export function SearchDockPanel() {
       setIsLoading(true);
       setError(null);
       try {
-        const hits = await searchProjectFiles(projectId, term, {
-          kind: "content",
+        const outcome = await searchProjectContent(projectId, term, {
           limit: MAX_RESULTS,
           case: caseOption,
+          sort,
+          signal: controller.signal,
         });
         if (reqId !== requestIdRef.current) return;
-        setResults(hits);
+        setResults(outcome.results);
+        setTotalFiles(outcome.totalFiles);
+        setTotalLineMatches(outcome.totalLineMatches);
+        setTruncated(outcome.truncated);
         setNeedles(plainNeedles(term));
         setCollapsed(new Set());
       } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
         if (reqId !== requestIdRef.current) return;
         setError(err instanceof Error ? err.message : "Search failed");
         setResults([]);
+        setTotalFiles(0);
+        setTotalLineMatches(0);
+        setTruncated(false);
       } finally {
         if (reqId === requestIdRef.current) setIsLoading(false);
       }
     },
-    [projectId, matchCase],
+    [projectId, matchCase, sort],
   );
 
   useEffect(() => {
     const handle = setTimeout(() => void runSearch(query), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(handle);
   }, [query, runSearch]);
+
+  useEffect(
+    () => () => {
+      searchAbortRef.current?.abort();
+      suggestAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const onChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     setQuery(e.target.value);
@@ -237,17 +312,59 @@ export function SearchDockPanel() {
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
-      if (e.key !== "Enter") return;
-      // Enter completes the first suggestion when autocompleting; otherwise it
-      // records the search in history.
-      if (activeOperator && suggestions.length > 0) {
-        e.preventDefault();
-        completeOperator(suggestions[0]);
-      } else {
-        commitToHistory();
+      const hasSuggestions = activeOperator !== null && suggestions.length > 0;
+
+      switch (e.key) {
+        // Cycle the highlight through [-1, 0, …, last] as a ring so there is
+        // always a way back to free input (index -1) via the keyboard.
+        case "ArrowDown": {
+          if (!hasSuggestions) return;
+          e.preventDefault();
+          setActiveIndex((i) => stepSuggestionIndex(i, suggestions.length, 1));
+          break;
+        }
+        case "ArrowUp": {
+          if (!hasSuggestions) return;
+          e.preventDefault();
+          setActiveIndex((i) => stepSuggestionIndex(i, suggestions.length, -1));
+          break;
+        }
+        // Tab always completes: the highlighted item, or the first as a quick
+        // accept when nothing is highlighted.
+        case "Tab": {
+          if (!hasSuggestions) return;
+          e.preventDefault();
+          completeOperator(suggestions[activeIndex >= 0 ? activeIndex : 0]);
+          break;
+        }
+        // Enter completes only an explicitly highlighted item; otherwise it
+        // leaves the query untouched and records the (already-live) search.
+        case "Enter": {
+          if (hasSuggestions && activeIndex >= 0) {
+            e.preventDefault();
+            completeOperator(suggestions[activeIndex]);
+          } else {
+            commitToHistory();
+          }
+          break;
+        }
+        // Dismiss the popup without touching the query; it reopens on the next
+        // keystroke that changes the trailing operator.
+        case "Escape": {
+          if (!hasSuggestions) return;
+          e.preventDefault();
+          setSuggestions([]);
+          break;
+        }
       }
     },
-    [activeOperator, suggestions, completeOperator, commitToHistory],
+    [
+      activeOperator,
+      suggestions,
+      activeIndex,
+      completeOperator,
+      commitToHistory,
+    ],
   );
 
   const applyHistory = useCallback((entry: string) => {
@@ -260,14 +377,10 @@ export function SearchDockPanel() {
     setHistory([]);
   }, []);
 
-  const sortedResults = useMemo(
-    () => sortResults(results, sort),
-    [results, sort],
-  );
-
+  // Results arrive already ordered by the server per `sort`; render as-is.
   const hasGroups = useMemo(
-    () => sortedResults.some((r) => r.line_matches.length > 0),
-    [sortedResults],
+    () => results.some((r) => r.line_matches.length > 0),
+    [results],
   );
 
   const toggleCollapse = useCallback((path: string) => {
@@ -283,12 +396,10 @@ export function SearchDockPanel() {
     setCollapsed((prev) => {
       if (prev.size > 0) return new Set();
       return new Set(
-        sortedResults
-          .filter((r) => r.line_matches.length > 0)
-          .map((r) => r.path),
+        results.filter((r) => r.line_matches.length > 0).map((r) => r.path),
       );
     });
-  }, [sortedResults]);
+  }, [results]);
 
   const showSuggestions = activeOperator !== null && suggestions.length > 0;
   const showFocusPanel = focused && query.trim() === "" && !showSuggestions;
@@ -310,6 +421,15 @@ export function SearchDockPanel() {
             onBlur={() => setFocused(false)}
             placeholder="Search…"
             className="h-8 min-w-0 flex-1 bg-transparent text-xs placeholder:text-muted-foreground focus:outline-none"
+            role="combobox"
+            aria-expanded={showSuggestions}
+            aria-controls={SUGGESTION_LISTBOX_ID}
+            aria-autocomplete="list"
+            aria-activedescendant={
+              showSuggestions && activeIndex >= 0
+                ? suggestionOptionId(activeIndex)
+                : undefined
+            }
           />
           <IconToggle
             active={matchCase}
@@ -324,6 +444,8 @@ export function SearchDockPanel() {
           <SuggestionPanel
             field={activeOperator.field}
             suggestions={suggestions}
+            activeIndex={activeIndex}
+            onHover={setActiveIndex}
             onPick={completeOperator}
           />
         )}
@@ -340,8 +462,11 @@ export function SearchDockPanel() {
 
       {results.length > 0 && (
         <div className="flex items-center justify-between gap-2 px-3 pt-2 text-[11px] text-muted-foreground">
-          <span>
-            {results.length} {results.length === 1 ? "result" : "results"}
+          <span title={truncated ? `Showing top ${results.length}` : undefined}>
+            {truncated ? `${totalFiles}+` : totalFiles}{" "}
+            {totalFiles === 1 ? "file" : "files"} · {totalLineMatches}{" "}
+            {totalLineMatches === 1 ? "match" : "matches"}
+            {truncated ? ` · top ${results.length}` : ""}
           </span>
           <div className="flex items-center gap-0.5">
             {hasGroups && (
@@ -372,17 +497,19 @@ export function SearchDockPanel() {
               >
                 <DropdownMenuRadioGroup
                   value={sort}
-                  onValueChange={(v) => setSort(v as SortOrder)}
+                  onValueChange={(v) => setSort(v as ContentSortOrder)}
                 >
-                  {(Object.keys(SORT_LABELS) as SortOrder[]).map((key) => (
-                    <DropdownMenuRadioItem
-                      key={key}
-                      value={key}
-                      className="py-1 text-[11px]"
-                    >
-                      {SORT_LABELS[key]}
-                    </DropdownMenuRadioItem>
-                  ))}
+                  {(Object.keys(SORT_LABELS) as ContentSortOrder[]).map(
+                    (key) => (
+                      <DropdownMenuRadioItem
+                        key={key}
+                        value={key}
+                        className="py-1 text-[11px]"
+                      >
+                        {SORT_LABELS[key]}
+                      </DropdownMenuRadioItem>
+                    ),
+                  )}
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -404,7 +531,7 @@ export function SearchDockPanel() {
           <DockHint>Type to search.</DockHint>
         ) : (
           <ul className="py-1">
-            {sortedResults.map((r) =>
+            {results.map((r) =>
               r.line_matches.length > 0 ? (
                 <ContentFileGroup
                   key={r.path}
@@ -518,36 +645,66 @@ function FocusPanel({
 function SuggestionPanel({
   field,
   suggestions,
+  activeIndex,
+  onHover,
   onPick,
 }: {
   field: AutocompleteField;
   suggestions: string[];
+  activeIndex: number;
+  onHover: (index: number) => void;
   onPick: (value: string) => void;
 }) {
   const keepFocus = (e: ReactMouseEvent) => e.preventDefault();
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Keep the highlighted option in view as the keyboard walks past the fold.
+  useEffect(() => {
+    if (activeIndex < 0) return;
+    optionRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
+
   return (
     <div
       onMouseDown={keepFocus}
-      className="absolute left-2 right-2 top-[calc(100%-2px)] z-50 mt-1 max-h-72 overflow-y-auto rounded-md border border-border bg-popover py-1 text-popover-foreground shadow-md"
+      className="absolute left-2 right-2 top-[calc(100%-2px)] z-50 mt-1 rounded-md border border-border bg-popover text-popover-foreground shadow-md"
     >
-      <ul>
-        {suggestions.map((value) => (
-          <li key={value}>
+      <div
+        id={SUGGESTION_LISTBOX_ID}
+        role="listbox"
+        className="max-h-72 overflow-y-auto py-1"
+      >
+        {suggestions.map((value, index) => {
+          const active = index === activeIndex;
+          return (
             <button
+              key={value}
+              ref={(el) => {
+                optionRefs.current[index] = el;
+              }}
+              id={suggestionOptionId(index)}
+              role="option"
+              aria-selected={active}
               type="button"
               onClick={() => onPick(value)}
-              className="flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-foreground/5"
+              onMouseMove={() => onHover(index)}
+              className={cn(
+                "flex w-full items-center gap-2 px-3 py-1 text-left text-xs",
+                active
+                  ? "bg-primary/15 text-foreground"
+                  : "hover:bg-foreground/5",
+              )}
               title={value}
             >
               <FileText className="h-3.5 w-3.5 shrink-0 opacity-50" />
               <span className="truncate">{value}</span>
             </button>
-          </li>
-        ))}
-      </ul>
-      <p className="px-3 pt-1 text-[10px] text-muted-foreground">
-        {field === "path" ? "path suggestions" : "file suggestions"} · Enter to
-        complete
+          );
+        })}
+      </div>
+      <p className="border-t border-border px-3 py-1 text-[10px] text-muted-foreground">
+        {field === "path" ? "path suggestions" : "file suggestions"} · ↑↓ to
+        navigate · Tab to complete
       </p>
     </div>
   );
@@ -808,26 +965,6 @@ function computeNeedleRanges(
     }
   }
   return merged;
-}
-
-function sortResults(
-  results: ProjectSearchResult[],
-  order: SortOrder,
-): ProjectSearchResult[] {
-  const sorted = [...results];
-  sorted.sort((a, b) => {
-    switch (order) {
-      case "name-asc":
-        return basename(a.path).localeCompare(basename(b.path));
-      case "name-desc":
-        return basename(b.path).localeCompare(basename(a.path));
-      case "path-asc":
-        return a.path.localeCompare(b.path);
-      case "path-desc":
-        return b.path.localeCompare(a.path);
-    }
-  });
-  return sorted;
 }
 
 function basename(path: string): string {

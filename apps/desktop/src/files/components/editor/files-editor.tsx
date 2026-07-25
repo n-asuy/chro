@@ -22,6 +22,7 @@ import { Code, Eye, Maximize2, Minimize2, RefreshCw } from "lucide-react";
 import {
   type ChangeEvent,
   type KeyboardEvent,
+  type SyntheticEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -67,6 +68,31 @@ const CSV_EXTENSIONS = new Set(["csv", "tsv"]);
 
 /** Extensions rendered as prose (WYSIWYG markdown editor) */
 const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
+const LARGE_TEXT_SAFE_MODE_BYTES = 512 * 1024;
+
+const setIframeKeydownListener = (
+  frameWindow: Window | null,
+  listener: (event: globalThis.KeyboardEvent) => void,
+  enabled: boolean,
+): void => {
+  if (!frameWindow) return;
+  try {
+    if (enabled) {
+      frameWindow.addEventListener("keydown", listener, true);
+    } else {
+      frameWindow.removeEventListener("keydown", listener, true);
+    }
+  } catch {
+    // The preview may navigate cross-origin; the parent-window listener still
+    // handles Escape whenever focus returns to the app.
+  }
+};
+
+const formatFileSize = (bytes?: number | null): string => {
+  if (!bytes || bytes < 1024) return `${bytes ?? 0} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+};
 
 const isProseFile = (extension?: string | null): boolean => {
   // Prose view is a strict whitelist. Extensionless files (LICENSE, Makefile)
@@ -158,9 +184,15 @@ type FilesEditorProps = {
    * worktree write endpoint exists; for now treat task-run files as read-only.
    */
   taskRunId?: string;
+  /** Close the transient file tab after Escape leaves fullscreen preview. */
+  onHtmlFullscreenEscape?: () => void;
 };
 
-export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
+export const FilesEditor = ({
+  path,
+  taskRunId,
+  onHtmlFullscreenEscape,
+}: FilesEditorProps) => {
   const projectId = useProjectId();
   const {
     currentFilePath,
@@ -259,6 +291,11 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   // Expands the HTML preview to fill the entire app window. Exits on Escape,
   // when switching to raw source, or when the active file changes.
   const [isHtmlFullscreen, setIsHtmlFullscreen] = useState(false);
+  const htmlPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const isHtmlFullscreenRef = useRef(isHtmlFullscreen);
+  const onHtmlFullscreenEscapeRef = useRef(onHtmlFullscreenEscape);
+  isHtmlFullscreenRef.current = isHtmlFullscreen;
+  onHtmlFullscreenEscapeRef.current = onHtmlFullscreenEscape;
 
   // In-editor find bar (Cmd/Ctrl+F). Rendered above the title/frontmatter so
   // it floats at the top of the file view like Obsidian's find panel.
@@ -275,18 +312,41 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     setIsHtmlFullscreen(false);
   }, [editorFilePath]);
 
-  // Allow Escape to leave the fullscreen HTML preview.
+  const handleHtmlPreviewKeyDown = useCallback(
+    (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || !isHtmlFullscreenRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setIsHtmlFullscreen(false);
+      onHtmlFullscreenEscapeRef.current?.();
+    },
+    [],
+  );
+
+  const handleHtmlPreviewLoad = useCallback(
+    (event: SyntheticEvent<HTMLIFrameElement>) => {
+      // Keyboard events do not bubble out of an iframe. Register on its Window
+      // as well so Escape works after the user interacts with the preview.
+      const frameWindow = event.currentTarget.contentWindow;
+      setIframeKeydownListener(frameWindow, handleHtmlPreviewKeyDown, false);
+      setIframeKeydownListener(frameWindow, handleHtmlPreviewKeyDown, true);
+    },
+    [handleHtmlPreviewKeyDown],
+  );
+
+  // Allow Escape to leave the fullscreen HTML preview from either the app
+  // window or the preview iframe.
   useEffect(() => {
-    if (!isHtmlFullscreen) return;
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setIsHtmlFullscreen(false);
-      }
+    window.addEventListener("keydown", handleHtmlPreviewKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleHtmlPreviewKeyDown, true);
+      setIframeKeydownListener(
+        htmlPreviewFrameRef.current?.contentWindow ?? null,
+        handleHtmlPreviewKeyDown,
+        false,
+      );
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isHtmlFullscreen]);
+  }, [handleHtmlPreviewKeyDown]);
 
   const relativePath = useMemo(
     () => relativePathForFile(editorFilePath, currentNode, workspaceRoot),
@@ -302,6 +362,9 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   const isHtml = isHtmlFile(fileExtension);
   const isCsv = isCsvFile(fileExtension);
   const isProse = isProseFile(fileExtension);
+  const useLargeTextSafeMode =
+    loadedFilePath === editorFilePath &&
+    (workspaceFile?.size ?? 0) > LARGE_TEXT_SAFE_MODE_BYTES;
   const headerPathLabel = currentNode
     ? relativePath ?? currentNode.path.replace(/^\/+/, "")
     : taskRunId
@@ -319,8 +382,9 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
       !isImage &&
       !isVideo &&
       !isPdf &&
-      !isExcalidraw &&
-      !isBase &&
+      (!isExcalidraw || useLargeTextSafeMode) &&
+      (!isBase || useLargeTextSafeMode) &&
+      !workspaceFile?.truncated &&
       !taskRunId &&
       !workspaceRootPath,
     debounceMs: 2000,
@@ -715,8 +779,43 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
     );
   }
 
+  // Oversized text files are returned as a bounded prefix by the backend.
+  // Never pass that prefix to an editor: saving it would destroy the unseen
+  // tail, and rich-text parsing of the original file is exactly the workload
+  // this safe mode is intended to avoid.
+  if (workspaceFile?.truncated && loadedFilePath === editorFilePath) {
+    return (
+      <div className="flex h-full w-full flex-1 flex-col overflow-hidden bg-custom-background-100 font-workspace">
+        <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-border bg-muted px-4 py-2 text-[12px]">
+          <span className="font-medium text-custom-text-100">
+            {currentNode?.name ?? fallbackFileName}
+          </span>
+          <span className="truncate text-muted-foreground">
+            {headerPathLabel}
+          </span>
+        </header>
+        <div
+          role="status"
+          className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-custom-text-200"
+        >
+          Large file ({formatFileSize(workspaceFile.size)}). Showing a read-only
+          preview of the beginning of the file; full editing is disabled to keep
+          the app responsive.
+        </div>
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-4 font-mono text-xs leading-5 text-custom-text-200">
+          {content}
+        </pre>
+      </div>
+    );
+  }
+
   // Handle Excalidraw files with ExcalidrawEditor
-  if (isExcalidraw && relativePath && loadedFilePath === editorFilePath) {
+  if (
+    isExcalidraw &&
+    !useLargeTextSafeMode &&
+    relativePath &&
+    loadedFilePath === editorFilePath
+  ) {
     return (
       <ExcalidrawEditor
         relativePath={relativePath}
@@ -728,7 +827,7 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   }
 
   // Handle .cbase files with BaseViewer
-  if (isBase && loadedFilePath === editorFilePath) {
+  if (isBase && !useLargeTextSafeMode && loadedFilePath === editorFilePath) {
     return (
       <BaseViewer
         content={content}
@@ -742,7 +841,7 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   // through `setContent`, which the shared auto-save hook persists. Task-run
   // and non-primary workspace roots have no write-back path, so the grid is
   // read-only there (matching how those files are treated elsewhere).
-  if (isCsv && loadedFilePath === editorFilePath) {
+  if (isCsv && !useLargeTextSafeMode && loadedFilePath === editorFilePath) {
     return (
       <CsvEditor
         content={content}
@@ -805,7 +904,6 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
 
   // Content to show in the editor depends on view mode
   const editorContent = frontmatterViewMode === "source" ? content : editorBody;
-
   const commitTitleChange = async () => {
     if (!currentNode) return;
     const trimmed = titleDraft.trim();
@@ -858,8 +956,9 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   };
 
   // Code file layout: no title editing, no frontmatter, line numbers
-  if (!isProse) {
-    const showHtmlPreview = isHtml && htmlViewMode === "preview";
+  if (!isProse || useLargeTextSafeMode) {
+    const showHtmlPreview =
+      isHtml && !useLargeTextSafeMode && htmlViewMode === "preview";
     const htmlFullscreen = showHtmlPreview && isHtmlFullscreen;
     const codeLayout = (
       <div
@@ -877,7 +976,7 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
               {currentNode?.name ?? fallbackFileName}
             </span>
             <span className="text-muted-foreground">{headerPathLabel}</span>
-            {isHtml && (
+            {isHtml && !useLargeTextSafeMode && (
               <div className="ml-auto flex items-center gap-1">
                 {htmlViewMode === "preview" && (
                   <>
@@ -948,14 +1047,23 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
               </div>
             )}
           </header>
+          {useLargeTextSafeMode && (
+            <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-custom-text-200">
+              Large text file ({formatFileSize(workspaceFile?.size)}). Rich-text
+              rendering, syntax highlighting, and line wrapping are disabled;
+              editing remains available in plain-text mode.
+            </div>
+          )}
           <div className="flex flex-1 flex-col overflow-hidden">
             {showHtmlPreview && relativePath ? (
               <iframe
+                ref={htmlPreviewFrameRef}
                 key={`${loadedFilePath ?? ""}-${htmlPreviewKey}`}
                 title={currentNode?.name ?? fallbackFileName}
                 src={`${getAssetUrl(relativePath)}${getAssetUrl(relativePath).includes("?") ? "&" : "?"}_r=${htmlPreviewKey}`}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                 className="h-full w-full flex-1 border-0 bg-white"
+                onLoad={handleHtmlPreviewLoad}
               />
             ) : (
               <div className="show-scrollbar flex flex-1 flex-col overflow-y-auto">
@@ -969,13 +1077,23 @@ export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
                   />
                 </div>
                 <CodeMirrorEditor
+                  key={
+                    useLargeTextSafeMode
+                      ? `large-safe-${loadedFilePath ?? ""}`
+                      : "standard-code-editor"
+                  }
                   ref={editorRef}
                   contentKey={loadedFilePath ?? ""}
                   initialContent={content}
                   onChange={(value) => setContent(value)}
                   className="min-h-0 h-full w-full flex-1"
                   mode="code"
-                  fileExtension={fileExtension ?? undefined}
+                  lineWrapping={!useLargeTextSafeMode}
+                  fileExtension={
+                    useLargeTextSafeMode
+                      ? undefined
+                      : fileExtension ?? undefined
+                  }
                   onFindRequest={openFindBar}
                 />
               </div>

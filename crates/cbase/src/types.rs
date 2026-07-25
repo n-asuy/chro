@@ -187,6 +187,12 @@ pub struct CbaseViewResult {
     pub view: CbaseView,
     pub rows: Vec<CbaseRow>,
     pub total_count: i64,
+    /// Offset of the first returned row within the filtered/sorted view.
+    #[serde(default)]
+    pub page_offset: i64,
+    /// Whether more rows remain after this response page.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 impl CbaseProperty {

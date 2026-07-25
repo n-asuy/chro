@@ -10,8 +10,8 @@
 //!
 //! The cache is shared (interior-mutable) so one instance can back every query
 //! for a process. Entries are keyed by absolute path, so a single cache serves
-//! multiple project roots without collision. Deleted files leave stale entries
-//! that are simply never read again (bounded by the vault size).
+//! multiple project roots without collision. A hard entry/byte budget prevents
+//! renamed or deleted files from accumulating for the process lifetime.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,12 +34,22 @@ struct CachedFile {
     modified: Option<SystemTime>,
     modified_at: Option<String>,
     values: IndexMap<String, JsonValue>,
+    estimated_bytes: usize,
+}
+
+const MAX_CACHED_FILES: usize = 50_000;
+const MAX_CACHED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct CacheState {
+    files: HashMap<PathBuf, CachedFile>,
+    estimated_bytes: usize,
 }
 
 /// Process-wide incremental index cache. Cloneable handle over shared state.
 #[derive(Clone, Default)]
 pub struct CbaseIndexCache {
-    files: std::sync::Arc<Mutex<HashMap<PathBuf, CachedFile>>>,
+    files: std::sync::Arc<Mutex<CacheState>>,
 }
 
 impl CbaseIndexCache {
@@ -107,8 +117,8 @@ impl CbaseIndexCache {
     /// update the cache. Returns `None` when the file cannot be read.
     fn get_or_read(&self, path: &Path, modified: Option<SystemTime>) -> Option<CachedFile> {
         {
-            let files = self.files.lock().unwrap();
-            if let Some(entry) = files.get(path) {
+            let state = self.files.lock().unwrap();
+            if let Some(entry) = state.files.get(path) {
                 // Reuse only when both sides have an mtime and they agree; a
                 // missing mtime is treated as "always re-read" for safety.
                 if entry.modified.is_some() && entry.modified == modified {
@@ -121,15 +131,39 @@ impl CbaseIndexCache {
         let values = read_file_properties(path).ok()?;
         let modified_at = modified
             .map(|time| DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Millis, true));
+        let estimated_bytes = path.to_string_lossy().len()
+            + modified_at.as_ref().map_or(0, String::len)
+            + serde_json::to_vec(&values).map_or(0, |encoded| encoded.len());
         let entry = CachedFile {
             modified,
             modified_at,
             values,
+            estimated_bytes,
         };
-        self.files
-            .lock()
-            .unwrap()
-            .insert(path.to_path_buf(), entry.clone());
+        if estimated_bytes <= MAX_CACHED_BYTES {
+            let mut state = self.files.lock().unwrap();
+            if let Some(previous) = state.files.remove(path) {
+                state.estimated_bytes = state
+                    .estimated_bytes
+                    .saturating_sub(previous.estimated_bytes);
+            }
+            state.estimated_bytes = state.estimated_bytes.saturating_add(estimated_bytes);
+            state.files.insert(path.to_path_buf(), entry.clone());
+
+            // A bounded cache is preferable to retaining every renamed/deleted
+            // file seen over a long-running process. HashMap eviction is
+            // intentionally simple here; mtime checks keep refills correct.
+            while state.files.len() > MAX_CACHED_FILES || state.estimated_bytes > MAX_CACHED_BYTES {
+                let Some(victim) = state.files.keys().next().cloned() else {
+                    break;
+                };
+                if let Some(removed) = state.files.remove(&victim) {
+                    state.estimated_bytes = state
+                        .estimated_bytes
+                        .saturating_sub(removed.estimated_bytes);
+                }
+            }
+        }
         Some(entry)
     }
 }

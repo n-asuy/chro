@@ -16,6 +16,48 @@ interface CbaseTableColumn {
 
 const DEFAULT_COLUMN_KEYS = ["file.path", "file.name", "file.mtime"];
 
+const compileCommonGlob = (glob: string): RegExp | null => {
+  // Keep uncommon glob syntax conservative: matching everything costs one
+  // refresh, whereas a false negative would leave the table stale.
+  if (/[[\]{}()!+@]/.test(glob)) return null;
+  let pattern = "^";
+  for (let index = 0; index < glob.length; index += 1) {
+    const char = glob[index];
+    if (char === "*" && glob[index + 1] === "*") {
+      if (glob[index + 2] === "/") {
+        pattern += "(?:.*/)?";
+        index += 2;
+      } else {
+        pattern += ".*";
+        index += 1;
+      }
+    } else if (char === "*") {
+      pattern += "[^/]*";
+    } else if (char === "?") {
+      pattern += "[^/]";
+    } else {
+      pattern += char?.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&") ?? "";
+    }
+  }
+  return new RegExp(`${pattern}$`);
+};
+
+/** Conservative watcher filter for the common glob forms used by datasets. */
+export function createDatasetPathFilter(
+  dataset: CbaseDataset | undefined,
+): (path: string) => boolean {
+  const include = (dataset?.include ?? ["**/*.md"]).map(compileCommonGlob);
+  const exclude = (dataset?.exclude ?? []).map(compileCommonGlob);
+  return (path: string) => {
+    const normalized = path.replaceAll("\\", "/").replace(/^\/+/, "");
+    const included = include.some(
+      (matcher) => !matcher || matcher.test(normalized),
+    );
+    if (!included) return false;
+    return !exclude.some((matcher) => matcher?.test(normalized) === true);
+  };
+}
+
 function resolveDefaultColumns(
   properties: Record<string, CbaseProperty>,
 ): string[] {
@@ -135,8 +177,18 @@ export function settleOverlay(
 // ---------------------------------------------------------------------------
 
 const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
 ];
 
 /**
@@ -144,7 +196,10 @@ const MONTHS = [
  * "Jul 22, 2025" otherwise. Returns null for values that are not dates, so the
  * caller can fall back to plain text.
  */
-export function formatDateLabel(value: unknown, today = new Date()): string | null {
+export function formatDateLabel(
+  value: unknown,
+  today = new Date(),
+): string | null {
   if (typeof value !== "string" && !(value instanceof Date)) return null;
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -181,7 +236,9 @@ export function deriveSelectOptions(
 }
 
 /** Whether a property can be written back as frontmatter (file.* cannot). */
-export function isEditableProperty(property: CbaseProperty | undefined): boolean {
+export function isEditableProperty(
+  property: CbaseProperty | undefined,
+): boolean {
   return !!property && !property.key.startsWith("file.");
 }
 
@@ -256,7 +313,9 @@ export function newNoteContent(
 ): string {
   const keys = resolveTableColumns(view, properties)
     .map((column) => properties[column.propertyId])
-    .filter((property): property is CbaseProperty => isEditableProperty(property))
+    .filter((property): property is CbaseProperty =>
+      isEditableProperty(property),
+    )
     .map((property) => property.key);
   if (keys.length === 0) return "";
   return `---\n${keys.map((key) => `${key}:`).join("\n")}\n---\n`;

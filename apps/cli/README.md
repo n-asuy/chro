@@ -142,12 +142,14 @@ Builds the Rust binary, zips it into `npx-cli/dist/<platform>/chro-server.zip`, 
 
 ### Release
 
-```bash
-cd apps/cli
-R2_ENDPOINT=... R2_BUCKET=... R2_PUBLIC_URL=... bash ./release.sh
-```
+Releases are cut by pushing a `v*` tag (`bun run release` from `apps/desktop`,
+which bumps every version in the repo together). CI then builds `chro-server`
+for all five targets, uploads them plus a checksum manifest to R2, and
+publishes the npm wrapper.
 
-Uploads `chro-server.zip` to R2, stores the resolved public URL in npm metadata, and publishes with `npm publish`. Optional env vars: `R2_PREFIX`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+There is deliberately no local publish path: it would bypass the release gate,
+and its version bump would touch only some of the files the tag script keeps in
+sync.
 
 ## Environment Variables
 

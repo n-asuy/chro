@@ -10,7 +10,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalPendingInfo, ApprovalRequest, ApprovalResponse, ApprovalStatus, CreateApprovalRequest,
+    ApprovalActor, ApprovalPendingInfo, ApprovalRequest, ApprovalResponse, ApprovalStatus,
+    CreateApprovalRequest,
 };
 
 #[derive(Debug, Error)]
@@ -106,7 +107,7 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
             .write()
             .await
             .insert(id.clone(), PendingApproval::new(request.clone(), waiter));
-        self.push_patch(&request, &ApprovalStatus::Pending, PatchOp::Add)
+        self.push_patch(&request, &ApprovalStatus::Pending, PatchOp::Add, None)
             .await;
         self.spawn_timeout_watcher(id).await;
         Ok(request)
@@ -121,6 +122,7 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
         match entry {
             Some(mut pending) => {
                 let status = response.status.clone();
+                let responded_by = response.responded_by.clone();
                 let data = ApprovalResolvedData {
                     status: response.status,
                     answers: response.answers,
@@ -130,8 +132,13 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
                     .write()
                     .await
                     .insert(id.to_string(), status.clone());
-                self.push_patch(&pending.request, &status, PatchOp::Replace)
-                    .await;
+                self.push_patch(
+                    &pending.request,
+                    &status,
+                    PatchOp::Replace,
+                    Some(&responded_by),
+                )
+                .await;
                 Ok(status)
             }
             None => {
@@ -180,8 +187,21 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
                 tool_name: pending.request.tool_name.clone(),
                 requested_at: pending.request.created_at,
                 timeout_at: pending.request.timeout_at,
+                task_id: None,
+                task_slug: None,
             })
             .collect()
+    }
+
+    /// Return the full pending request for an approval id, if it is still
+    /// pending. Used to surface `tool_input` (e.g. the AskUserQuestion prompt)
+    /// and to resolve the owning run for the self-approval ban.
+    pub async fn request(&self, id: &str) -> Option<ApprovalRequest> {
+        self.pending
+            .read()
+            .await
+            .get(id)
+            .map(|pending| pending.request.clone())
     }
 
     async fn spawn_timeout_watcher(&self, id: String)
@@ -219,14 +239,20 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
                 .write()
                 .await
                 .insert(id.to_string(), status.clone());
-            self.push_patch(&pending.request, &status, PatchOp::Replace)
+            self.push_patch(&pending.request, &status, PatchOp::Replace, None)
                 .await;
         }
     }
 
-    async fn push_patch(&self, request: &ApprovalRequest, status: &ApprovalStatus, op: PatchOp) {
+    async fn push_patch(
+        &self,
+        request: &ApprovalRequest,
+        status: &ApprovalStatus,
+        op: PatchOp,
+        responded_by: Option<&ApprovalActor>,
+    ) {
         if let Some(store) = self.msg_store_for_run(request.task_run_id).await {
-            let value = approval_patch_value(request, status, op);
+            let value = approval_patch_value(request, status, op, responded_by);
             store.push(LogEntry::JsonPatch(value));
         }
     }
@@ -257,6 +283,7 @@ fn approval_patch_value(
     request: &ApprovalRequest,
     status: &ApprovalStatus,
     op: PatchOp,
+    responded_by: Option<&ApprovalActor>,
 ) -> serde_json::Value {
     let escaped_id = escape_json_pointer_segment(&request.id);
     let value = serde_json::json!({
@@ -267,6 +294,7 @@ fn approval_patch_value(
         "created_at": request.created_at,
         "timeout_at": request.timeout_at,
         "status": status,
+        "responded_by": responded_by,
     });
 
     let op_value = match op {
@@ -285,4 +313,84 @@ fn approval_patch_value(
 
 fn escape_json_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingPusher {
+        entries: Mutex<Vec<LogEntry>>,
+    }
+
+    impl LogEntryPusher for CapturingPusher {
+        fn push(&self, entry: LogEntry) {
+            self.entries.lock().unwrap().push(entry);
+        }
+    }
+
+    fn last_patch(pusher: &CapturingPusher) -> serde_json::Value {
+        pusher
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                LogEntry::JsonPatch(value) => Some(value.clone()),
+                _ => None,
+            })
+            .expect("expected a json patch")
+    }
+
+    #[test]
+    fn responded_by_defaults_to_user_when_omitted() {
+        // The UI never sends `responded_by`; it must deserialize as User so
+        // attribution is recorded, never null.
+        let response: ApprovalResponse =
+            serde_json::from_value(serde_json::json!({ "status": { "status": "approved" } }))
+                .unwrap();
+        assert!(matches!(response.responded_by, ApprovalActor::User));
+    }
+
+    #[tokio::test]
+    async fn respond_records_actor_in_transcript_patch() {
+        let run_id = Uuid::new_v4();
+        let pusher = Arc::new(CapturingPusher::default());
+        let mut stores = HashMap::new();
+        stores.insert(run_id, Arc::clone(&pusher));
+        let approvals = Approvals::new(Arc::new(RwLock::new(stores)));
+
+        let request = approvals
+            .create(CreateApprovalRequest {
+                task_run_id: run_id,
+                tool_name: "Bash".to_string(),
+                tool_input: serde_json::json!({ "command": "ls" }),
+            })
+            .await
+            .unwrap();
+
+        approvals
+            .respond(
+                &request.id,
+                ApprovalResponse {
+                    status: ApprovalStatus::Approved,
+                    answers: None,
+                    responded_by: ApprovalActor::Agent {
+                        task: "parent-task".to_string(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        // The resolved-approval patch carries the responder, so the run's
+        // transcript is the audit log of who approved.
+        let patch = last_patch(&pusher);
+        let responded_by = &patch[0]["value"]["responded_by"];
+        assert_eq!(responded_by["kind"], "agent");
+        assert_eq!(responded_by["task"], "parent-task");
+    }
 }

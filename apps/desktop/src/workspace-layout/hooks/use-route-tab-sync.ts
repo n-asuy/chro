@@ -132,11 +132,7 @@ function isSameRouteKind(a: TabKind, b: TabKind): boolean {
         (a.taskRunId ?? null) === (b.taskRunId ?? null)
       );
     case "diff":
-      return (
-        b.type === "diff" &&
-        a.runId === b.runId &&
-        (a.path ?? null) === (b.path ?? null)
-      );
+      return b.type === "diff" && a.runId === b.runId;
     case "project-diff":
       return b.type === "project-diff" && a.projectId === b.projectId;
     case "browser":

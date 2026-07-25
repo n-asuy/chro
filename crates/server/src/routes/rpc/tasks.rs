@@ -27,7 +27,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
         .route("/tasks/:id/last-message", get(get_task_last_message))
-        .route("/tasks/:id/pending-question", get(get_task_pending_question))
+        .route(
+            "/tasks/:id/pending-question",
+            get(get_task_pending_question),
+        )
 }
 
 #[derive(Debug, Serialize)]

@@ -1,6 +1,6 @@
 {
   "name": "@chro/desktop",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -20,11 +20,8 @@
     "build:vite": "vite build",
     "tauri": "tauri",
     "tauri:icons": "tauri icon assets/logo/logo_chro_symbol_bg_rounded.png",
-    "package": "bun ./scripts/deployer.ts package",
     "package:mac:nosign": "bun ./scripts/deployer.ts package --skip-sign -- --mac",
     "package:win:nosign": "bun ./scripts/deployer.ts package --skip-sign -- --win",
-    "package:release": "bun ./scripts/deployer.ts release",
-    "package:release:nosign": "bun ./scripts/deployer.ts release --skip-sign",
     "release": "bun ./scripts/deployer.ts tag"
   },
   "dependencies": {
