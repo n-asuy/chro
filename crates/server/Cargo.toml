@@ -1,6 +1,6 @@
 [package]
 name = "chro-server"
-version = "0.1.47"
+version = "0.1.48"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -27,6 +27,7 @@ log-types = { path = "../log-types" }
 runtime = { path = "../runtime" }
 local-runtime = { path = "../local-runtime" }
 futures = "0.3"
+fd-lock = "4"
 approvals = { path = "../approvals" }
 chro-image = { path = "../image" }
 config = { path = "../config" }

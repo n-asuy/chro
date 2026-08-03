@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod jsonrpc;
+pub mod mcp_approval;
 pub mod normalize_logs;
 pub mod session;
 

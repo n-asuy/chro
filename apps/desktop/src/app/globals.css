@@ -2313,9 +2313,20 @@ body {
   padding: 0;
 }
 
-/* Allow native styling for rendered HTML elements */
-.cm-editor-container .cm-html-block-container * {
+/* Allow native styling for rendered HTML elements.
+   SVG and MathML subtrees are excluded on purpose: `all: revert` rolls the
+   cascade back past the author origin, and presentation attributes
+   (fill, stroke, stroke-width, width, ...) live in that origin. Reverting them
+   paints every shape black at zero width, i.e. an empty diagram. */
+.cm-editor-container .cm-html-block-container *:not(svg, svg *, math, math *) {
   all: revert;
+}
+
+/* Diagrams scale to the content column instead of overflowing it. */
+.cm-editor-container .cm-html-block-container svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
 }
 
 /* Restore basic layout for the container itself */
@@ -2419,8 +2430,10 @@ body {
   display: inline;
 }
 
-/* Inline HTML - revert to browser defaults */
-.cm-editor-container .cm-html-inline-container * {
+/* Inline HTML - revert to browser defaults (see the block container note
+   above for why SVG/MathML subtrees are left alone) */
+.cm-editor-container .cm-html-inline-container
+  *:not(svg, svg *, math, math *) {
   all: revert;
 }
 

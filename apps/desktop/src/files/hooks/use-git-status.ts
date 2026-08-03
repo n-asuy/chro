@@ -1,8 +1,5 @@
-import {
-  type TranslationFunction,
-  type TranslationKey,
-  useLanguage,
-} from "@/i18n";
+import { useRepoEvents } from "@/hooks/use-repo-events";
+import { useLanguage } from "@/i18n";
 import {
   type GitScope,
   type GitStatus,
@@ -16,7 +13,7 @@ import {
   stageFiles,
   unstageFiles,
 } from "@/lib/git-client";
-import { useRepoEvents } from "@/hooks/use-repo-events";
+import { resolveGitError } from "@/lib/git-error";
 import { toast } from "@chro/ui/hooks/use-toast";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -53,117 +50,6 @@ const EMPTY_STATUS: GitStatus = {
   modified: [],
   untracked: [],
   hasChanges: false,
-};
-
-const PUSH_REJECT_HINTS = [
-  "fetch first",
-  "non-fast-forward",
-  "remote contains work",
-  "failed to push some refs",
-  "rejected",
-];
-
-const isPushRejected = (message: string): boolean => {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes("git push") &&
-    PUSH_REJECT_HINTS.some((hint) => lower.includes(hint))
-  );
-};
-
-const GIT_ERROR_MATCHERS: Array<{
-  match: (message: string) => boolean;
-  key: TranslationKey;
-}> = [
-  {
-    match: (message) =>
-      message.includes("authentication failed") ||
-      message.includes("could not read username"),
-    key: "gitAuthFailed",
-  },
-  {
-    match: (message) =>
-      message.includes("permission denied") || message.includes("publickey"),
-    key: "gitPermissionDenied",
-  },
-  {
-    match: (message) => message.includes("repository not found"),
-    key: "gitRepositoryNotFound",
-  },
-  {
-    match: (message) =>
-      message.includes("could not read from remote repository") ||
-      message.includes("no such remote"),
-    key: "gitRemoteAccessFailed",
-  },
-  {
-    match: (message) =>
-      message.includes("no upstream") ||
-      message.includes("set upstream") ||
-      message.includes("@{u}"),
-    key: "gitNoUpstream",
-  },
-  {
-    match: (message) =>
-      message.includes("merge conflict") ||
-      message.includes("rebase conflict") ||
-      message.includes("conflict"),
-    key: "gitMergeConflict",
-  },
-  {
-    match: (message) => message.includes("rebase in progress"),
-    key: "gitRebaseInProgress",
-  },
-  {
-    match: (message) => message.includes("not a git repository"),
-    key: "gitNotRepository",
-  },
-  {
-    match: (message) =>
-      message.includes("could not resolve host") ||
-      message.includes("failed to connect") ||
-      message.includes("connection timed out") ||
-      message.includes("unable to access"),
-    key: "gitNetworkError",
-  },
-  {
-    match: (message) => message.includes("local changes would be overwritten"),
-    key: "gitLocalChanges",
-  },
-];
-
-const normalizeGitErrorMessage = (message: string): string =>
-  message.replace(/^bad request:\s*/i, "").trim();
-
-const resolveGitError = (
-  err: unknown,
-  t: TranslationFunction,
-  fallbackKey: TranslationKey,
-): {
-  message: string;
-} => {
-  const rawMessage = err instanceof Error ? err.message : "";
-  const normalizedMessage = normalizeGitErrorMessage(rawMessage);
-  const lower = normalizedMessage.toLowerCase();
-
-  if (isPushRejected(lower)) {
-    return {
-      message: t("gitPushRejectedDescription"),
-    };
-  }
-
-  const matched = GIT_ERROR_MATCHERS.find((matcher) => matcher.match(lower));
-  if (matched) {
-    return { message: t(matched.key) };
-  }
-
-  if (normalizedMessage) {
-    return {
-      message: t("gitErrorWithDetails", { message: normalizedMessage }),
-    };
-  }
-
-  return { message: t(fallbackKey) };
 };
 
 export function useGitStatus({
@@ -215,7 +101,7 @@ export function useGitStatus({
       const response = await getGitStatus(scope);
       applyStatusResponse(response);
     } catch (err) {
-      const { message } = resolveGitError(err, t, "gitStatusFailed");
+      const message = resolveGitError(err, t, "gitStatusFailed");
       setError(message);
       console.error("[use-git-status] Error fetching status:", err);
     } finally {
@@ -232,7 +118,7 @@ export function useGitStatus({
         const response = await stageFiles(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
-        const { message } = resolveGitError(err, t, "gitStageFailed");
+        const message = resolveGitError(err, t, "gitStageFailed");
         setError(message);
         showGitErrorToast(message);
         return;
@@ -250,7 +136,7 @@ export function useGitStatus({
         const response = await unstageFiles(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
-        const { message } = resolveGitError(err, t, "gitUnstageFailed");
+        const message = resolveGitError(err, t, "gitUnstageFailed");
         setError(message);
         showGitErrorToast(message);
         return;
@@ -270,7 +156,7 @@ export function useGitStatus({
         await refresh();
         return response.commitSha;
       } catch (err) {
-        const { message } = resolveGitError(err, t, "gitCommitFailed");
+        const message = resolveGitError(err, t, "gitCommitFailed");
         setError(message);
         showGitErrorToast(message);
         return null;
@@ -291,7 +177,7 @@ export function useGitStatus({
         title: t("gitPushSuccessTitle"),
       });
     } catch (err) {
-      const { message } = resolveGitError(err, t, "gitPushFailed");
+      const message = resolveGitError(err, t, "gitPushFailed");
       setError(message);
       showGitErrorToast(message);
       return;
@@ -312,7 +198,7 @@ export function useGitStatus({
         title: t("gitPullSuccessTitle"),
       });
     } catch (err) {
-      const { message } = resolveGitError(err, t, "gitPullFailed");
+      const message = resolveGitError(err, t, "gitPullFailed");
       setError(message);
       showGitErrorToast(message);
       return;
@@ -330,7 +216,7 @@ export function useGitStatus({
       const response = await discardAllChanges(scope);
       applyStatusResponse(response);
     } catch (err) {
-      const { message } = resolveGitError(err, t, "gitDiscardFailed");
+      const message = resolveGitError(err, t, "gitDiscardFailed");
       setError(message);
       showGitErrorToast(message);
       return;
@@ -348,7 +234,7 @@ export function useGitStatus({
         const response = await discardFilesApi(scope, paths);
         applyStatusResponse(response);
       } catch (err) {
-        const { message } = resolveGitError(err, t, "gitDiscardFilesFailed");
+        const message = resolveGitError(err, t, "gitDiscardFilesFailed");
         setError(message);
         showGitErrorToast(message);
         return;

@@ -41,6 +41,11 @@ import {
   combineFrontmatterAndBody,
   parseFrontmatter,
 } from "../../lib/frontmatter";
+import {
+  PREVIEW_LINK_BRIDGE_PARAM,
+  parsePreviewLinkMessage,
+  resolvePreviewLinkTarget,
+} from "../../lib/preview-link";
 import { useFileTreeStore } from "../../state/file-tree-store";
 import { type WorkspaceRoot, useFilesStore } from "../../state/files-store";
 import type { FileNode } from "../../types/file-tree";
@@ -200,6 +205,7 @@ export const FilesEditor = ({
     roots,
     renameDisplayName,
     openFile,
+    openFilePath,
     selectNode,
     fileContentVersion,
     editorReveal,
@@ -728,6 +734,47 @@ export const FilesEditor = ({
     [projectId, taskRunId, workspaceRootPath, fileContentVersion],
   );
 
+  /**
+   * Source of the preview iframe. `_r` forces a reload on save/refresh, and
+   * the bridge flag asks the server to append the link-forwarding script to
+   * this document (see `preview-link`). Sub-resources the document pulls in
+   * carry neither, so they are served untouched.
+   */
+  const htmlPreviewSrc = useMemo(() => {
+    if (!relativePath) return "";
+    const base = getAssetUrl(relativePath);
+    if (!base) return "";
+    const url = new URL(base);
+    url.searchParams.set("_r", String(htmlPreviewKey));
+    url.searchParams.set(PREVIEW_LINK_BRIDGE_PARAM, "1");
+    return url.toString();
+  }, [relativePath, getAssetUrl, htmlPreviewKey]);
+
+  /**
+   * Links clicked inside the preview act on the app instead of navigating the
+   * frame: a workspace file opens as an editor tab, a web address goes to the
+   * system browser. Without this the frame would leave the previewed document
+   * behind and render another file's raw bytes.
+   */
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const frameWindow = htmlPreviewFrameRef.current?.contentWindow;
+      if (!frameWindow || event.source !== frameWindow) return;
+      const message = parsePreviewLinkMessage(event.data);
+      if (!message) return;
+      const target = resolvePreviewLinkTarget(message, relativePath);
+      if (!target) return;
+      if (target.kind === "external") {
+        const openExternal = window.desktop?.openExternalUrl;
+        if (openExternal) void openExternal(target.url);
+        return;
+      }
+      openFilePath(target.path, taskRunId);
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [relativePath, taskRunId, openFilePath]);
+
   const embedConfig: EmbedPluginConfig = useMemo(
     () => ({
       getImageUrl: (path: string) =>
@@ -1055,12 +1102,12 @@ export const FilesEditor = ({
             </div>
           )}
           <div className="flex flex-1 flex-col overflow-hidden">
-            {showHtmlPreview && relativePath ? (
+            {showHtmlPreview && htmlPreviewSrc ? (
               <iframe
                 ref={htmlPreviewFrameRef}
                 key={`${loadedFilePath ?? ""}-${htmlPreviewKey}`}
                 title={currentNode?.name ?? fallbackFileName}
-                src={`${getAssetUrl(relativePath)}${getAssetUrl(relativePath).includes("?") ? "&" : "?"}_r=${htmlPreviewKey}`}
+                src={htmlPreviewSrc}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                 className="h-full w-full flex-1 border-0 bg-white"
                 onLoad={handleHtmlPreviewLoad}

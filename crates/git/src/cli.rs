@@ -14,6 +14,10 @@ pub enum GitCliError {
     NotAvailable,
     #[error("git command failed: {0}")]
     CommandFailed(String),
+    /// A commit was asked for with nothing staged. Callers treat this as a
+    /// no-op rather than a failure.
+    #[error("nothing to commit")]
+    NothingToCommit,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("failed to parse worktree output: {0}")]
@@ -228,7 +232,15 @@ impl GitCli {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !output.status.success() {
-            return Err(GitCliError::CommandFailed(stderr));
+            // Git explains some failures on stdout and leaves stderr empty
+            // (`commit` with an empty index, most notably). Reporting stderr
+            // alone would surface an error with no message at all.
+            let detail = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
+            return Err(GitCliError::CommandFailed(detail.trim().to_string()));
         }
         Ok((stdout, stderr))
     }
@@ -361,6 +373,23 @@ impl GitCli {
         Ok(())
     }
 
+    /// Remove the commit message `merge --squash` stages for the next commit.
+    /// Only called when that commit is not going to happen; failures are not
+    /// worth surfacing because the file is advisory.
+    fn discard_pending_merge_message(&self, repo_path: &Path) {
+        for name in ["SQUASH_MSG", "MERGE_MSG"] {
+            if let Ok(raw) = self.git(repo_path, ["rev-parse", "--git-path", name]) {
+                let path = Path::new(raw.trim()).to_path_buf();
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    repo_path.join(path)
+                };
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
     pub fn merge_squash_commit(
         &self,
         repo_path: &Path,
@@ -382,6 +411,15 @@ impl GitCli {
             return Err(GitCliError::CommandFailed(
                 String::from_utf8_lossy(&merge_result.stderr).to_string(),
             ));
+        }
+        // A branch can be ahead in commits yet identical in content (its work
+        // reached the base by another route, e.g. a rebase or a pull). The
+        // squash then stages nothing, and committing would fail with an
+        // unrelated-looking error. Report the no-op for what it is, and drop
+        // the message `--squash` left behind so the checkout is untouched.
+        if !self.has_staged_changes(repo_path)? {
+            self.discard_pending_merge_message(repo_path);
+            return Err(GitCliError::NothingToCommit);
         }
         self.run(repo_path, &["commit", "-m", message])?;
         let (stdout, _) = self.run(repo_path, &["rev-parse", "HEAD"])?;
@@ -886,6 +924,61 @@ mod tests {
         assert_eq!(
             rev_parse(&remote, "refs/heads/ch/inferred"),
             rev_parse(&work, "HEAD")
+        );
+    }
+
+    /// A branch whose commits are already contained in the base by content
+    /// (rebased away, or landed via the remote) squashes into an empty index.
+    /// That is "nothing to merge", not a broken repository: `git commit` would
+    /// exit non-zero with an empty stderr and the failure would be reported as
+    /// an unrelated repository error.
+    #[test]
+    fn merge_squash_reports_nothing_to_commit_when_branch_is_already_upstream() {
+        let (_tmp, _remote, work) = remote_and_clone();
+        let cli = GitCli::new();
+
+        // The task branch adds a file...
+        git(&work, &["checkout", "-b", "ch/already-landed"]);
+        write(&work, "feature.txt", "feature\n");
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-m", "feature work"]);
+
+        // ...and the very same content reaches main independently, so the two
+        // branches differ in commits but not in tree.
+        git(&work, &["checkout", "main"]);
+        write(&work, "feature.txt", "feature\n");
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-m", "same content, other commit"]);
+
+        let before = rev_parse(&work, "HEAD");
+        let result = cli.merge_squash_commit(&work, "main", "ch/already-landed", "squash");
+
+        assert!(
+            matches!(result, Err(GitCliError::NothingToCommit)),
+            "expected NothingToCommit, got {result:?}"
+        );
+        // The base branch must be left exactly where it was: no empty commit,
+        // and no half-prepared commit message waiting in the checkout.
+        assert_eq!(rev_parse(&work, "HEAD"), before);
+        assert!(!work.join(".git/SQUASH_MSG").exists());
+    }
+
+    /// Git reports some failures (`commit` with an empty index above all) on
+    /// stdout and leaves stderr empty. Reading stderr alone produced errors
+    /// whose text stopped at "git command failed:".
+    #[test]
+    fn command_failure_reported_on_stdout_keeps_its_message() {
+        let (_tmp, _remote, work) = remote_and_clone();
+        let cli = GitCli::new();
+
+        let err = cli
+            .run(&work, &["commit", "-m", "nothing staged"])
+            .expect_err("committing an empty index fails");
+
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("nothing to commit"),
+            "failure message lost git's explanation: {message}"
         );
     }
 

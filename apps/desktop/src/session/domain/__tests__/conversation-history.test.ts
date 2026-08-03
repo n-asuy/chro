@@ -8,6 +8,7 @@ import {
   createSyntheticUserMessageEntry,
   filterConversationLogEntries,
   flattenConversationEntries,
+  resolveConversationStreamAction,
   withAuthoritativeRunOrder,
 } from "../conversation-history";
 
@@ -66,6 +67,27 @@ const makeState = (
   taskRunId,
   createdAt,
   entries,
+});
+
+describe("resolveConversationStreamAction", () => {
+  it("keeps a live socket when a stale DB patch turns the run terminal", () => {
+    expect(resolveConversationStreamAction(null, "run-live")).toEqual({
+      type: "keep",
+    });
+  });
+
+  it("replaces the socket when a genuinely newer run starts", () => {
+    expect(resolveConversationStreamAction("run-new", "run-old")).toEqual({
+      type: "start",
+      runId: "run-new",
+    });
+  });
+
+  it("is idle after finished clears the socket and no DB run is active", () => {
+    expect(resolveConversationStreamAction(null, null)).toEqual({
+      type: "idle",
+    });
+  });
 });
 
 describe("buildTaskSessionPromptMap", () => {
@@ -473,7 +495,9 @@ describe("withAuthoritativeRunOrder", () => {
   });
 
   it("leaves a brand-new optimistic run (absent from the stream) untouched", () => {
-    const states = [makeState("optimistic-run-1", "2026-06-27T05:00:00.000Z", [])];
+    const states = [
+      makeState("optimistic-run-1", "2026-06-27T05:00:00.000Z", []),
+    ];
     const result = withAuthoritativeRunOrder(states, new Map());
     expect(result[0]).toBe(states[0]); // same ref: no needless rebuild
   });
@@ -505,8 +529,8 @@ describe("withAuthoritativeRunOrder", () => {
       ["run-aaa", "2026-06-27T04:40:34.360443+00:00"],
     ]);
 
-    const wrong = flattenConversationEntries(states, sessions).map(
-      (e) => (e.type === "NORMALIZED_ENTRY" ? e.content.content : ""),
+    const wrong = flattenConversationEntries(states, sessions).map((e) =>
+      e.type === "NORMALIZED_ENTRY" ? e.content.content : "",
     );
     expect(wrong[0]).toBe("Aaa…"); // demonstrates the bug without the fix
 

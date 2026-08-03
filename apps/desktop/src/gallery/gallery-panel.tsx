@@ -24,8 +24,8 @@ import {
 /** Matches the server-side default cap; the panel surfaces truncation. */
 const MEDIA_LIMIT = 2000;
 
-/** Tile sizing. Columns are derived from the measured width, so the same grid
- *  works in a ~300px dock (1-2 columns) and in a full-width tab (many). */
+/** Tile sizing. Columns are derived from the measured width, so the grid
+ *  adapts to any pane width (narrow splits to full-width tabs). */
 const MIN_TILE_PX = 160;
 const GRID_GAP = 12;
 
@@ -38,9 +38,8 @@ type LoadStatus = "loading" | "ready" | "error";
  * normal editor tab, reusing the existing image/video viewers — the grid is a
  * visual index of the scope, not a viewer of its own.
  *
- * Rendered both in the right dock (as the Files panel's gallery presentation)
- * and as a full-width tab, so it carries no title of its own: both hosts already
- * name it.
+ * Rendered as the body of the gallery tab (project- or run-scoped), so it
+ * carries no title of its own: the tab already names it.
  */
 export function GalleryPanel({ taskRunId }: { taskRunId?: string }) {
   const projectId = useProjectId();

@@ -1,11 +1,11 @@
 # Session Code Map
 
-Generated at: 2026-07-05T07:20:51.198Z
+Generated at: 2026-08-03T11:57:33.056Z
 
 ## Summary
 
-- Files: 94
-- Exported symbols: 299
+- Files: 107
+- Exported symbols: 327
 - RPC references: 6
 
 ## File Index
@@ -19,23 +19,26 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/components/braille-spinner.tsx` | BrailleSpinner | - |
 | `apps/desktop/src/session/components/branch-selector.tsx` | BranchSelector, GitBranch | - |
 | `apps/desktop/src/session/components/collapsible-message.tsx` | CollapsibleMessage | - |
-| `apps/desktop/src/session/components/run-status-pill.tsx` | RunStatusPill | - |
 | `apps/desktop/src/session/components/conflict-banner.tsx` | ConflictBanner | - |
 | `apps/desktop/src/session/components/conversation-find-bar.tsx` | ConversationFindBar | - |
+| `apps/desktop/src/session/components/conversation-fork-origin.tsx` | ConversationForkOrigin, useForkEdge | - |
 | `apps/desktop/src/session/components/conversation-message-nav.tsx` | ConversationMessageNav | - |
 | `apps/desktop/src/session/components/diff-viewer-panel.tsx` | DiffViewerPanel | - |
 | `apps/desktop/src/session/components/execution-options-controls.tsx` | BaseBranchDropdown, BaseBranchOption, NewSessionExecutionControls, WorktreeModeDropdown | - |
 | `apps/desktop/src/session/components/file-path-utils.ts` | looksLikeFilePath, stripLineColumnSuffix | - |
 | `apps/desktop/src/session/components/image-upload-preview-list.tsx` | ImageUploadPreviewList | - |
 | `apps/desktop/src/session/components/markdown.tsx` | Markdown | - |
+| `apps/desktop/src/session/components/mcp-tool-approval.tsx` | McpToolApproval | - |
 | `apps/desktop/src/session/components/prompt-editor/at-popover.tsx` | AtPopover, AtPopoverHandle, AtPopoverSelection, ModelOption, ... (+2) | - |
 | `apps/desktop/src/session/components/prompt-editor/prompt-editor.tsx` | PromptEditor | - |
 | `apps/desktop/src/session/components/prompt-editor/skill-popover.tsx` | SkillPopover, SkillPopoverHandle | - |
 | `apps/desktop/src/session/components/raw-log-text.tsx` | - | - |
 | `apps/desktop/src/session/components/remark-wikilink.ts` | remarkWikilink | - |
+| `apps/desktop/src/session/components/run-status-pill.tsx` | RunStatusPill | - |
 | `apps/desktop/src/session/components/session-activity-indicator.tsx` | SessionActivityIndicator | - |
 | `apps/desktop/src/session/components/session-header.tsx` | SessionHeader | - |
 | `apps/desktop/src/session/components/session-input-controls.tsx` | PromptEditorWithPopover, SendButtonWithState | - |
+| `apps/desktop/src/session/components/session-leading-marker.tsx` | SessionLeadingMarker | - |
 | `apps/desktop/src/session/components/session-preview.tsx` | SessionPreviewProvider, useSessionPreviewTrigger | - |
 | `apps/desktop/src/session/components/session-references-popover.tsx` | SessionReferencesPopover | /rpc/tasks/${encoded}/context-refs, /rpc/tasks/${encoded}/referenced-by |
 | `apps/desktop/src/session/components/task-conversation.tsx` | TaskConversation | - |
@@ -44,10 +47,12 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/context/local-images-context.tsx` | LocalImageMetadata | /rpc/images/{id}/file |
 | `apps/desktop/src/session/context/project-tasks-context.tsx` | ProjectTasksProvider, useOptionalProjectTasks, useProjectTasks | - |
 | `apps/desktop/src/session/conversation-actions.ts` | ConversationActions, ConversationActionsContext, useConversationActions | - |
-| `apps/desktop/src/session/conversation-view.tsx` | ConversationEntries, UserMessageContent | - |
-| `apps/desktop/src/session/domain/conversation-history.ts` | buildTaskSessionPromptMap, ConversationFlattenCache, createConversationFlattenCache, createLoadingEntry, ... (+7) | - |
+| `apps/desktop/src/session/conversation-view.tsx` | ConversationEntries, EntryList, UserMessageContent | - |
+| `apps/desktop/src/session/domain/conversation-history.ts` | buildTaskSessionPromptMap, ConversationFlattenCache, ConversationStreamAction, createConversationFlattenCache, ... (+9) | - |
 | `apps/desktop/src/session/domain/execution-mode.ts` | isWorktreeExecutionPath, resolveUseWorktreeForRun | - |
-| `apps/desktop/src/session/domain/session-grouping.ts` | DateBucket, deriveDateBucket, deriveSessionState, GroupLabels, ... (+7) | - |
+| `apps/desktop/src/session/domain/executor-setting-locks.ts` | ExecutorSettingLockState, resolveExecutorSettingLocks | - |
+| `apps/desktop/src/session/domain/session-grouping.test.ts` | - | - |
+| `apps/desktop/src/session/domain/session-grouping.ts` | DateBucket, deriveDateBucket, deriveSessionState, GroupLabels, ... (+8) | - |
 | `apps/desktop/src/session/domain/session-run-state.ts` | CANCELABLE_RUN_STATUSES, CancelAction, deriveSessionRunState, resolveCancelAction, ... (+2) | - |
 | `apps/desktop/src/session/domain/session-task-state.ts` | applyPendingSubmissionGroupsToTasks, applyPendingSubmissionsToTasks, applyPendingSubmissionToTasks, createPendingSessionSubmission, ... (+10) | - |
 | `apps/desktop/src/session/domain/task-read-state.ts` | deriveTaskStatusDot, TaskStatusDotKind | - |
@@ -55,11 +60,12 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/hooks/index.ts` | useArchivedSessions, useConversationHistory, useDiffStream, useImageUploads, ... (+19) | - |
 | `apps/desktop/src/session/hooks/json-patch-stream-registry.test.ts` | - | - |
 | `apps/desktop/src/session/hooks/json-patch-stream-registry.ts` | acquireStream, DISABLED_SNAPSHOT, forceCloseStream, getStreamSnapshot, ... (+4) | /rpc/events |
+| `apps/desktop/src/session/hooks/use-anchor-scroll.ts` | useAnchorScroll | - |
 | `apps/desktop/src/session/hooks/use-archived-sessions.test.ts` | - | - |
 | `apps/desktop/src/session/hooks/use-archived-sessions.ts` | ArchivedSession, archiveTask, ArchiveTaskApi, useArchivedSessions, ... (+1) | - |
 | `apps/desktop/src/session/hooks/use-composer-file-drag.ts` | ComposerFileDrag, useComposerFileDrag | - |
 | `apps/desktop/src/session/hooks/use-conversation-find.ts` | ConversationFindController, useConversationFind | - |
-| `apps/desktop/src/session/hooks/use-conversation-history.ts` | useConversationHistory, UseConversationHistoryResult | - |
+| `apps/desktop/src/session/hooks/use-conversation-history.ts` | loadHistoricTaskRunEntries, useConversationHistory, UseConversationHistoryResult | - |
 | `apps/desktop/src/session/hooks/use-diff-stream.ts` | useDiffStream, UseDiffStreamResult | - |
 | `apps/desktop/src/session/hooks/use-image-metadata.ts` | useImageMetadata | - |
 | `apps/desktop/src/session/hooks/use-image-uploads.ts` | ImageUploadItem, ImageUploadStatus, useImageUploads | /rpc/images/${item.imageId}/file |
@@ -82,6 +88,13 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/hooks/use-task-log-stream.ts` | applyTaskRunPatchOperations, DiffChangeKind, DiffContent, DiffEntry, ... (+4) | - |
 | `apps/desktop/src/session/hooks/use-task-runs-stream.ts` | useTaskRunsStream, UseTaskRunsStreamResult | - |
 | `apps/desktop/src/session/hooks/use-task-sessions-stream.ts` | useTaskSessionsStream, UseTaskSessionsStreamResult | - |
+| `apps/desktop/src/session/lib/diff-render-policy.test.ts` | - | - |
+| `apps/desktop/src/session/lib/diff-render-policy.ts` | bulkExpandedDiffIds, DIFF_EXPAND_BATCH_SIZE, MAX_RENDERED_DIFF_BYTES, shouldBuildInlineDiff | - |
+| `apps/desktop/src/session/lib/diff-reveal.test.ts` | - | - |
+| `apps/desktop/src/session/lib/diff-reveal.ts` | DiffRevealRequest, resolveDiffReveal | - |
+| `apps/desktop/src/session/lib/prompt-submit-policy.test.ts` | - | - |
+| `apps/desktop/src/session/lib/prompt-submit-policy.ts` | PromptKeystroke, shouldSubmitPrompt | - |
+| `apps/desktop/src/session/lib/relative-time.ts` | formatRelativeTime | - |
 | `apps/desktop/src/session/single-agent-session.tsx` | SingleAgentSessionView | - |
 | `apps/desktop/src/session/state/pending-session-submissions-store.test.ts` | - | - |
 | `apps/desktop/src/session/state/pending-session-submissions-store.ts` | BeginPendingSessionSubmissionInput, ProjectPendingSubmissions, useAllPendingSessionSubmissions, usePendingSessionSubmissions, ... (+1) | - |
@@ -102,6 +115,7 @@ Generated at: 2026-07-05T07:20:51.198Z
 | `apps/desktop/src/session/utils/conversation-find-highlighter.ts` | clearHighlightRanges, collectMatchRanges, isHighlightApiSupported, setHighlightRanges | - |
 | `apps/desktop/src/session/utils/json-patch-stream.test.ts` | - | - |
 | `apps/desktop/src/session/utils/json-patch-stream.ts` | dedupeJsonPatchOperations, JsonPatchPathOperation | - |
+| `apps/desktop/src/session/utils/mcp-approval-mapping.ts` | findPendingMcpApproval, isApprovingDecision, MCP_APPROVAL_DECISIONS, MCP_APPROVAL_TOOL_NAME, ... (+5) | - |
 | `apps/desktop/src/session/utils/session-dnd.ts` | parseSessionDragPayload, serializeSessionDragPayload, SESSION_DRAG_DATA_TYPE, SessionDragPayload | - |
 | `apps/desktop/src/session/utils/session-select-all.ts` | activateSessionSelectScope, clearSessionSelectHighlight, clearSessionSelectState, getSelectableMessageElements, ... (+10) | - |
 | `apps/desktop/src/session/utils/task-message-api.ts` | cancelTaskRun, sendTaskMessage | - |

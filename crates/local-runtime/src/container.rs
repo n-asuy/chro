@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
@@ -336,7 +336,7 @@ impl LocalContainerService {
         &self,
         run_id: Uuid,
         exit_code: Option<i32>,
-    ) -> Result<(), ContainerError> {
+    ) -> Result<RunStatus, ContainerError> {
         tracing::debug!(
             %run_id,
             ?exit_code,
@@ -360,30 +360,48 @@ impl LocalContainerService {
         );
 
         let result = sqlx::query(
-            "UPDATE task_runs SET status = ?, exit_code = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_runs
+             SET status = ?, exit_code = ?, completed_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND status IN (?, ?)",
         )
         .bind(status)
         .bind(exit_code)
         .bind(run_id)
+        .bind(RunStatus::Pending)
+        .bind(RunStatus::Running)
         .execute(self.db.pool())
         .await?;
+
+        // A cancellation or orphan sweep may already have made this run
+        // terminal. Never rewrite that outcome when the executor eventually
+        // exits; use the persisted status to settle task state instead.
+        let effective_status = if result.rows_affected() == 0 {
+            TaskRun::find_by_id(self.db.pool(), run_id)
+                .await?
+                .map(|run| run.status)
+                .unwrap_or(status)
+        } else {
+            status
+        };
 
         tracing::debug!(
             %run_id,
             rows_affected = result.rows_affected(),
+            ?effective_status,
             "[mark_run_completion] updated task_runs"
         );
 
-        self.complete_task_execution(run_id, status).await?;
+        self.complete_task_execution(run_id, effective_status)
+            .await?;
 
         tracing::info!(
             %run_id,
             ?exit_code,
-            ?status,
+            ?effective_status,
             "[mark_run_completion] completed"
         );
 
-        Ok(())
+        Ok(effective_status)
     }
 
     /// Complete task execution by updating task status and clearing active_session_id.
@@ -428,19 +446,39 @@ impl LocalContainerService {
         let result = sqlx::query(
             "UPDATE task_records
              SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
-             WHERE id = ?",
+             WHERE id = ?
+               AND (
+                   active_session_id IN (
+                       SELECT id FROM task_sessions WHERE task_run_id = ?
+                   )
+                   OR (
+                       active_session_id IS NULL
+                       AND NOT EXISTS (
+                           SELECT 1 FROM task_runs
+                           WHERE task_id = ? AND id != ? AND status IN (?, ?)
+                       )
+                   )
+               )",
         )
         .bind(task_status)
         .bind(run.task_id)
+        .bind(run_id)
+        .bind(run.task_id)
+        .bind(run_id)
+        .bind(RunStatus::Pending)
+        .bind(RunStatus::Running)
         .execute(self.db.pool())
         .await?;
+
+        let owns_task_state = result.rows_affected() > 0;
 
         tracing::info!(
             task_id = %run.task_id,
             %run_id,
             ?task_status,
             rows_affected = result.rows_affected(),
-            "[complete_task_execution] task_records updated - status and active_session_id cleared"
+            owns_task_state,
+            "[complete_task_execution] conditionally settled task_records"
         );
 
         // Best-effort outcome summary, in the background: reading the run's
@@ -450,7 +488,10 @@ impl LocalContainerService {
             let this = self.clone();
             let task_id = run.task_id;
             tokio::spawn(async move {
-                if let Err(err) = this.record_run_outcome(run_id, task_id).await {
+                if let Err(err) = this
+                    .record_run_outcome(run_id, task_id, owns_task_state)
+                    .await
+                {
                     tracing::warn!(
                         %run_id,
                         error = %err,
@@ -467,7 +508,12 @@ impl LocalContainerService {
     /// persist it: per-session on `task_sessions.summary`, and denormalized
     /// onto the task as `last_summary` for list surfaces. No-op when the run
     /// produced no assistant prose (e.g. it only ran tools).
-    async fn record_run_outcome(&self, run_id: Uuid, task_id: Uuid) -> Result<(), ContainerError> {
+    async fn record_run_outcome(
+        &self,
+        run_id: Uuid,
+        task_id: Uuid,
+        update_task_summary: bool,
+    ) -> Result<(), ContainerError> {
         let entries = self.fetch_logs(run_id).await?;
         let Some(summary) = crate::transcript::last_assistant_text(&entries)
             .and_then(|text| crate::transcript::outcome_summary(&text))
@@ -476,7 +522,9 @@ impl LocalContainerService {
         };
 
         db::models::TaskSession::set_summary_by_run_id(self.db.pool(), run_id, &summary).await?;
-        TaskRecord::set_last_summary(self.db.pool(), task_id, &summary).await?;
+        if update_task_summary {
+            TaskRecord::set_last_summary(self.db.pool(), task_id, &summary).await?;
+        }
 
         tracing::debug!(
             %run_id,
@@ -696,57 +744,55 @@ impl LocalContainerService {
                         event: payload.clone(),
                     });
 
-                    if let Some(msg_type) = payload.get("type").and_then(|v| v.as_str()) {
-                        if msg_type == "result" {
-                            tracing::info!(%run_id, "[stdout_task] received result message, signaling completion");
-                            saw_result_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                            // Capture key fields from the result for diagnostics
-                            if let Ok(mut guard) = result_summary_writer.lock() {
-                                let mut summary = serde_json::Map::new();
-                                if let Some(v) = payload.get("subtype") {
-                                    summary.insert("subtype".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("is_error") {
-                                    summary.insert("is_error".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("cost_usd") {
-                                    summary.insert("cost_usd".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("duration_ms") {
-                                    summary.insert("duration_ms".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("duration_api_ms") {
-                                    summary.insert("duration_api_ms".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("num_turns") {
-                                    summary.insert("num_turns".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("session_id") {
-                                    summary.insert("session_id".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("stop_reason") {
-                                    summary.insert("stop_reason".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("error") {
-                                    summary.insert("error".into(), v.clone());
-                                }
-                                if let Some(v) = payload.get("total_cost_usd") {
-                                    summary.insert("total_cost_usd".into(), v.clone());
-                                }
-                                // Capture result text preview (first 200 chars)
-                                if let Some(result_text) =
-                                    payload.get("result").and_then(|v| v.as_str())
-                                {
-                                    let preview: String = result_text.chars().take(200).collect();
-                                    summary.insert(
-                                        "result_preview".into(),
-                                        serde_json::Value::String(preview),
-                                    );
-                                }
-                                *guard = Some(serde_json::Value::Object(summary));
+                    if result_closes_run(&payload) {
+                        tracing::info!(%run_id, "[stdout_task] received result message, signaling completion");
+                        saw_result_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Capture key fields from the result for diagnostics
+                        if let Ok(mut guard) = result_summary_writer.lock() {
+                            let mut summary = serde_json::Map::new();
+                            if let Some(v) = payload.get("subtype") {
+                                summary.insert("subtype".into(), v.clone());
                             }
-                            let _ = completion_tx.send(true);
+                            if let Some(v) = payload.get("is_error") {
+                                summary.insert("is_error".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("cost_usd") {
+                                summary.insert("cost_usd".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("duration_ms") {
+                                summary.insert("duration_ms".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("duration_api_ms") {
+                                summary.insert("duration_api_ms".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("num_turns") {
+                                summary.insert("num_turns".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("session_id") {
+                                summary.insert("session_id".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("stop_reason") {
+                                summary.insert("stop_reason".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("error") {
+                                summary.insert("error".into(), v.clone());
+                            }
+                            if let Some(v) = payload.get("total_cost_usd") {
+                                summary.insert("total_cost_usd".into(), v.clone());
+                            }
+                            // Capture result text preview (first 200 chars)
+                            if let Some(result_text) =
+                                payload.get("result").and_then(|v| v.as_str())
+                            {
+                                let preview: String = result_text.chars().take(200).collect();
+                                summary.insert(
+                                    "result_preview".into(),
+                                    serde_json::Value::String(preview),
+                                );
+                            }
+                            *guard = Some(serde_json::Value::Object(summary));
                         }
+                        let _ = completion_tx.send(true);
                     }
                 }
             }
@@ -1005,12 +1051,15 @@ impl LocalContainerService {
         // worktree); awaiting it before clearing `active_session_id` left the
         // sidebar spinning long after the conversation already showed the turn
         // finished. Completion visibility must not be gated on housekeeping.
-        if let Err(e) = self.mark_run_completion(run_id, exit_code).await {
-            tracing::error!(%run_id, error = %e, "[run_execution_process] mark_run_completion failed");
-            return Err(e);
-        }
+        let completion_status = match self.mark_run_completion(run_id, exit_code).await {
+            Ok(status) => status,
+            Err(e) => {
+                tracing::error!(%run_id, error = %e, "[run_execution_process] mark_run_completion failed");
+                return Err(e);
+            }
+        };
 
-        if exit_code == Some(0) {
+        if completion_status == RunStatus::Completed {
             self.try_commit_changes(run_id, &params.workspace_path)
                 .await;
         }
@@ -1208,40 +1257,12 @@ impl ContainerService for LocalContainerService {
     async fn cancel_execution(&self, task_run_id: Uuid) -> Result<(), ContainerError> {
         use std::time::Duration;
 
-        let update_result = sqlx::query(
-            "UPDATE task_runs SET status = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(RunStatus::Cancelled)
-        .bind(task_run_id)
-        .execute(self.db.pool())
-        .await;
-
-        if let Err(e) = update_result {
+        if let Err(e) = self.mark_run_completion(task_run_id, None).await {
             tracing::warn!(
                 "Failed to update task run status to Cancelled for {}: {}",
                 task_run_id,
                 e
             );
-        }
-
-        if let Ok(Some(run)) = TaskRun::find_by_id(self.db.pool(), task_run_id).await {
-            let result = sqlx::query(
-                "UPDATE task_records
-                 SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
-                 WHERE id = ?",
-            )
-            .bind(TaskStatus::Completed)
-            .bind(run.task_id)
-            .execute(self.db.pool())
-            .await;
-
-            if let Err(e) = result {
-                tracing::warn!(
-                    "Failed to clear active session for task {}: {}",
-                    run.task_id,
-                    e
-                );
-            }
         }
 
         let handle = {
@@ -1319,42 +1340,69 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn cleanup_orphan_executions(&self) -> Result<(), ContainerError> {
-        // Local executions die with the server, and a Pending run only exists
-        // inside the create window of a start request, so any run still
-        // running or pending at startup is an orphan (e.g. a create request
-        // whose provisioning was cut short by a crash).
-        let affected = sqlx::query(
-            "UPDATE task_runs SET status = ?, completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now') WHERE status IN (?, ?)",
-        )
-        .bind(RunStatus::Failed)
-        .bind(RunStatus::Running)
-        .bind(RunStatus::Pending)
-        .execute(self.db.pool())
-        .await?;
-        if affected.rows_affected() > 0 {
+        // This is primarily a startup sweep, when the registry is empty and
+        // every Running/Pending row really was owned by the previous process.
+        // Keep the live-set guard anyway: calling this maintenance hook on a
+        // running server must never make its workers disappear from the UI.
+        let live_run_ids = self
+            .executions
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        let candidates =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM task_runs WHERE status IN (?, ?)")
+                .bind(RunStatus::Running)
+                .bind(RunStatus::Pending)
+                .fetch_all(self.db.pool())
+                .await?;
+
+        let mut orphaned_run_ids = Vec::new();
+        for run_id in candidates {
+            if live_run_ids.contains(&run_id) {
+                continue;
+            }
+            let affected = sqlx::query(
+                "UPDATE task_runs
+                 SET status = ?, completed_at = COALESCE(completed_at, datetime('now')), updated_at = datetime('now')
+                 WHERE id = ? AND status IN (?, ?)",
+            )
+            .bind(RunStatus::Failed)
+            .bind(run_id)
+            .bind(RunStatus::Running)
+            .bind(RunStatus::Pending)
+            .execute(self.db.pool())
+            .await?;
+            if affected.rows_affected() > 0 {
+                orphaned_run_ids.push(run_id);
+            }
+        }
+        if !orphaned_run_ids.is_empty() {
             tracing::info!(
-                count = affected.rows_affected(),
+                count = orphaned_run_ids.len(),
                 "marked orphaned executions as failed"
             );
         }
 
-        let task_affected = sqlx::query(
-            "UPDATE task_records
-             SET status = ?, active_session_id = NULL, updated_at = datetime('now')
-             WHERE active_session_id IN (
-                 SELECT ts.id
-                 FROM task_sessions ts
-                 JOIN task_runs tr ON ts.task_run_id = tr.id
-                 WHERE tr.status != ?
-             )",
-        )
-        .bind(TaskStatus::Failed)
-        .bind(RunStatus::Running)
-        .execute(self.db.pool())
-        .await?;
-        if task_affected.rows_affected() > 0 {
+        let mut finalized_tasks = 0_u64;
+        for run_id in orphaned_run_ids {
+            finalized_tasks += sqlx::query(
+                "UPDATE task_records
+                 SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
+                 WHERE active_session_id IN (
+                     SELECT id FROM task_sessions WHERE task_run_id = ?
+                 )",
+            )
+            .bind(TaskStatus::Failed)
+            .bind(run_id)
+            .execute(self.db.pool())
+            .await?
+            .rows_affected();
+        }
+        if finalized_tasks > 0 {
             tracing::info!(
-                count = task_affected.rows_affected(),
+                count = finalized_tasks,
                 "finalized orphaned tasks: status set to Failed and active_session_id cleared"
             );
         }
@@ -1363,10 +1411,18 @@ impl ContainerService for LocalContainerService {
         // all (a create that never reached the session insert). Nothing is
         // running at startup, so every remaining in-progress task is stale.
         let stranded_tasks = sqlx::query(
-            "UPDATE task_records SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now') WHERE status = ?",
+            "UPDATE task_records
+             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
+             WHERE status = ? AND active_session_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM task_runs
+                   WHERE task_id = task_records.id AND status IN (?, ?)
+               )",
         )
         .bind(TaskStatus::Failed)
         .bind(TaskStatus::InProgress)
+        .bind(RunStatus::Pending)
+        .bind(RunStatus::Running)
         .execute(self.db.pool())
         .await?;
         if stranded_tasks.rows_affected() > 0 {
@@ -1571,6 +1627,24 @@ fn escape_json_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
 
+/// Whether a stream message is the `result` that ends *our* turn.
+///
+/// A run submits exactly one prompt, but the agent may run more turns than
+/// that in the same process, and every turn emits its own `result`. Claude
+/// Code replays queued side-channel turns when a session is resumed -- most
+/// visibly the notifications of background tasks that a previous process left
+/// behind -- and those are tagged with an `origin`; the reply to the submitted
+/// prompt carries none. Closing the run on a side-channel `result` terminates
+/// the CLI while the prompt's own turn is still streaming, which the CLI
+/// reports back as `error_during_execution` /
+/// `terminal_reason: aborted_streaming` and the UI renders as a raw error
+/// blob. Anything the agent did not produce for our prompt is therefore
+/// ignored here; if a future origin ever tags the prompt turn itself, the run
+/// still finishes through the process's own exit.
+fn result_closes_run(payload: &Value) -> bool {
+    payload.get("type").and_then(Value::as_str) == Some("result") && payload.get("origin").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1728,6 +1802,80 @@ mod tests {
         assert_eq!(task_after.status, TaskStatus::Completed);
     }
 
+    /// A late completion from an older overlapping run must not clear the
+    /// session pointer that drives the newer run's spinner and Stop button.
+    #[tokio::test]
+    async fn older_run_completion_preserves_newer_active_session() {
+        let (service, _temp) = build_service().await;
+        let (task_id, older_run_id) = seed_running_task(&service, RunStatus::Running).await;
+        let pool = service.db.pool();
+
+        let mut newer_run = TaskRun::new_local(task_id, Some("follow-up".to_string()));
+        newer_run.status = RunStatus::Running;
+        newer_run.insert(pool).await.unwrap();
+
+        let agent_id = AgentProfile::ensure_default_desktop_profile(pool)
+            .await
+            .unwrap();
+        let newer_session = TaskSession::new(task_id, agent_id, Some("newer prompt".to_string()));
+        sqlx::query(
+            "INSERT INTO task_sessions
+             (id, task_id, task_run_id, agent_profile_id, prompt, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+        )
+        .bind(newer_session.id)
+        .bind(task_id)
+        .bind(newer_run.id)
+        .bind(newer_session.agent_profile_id)
+        .bind(&newer_session.prompt)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE task_records
+             SET status = ?, active_session_id = ?, awaiting_input = 1
+             WHERE id = ?",
+        )
+        .bind(TaskStatus::InProgress)
+        .bind(newer_session.id)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let status = service
+            .mark_run_completion(older_run_id, Some(0))
+            .await
+            .unwrap();
+        assert_eq!(status, RunStatus::Completed);
+
+        let task_after = TaskRecord::find_by_id(pool, task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.status, TaskStatus::InProgress);
+        assert_eq!(task_after.active_session_id, Some(newer_session.id));
+        assert!(task_after.awaiting_input);
+    }
+
+    /// Once a run is terminal, a delayed process-exit notification cannot
+    /// rewrite the recorded outcome.
+    #[tokio::test]
+    async fn process_exit_does_not_rewrite_terminal_run_status() {
+        let (service, _temp) = build_service().await;
+        let (_task_id, run_id) = seed_running_task(&service, RunStatus::Failed).await;
+
+        let status = service.mark_run_completion(run_id, Some(0)).await.unwrap();
+        assert_eq!(status, RunStatus::Failed);
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Failed);
+        assert_eq!(run_after.exit_code, None);
+    }
+
     /// Seed a project + task + run with the given statuses and NO session row,
     /// mirroring a create request that was cancelled mid-provisioning (task
     /// inserted, run never launched). Returns `(task_id, run_id)`.
@@ -1813,6 +1961,40 @@ mod tests {
         assert_eq!(task_after.active_session_id, None);
     }
 
+    /// The maintenance hook can be called while the server is live. Runs in
+    /// its execution registry are workers, not startup orphans.
+    #[tokio::test]
+    async fn cleanup_preserves_registered_live_execution() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+        TaskRecord::update_status(service.db.pool(), task_id, TaskStatus::InProgress)
+            .await
+            .unwrap();
+        service.executions.write().await.insert(
+            run_id,
+            ExecutionHandle {
+                cancel: oneshot::channel().0,
+                join: tokio::spawn(async {}),
+            },
+        );
+
+        service.cleanup_orphan_executions().await.unwrap();
+
+        let run_after = TaskRun::find_by_id(service.db.pool(), run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_after.status, RunStatus::Running);
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.status, TaskStatus::InProgress);
+        assert!(task_after.active_session_id.is_some());
+        assert!(task_after.awaiting_input);
+    }
+
     /// Terminal state is untouched: completed work must not be rewritten as
     /// failed by the startup sweep.
     #[tokio::test]
@@ -1842,6 +2024,48 @@ mod tests {
             task_status_for_terminal_run_status(RunStatus::Cancelled),
             Some(TaskStatus::Completed)
         );
+    }
+
+    /// The reply to the submitted prompt ends the run.
+    #[test]
+    fn prompt_result_closes_run() {
+        let payload = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "num_turns": 4,
+            "stop_reason": "end_turn",
+            "result": "done",
+        });
+        assert!(result_closes_run(&payload));
+    }
+
+    /// Regression: a resumed session flushes the notifications of background
+    /// tasks orphaned by a previous process, and that turn's `result` arrives
+    /// before the prompt has even started streaming. Ending the run there
+    /// killed the CLI mid-turn and surfaced `error_during_execution`.
+    #[test]
+    fn side_channel_result_does_not_close_run() {
+        let payload = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "num_turns": 0,
+            "duration_ms": 69,
+            "result": "",
+            "origin": { "kind": "task-notification" },
+        });
+        assert!(!result_closes_run(&payload));
+    }
+
+    /// Everything that is not a `result` streams through untouched.
+    #[test]
+    fn non_result_message_does_not_close_run() {
+        let payload = serde_json::json!({ "type": "system", "subtype": "init" });
+        assert!(!result_closes_run(&payload));
+
+        let unparsed = Value::String("not json at all".to_string());
+        assert!(!result_closes_run(&unparsed));
     }
 
     #[test]

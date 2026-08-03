@@ -141,10 +141,10 @@ impl ClaudeCode {
         for (key, value) in claude_environment() {
             process.env(key, value);
         }
-        // An unset timeout is infinite, so bound hanging MCP tool calls. Apply
-        // this before profile variables so an explicit user override still wins.
-        process.env("MCP_TOOL_TIMEOUT", "60000");
-        process.env("NO_COLOR", "1");
+        // Applied before profile variables so an explicit user override wins.
+        for (key, value) in headless_harness_env() {
+            process.env(key, value);
+        }
         for (key, value) in &env.vars {
             process.env(key, value);
         }
@@ -357,6 +357,28 @@ fn claude_environment() -> impl Iterator<Item = (String, String)> {
     std::env::vars().filter(|(key, _)| key != "CLAUDECODE" && !key.starts_with("CLAUDE_CODE_"))
 }
 
+/// Fixed environment for headless (`--print`) execution, applied on every
+/// spawn after the inherited environment and before profile overrides.
+///
+/// - `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`: under `--print` there is no
+///   "re-invoke the agent when a background task finishes" — the process ends
+///   with the turn, and the CLI kills its background tasks on exit. An agent
+///   that backgrounds a long job and yields to await it therefore ends the run
+///   as a success mid-work, with the awaited job dead. Disabling the
+///   capability (which also covers the CLI auto-backgrounding long foreground
+///   commands) forces long jobs to run in the foreground, where the CLI keeps
+///   the turn open and emits `tool_progress` heartbeats.
+/// - `MCP_TOOL_TIMEOUT`: an unset timeout is infinite, so bound hanging MCP
+///   tool calls.
+/// - `NO_COLOR`: keep stream output free of ANSI noise.
+fn headless_harness_env() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
+        ("MCP_TOOL_TIMEOUT", "60000"),
+        ("NO_COLOR", "1"),
+    ]
+}
+
 /// Run `claude auth status` with a timeout and return the `loggedIn` value.
 ///
 /// Resolves the binary through the shared layered resolver (the same path the
@@ -440,6 +462,18 @@ mod tests {
         unsafe {
             std::env::remove_var("CHRO_CLAUDE_ENV_PROBE");
         }
+    }
+
+    #[test]
+    fn headless_env_disables_background_tasks() {
+        let env: std::collections::HashMap<&str, &str> =
+            headless_harness_env().iter().copied().collect();
+        // Yielding a turn while a background task runs ends the process (and
+        // the CLI kills the task on exit) under `--print`, so the capability
+        // must be off entirely; see the fn doc for the failure it prevents.
+        assert_eq!(env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), Some(&"1"));
+        assert_eq!(env.get("MCP_TOOL_TIMEOUT"), Some(&"60000"));
+        assert_eq!(env.get("NO_COLOR"), Some(&"1"));
     }
 
     #[test]

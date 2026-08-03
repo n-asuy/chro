@@ -16,6 +16,31 @@ export type FlattenConversationEntriesOptions = {
   loadingRunIds?: Iterable<string>;
 };
 
+export type ConversationStreamAction =
+  | { type: "start"; runId: string }
+  | { type: "keep" }
+  | { type: "idle" };
+
+/**
+ * Reconcile DB-backed run status with an already-established live log socket.
+ *
+ * Starting a different active run replaces the old socket. A terminal DB patch
+ * alone does not close the current socket: only its protocol-level `finished`
+ * marker (or the socket ending) proves that the child stopped producing logs.
+ */
+export function resolveConversationStreamAction(
+  activeRunId: string | null,
+  currentStreamRunId: string | null,
+): ConversationStreamAction {
+  if (activeRunId && activeRunId !== currentStreamRunId) {
+    return { type: "start", runId: activeRunId };
+  }
+  if (currentStreamRunId) {
+    return { type: "keep" };
+  }
+  return { type: "idle" };
+}
+
 const isNormalizedUserMessage = (entry: DisplayEntry): boolean =>
   entry.type === "NORMALIZED_ENTRY" &&
   entry.content.entry_type.type === "user_message";

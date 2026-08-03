@@ -1,5 +1,6 @@
 import { cn } from "@chro/ui/utils";
 import { useCallback } from "react";
+import { shouldSubmitPrompt } from "../../lib/prompt-submit-policy";
 import type { PromptEditorHandle } from "../../state/prompt-editor-store";
 import {
   getPromptEditorScopeState,
@@ -19,17 +20,6 @@ interface PromptEditorProps {
   onDrop?: (e: React.DragEvent<HTMLDivElement>) => void;
   onPaste?: (e: React.ClipboardEvent<HTMLDivElement>) => void;
 }
-
-const isMacLikePlatform = () => {
-  if (typeof window === "undefined") return false;
-  if ("userAgentData" in navigator) {
-    const uad = navigator.userAgentData as { platform?: string } | undefined;
-    if (uad?.platform) {
-      return /mac/i.test(uad.platform);
-    }
-  }
-  return /mac|ipod|iphone|ipad/i.test(navigator.userAgent);
-};
 
 export function PromptEditor({
   handle,
@@ -79,16 +69,22 @@ export function PromptEditor({
         }
       }
 
-      // 3. Cmd/Ctrl+Enter: submit
-      if (e.key === "Enter") {
-        const onMac = isMacLikePlatform();
-        const hasModifier = onMac ? e.metaKey : e.ctrlKey;
-        if (hasModifier && !e.shiftKey && !e.altKey) {
-          e.preventDefault();
-          onSubmit();
-          return;
-        }
-        // Shift+Enter or bare Enter: allow default (newline)
+      // 3. Return: submit. Shift/Alt+Return falls through to the default
+      //    newline, as does the Return that confirms an IME conversion.
+      if (
+        shouldSubmitPrompt({
+          key: e.key,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+          ctrlKey: e.ctrlKey,
+          isComposing: e.nativeEvent.isComposing,
+          keyCode: e.nativeEvent.keyCode,
+        })
+      ) {
+        e.preventDefault();
+        onSubmit();
+        return;
       }
 
       // Backspace, other keys: default behavior

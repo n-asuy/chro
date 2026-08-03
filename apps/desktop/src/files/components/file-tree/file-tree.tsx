@@ -1,9 +1,9 @@
 import { FolderPickerDialog } from "@/components/dialogs/folder-picker-dialog";
-import { GalleryPanel } from "@/gallery/gallery-panel";
 import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { revealInFinder } from "@/lib/project-client";
 import { usePromptEditorHandle } from "@/session/hooks/use-prompt-editor";
+import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -107,19 +107,16 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     removeRoot,
     worktreeScopeView,
     setWorktreeScopeView,
-    worktreePresentation,
-    setWorktreePresentation,
   } = useFilesStore();
+  const openTab = useLayoutStore((s) => s.openTab);
 
   // A session sandbox (task-run worktree) is read-only here: it lists and
   // opens files, but project-scoped mutations are hidden/disabled.
   const isWorktreeScope = scopeTaskRunId != null;
-  const isGallery = worktreePresentation === "gallery";
 
   // Worktree-only range switch: how much of the tree to list. The data swap
   // lives in the dock panel, which reacts to `worktreeScopeView`; this just sets
-  // the mode. The tree/gallery choice is a separate control (see below) because
-  // it is a different axis — text peers here, an icon toggle there.
+  // the mode.
   const worktreeScopeOptions: { value: WorktreeScopeView; label: string }[] = [
     { value: "changed", label: t("worktreeChangedFiles") },
     { value: "all", label: t("worktreeAllFiles") },
@@ -763,56 +760,53 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           </TooltipProvider>
           {isWorktreeScope && (
             <div className="flex items-center gap-1.5">
-              {/* Range axis. Hidden in gallery mode, where "how much of the
-                  tree" has no meaning. */}
-              {!isGallery && (
-                <div
-                  role="group"
-                  aria-label={t("worktreeFileViewLabel")}
-                  className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs"
-                >
-                  {worktreeScopeOptions.map(({ value, label }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      aria-pressed={worktreeScopeView === value}
-                      onClick={() => setWorktreeScopeView(value)}
-                      className={cn(
-                        "rounded-[4px] px-2 py-0.5 transition",
-                        worktreeScopeView === value
-                          ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
-                          : "text-custom-text-300 hover:text-custom-text-100",
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {/* Form axis. An icon toggle rather than a text peer so the
-                  control itself signals it belongs to a different axis. */}
+              <div
+                role="group"
+                aria-label={t("worktreeFileViewLabel")}
+                className="flex rounded-[5px] bg-custom-background-80 p-0.5 text-xs"
+              >
+                {worktreeScopeOptions.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={worktreeScopeView === value}
+                    onClick={() => setWorktreeScopeView(value)}
+                    className={cn(
+                      "rounded-[4px] px-2 py-0.5 transition",
+                      worktreeScopeView === value
+                        ? "bg-custom-background-100 text-custom-text-100 shadow-sm"
+                        : "text-custom-text-300 hover:text-custom-text-100",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {/* The dock stays an index: this opens the run-scoped gallery as
+                  a center tab (same tab kind as the project-level Gallery)
+                  instead of swapping the panel into a grid. */}
               <TooltipProvider delayDuration={150}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
                       type="button"
-                      aria-pressed={isGallery}
-                      aria-label={t("worktreeGalleryToggle")}
+                      aria-label={t("worktreeGalleryOpen")}
                       onClick={() =>
-                        setWorktreePresentation(isGallery ? "files" : "gallery")
+                        openTab(
+                          {
+                            type: "gallery",
+                            taskRunId: scopeTaskRunId ?? undefined,
+                          },
+                          { activate: true },
+                        )
                       }
-                      className={cn(
-                        "inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 transition",
-                        isGallery
-                          ? "bg-custom-background-80 text-custom-text-100"
-                          : "text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
-                      )}
+                      className="inline-flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 text-custom-sidebar-text-300 transition hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100"
                     >
                       <Images className="size-4" />
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" align="center">
-                    {t("worktreeGalleryToggle")}
+                    {t("worktreeGalleryOpen")}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -840,217 +834,207 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         )}
       </div>
 
-      {isWorktreeScope && isGallery ? (
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <GalleryPanel taskRunId={scopeTaskRunId ?? undefined} />
-        </div>
-      ) : (
-        <ContextMenu>
-          <ContextMenuTrigger asChild>
-            <div
-              ref={containerRef}
-              className={`flex-1 overflow-y-auto outline-none transition-colors duration-150 ${
-                externalDropState.isDraggingOver
-                  ? "bg-custom-primary-100/5 ring-2 ring-inset ring-custom-primary-100/50"
-                  : ""
-              } ${showScrollBar ? "show-scrollbar" : ""}`}
-              style={{
-                contain: "strict",
-                scrollBehavior: "auto",
-                overscrollBehavior: "contain",
-              }}
-              data-file-tree-root="true"
-              // biome-ignore lint/a11y/noNoninteractiveTabindex: role="tree" requires keyboard focus for arrow key navigation
-              tabIndex={0}
-              onKeyDown={handleKeyDown}
-              onMouseDownCapture={handleMouseDownCapture}
-              onClick={handleTreeClick}
-              onScroll={handleTreeScroll}
-              role="tree"
-            >
-              {isWorktreeScope &&
-              worktreeScopeView === "changed" &&
-              fileTree.length === 0 ? (
-                <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-custom-sidebar-text-400">
-                  {t("sessionNoChanges")}
-                </div>
-              ) : visibleRows.length > 0 ? (
-                <div
-                  className="relative w-full py-2"
-                  style={{ height: rowVirtualizer.getTotalSize() }}
-                >
-                  {rowVirtualizer.getVirtualItems().map((virtualItem) => {
-                    const row = visibleRows[virtualItem.index];
-                    if (!row) return null;
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={containerRef}
+            className={`flex-1 overflow-y-auto outline-none transition-colors duration-150 ${
+              externalDropState.isDraggingOver
+                ? "bg-custom-primary-100/5 ring-2 ring-inset ring-custom-primary-100/50"
+                : ""
+            } ${showScrollBar ? "show-scrollbar" : ""}`}
+            style={{
+              contain: "strict",
+              scrollBehavior: "auto",
+              overscrollBehavior: "contain",
+            }}
+            data-file-tree-root="true"
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: role="tree" requires keyboard focus for arrow key navigation
+            tabIndex={0}
+            onKeyDown={handleKeyDown}
+            onMouseDownCapture={handleMouseDownCapture}
+            onClick={handleTreeClick}
+            onScroll={handleTreeScroll}
+            role="tree"
+          >
+            {isWorktreeScope &&
+            worktreeScopeView === "changed" &&
+            fileTree.length === 0 ? (
+              <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-custom-sidebar-text-400">
+                {t("sessionNoChanges")}
+              </div>
+            ) : visibleRows.length > 0 ? (
+              <div
+                className="relative w-full py-2"
+                style={{ height: rowVirtualizer.getTotalSize() }}
+              >
+                {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const row = visibleRows[virtualItem.index];
+                  if (!row) return null;
 
-                    const { node, isExpanded, indentPx, isWorkspaceRoot } = row;
-                    const isSelected = selectedSet.has(node.path);
-                    const isNewlyRevealed =
-                      justExpanded != null &&
-                      node.path !== justExpanded.path &&
-                      node.path.startsWith(`${justExpanded.path}/`);
-                    const isDirectory = node.type === FileNodeType.Directory;
-                    const isDragOver =
-                      dragState.dropTargetPath === node.path ||
-                      externalDropState.dropTarget?.path === node.path;
-                    const isDragging =
-                      dragState.isDragging &&
-                      dragState.draggedNode?.path === node.path;
-                    const matchedRoot = isWorkspaceRoot
-                      ? roots.find((r) => r.path === node.path)
+                  const { node, isExpanded, indentPx, isWorkspaceRoot } = row;
+                  const isSelected = selectedSet.has(node.path);
+                  const isNewlyRevealed =
+                    justExpanded != null &&
+                    node.path !== justExpanded.path &&
+                    node.path.startsWith(`${justExpanded.path}/`);
+                  const isDirectory = node.type === FileNodeType.Directory;
+                  const isDragOver =
+                    dragState.dropTargetPath === node.path ||
+                    externalDropState.dropTarget?.path === node.path;
+                  const isDragging =
+                    dragState.isDragging &&
+                    dragState.draggedNode?.path === node.path;
+                  const matchedRoot = isWorkspaceRoot
+                    ? roots.find((r) => r.path === node.path)
+                    : null;
+                  // Decorate only primary-root nodes — their vault path is
+                  // exactly `/${relativePath}`, so a match excludes ad-hoc roots
+                  // whose git status we don't track.
+                  const relativePath = node.relativePath;
+                  const nodeGitStatus =
+                    relativePath && node.path === `/${relativePath}`
+                      ? (isDirectory
+                          ? decorations.folders.get(relativePath)
+                          : decorations.files.get(relativePath)) ?? null
                       : null;
-                    // Decorate only primary-root nodes — their vault path is
-                    // exactly `/${relativePath}`, so a match excludes ad-hoc roots
-                    // whose git status we don't track.
-                    const relativePath = node.relativePath;
-                    const nodeGitStatus =
-                      relativePath && node.path === `/${relativePath}`
-                        ? (isDirectory
-                            ? decorations.folders.get(relativePath)
-                            : decorations.files.get(relativePath)) ?? null
-                        : null;
 
-                    return (
+                  return (
+                    <div
+                      key={node.path}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        height: virtualItem.size,
+                        transform: `translateY(${virtualItem.start}px)`,
+                      }}
+                    >
                       <div
-                        key={node.path}
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "100%",
-                          height: virtualItem.size,
-                          transform: `translateY(${virtualItem.start}px)`,
-                        }}
+                        className={
+                          isNewlyRevealed ? "tree-row-reveal" : undefined
+                        }
                       >
-                        <div
-                          className={
-                            isNewlyRevealed ? "tree-row-reveal" : undefined
+                        <TreeContextMenu
+                          node={node}
+                          workspacePath={workspacePath}
+                          readOnly={isWorktreeScope}
+                          scopeTaskRunId={scopeTaskRunId}
+                          onDelete={handleDelete}
+                          onRename={handleRename}
+                          onDuplicate={handleDuplicate}
+                          onCreateFile={(parentPath, kind) =>
+                            quickCreate(FileNodeType.File, parentPath, kind)
+                          }
+                          onCreateFolder={(parentPath) =>
+                            quickCreate(FileNodeType.Directory, parentPath)
+                          }
+                          isWorkspaceRoot={isWorkspaceRoot}
+                          isPrimaryRoot={matchedRoot?.isPrimary ?? false}
+                          onAddFolderToProject={handleAddFolderToProject}
+                          onRemoveFolderFromProject={
+                            handleRemoveFolderFromProject
                           }
                         >
-                          <TreeContextMenu
+                          <TreeNode
                             node={node}
-                            workspacePath={workspacePath}
-                            readOnly={isWorktreeScope}
-                            scopeTaskRunId={scopeTaskRunId}
-                            onDelete={handleDelete}
-                            onRename={handleRename}
-                            onDuplicate={handleDuplicate}
-                            onCreateFile={(parentPath, kind) =>
-                              quickCreate(FileNodeType.File, parentPath, kind)
-                            }
-                            onCreateFolder={(parentPath) =>
-                              quickCreate(FileNodeType.Directory, parentPath)
-                            }
-                            isWorkspaceRoot={isWorkspaceRoot}
-                            isPrimaryRoot={matchedRoot?.isPrimary ?? false}
-                            onAddFolderToProject={handleAddFolderToProject}
-                            onRemoveFolderFromProject={
-                              handleRemoveFolderFromProject
-                            }
-                          >
-                            <TreeNode
-                              node={node}
-                              isExpanded={isExpanded}
-                              isSelected={isSelected}
-                              indentPx={indentPx}
-                              isDragOver={isDragOver}
-                              isDragging={isDragging}
-                              gitStatus={nodeGitStatus}
-                              onToggle={() => {
-                                if (isDirectory) {
-                                  void toggleFolderWithHydration(node.path);
-                                }
-                              }}
-                              onSelect={() => selectNode(node.path)}
-                              onOpen={() =>
-                                openFile(node.path, scopeTaskRunId ?? undefined)
+                            isExpanded={isExpanded}
+                            isSelected={isSelected}
+                            indentPx={indentPx}
+                            isDragOver={isDragOver}
+                            isDragging={isDragging}
+                            gitStatus={nodeGitStatus}
+                            onToggle={() => {
+                              if (isDirectory) {
+                                void toggleFolderWithHydration(node.path);
                               }
-                              onMouseDown={(e) =>
-                                dndHandlers.onMouseDown(e, node)
-                              }
-                            />
-                          </TreeContextMenu>
-                        </div>
+                            }}
+                            onSelect={() => selectNode(node.path)}
+                            onOpen={() =>
+                              openFile(node.path, scopeTaskRunId ?? undefined)
+                            }
+                            onMouseDown={(e) =>
+                              dndHandlers.onMouseDown(e, node)
+                            }
+                          />
+                        </TreeContextMenu>
                       </div>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-          </ContextMenuTrigger>
-          {!isWorktreeScope && (
-            <ContextMenuContent className="z-20 w-48 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
-              <ContextMenuSub>
-                <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
-                  <FilePlus className="h-3.5 w-3.5 shrink-0" />
-                  <span>{t("newFile")}</span>
-                </ContextMenuSubTrigger>
-                <ContextMenuSubContent className="z-20 min-w-[140px] rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
-                  <ContextMenuItem
-                    onSelect={() =>
-                      void quickCreate(FileNodeType.File, rootTargetPath, "md")
-                    }
-                    className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                  >
-                    <FileText className="h-3.5 w-3.5 shrink-0" />
-                    <span>{t("newFileMarkdown")}</span>
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    onSelect={() =>
-                      void quickCreate(
-                        FileNodeType.File,
-                        rootTargetPath,
-                        "excalidraw",
-                      )
-                    }
-                    className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                  >
-                    <PenLine className="h-3.5 w-3.5 shrink-0" />
-                    <span>{t("newFileExcalidraw")}</span>
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    onSelect={() =>
-                      void quickCreate(
-                        FileNodeType.File,
-                        rootTargetPath,
-                        "cbase",
-                      )
-                    }
-                    className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-                  >
-                    <Database className="h-3.5 w-3.5 shrink-0" />
-                    <span>{t("newFileBase")}</span>
-                  </ContextMenuItem>
-                </ContextMenuSubContent>
-              </ContextMenuSub>
-              <ContextMenuItem
-                onSelect={() =>
-                  void quickCreate(FileNodeType.Directory, rootTargetPath)
-                }
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-              >
-                <FolderPlus className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("newFolder")}</span>
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={handleAddFolderToProject}
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-              >
-                <FolderInput className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("addFolderToProject")}</span>
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={handleRevealRootInFinder}
-                disabled={!projectId}
-                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
-              >
-                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                <span>{t("revealInFinder")}</span>
-              </ContextMenuItem>
-            </ContextMenuContent>
-          )}
-        </ContextMenu>
-      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        </ContextMenuTrigger>
+        {!isWorktreeScope && (
+          <ContextMenuContent className="z-20 w-48 rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
+            <ContextMenuSub>
+              <ContextMenuSubTrigger className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100">
+                <FilePlus className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("newFile")}</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent className="z-20 min-w-[140px] rounded-xl border border-custom-border-200 bg-custom-background-100 p-1 shadow-sm">
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(FileNodeType.File, rootTargetPath, "md")
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileMarkdown")}</span>
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(
+                      FileNodeType.File,
+                      rootTargetPath,
+                      "excalidraw",
+                    )
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <PenLine className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileExcalidraw")}</span>
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() =>
+                    void quickCreate(FileNodeType.File, rootTargetPath, "cbase")
+                  }
+                  className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+                >
+                  <Database className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t("newFileBase")}</span>
+                </ContextMenuItem>
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuItem
+              onSelect={() =>
+                void quickCreate(FileNodeType.Directory, rootTargetPath)
+              }
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+            >
+              <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("newFolder")}</span>
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={handleAddFolderToProject}
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+            >
+              <FolderInput className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("addFolderToProject")}</span>
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={handleRevealRootInFinder}
+              disabled={!projectId}
+              className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[disabled]:pointer-events-none data-[disabled]:opacity-40"
+            >
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("revealInFinder")}</span>
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
+      </ContextMenu>
       <FolderPickerDialog
         open={folderPickerOpen}
         onOpenChange={setFolderPickerOpen}

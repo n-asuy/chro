@@ -43,6 +43,9 @@ export interface AskUserOption {
   id?: string;
   title: string;
   description?: string;
+  /** "muted" plays an option down and drops its submit arrow — the arrow reads
+   *  as "go", which misleads on a decline. */
+  tone?: "default" | "muted";
 }
 
 export interface AskUserQuestionItem {
@@ -50,6 +53,11 @@ export interface AskUserQuestionItem {
   title: string;
   /** Short context label shown in the card header (e.g. "Auth method"). */
   header?: string;
+  /** Trailing header content, e.g. a badge qualifying the question. */
+  headerAccessory?: ReactNode;
+  /** Context rendered between the title and the options: what the answer is
+   *  actually about, when the title alone cannot carry it. */
+  detail?: ReactNode;
   options: AskUserOption[];
   multiSelect?: boolean;
   allowOther?: boolean;
@@ -583,6 +591,9 @@ export const AskUserQuestions = forwardRef<
             Question {safeIndex + 1} of {total}
           </span>
         )}
+        {question.headerAccessory && (
+          <span className="ml-auto">{question.headerAccessory}</span>
+        )}
       </div>
 
       {/* Morphing Q/A region — its REAL height animates to the measured
@@ -606,6 +617,8 @@ export const AskUserQuestions = forwardRef<
             >
               {question.title}
             </h3>
+
+            {question.detail}
 
             {/* Options + Other (proximity-tracked container) */}
             <div
@@ -739,7 +752,8 @@ export const AskUserQuestions = forwardRef<
                 const oid = optionKey(opt, i);
                 const isSelected = selectedIds.includes(oid);
                 const isHover = activeIndex === i;
-                const showArrow = !isMulti && isHover;
+                const isMutedTone = opt.tone === "muted";
+                const showArrow = !isMulti && isHover && !isMutedTone;
                 return (
                   <Row
                     key={oid}
@@ -791,7 +805,10 @@ export const AskUserQuestions = forwardRef<
                         </span>
                         <span
                           className={cn(
-                            "col-start-1 row-start-1 text-foreground",
+                            "col-start-1 row-start-1",
+                            isMutedTone
+                              ? "text-muted-foreground"
+                              : "text-foreground",
                             isSelected ? "font-semibold" : "font-medium",
                           )}
                         >

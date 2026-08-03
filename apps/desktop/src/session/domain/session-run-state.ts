@@ -25,6 +25,12 @@ export interface SessionRunStateInputs {
    * so the stream stays the single source of truth.
    */
   activeSessionHint: string | null | undefined;
+  /**
+   * Run whose live log socket is still open. The log stream's `finished`
+   * marker is authoritative when a stale task-runs patch reports a live
+   * process as terminal.
+   */
+  streamingRunId?: string | null;
 }
 
 export interface SessionRunState {
@@ -42,18 +48,21 @@ export interface SessionRunState {
 }
 
 /**
- * Single source of truth for session run state. Derives "is a run active" and
- * "which run to cancel" from the task-runs stream, with the optimistic
- * submission only covering the create window before the run reaches the stream.
+ * Derives "is a run active" and "which run to cancel" from the task-runs
+ * stream. The optimistic submission covers the create window, and an already
+ * established log socket covers the opposite race where DB state turns
+ * terminal before the process emits `finished`.
  */
 export function deriveSessionRunState({
   taskRuns,
   isTaskRunsLoading,
   pendingSubmission,
   activeSessionHint,
+  streamingRunId = null,
 }: SessionRunStateInputs): SessionRunState {
   const cancelTargetRunId =
-    taskRuns.find((run) => CANCELABLE_RUN_STATUSES.has(run.status))?.id ?? null;
+    taskRuns.find((run) => CANCELABLE_RUN_STATUSES.has(run.status))?.id ??
+    streamingRunId;
   const streamHasActiveRun = cancelTargetRunId !== null;
 
   const streamShowsPendingRun = pendingSubmission?.runId
@@ -71,7 +80,7 @@ export function deriveSessionRunState({
   const isRunning =
     isTaskRunsLoading && pendingSubmission === null
       ? Boolean(activeSessionHint)
-      : streamHasActiveRun || isInCreateWindow;
+      : streamHasActiveRun || isInCreateWindow || streamingRunId !== null;
 
   return { isRunning, isInCreateWindow, cancelTargetRunId };
 }

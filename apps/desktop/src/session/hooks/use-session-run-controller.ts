@@ -17,6 +17,8 @@ type UseSessionRunControllerArgs = {
   pendingSubmission: PendingSessionSubmission | null;
   /** The task's `active_session_id`, used only as a stream-loading hint. */
   activeSessionHint: string | null | undefined;
+  /** Run whose conversation log stream has not emitted `finished` yet. */
+  streamingRunId?: string | null;
   /**
    * Mark an in-flight create request so the run it produces is cancelled as
    * soon as the create response returns its id. Creation is atomic on the
@@ -38,8 +40,9 @@ export type UseSessionRunControllerResult = SessionRunState & {
 };
 
 /**
- * Owns session run state and cancellation, derived from the task-runs stream as
- * the single source of truth. Replaces the previous imperative
+ * Owns session run state and cancellation, derived from the task-runs stream
+ * plus an established live log socket until its `finished` marker. Replaces
+ * the previous imperative
  * `activeTaskRunIdRef` whose cancel target went stale or null right after a
  * send, so Stop did nothing during the window the user most wanted it.
  */
@@ -48,6 +51,7 @@ export function useSessionRunController({
   isTaskRunsLoading,
   pendingSubmission,
   activeSessionHint,
+  streamingRunId,
   requestCancelSubmission,
   clearPendingSubmission,
 }: UseSessionRunControllerArgs): UseSessionRunControllerResult {
@@ -58,6 +62,7 @@ export function useSessionRunController({
     isTaskRunsLoading,
     pendingSubmission,
     activeSessionHint,
+    streamingRunId,
   });
   const { cancelTargetRunId, isInCreateWindow } = runState;
 

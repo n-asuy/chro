@@ -33,10 +33,6 @@ pub fn spawn_housekeeping_tasks(runtime: LocalRuntime) {
 }
 
 async fn run_cycle(runtime: &LocalRuntime) -> Result<()> {
-    if let Err(err) = runtime.cleanup_orphan_executions().await {
-        warn!(error = %err, "failed to cleanup orphan executions");
-    }
-
     let (runs_marked, tasks_marked) = reconcile_db_flags(runtime.db()).await?;
     if runs_marked > 0 || tasks_marked > 0 {
         info!(runs_marked, tasks_marked, "reconciled worktree metadata");

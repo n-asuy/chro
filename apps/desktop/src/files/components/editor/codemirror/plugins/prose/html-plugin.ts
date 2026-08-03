@@ -1,264 +1,118 @@
 /**
  * HTML rendering plugin for WYSIWYG markdown editor
- * Renders HTML blocks and inline HTML like Obsidian
  *
- * Supports:
+ * Renders raw HTML embedded in markdown, including foreign content:
  * - Block-level HTML: <div>, <details>, <table>, etc.
+ * - Vector graphics: <svg> with its full element/attribute vocabulary
+ * - Formulas: <math> (MathML)
  * - Inline HTML: <span>, <mark>, <sub>, <sup>, etc.
  * - Self-closing tags: <br>, <hr>, <img>, etc.
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { syntaxTree } from "@codemirror/language";
+import {
+  type Range as EditorRange,
+  type EditorState,
+  RangeSet,
+  StateField,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
-  WidgetType,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
-import {
-  StateField,
-  RangeSet,
-  type EditorState,
-  type Range as EditorRange,
-} from "@codemirror/state";
-import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
+import DOMPurify from "dompurify";
 import { cursorInNode } from "../../utility/tools";
+import { memoizeByDoc } from "../decoration-cache";
+import { hasDecorationRefresh } from "../decoration-refresh";
 
 // Store view reference for click handling
 let currentView: EditorView | null = null;
 
 /**
- * Allowed HTML tags for security (similar to Obsidian)
+ * Sanitizer policy.
+ *
+ * The SVG and MathML profiles are what make diagrams work: their element and
+ * attribute vocabularies (<rect>, <path>, `viewBox`, `stroke-width`, ...) have
+ * nothing in common with HTML's, so an HTML-only allowlist silently reduces a
+ * diagram to an empty <svg> box.
+ *
+ * `RETURN_DOM_FRAGMENT` hands back nodes instead of a string. Serializing a
+ * sanitized tree and re-parsing it is the classic mutation-XSS setup, since the
+ * second parse can reinterpret markup the first parse considered inert.
  */
-const ALLOWED_BLOCK_TAGS = new Set([
-  "div",
-  "p",
-  "details",
-  "summary",
-  "section",
+const SANITIZE_CONFIG = {
+  USE_PROFILES: { html: true, svg: true, svgFilters: true, mathMl: true },
+  // Embedded players and outbound links are long-standing note content, and
+  // neither <iframe> nor `target` is in the default profile. Restored by name
+  // so the exception stays visible instead of widening the whole policy.
+  ADD_TAGS: ["iframe"],
+  ADD_ATTR: [
+    "target",
+    "allow",
+    "allowfullscreen",
+    "frameborder",
+    "loading",
+    "referrerpolicy",
+  ],
+  RETURN_DOM_FRAGMENT: true as const,
+};
+
+function sanitizeToFragment(html: string): DocumentFragment {
+  return DOMPurify.sanitize(html, SANITIZE_CONFIG);
+}
+
+/**
+ * Tags that occupy their own block when rendered. Used only to decide between
+ * a block widget and an inline widget; it carries no security meaning.
+ */
+const BLOCK_LEVEL_TAGS = new Set([
+  "address",
   "article",
   "aside",
-  "header",
-  "footer",
-  "nav",
-  "main",
-  "figure",
-  "figcaption",
+  "audio",
   "blockquote",
-  "pre",
-  "address",
+  "canvas",
+  "caption",
+  "center",
+  "col",
+  "colgroup",
+  "dd",
+  "details",
+  "div",
   "dl",
   "dt",
-  "dd",
-  "ol",
-  "ul",
-  "li",
-  "table",
-  "thead",
-  "tbody",
-  "tfoot",
-  "tr",
-  "th",
-  "td",
-  "caption",
-  "colgroup",
-  "col",
-  "form",
   "fieldset",
-  "legend",
-  "label",
-  "input",
-  "button",
-  "select",
-  "option",
-  "optgroup",
-  "textarea",
-  "output",
-  "progress",
-  "meter",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "header",
   "iframe",
-  "video",
-  "audio",
-  "source",
-  "track",
-  "canvas",
-  "svg",
+  "legend",
+  "li",
+  "main",
   "math",
-  "center",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "summary",
+  "svg",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+  "video",
 ]);
-
-const ALLOWED_INLINE_TAGS = new Set([
-  "span",
-  "a",
-  "abbr",
-  "acronym",
-  "b",
-  "bdi",
-  "bdo",
-  "big",
-  "br",
-  "cite",
-  "code",
-  "data",
-  "del",
-  "dfn",
-  "em",
-  "i",
-  "ins",
-  "kbd",
-  "mark",
-  "q",
-  "ruby",
-  "rt",
-  "rp",
-  "s",
-  "samp",
-  "small",
-  "strong",
-  "sub",
-  "sup",
-  "time",
-  "tt",
-  "u",
-  "var",
-  "wbr",
-  "img",
-  "hr",
-]);
-
-/**
- * Dangerous attributes that should be removed
- */
-const DANGEROUS_ATTRS = new Set([
-  "onabort",
-  "onafterprint",
-  "onbeforeprint",
-  "onbeforeunload",
-  "onblur",
-  "oncanplay",
-  "oncanplaythrough",
-  "onchange",
-  "onclick",
-  "oncontextmenu",
-  "oncopy",
-  "oncuechange",
-  "oncut",
-  "ondblclick",
-  "ondrag",
-  "ondragend",
-  "ondragenter",
-  "ondragleave",
-  "ondragover",
-  "ondragstart",
-  "ondrop",
-  "ondurationchange",
-  "onemptied",
-  "onended",
-  "onerror",
-  "onfocus",
-  "onhashchange",
-  "oninput",
-  "oninvalid",
-  "onkeydown",
-  "onkeypress",
-  "onkeyup",
-  "onload",
-  "onloadeddata",
-  "onloadedmetadata",
-  "onloadstart",
-  "onmessage",
-  "onmousedown",
-  "onmousemove",
-  "onmouseout",
-  "onmouseover",
-  "onmouseup",
-  "onmousewheel",
-  "onoffline",
-  "ononline",
-  "onpagehide",
-  "onpageshow",
-  "onpaste",
-  "onpause",
-  "onplay",
-  "onplaying",
-  "onpopstate",
-  "onprogress",
-  "onratechange",
-  "onreset",
-  "onresize",
-  "onscroll",
-  "onseeked",
-  "onseeking",
-  "onselect",
-  "onstalled",
-  "onstorage",
-  "onsubmit",
-  "onsuspend",
-  "ontimeupdate",
-  "onunload",
-  "onvolumechange",
-  "onwaiting",
-  "onwheel",
-]);
-
-/**
- * Sanitize HTML content for safe rendering
- */
-function sanitizeHtml(html: string): string {
-  // Create a temporary container to parse HTML
-  const template = document.createElement("template");
-  template.innerHTML = html;
-
-  const fragment = template.content;
-
-  // Process all elements
-  const processElement = (element: Element): void => {
-    const tagName = element.tagName.toLowerCase();
-
-    // Check if tag is allowed
-    if (!ALLOWED_BLOCK_TAGS.has(tagName) && !ALLOWED_INLINE_TAGS.has(tagName)) {
-      // Replace disallowed element with its text content
-      const text = document.createTextNode(element.textContent || "");
-      element.parentNode?.replaceChild(text, element);
-      return;
-    }
-
-    // Remove dangerous attributes
-    const attrs = Array.from(element.attributes);
-    for (const attr of attrs) {
-      const attrName = attr.name.toLowerCase();
-      if (
-        DANGEROUS_ATTRS.has(attrName) ||
-        attrName.startsWith("on") ||
-        (attrName === "href" &&
-          attr.value.toLowerCase().startsWith("javascript:")) ||
-        (attrName === "src" &&
-          attr.value.toLowerCase().startsWith("javascript:"))
-      ) {
-        element.removeAttribute(attr.name);
-      }
-    }
-
-    // Process children recursively
-    const children = Array.from(element.children);
-    for (const child of children) {
-      processElement(child);
-    }
-  };
-
-  // Process all top-level elements
-  const elements = Array.from(fragment.children);
-  for (const element of elements) {
-    processElement(element);
-  }
-
-  // Serialize back to HTML
-  const serializer = document.createElement("div");
-  serializer.appendChild(fragment.cloneNode(true));
-  return serializer.innerHTML;
-}
 
 /**
  * Widget to display rendered HTML block
@@ -276,9 +130,7 @@ class HtmlBlockWidget extends WidgetType {
     container.className = "cm-html-block-container";
     container.style.cursor = "pointer";
 
-    // Sanitize and render HTML
-    const sanitized = sanitizeHtml(this.html);
-    container.innerHTML = sanitized;
+    container.appendChild(sanitizeToFragment(this.html));
 
     // Add click handler to edit
     const blockFrom = this.blockFrom;
@@ -317,7 +169,7 @@ class HtmlBlockWidget extends WidgetType {
   }
 
   get estimatedHeight(): number {
-    return 50;
+    return estimateBlockHeight(this.html);
   }
 }
 
@@ -336,9 +188,7 @@ class HtmlInlineWidget extends WidgetType {
     const container = document.createElement("span");
     container.className = "cm-html-inline-container";
 
-    // Sanitize and render HTML
-    const sanitized = sanitizeHtml(this.html);
-    container.innerHTML = sanitized;
+    container.appendChild(sanitizeToFragment(this.html));
 
     return container;
   }
@@ -356,15 +206,73 @@ interface HtmlBlockInfo {
 }
 
 /**
- * Check if HTML content is block-level
+ * Check if HTML content is block-level.
+ *
+ * Closing tags count too. A tag pair is skipped or rendered as a unit, and
+ * matching only `<tag>` would leave the orphaned `</tag>` to be replaced by an
+ * empty inline widget, silently hiding it from the source.
  */
 function isBlockLevelHtml(html: string): boolean {
   const trimmed = html.trim();
-  const match = trimmed.match(/^<(\w+)/);
+  const match = trimmed.match(/^<\/?(\w+)/);
   if (!match) return false;
 
   const tagName = match[1].toLowerCase();
-  return ALLOWED_BLOCK_TAGS.has(tagName);
+  return BLOCK_LEVEL_TAGS.has(tagName);
+}
+
+/**
+ * Width the editor's content column is assumed to have while a block is still
+ * unmeasured. Only used to turn an SVG aspect ratio into a pixel estimate.
+ */
+const NOMINAL_CONTENT_WIDTH = 700;
+
+/** Height assumed for HTML with no declared geometry. */
+const DEFAULT_BLOCK_HEIGHT = 50;
+
+function readAttribute(openingTag: string, name: string): string | null {
+  const match = openingTag.match(
+    new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, "i"),
+  );
+  return match ? match[2] ?? match[3] ?? null : null;
+}
+
+/** Parse a length that resolves to pixels; `100%` and friends do not. */
+function parsePixelLength(value: string | null): number | null {
+  if (value === null) return null;
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)(px)?$/i);
+  if (!match) return null;
+  const pixels = Number.parseFloat(match[1]);
+  return pixels > 0 ? pixels : null;
+}
+
+/**
+ * Estimate a block's rendered height before it has been measured.
+ *
+ * CodeMirror sizes the scrollbar and the viewport from this number, so an
+ * estimate far below the real height makes the document shift under the reader
+ * once the block is measured. A diagram declaring `viewBox="0 0 1000 300"` is
+ * several hundred pixels tall, not the 50px an unspecified block gets.
+ */
+function estimateBlockHeight(html: string): number {
+  const openingTag = html.match(/<svg\b[^>]*>/i)?.[0];
+  if (!openingTag) return DEFAULT_BLOCK_HEIGHT;
+
+  const declaredHeight = parsePixelLength(readAttribute(openingTag, "height"));
+  if (declaredHeight !== null) return declaredHeight;
+
+  const viewBox = readAttribute(openingTag, "viewBox")
+    ?.trim()
+    .split(/[\s,]+/);
+  if (viewBox?.length === 4) {
+    const width = Number.parseFloat(viewBox[2]);
+    const height = Number.parseFloat(viewBox[3]);
+    if (width > 0 && height > 0) {
+      return Math.round(NOMINAL_CONTENT_WIDTH * (height / width));
+    }
+  }
+
+  return DEFAULT_BLOCK_HEIGHT;
 }
 
 /**
@@ -406,13 +314,17 @@ function findHtmlContent(state: EditorState): HtmlBlockInfo[] {
   return htmlContent;
 }
 
+// The scan depends only on the document; memoize it so moving the cursor
+// reuses the scan instead of re-walking the syntax tree.
+const findHtmlContentCached = memoizeByDoc(findHtmlContent);
+
 /**
  * Build decorations for HTML content
  */
 function buildHtmlDecorations(state: EditorState): EditorRange<Decoration>[] {
   const decorations: EditorRange<Decoration>[] = [];
   const cursor = state.selection.main;
-  const htmlContent = findHtmlContent(state);
+  const htmlContent = findHtmlContentCached(state);
 
   for (const content of htmlContent) {
     const isEditing = cursorInNode(

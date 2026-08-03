@@ -20,6 +20,7 @@ use std::{
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use super::asset_response::{stream_asset_response, AssetQuery};
 use super::path_resolve::{
     read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
 };
@@ -402,6 +403,7 @@ async fn read_project_file(
 async fn read_project_asset(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
+    Query(asset_query): Query<AssetQuery>,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -412,7 +414,7 @@ async fn read_project_asset(
     let binary_file =
         read_binary_resolving(&service, &relative_path, &[project_root.as_str()]).await?;
 
-    stream_binary_response(binary_file, "no-cache").await
+    stream_asset_response(binary_file, &asset_query).await
 }
 
 async fn read_project_binary_file(

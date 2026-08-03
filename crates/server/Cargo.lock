@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.47"
+version = "0.1.48"
 dependencies = [
  "analytics",
  "anyhow",
@@ -609,6 +609,7 @@ dependencies = [
  "dunce",
  "events",
  "executors",
+ "fd-lock",
  "file-search-cache",
  "filesystem",
  "futures",

@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ConversationFlattenCache,
   createConversationFlattenCache,
+  resolveConversationStreamAction,
   withAuthoritativeRunOrder,
 } from "../domain/conversation-history";
 import {
@@ -39,6 +40,8 @@ export interface UseConversationHistoryResult {
   error: string | null;
   /** ID of the currently running TaskRun (if any) */
   activeRunId: string | null;
+  /** ID whose live log socket is open and has not emitted `finished`. */
+  streamingRunId: string | null;
   /** ID of the most recent TaskRun (running or completed) */
   latestRunId: string | null;
   /** Approval records from the active run's log stream. */
@@ -363,6 +366,7 @@ function streamRunningTaskRunEntries(
   taskRunId: string,
   onPatch: (patch: JsonPatchOperation[]) => void,
   onFinished: () => void,
+  onClosedWithoutFinished: () => void,
 ): { close: () => void } {
   const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
   const endpoint = httpToWs(
@@ -370,6 +374,7 @@ function streamRunningTaskRunEntries(
   );
   const ws = new WebSocket(endpoint);
   let closed = false;
+  let finished = false;
   let connectedAt: number | null = null;
   let firstPatchSeen = false;
   let patchMessages = 0;
@@ -425,6 +430,7 @@ function streamRunningTaskRunEntries(
       }
 
       if (msg.finished) {
+        finished = true;
         if (flushTimerId !== null) {
           window.clearTimeout(flushTimerId);
         }
@@ -459,14 +465,15 @@ function streamRunningTaskRunEntries(
   };
 
   ws.onclose = (evt) => {
-    if (!closed && evt?.code !== 1000) {
-      recordPerfEvent("conv_stream_closed_unexpectedly", {
-        task_run_id: taskRunId,
-        close_code: evt?.code ?? null,
-        was_clean: Boolean(evt?.wasClean),
-        patch_messages: patchMessages,
-      });
-    }
+    if (closed || finished) return;
+
+    recordPerfEvent("conv_stream_closed_unexpectedly", {
+      task_run_id: taskRunId,
+      close_code: evt?.code ?? null,
+      was_clean: Boolean(evt?.wasClean),
+      patch_messages: patchMessages,
+    });
+    onClosedWithoutFinished();
   };
 
   return {
@@ -516,6 +523,7 @@ export function useConversationHistory({
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingRunId, setStreamingRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Approval records extracted from /approvals/* patches in the active stream
@@ -584,6 +592,7 @@ export function useConversationHistory({
     ? null
     : scopedPendingSubmission?.runId;
   const activeRunId = pendingActiveRunId ?? wsActiveRun?.id ?? null;
+  const effectiveLiveRunId = streamingRunId ?? activeRunId;
 
   const latestRunId = useMemo(() => {
     if (runs.length === 0) return null;
@@ -672,6 +681,7 @@ export function useConversationHistory({
     setIsLoading(Boolean(taskId));
     setIsLoadingMoreHistory(false);
     setIsStreaming(false);
+    setStreamingRunId(null);
     setError(null);
     setEntriesVersion(0);
     resetApprovals();
@@ -687,7 +697,7 @@ export function useConversationHistory({
 
       const historicRuns = getUnloadedHistoricRunsNewestFirst(
         runs,
-        activeRunId,
+        effectiveLiveRunId,
         loadedRunIdsRef.current,
       ).slice(0, count);
 
@@ -733,7 +743,14 @@ export function useConversationHistory({
         }
       }
     },
-    [activeRunId, enabled, runs, runsLoading, taskId, updateEntriesVersion],
+    [
+      effectiveLiveRunId,
+      enabled,
+      runs,
+      runsLoading,
+      taskId,
+      updateEntriesVersion,
+    ],
   );
 
   const loadMoreHistory = useCallback(
@@ -788,16 +805,22 @@ export function useConversationHistory({
   useEffect(() => {
     if (!enabled || !taskId) return;
 
-    if (activeRunId && activeStreamRef.current?.runId !== activeRunId) {
+    const streamAction = resolveConversationStreamAction(
+      activeRunId,
+      activeStreamRef.current?.runId ?? null,
+    );
+
+    if (streamAction.type === "start") {
       if (activeStreamRef.current) {
         activeStreamRef.current.close();
       }
 
       const createdAt = activeRunCreatedAt ?? new Date().toISOString();
+      const runId = streamAction.runId;
 
-      if (!taskRunEntriesRef.current.has(activeRunId)) {
-        taskRunEntriesRef.current.set(activeRunId, {
-          taskRunId: activeRunId,
+      if (!taskRunEntriesRef.current.has(runId)) {
+        taskRunEntriesRef.current.set(runId, {
+          taskRunId: runId,
           createdAt: createdAt,
           entries: [],
           finished: false,
@@ -805,9 +828,9 @@ export function useConversationHistory({
       }
 
       setIsStreaming(true);
+      setStreamingRunId(runId);
       resetApprovals();
 
-      const runId = activeRunId;
       const controller = streamRunningTaskRunEntries(
         runId,
         (patchOps) => {
@@ -821,6 +844,7 @@ export function useConversationHistory({
         () => {
           loadedRunIdsRef.current.add(runId);
           setIsStreaming(false);
+          setStreamingRunId(null);
           activeStreamRef.current = null;
 
           void loadHistoricTaskRunEntries(runId, (entries) => {
@@ -845,45 +869,24 @@ export function useConversationHistory({
               updateEntriesVersion();
             });
         },
+        () => {
+          // A socket that ends without the protocol's `finished` marker is not
+          // proof of completion. Stop presenting it as live, but do not run the
+          // finalized-history path or invoke completion callbacks.
+          if (activeStreamRef.current?.runId === runId) {
+            activeStreamRef.current = null;
+            setIsStreaming(false);
+            setStreamingRunId(null);
+          }
+        },
       );
 
       activeStreamRef.current = { runId, close: controller.close };
-    } else if (!activeRunId && activeStreamRef.current) {
-      // activeRunId went null while streaming (e.g. pendingSubmission cleared
-      // before log stream sent 'finished'). Finalize gracefully: close the
-      // stream, mark the run as loaded, and reload finalized entries so we
-      // don't lose the tail.
-      const closingRunId = activeStreamRef.current.runId;
-      const closingCreatedAt =
-        taskRunEntriesRef.current.get(closingRunId)?.createdAt ??
-        new Date().toISOString();
-      activeStreamRef.current.close();
-      activeStreamRef.current = null;
-      setIsStreaming(false);
-      loadedRunIdsRef.current.add(closingRunId);
-
-      void loadHistoricTaskRunEntries(closingRunId, (entries) => {
-        taskRunEntriesRef.current.set(closingRunId, {
-          taskRunId: closingRunId,
-          createdAt: closingCreatedAt,
-          entries,
-          finished: true,
-        });
-        updateEntriesVersion();
-      })
-        .catch((err) => {
-          console.error(
-            `[useConversationHistory] Failed to reload early-closed TaskRun ${closingRunId}:`,
-            err,
-          );
-          const state = taskRunEntriesRef.current.get(closingRunId);
-          if (state) state.finished = true;
-        })
-        .finally(() => {
-          callbacksRef.current?.onFinished?.();
-          updateEntriesVersion();
-        });
     }
+    // Do not close an established stream merely because the DB-backed runs
+    // stream went terminal. A cleanup race can publish `failed` while the child
+    // and its log socket are still alive. The log protocol's `finished` marker
+    // (or the socket actually ending) is the authoritative lifecycle boundary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, taskId, activeRunId, sessionScopeId]);
 
@@ -929,8 +932,8 @@ export function useConversationHistory({
     }
 
     const loadingRunIds = new Set<string>();
-    if (isStreaming && activeRunId) {
-      loadingRunIds.add(activeRunId);
+    if (isStreaming && streamingRunId) {
+      loadingRunIds.add(streamingRunId);
     }
     if (pendingRunId && !scopedPendingSubmission?.finishedAt) {
       loadingRunIds.add(pendingRunId);
@@ -939,7 +942,10 @@ export function useConversationHistory({
     // Order runs by the server's authoritative created_at, not each state's
     // self-assembled client/optimistic time, so a streaming run can never sort
     // above already-completed runs.
-    const orderedStates = withAuthoritativeRunOrder(allStates, runCreatedAtById);
+    const orderedStates = withAuthoritativeRunOrder(
+      allStates,
+      runCreatedAtById,
+    );
 
     return flattenCacheRef.current.flatten(orderedStates, sessions, {
       promptOverridesByRun,
@@ -948,6 +954,7 @@ export function useConversationHistory({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeRunId,
+    streamingRunId,
     entriesVersion,
     isStreaming,
     runCreatedAtById,
@@ -961,11 +968,11 @@ export function useConversationHistory({
     return (
       getUnloadedHistoricRunsNewestFirst(
         runs,
-        activeRunId,
+        effectiveLiveRunId,
         loadedRunIdsRef.current,
       ).length > 0
     );
-  }, [activeRunId, enabled, entriesVersion, runs, runsLoading, taskId]);
+  }, [effectiveLiveRunId, enabled, entriesVersion, runs, runsLoading, taskId]);
 
   return {
     entries,
@@ -975,6 +982,7 @@ export function useConversationHistory({
     isStreaming,
     error: error || runsError || sessionsError,
     activeRunId,
+    streamingRunId,
     latestRunId,
     approvals,
     resetApprovals,

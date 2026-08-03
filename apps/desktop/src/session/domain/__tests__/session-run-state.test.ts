@@ -146,6 +146,24 @@ describe("deriveSessionRunState", () => {
     expect(state.isRunning).toBe(false);
   });
 
+  it("keeps the session live until the log stream emits finished", () => {
+    // Regression: orphan cleanup temporarily marked a still-running process as
+    // failed. The task-runs stream became terminal, but its already-open log
+    // stream continued to receive output. The composer and thinking shimmer
+    // must follow that stronger liveness signal instead of freezing.
+    const state = deriveSessionRunState({
+      taskRuns: [makeRun({ id: "run-live", status: "failed" })],
+      isTaskRunsLoading: false,
+      pendingSubmission: null,
+      activeSessionHint: null,
+      streamingRunId: "run-live",
+    });
+
+    expect(state.isRunning).toBe(true);
+    expect(state.isInCreateWindow).toBe(false);
+    expect(state.cancelTargetRunId).toBe("run-live");
+  });
+
   it("hands the create window off to the stream once the run appears", () => {
     const state = deriveSessionRunState({
       taskRuns: [makeRun({ id: "run-1", status: "running" })],

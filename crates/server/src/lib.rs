@@ -1,6 +1,9 @@
-use anyhow::Context;
+use std::fs::OpenOptions;
+
+use anyhow::{anyhow, Context};
 use axum::{middleware, Router};
 use db::DBService;
+use fd_lock::RwLock as FileRwLock;
 use local_runtime::LocalRuntime;
 use runtime::{Runtime, RuntimeOptions};
 use tower_http::trace::TraceLayer;
@@ -139,6 +142,34 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     let log_db_path = args.db_path.clone().unwrap_or_else(DBService::default_path);
     info!(path = %log_db_path.display(), "using sqlite");
 
+    // Claim the network address and the database before bootstrapping the
+    // runtime. Startup cleanup changes stale Running rows to Failed, so a
+    // second server must not reach it and corrupt work owned by the first one.
+    // Desktop sidecars may deliberately choose another free port, hence the
+    // per-database advisory lock in addition to binding first.
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
+    let actual_port = listener.local_addr()?.port();
+
+    if let Some(parent) = log_db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create database directory {}", parent.display()))?;
+    }
+    let lock_path = log_db_path.with_extension("sqlite.chro-server.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open database lock {}", lock_path.display()))?;
+    let mut database_lock = FileRwLock::new(lock_file);
+    let _database_guard = database_lock.try_write().map_err(|error| {
+        anyhow!(
+            "database {} is already owned by another chro-server: {error}",
+            log_db_path.display()
+        )
+    })?;
+
     let runtime = LocalRuntime::bootstrap(RuntimeOptions {
         user_id: "desktop".to_string(),
         db_path: args.db_path.clone(),
@@ -151,8 +182,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .context("failed to cleanup executions")?;
     let state = AppState::new(runtime.clone());
     let state_browser_handle = state.browser().clone();
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
-    let actual_port = listener.local_addr()?.port();
 
     let allowed_origins = cors::AllowedOrigins::load(actual_port)?;
     info!(origins = ?allowed_origins.values(), "configured CORS allowlist");

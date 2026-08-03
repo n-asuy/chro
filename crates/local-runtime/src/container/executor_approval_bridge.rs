@@ -155,12 +155,15 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
         if let Some(answers) = resolved.answers {
             return Ok(QuestionStatus::Answered { answers });
         }
-        match resolved.status {
-            approvals::ApprovalStatus::TimedOut => Ok(QuestionStatus::TimedOut),
-            _ => Err(ExecutorApprovalError::request_failed(
-                "unexpected non-question approval response",
-            )),
-        }
+        Ok(match resolved.status {
+            approvals::ApprovalStatus::TimedOut => QuestionStatus::TimedOut,
+            approvals::ApprovalStatus::Approved => QuestionStatus::Resolved { approved: true },
+            // A pending status cannot reach here: the waiter only fires on a
+            // resolution. Treating it as a denial keeps the fallback safe.
+            approvals::ApprovalStatus::Denied { .. } | approvals::ApprovalStatus::Pending => {
+                QuestionStatus::Resolved { approved: false }
+            }
+        })
     }
 }
 

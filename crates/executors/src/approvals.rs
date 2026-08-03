@@ -98,5 +98,10 @@ pub enum QuestionStatus {
     Answered {
         answers: std::collections::HashMap<String, String>,
     },
+    /// Resolved without answers. The UI always sends them, but the CLI can
+    /// approve or deny a request outright, and that is still an answer.
+    Resolved {
+        approved: bool,
+    },
     TimedOut,
 }

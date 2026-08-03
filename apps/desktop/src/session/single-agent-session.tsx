@@ -103,6 +103,7 @@ import { RunStatusPill } from "./components/run-status-pill";
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
 import { ImageUploadPreviewList } from "./components/image-upload-preview-list";
+import { McpToolApproval } from "./components/mcp-tool-approval";
 import type { AtPopoverHandle } from "./components/prompt-editor/at-popover";
 import { SessionHeader } from "./components/session-header";
 import {
@@ -154,6 +155,11 @@ import {
   formatSkillContextForPrompt,
 } from "./types/context";
 import { AbortControllerRegistry } from "./utils/abort-controller-registry";
+import {
+  type McpApprovalDecision,
+  findPendingMcpApproval,
+  mcpApprovalResponseBody,
+} from "./utils/mcp-approval-mapping";
 import {
   SESSION_DRAG_DATA_TYPE,
   parseSessionDragPayload,
@@ -578,14 +584,54 @@ export function SingleAgentSessionView({
     : null;
   useDocumentTitle(activeTask?.title ?? null);
 
+  // The log protocol's `finished` marker is the authoritative end of a turn.
+  // Keep this hook ahead of the composer run controller so an established live
+  // socket can hold Stop/thinking UI active even if a stale DB patch briefly
+  // reports the run as terminal.
+  const handleStreamFinished = useCallback(() => {
+    if (pendingSubmission?.requestId) {
+      finishPendingSubmission(
+        pendingSubmission.requestId,
+        new Date().toISOString(),
+      );
+    }
+  }, [finishPendingSubmission, pendingSubmission?.requestId]);
+
+  const {
+    entries,
+    isLoading: isConversationLoading,
+    isLoadingMoreHistory,
+    hasMoreHistory,
+    isStreaming: isConversationStreaming,
+    streamingRunId,
+    error: conversationError,
+    approvals,
+    loadMoreHistory,
+  } = useConversationHistory({
+    sessionScopeId: promptScopeId,
+    taskId: activeStreamTaskId,
+    enabled: Boolean(activeTaskId || pendingSubmission),
+    runs: taskRuns,
+    runsLoading: isTaskRunsLoading,
+    runsError: taskRunsError,
+    sessions: taskSessions,
+    sessionsLoading: isTaskSessionsLoading,
+    sessionsError: taskSessionsError,
+    pendingSubmission,
+    callbacks: {
+      onFinished: handleStreamFinished,
+    },
+  });
+
   // Run state and cancellation derive from the task-runs stream as the single
-  // source of truth (see useSessionRunController). The optimistic submission
-  // only covers the create window before the run reaches the stream.
+  // source of truth, with the live log socket as the stronger transient
+  // liveness signal until it emits `finished`.
   const { isSending, isStopping, handleCancel } = useSessionRunController({
     taskRuns,
     isTaskRunsLoading,
     pendingSubmission,
     activeSessionHint: activeTask?.active_session_id ?? null,
+    streamingRunId,
     requestCancelSubmission,
     clearPendingSubmission,
   });
@@ -1298,41 +1344,6 @@ export function SingleAgentSessionView({
     }
   }, [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions]);
 
-  // Stream finished handler - called when task run completes
-  const handleStreamFinished = useCallback(() => {
-    if (pendingSubmission?.requestId) {
-      finishPendingSubmission(
-        pendingSubmission.requestId,
-        new Date().toISOString(),
-      );
-    }
-  }, [finishPendingSubmission, pendingSubmission?.requestId]);
-
-  const {
-    entries,
-    isLoading: isConversationLoading,
-    isLoadingMoreHistory,
-    hasMoreHistory,
-    isStreaming: isConversationStreaming,
-    error: conversationError,
-    approvals,
-    loadMoreHistory,
-  } = useConversationHistory({
-    sessionScopeId: promptScopeId,
-    taskId: activeStreamTaskId,
-    enabled: Boolean(activeTaskId || pendingSubmission),
-    runs: taskRuns,
-    runsLoading: isTaskRunsLoading,
-    runsError: taskRunsError,
-    sessions: taskSessions,
-    sessionsLoading: isTaskSessionsLoading,
-    sessionsError: taskSessionsError,
-    pendingSubmission,
-    callbacks: {
-      onFinished: handleStreamFinished,
-    },
-  });
-
   // Surface pending AskUserQuestion approvals from the active stream as the
   // interactive question panel, and drop the panel once the approval resolves
   // (answered, denied, or timed out).
@@ -1370,6 +1381,36 @@ export function SingleAgentSessionView({
       store.clearPendingQuestions(taskRunId);
     }
   }, [approvals, taskRunId]);
+
+  // MCP tool approvals need no store: the approval record in the active stream
+  // is already the source of truth, and it clears itself once resolved.
+  const pendingMcpApproval = useMemo(
+    () => findPendingMcpApproval(approvals, taskRunId ?? null),
+    [approvals, taskRunId],
+  );
+
+  const handleMcpApprovalDecision = useCallback(
+    async (decision: McpApprovalDecision) => {
+      if (!pendingMcpApproval) return;
+      const { approvalId } = pendingMcpApproval;
+      try {
+        await desktopFetch(
+          `/rpc/approvals/${encodeURIComponent(approvalId)}/respond`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(mcpApprovalResponseBody(decision)),
+          },
+        );
+      } catch (error) {
+        console.error(
+          "[handleMcpApprovalDecision] Failed to submit decision",
+          error,
+        );
+      }
+    },
+    [pendingMcpApproval],
+  );
 
   // Find-in-conversation (Cmd/Ctrl+F), mirroring the file editor's find UX.
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
@@ -2120,6 +2161,13 @@ export function SingleAgentSessionView({
             pendingQuestions={pendingQuestions}
             onAnswer={handleQuestionAnswer}
             onSkip={handleQuestionSkip}
+          />
+        )}
+        {pendingMcpApproval && (
+          <McpToolApproval
+            approvalId={pendingMcpApproval.approvalId}
+            prompt={pendingMcpApproval.prompt}
+            onDecide={handleMcpApprovalDecision}
           />
         )}
       </div>

@@ -14,6 +14,7 @@
 //! - `merges`: Merge record management (merged from api.rs)
 
 mod approvals;
+mod asset_response;
 mod cbase;
 pub(crate) mod cli_status;
 mod config;

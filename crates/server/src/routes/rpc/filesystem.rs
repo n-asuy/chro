@@ -15,6 +15,7 @@ use runtime::ProjectFileService;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::asset_response::{stream_asset_response, AssetQuery};
 use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
 use crate::{format_system_time, ApiError, AppState};
 
@@ -240,6 +241,7 @@ async fn read_workspace_binary_file(
 async fn read_workspace_asset(
     State(state): State<AppState>,
     Path((encoded_root, relative_path)): Path<(String, String)>,
+    Query(asset_query): Query<AssetQuery>,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -254,7 +256,7 @@ async fn read_workspace_asset(
     let service = ProjectFileService::new(state.runtime(), abs_path);
     let binary_file = read_binary_resolving(&service, &relative_path, &[root_str.as_str()]).await?;
 
-    stream_binary_response(binary_file, "no-cache").await
+    stream_asset_response(binary_file, &asset_query).await
 }
 
 pub(super) fn router() -> Router<AppState> {

@@ -296,6 +296,17 @@ impl GitService {
         Ok(None)
     }
 
+    /// A branch that is ahead in commits but identical in content has nothing
+    /// left to land: its work already reached the base by another route.
+    fn nothing_to_merge_by_content(
+        task_branch_name: &str,
+        base_branch_name: &str,
+    ) -> GitServiceError {
+        GitServiceError::NothingToMerge(format!(
+            "Cannot merge: task branch '{task_branch_name}' has no changes left to apply to base branch '{base_branch_name}'. Its commits are already contained in the base.",
+        ))
+    }
+
     /// Merge changes from a task branch into the base branch.
     pub fn merge_changes(
         &self,
@@ -346,8 +357,13 @@ impl GitService {
                         task_branch_name,
                         commit_message,
                     )
-                    .map_err(|e| {
-                        GitServiceError::InvalidRepository(format!("CLI merge failed: {e}"))
+                    .map_err(|e| match e {
+                        GitCliError::NothingToCommit => {
+                            Self::nothing_to_merge_by_content(task_branch_name, base_branch_name)
+                        }
+                        other => {
+                            GitServiceError::InvalidRepository(format!("CLI merge failed: {other}"))
+                        }
                     })?;
 
                 let task_refname = format!("refs/heads/{task_branch_name}");
@@ -365,14 +381,18 @@ impl GitService {
                 let base_commit = base_branch.get().peel_to_commit()?;
                 let task_commit = task_branch.get().peel_to_commit()?;
                 let signature = self.signature_with_fallback(&task_repo)?;
-                let squash_commit_id = self.perform_squash_merge(
-                    &task_repo,
-                    &base_commit,
-                    &task_commit,
-                    &signature,
-                    commit_message,
-                    base_branch_name,
-                )?;
+                let squash_commit_id = self
+                    .perform_squash_merge(
+                        &task_repo,
+                        &base_commit,
+                        &task_commit,
+                        &signature,
+                        commit_message,
+                        base_branch_name,
+                    )?
+                    .ok_or_else(|| {
+                        Self::nothing_to_merge_by_content(task_branch_name, base_branch_name)
+                    })?;
 
                 let task_refname = format!("refs/heads/{task_branch_name}");
                 base_repo.reference(
@@ -694,7 +714,7 @@ impl GitService {
         signature: &git2::Signature,
         commit_message: &str,
         base_branch_name: &str,
-    ) -> Result<git2::Oid, GitServiceError> {
+    ) -> Result<Option<git2::Oid>, GitServiceError> {
         let mut merge_opts = MergeOptions::new();
         merge_opts.find_renames(true);
         merge_opts.fail_on_conflict(true);
@@ -707,6 +727,12 @@ impl GitService {
         }
 
         let tree_id = index.write_tree_to(repo)?;
+        // Mirror of the CLI path: when the merge result matches the base
+        // exactly, the branch's work is already there and committing would only
+        // add an empty commit. The caller turns this into "nothing to merge".
+        if tree_id == base_commit.tree_id() {
+            return Ok(None);
+        }
         let tree = repo.find_tree(tree_id)?;
         let squash_commit_id = repo.commit(
             None,
@@ -720,7 +746,7 @@ impl GitService {
         let refname = format!("refs/heads/{base_branch_name}");
         repo.reference(&refname, squash_commit_id, true, "Squash merge")?;
 
-        Ok(squash_commit_id)
+        Ok(Some(squash_commit_id))
     }
 
     pub fn head_commit(&self, repo_path: impl AsRef<Path>) -> Result<CommitId, GitServiceError> {
@@ -1636,6 +1662,112 @@ mod tests {
             "expected chro's own wording, got: {msg}"
         );
         drop(repo);
+    }
+
+    /// Build a repo where the task branch is genuinely ahead of the base in
+    /// commits, yet identical to it in content: its own change also reached the
+    /// base independently, and the base was then merged back in. This is what a
+    /// rebase-plus-pull leaves behind, and it is the state that made Merge
+    /// report a repository error.
+    fn repo_with_branch_already_contained(
+    ) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
+        let (tmp, repo) = init_repo();
+        let service = GitService::new();
+        let root = tmp.path();
+        write_file(root, "base.txt", "base\n");
+        service.commit_all(root, "base commit").unwrap();
+        let base_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        service
+            .ensure_branch_exists(root, "ch/landed", Some(&base_branch))
+            .unwrap();
+        let wt_home = tempdir().unwrap();
+        let task_wt = wt_home.path().join("task-worktree");
+        let added = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["worktree", "add", task_wt.to_str().unwrap(), "ch/landed"])
+            .output()
+            .unwrap();
+        assert!(added.status.success());
+
+        write_file(&task_wt, "feature.txt", "feature\n");
+        service.commit_all(&task_wt, "task commit").unwrap();
+
+        // The same content lands on the base through another route...
+        write_file(root, "feature.txt", "feature\n");
+        service
+            .commit_all(root, "same content, other commit")
+            .unwrap();
+
+        // ...and the task branch takes the base back in, so it is no longer
+        // behind. Identical additions merge without a conflict.
+        let merged = std::process::Command::new("git")
+            .current_dir(&task_wt)
+            .args(["merge", "--no-edit", &base_branch])
+            .output()
+            .unwrap();
+        assert!(
+            merged.status.success(),
+            "merge failed: {}",
+            String::from_utf8_lossy(&merged.stderr)
+        );
+
+        drop(repo);
+        (tmp, wt_home, task_wt, base_branch)
+    }
+
+    /// Merging a branch whose content is already in the base is a no-op, not a
+    /// failure. It must be reported as "nothing to merge" (which the API maps
+    /// to 409) rather than as an invalid repository.
+    #[test]
+    fn merge_reports_nothing_to_merge_when_content_already_landed() {
+        let (tmp, _wt_home, task_wt, base_branch) = repo_with_branch_already_contained();
+        let service = GitService::new();
+        let root = tmp.path();
+        let head_before = service.head_commit(root).unwrap().as_oid();
+
+        let err = service
+            .merge_changes(root, &task_wt, "ch/landed", &base_branch, "squash merge")
+            .expect_err("a content-identical branch has nothing to merge");
+
+        assert!(
+            matches!(err, GitServiceError::NothingToMerge(_)),
+            "expected NothingToMerge, got: {err:?}"
+        );
+        assert_eq!(service.head_commit(root).unwrap().as_oid(), head_before);
+    }
+
+    /// Same situation, but with the base branch checked out nowhere, which
+    /// routes the merge through the in-process (git2) path. That path used to
+    /// write an empty commit onto the base instead of refusing.
+    #[test]
+    fn merge_without_a_base_checkout_also_reports_nothing_to_merge() {
+        let (tmp, _wt_home, task_wt, base_branch) = repo_with_branch_already_contained();
+        let service = GitService::new();
+        let root = tmp.path();
+
+        // Park the main checkout on an unrelated branch so no worktree holds
+        // the base branch any more.
+        service
+            .ensure_branch_exists(root, "ch/parking", Some(&base_branch))
+            .unwrap();
+        let parked = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["checkout", "ch/parking"])
+            .output()
+            .unwrap();
+        assert!(parked.status.success());
+        let base_before = service.resolve_commit_sha(root, &base_branch);
+
+        let err = service
+            .merge_changes(root, &task_wt, "ch/landed", &base_branch, "squash merge")
+            .expect_err("a content-identical branch has nothing to merge");
+
+        assert!(
+            matches!(err, GitServiceError::NothingToMerge(_)),
+            "expected NothingToMerge, got: {err:?}"
+        );
+        assert_eq!(service.resolve_commit_sha(root, &base_branch), base_before);
     }
 
     #[test]

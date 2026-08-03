@@ -1,13 +1,16 @@
 import { useBranchStatus } from "@/hooks/use-branch-status";
 import { useMergeRun } from "@/hooks/use-merge-run";
 import { useRebase } from "@/hooks/use-rebase";
+import { type TranslationKey, useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import {
   type FileChangeStatus,
   type GitScope,
 } from "@/lib/git-client";
+import { resolveGitError } from "@/lib/git-error";
 import type { DiffChangeKind } from "@/session/hooks";
 import { useLayoutStore } from "@/workspace-layout/state/layout-store";
+import { toast } from "@chro/ui/hooks/use-toast";
 import {
   Tooltip,
   TooltipContent,
@@ -288,6 +291,7 @@ const CollapsibleSection = ({
 };
 
 export const SourceControlPanel = () => {
+  const { t } = useLanguage();
   const { projectId } = useProjectContext();
   // When a session worktree is in view, Source Control reflects that run's
   // branch (per-branch changes); otherwise the project checkout.
@@ -383,15 +387,40 @@ export const SourceControlPanel = () => {
   const [commitMessage, setCommitMessage] = useState(getDefaultCommitMessage);
   const [isCommitting, setIsCommitting] = useState(false);
 
+  // A failed integration is otherwise invisible: the button simply stops
+  // spinning. Report it the way the other git verbs in this panel do, and
+  // refresh branch status because the failure usually leaves the worktree in a
+  // new state (conflicts, a half-applied rebase) that the buttons key off.
+  const reportIntegrationFailure = useCallback(
+    (error: Error, fallbackKey: TranslationKey) => {
+      toast({
+        title: resolveGitError(error, t, fallbackKey),
+        variant: "warning",
+      });
+      void refetchBranchStatus();
+    },
+    [refetchBranchStatus, t],
+  );
+  const handleRebaseError = useCallback(
+    (error: Error) => reportIntegrationFailure(error, "rebaseErrorMessage"),
+    [reportIntegrationFailure],
+  );
+  const handleMergeError = useCallback(
+    (error: Error) => reportIntegrationFailure(error, "diffMergeErrorMessage"),
+    [reportIntegrationFailure],
+  );
+
   // Integration verbs. Both refresh branch status on success so the ahead/behind
   // counts these buttons key off reflect the new reality immediately.
   const { rebase, isRebasing } = useRebase({
     taskRunId: scopeTaskRunId,
     onSuccess: () => void refetchBranchStatus(),
+    onError: handleRebaseError,
   });
   const { merge, isMerging, didMerge } = useMergeRun({
     taskRunId: scopeTaskRunId,
     onSuccess: () => void refetchBranchStatus(),
+    onError: handleMergeError,
   });
 
   const conflictCount = branchStatus?.conflicted_files?.length ?? 0;

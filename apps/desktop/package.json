@@ -1,6 +1,6 @@
 {
   "name": "@chro/desktop",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -52,6 +52,7 @@
     "@tauri-apps/plugin-updater": "^2.0.0",
     "@tauri-apps/plugin-window-state": "^2.0.0",
     "culori": "^4.0.2",
+    "dompurify": "^3.3.2",
     "framer-motion": "11.15.0",
     "katex": "^0.16.27",
     "lezer-markdown-obsidian": "^0.0.3",

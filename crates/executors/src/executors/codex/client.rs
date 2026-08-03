@@ -15,8 +15,9 @@ use codex_app_server_protocol::{
     ExecCommandApprovalResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAuthStatusParams, GetAuthStatusResponse, InitializeCapabilities, InitializeParams,
     InitializeResponse, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    RequestId, ServerRequest, ThreadForkParams, ThreadStartParams, TurnStartParams,
-    TurnStartResponse, UserInput,
+    McpServerElicitationRequestParams, McpServerElicitationRequestResponse, RequestId,
+    ServerRequest, ThreadForkParams, ThreadStartParams, TurnStartParams, TurnStartResponse,
+    UserInput,
 };
 use codex_protocol::{openai_models::ReasoningEffort, protocol::ReviewDecision};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -29,10 +30,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::jsonrpc::{JsonRpcCallbacks, JsonRpcPeer};
 use crate::{
-    approvals::{ExecutorApprovalError, ExecutorApprovalService},
+    approvals::{ExecutorApprovalError, ExecutorApprovalService, QuestionStatus},
     executors::ExecutorError,
 };
 
+use super::mcp_approval::{
+    MCP_APPROVAL_DECISION_KEY, MCP_APPROVAL_TOOL_NAME, McpApprovalDecision, McpApprovalPrompt,
+    elicitation_response, unsupported_elicitation_response,
+};
 use super::normalize_logs::Approval;
 
 pub struct AppServerClient {
@@ -308,13 +313,113 @@ impl AppServerClient {
                 }
                 Ok(())
             }
-            _ => {
-                tracing::error!("received unsupported server request: {:?}", request);
-                Err(
-                    ExecutorApprovalError::RequestFailed("unsupported server request".to_string())
-                        .into(),
-                )
+            ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                let response = self.resolve_mcp_elicitation(params).await;
+                send_server_response(peer, request_id, response).await
             }
+            other => {
+                // Every server-initiated request must be answered, and answering
+                // must not end the session. The read loop treats an error here as
+                // end-of-stream, so failing an unknown request stops the run while
+                // the agent server waits forever for a reply that never comes. A
+                // null result lets the server fall back and the turn continue.
+                tracing::warn!("unsupported server request, replying empty: {other:?}");
+                send_server_response(peer, other.id().clone(), Value::Null).await
+            }
+        }
+    }
+
+    /// Answers an MCP elicitation. Approval-kind elicitations go to the user as
+    /// an approval; anything else is declined, because presenting a form this
+    /// client cannot render would be worse than telling the server no.
+    ///
+    /// No approval entry is written to the conversation log. Exec and patch
+    /// approvals log one because the tool event that follows reclaims it by
+    /// call id, and the elicitation carries no call id to reclaim with. The MCP
+    /// tool item already shows the call running, then completed or failed.
+    async fn resolve_mcp_elicitation(
+        &self,
+        params: McpServerElicitationRequestParams,
+    ) -> McpServerElicitationRequestResponse {
+        let Some(prompt) = McpApprovalPrompt::from_elicitation(&params) else {
+            tracing::info!(
+                server = %params.server_name,
+                "declining MCP elicitation that is not an approval request"
+            );
+            return unsupported_elicitation_response();
+        };
+
+        if self.auto_approve {
+            return elicitation_response(McpApprovalDecision::Allow);
+        }
+
+        let decision = match self.request_mcp_decision(&prompt).await {
+            Ok(decision) => decision,
+            Err(err) => {
+                tracing::error!("failed to request MCP tool approval: {err}");
+                McpApprovalDecision::Deny
+            }
+        };
+
+        elicitation_response(decision)
+    }
+
+    async fn request_mcp_decision(
+        &self,
+        prompt: &McpApprovalPrompt,
+    ) -> Result<McpApprovalDecision, ExecutorError> {
+        let approval_service = self
+            .approvals
+            .as_ref()
+            .ok_or(ExecutorApprovalError::ServiceUnavailable)?;
+
+        let tool_input = serde_json::to_value(prompt)
+            .map_err(|err| ExecutorError::Io(io::Error::other(err.to_string())))?;
+        let approval_id = approval_service
+            .create_question_approval(MCP_APPROVAL_TOOL_NAME, tool_input)
+            .await?;
+
+        let answered = approval_service
+            .wait_question_answer(&approval_id, self.cancel.clone())
+            .await?;
+
+        // An answer that names no decision, or names one this build does not
+        // know, is not consent.
+        Ok(match answered {
+            QuestionStatus::Answered { answers } => answers
+                .get(MCP_APPROVAL_DECISION_KEY)
+                .and_then(|id| McpApprovalDecision::from_id(id))
+                .unwrap_or(McpApprovalDecision::Deny),
+            // Approved without naming a variant (the CLI can do this): grant the
+            // narrowest thing that was asked for, this call only.
+            QuestionStatus::Resolved { approved: true } => McpApprovalDecision::Allow,
+            QuestionStatus::Resolved { approved: false } | QuestionStatus::TimedOut => {
+                McpApprovalDecision::Deny
+            }
+        })
+    }
+
+    /// Records a pending approval in the conversation log. Best-effort: losing
+    /// the log line costs a rendered row, not the approval itself.
+    async fn log_approval_requested(&self, call_id: &str, tool_name: &str, approval_id: &str) {
+        let now = Utc::now();
+        if let Err(err) = self
+            .log_writer
+            .log_raw(
+                &Approval::approval_requested(
+                    call_id.to_string(),
+                    tool_name.to_string(),
+                    approval_id.to_string(),
+                    now.to_rfc3339(),
+                    (now + Duration::seconds(APPROVAL_TIMEOUT_SECONDS)).to_rfc3339(),
+                )
+                .raw(),
+            )
+            .await
+        {
+            tracing::warn!(
+                "failed to log approval request for call_id={call_id}, tool={tool_name}: {err}"
+            );
         }
     }
 
@@ -334,28 +439,8 @@ impl AppServerClient {
             .ok_or(ExecutorApprovalError::ServiceUnavailable)?;
 
         let approval_id = approval_service.create_tool_approval(tool_name).await?;
-
-        let now = Utc::now();
-        let requested_at = now.to_rfc3339();
-        let timeout_at = (now + Duration::seconds(APPROVAL_TIMEOUT_SECONDS)).to_rfc3339();
-        if let Err(err) = self
-            .log_writer
-            .log_raw(
-                &Approval::approval_requested(
-                    tool_call_id.to_string(),
-                    display_tool_name.to_string(),
-                    approval_id.clone(),
-                    requested_at,
-                    timeout_at,
-                )
-                .raw(),
-            )
-            .await
-        {
-            tracing::warn!(
-                "failed to log approval request for call_id={tool_call_id}, tool={display_tool_name}: {err}"
-            );
-        }
+        self.log_approval_requested(tool_call_id, display_tool_name, &approval_id)
+            .await;
 
         Ok(approval_service
             .wait_tool_approval(&approval_id, self.cancel.clone())
@@ -524,6 +609,155 @@ mod tests {
         assert_eq!(response.thread.id, "forked-thread");
         assert_eq!(response.model, "gpt-5.4");
         assert_eq!(response.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    /// Drives a client over an in-memory pipe pair standing in for the agent
+    /// server. Returns a writer for server-to-client lines and a reader for the
+    /// client's replies.
+    struct FakeServer {
+        to_client: tokio::io::DuplexStream,
+        from_client: tokio::io::Lines<tokio::io::BufReader<tokio::io::DuplexStream>>,
+        _client: Arc<AppServerClient>,
+    }
+
+    impl FakeServer {
+        fn start(auto_approve: bool) -> Self {
+            use tokio::io::AsyncBufReadExt;
+
+            let (to_client, client_stdout) = tokio::io::duplex(8 * 1024);
+            let (client_stdin, from_client) = tokio::io::duplex(8 * 1024);
+
+            let client = AppServerClient::new(
+                LogWriter::new(tokio::io::sink()),
+                None,
+                auto_approve,
+                CancellationToken::new(),
+            );
+            let (exit_tx, _exit_rx) = tokio::sync::oneshot::channel();
+            let peer = super::super::jsonrpc::JsonRpcPeer::spawn(
+                client_stdin,
+                client_stdout,
+                client.clone(),
+                super::super::jsonrpc::ExitSignalSender::new(exit_tx),
+            );
+            client.connect(peer);
+
+            Self {
+                to_client,
+                from_client: tokio::io::BufReader::new(from_client).lines(),
+                _client: client,
+            }
+        }
+
+        async fn send(&mut self, message: Value) {
+            let line = format!("{}\n", serde_json::to_string(&message).unwrap());
+            self.to_client.write_all(line.as_bytes()).await.unwrap();
+        }
+
+        /// Next reply, or `None` if the client stopped reading and answering.
+        async fn next_reply(&mut self) -> Option<Value> {
+            let line = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.from_client.next_line(),
+            )
+            .await
+            .ok()?
+            .ok()??;
+            serde_json::from_str(&line).ok()
+        }
+    }
+
+    fn mcp_approval_request(id: i64) -> Value {
+        serde_json::json!({
+            "method": "mcpServer/elicitation/request",
+            "id": id,
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "serverName": "some_server",
+                "mode": "form",
+                "_meta": {
+                    "codex_approval_kind": "mcp_tool_call",
+                    "persist": ["session", "always"],
+                },
+                "message": "Allow this?",
+                "requestedSchema": { "type": "object", "properties": {} },
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn answers_an_mcp_approval_request() {
+        let mut server = FakeServer::start(true);
+        server.send(mcp_approval_request(7)).await;
+
+        let reply = server.next_reply().await.expect("client should reply");
+        assert_eq!(reply["id"], serde_json::json!(7));
+        assert_eq!(reply["result"]["action"], serde_json::json!("accept"));
+    }
+
+    #[tokio::test]
+    async fn keeps_serving_after_a_request_it_does_not_understand() {
+        // Regression: an unhandled server request used to end the read loop,
+        // which reported the run as finished while the agent server sat waiting
+        // for a reply that never came. It must be answered and survived.
+        let mut server = FakeServer::start(true);
+
+        server
+            .send(serde_json::json!({
+                "method": "item/tool/requestUserInput",
+                "id": 1,
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "item-1",
+                    "questions": [],
+                },
+            }))
+            .await;
+
+        let reply = server
+            .next_reply()
+            .await
+            .expect("an unhandled request must still be answered");
+        assert_eq!(reply["id"], serde_json::json!(1));
+
+        server.send(mcp_approval_request(2)).await;
+        let reply = server
+            .next_reply()
+            .await
+            .expect("the session must survive an unhandled request");
+        assert_eq!(reply["id"], serde_json::json!(2));
+        assert_eq!(reply["result"]["action"], serde_json::json!("accept"));
+    }
+
+    #[tokio::test]
+    async fn declines_an_elicitation_that_is_not_an_approval() {
+        let mut server = FakeServer::start(true);
+
+        server
+            .send(serde_json::json!({
+                "method": "mcpServer/elicitation/request",
+                "id": 3,
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "serverName": "some_server",
+                    "mode": "form",
+                    "_meta": null,
+                    "message": "Which profile?",
+                    "requestedSchema": { "type": "object", "properties": {} },
+                },
+            }))
+            .await;
+
+        let reply = server.next_reply().await.expect("client should reply");
+        assert_eq!(reply["id"], serde_json::json!(3));
+        assert_eq!(
+            reply["result"]["action"],
+            serde_json::json!("decline"),
+            "a form this client cannot render is declined, never left hanging"
+        );
     }
 }
 

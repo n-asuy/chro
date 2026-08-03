@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use super::images::{ImageListResponse, ImageResponse};
+use super::asset_response::{stream_asset_response, AssetQuery};
 use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
@@ -1327,6 +1328,7 @@ async fn read_task_run_binary_file(
 async fn read_task_run_asset(
     State(state): State<AppState>,
     Path((id, relative_path)): Path<(String, String)>,
+    Query(asset_query): Query<AssetQuery>,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -1338,7 +1340,7 @@ async fn read_task_run_asset(
     let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
     let binary_file = read_binary_resolving(&service, &relative_path, &candidate_refs).await?;
 
-    stream_binary_response(binary_file, "no-cache").await
+    stream_asset_response(binary_file, &asset_query).await
 }
 
 #[derive(Debug, Serialize)]
