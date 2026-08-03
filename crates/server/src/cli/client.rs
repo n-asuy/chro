@@ -29,7 +29,7 @@ impl fmt::Display for ClientError {
         match self {
             Self::ServerNotRunning => write!(
                 f,
-                "Chro server is not running. Start it with `chro` or the desktop app."
+                "Chro server is not running. Start the desktop app or run `chro-server`."
             ),
             Self::NoGitRepo => write!(
                 f,

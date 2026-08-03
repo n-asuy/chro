@@ -11,7 +11,7 @@
     "dev:web:scan": "concurrently -p \"[{name}]\" -n server,vite,scan \"bun run dev:server\" \"bun run dev:vite\" \"wait-on http://localhost:3400 && npx react-scan@latest http://localhost:3400\"",
     "dev:web:perf": "concurrently -p \"[{name}]\" -n server,vite \"bun run dev:server:perf\" \"bun run dev:vite:perf\"",
     "dev:server": "cargo run --manifest-path ../../crates/server/Cargo.toml --bin chro-server -- --port 4310",
-    "dev:server:build": "cargo build --manifest-path ../../crates/server/Cargo.toml --bin chro-server",
+    "dev:server:build": "cargo build --manifest-path ../../crates/server/Cargo.toml --bins",
     "dev:server:perf": "cross-env CHRO_PERF_DIR=../../log/performance cargo run --manifest-path ../../crates/server/Cargo.toml --bin chro-server -- --port 4310 --perf",
     "build:native:filesystem": "node ./scripts/build-native-filesystem.mjs",
     "dev:vite": "bun run build:native:filesystem && vite",

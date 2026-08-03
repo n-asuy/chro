@@ -95,10 +95,10 @@ const rustServerManifestPath = path.join(rustServerCrateDir, "Cargo.toml");
 
 // The terminal CLI is staged as a second Tauri sidecar so agents launched by the
 // bundled server can call `chro task ...` by bare name (the server prepends the
-// sidecar dir to PATH via CHRO_CLI_DIR).
-const cliCrateDir = path.join(repoRoot, "apps", "cli");
+// sidecar dir to PATH via CHRO_CLI_DIR). It is a second binary of the server
+// crate: same commands, without the server runtime that would otherwise be
+// shipped and updated twice.
 const cliBinaryBaseName = "chro";
-const cliManifestPath = path.join(cliCrateDir, "Cargo.toml");
 const npxCliPackageJsonPath = path.join(
   repoRoot,
   "apps",
@@ -690,8 +690,8 @@ function buildAndStageRustBinary(context: TauriBuildContext) {
   });
   buildAndStageStandaloneBinary({
     label: context.label,
-    crateDir: cliCrateDir,
-    manifestPath: cliManifestPath,
+    crateDir: rustServerCrateDir,
+    manifestPath: rustServerManifestPath,
     baseName: cliBinaryBaseName,
     triple: context.triple,
     exe,

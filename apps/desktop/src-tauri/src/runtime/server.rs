@@ -368,13 +368,14 @@ fn cli_dir_next_to_current_exe() -> Option<PathBuf> {
 }
 
 /// Locate the cargo target dir for the `chro` CLI in a source checkout, anchored
-/// on the repo root so the desktop can launch from any subdirectory.
+/// on the repo root so the desktop can launch from any subdirectory. The CLI is
+/// a binary of the server crate, so it lands beside `chro-server`.
 fn dev_cli_dir() -> Option<PathBuf> {
     let repo_root = repo_root()?;
     for profile in ["debug", "release"] {
         let dir = repo_root
-            .join("apps")
-            .join("cli")
+            .join("crates")
+            .join("server")
             .join("target")
             .join(profile);
         if dir.join(cli_binary_name()).exists() {

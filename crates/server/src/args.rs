@@ -32,6 +32,21 @@ pub struct ServerArgs {
     pub no_open: bool,
 }
 
+/// Command line of the standalone `chro` binary: the same commands as
+/// `chro-server`, without the server the app runs as a sidecar. Agents launched
+/// by chro get this binary on their PATH, so `chro task ...` resolves by bare
+/// name from inside a run.
+#[derive(Parser, Debug)]
+#[command(name = "chro", version, about = "Chro — task and approval commands")]
+pub struct TerminalCli {
+    /// Git repository path (default: CWD's git root)
+    #[arg(short = 'w', long)]
+    pub project: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Task management
