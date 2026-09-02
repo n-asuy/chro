@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.50
+
+- Fixed Windows releases failing to build, which left 0.1.49 with no Windows installer at all. The build-time signing added in 0.1.49 pointed Tauri at the signing script by a path relative to the desktop package, but Tauri runs the hook from its own `src-tauri` directory, so the script was never found and the build stopped with only "failed to run pwsh" to show for it. The path is corrected, and the hook now keeps a log that the build prints when signing fails, so the next problem is readable instead of silent. This is the first release whose Windows installer and every binary inside it carry a signature
+- Changed GitHub Release notes to come from the matching section of CHANGELOG.md. The tag annotation that used to carry them is discarded when the tag is recreated on the public repository, so every release page had shown only the commit message
+
 ## 0.1.49
 
 - Changed the composer back to Cmd/Ctrl+Return to send, with a bare Return inserting a newline, reversing the send-on-Return switch made in the previous release. The composer holds multi-line prompts, so Return has to stay a newline the way every other multi-line field in the app treats it; both modifiers are accepted rather than branching on the platform, and the Return that confirms an IME conversion still never sends

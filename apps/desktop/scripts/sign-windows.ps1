@@ -52,6 +52,19 @@ if (-not (Test-Path -LiteralPath $codeSignTool -PathType Leaf)) {
   Fail-Signing "SSL.com CodeSignTool was not found at '$codeSignTool'."
 }
 
+# CodeSignTool decides whether it can sign a file by its extension. NSIS hands
+# the uninstaller to this hook as a .tmp file (and ignores the hook's exit
+# status), so anything without a recognised extension is signed through an
+# .exe-named copy whose signed bytes then replace the original.
+$signableExtensions = @(".exe", ".dll", ".msi")
+$extension = [IO.Path]::GetExtension($resolvedFilePath).ToLowerInvariant()
+$signTarget = $resolvedFilePath
+if ($extension -notin $signableExtensions) {
+  $signTarget = "$resolvedFilePath.exe"
+  Copy-Item -LiteralPath $resolvedFilePath -Destination $signTarget -Force
+  Write-SignLog "Signing '$extension' file through a temporary .exe copy: $signTarget"
+}
+
 # CodeSignTool normally writes a signed copy to a separate directory. Tauri's
 # signCommand contract requires the file passed as %1 to be signed in place, so
 # use eSigner's override mode. Tauri invokes this script for the main app,
@@ -62,7 +75,7 @@ $signerOutput = @(
     "-password=$env:ES_PASSWORD" `
     "-credential_id=$env:ES_CREDENTIAL_ID" `
     "-totp_secret=$env:ES_TOTP_SECRET" `
-    "-input_file_path=$resolvedFilePath" `
+    "-input_file_path=$signTarget" `
     "-override=true" 2>&1
 )
 $signerExitCode = $LASTEXITCODE
@@ -71,12 +84,16 @@ $signerOutput | ForEach-Object { Write-SignLog "$_" }
 $signerText = $signerOutput -join "`n"
 $reportedFailure = $signerText -match "Error|Exception|Missing required option|Unmatched argument"
 if ($signerExitCode -ne 0 -or $reportedFailure) {
-  Fail-Signing "SSL.com CodeSignTool failed to sign '$resolvedFilePath' (exit code $signerExitCode)."
+  Fail-Signing "SSL.com CodeSignTool failed to sign '$signTarget' (exit code $signerExitCode)."
 }
 
-$signature = Get-AuthenticodeSignature -FilePath $resolvedFilePath
+$signature = Get-AuthenticodeSignature -FilePath $signTarget
 if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
-  Fail-Signing "Authenticode verification failed for '$resolvedFilePath': $($signature.StatusMessage)"
+  Fail-Signing "Authenticode verification failed for '$signTarget': $($signature.StatusMessage)"
+}
+
+if ($signTarget -ne $resolvedFilePath) {
+  Move-Item -LiteralPath $signTarget -Destination $resolvedFilePath -Force
 }
 
 Write-SignLog "Verified Authenticode signature: $resolvedFilePath"

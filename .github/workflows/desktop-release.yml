@@ -327,6 +327,19 @@ jobs:
           env.ES_TOTP_SECRET != ''
         shell: pwsh
         run: |
+          # NSIS ignores the sign hook's exit status for the uninstaller, so a
+          # failure there leaves a green build and an unsigned uninstaller. The
+          # hook's own log is the only record of every invocation.
+          $signLog = Join-Path $env:RUNNER_TEMP "sign-windows.log"
+          if (-not (Test-Path -LiteralPath $signLog)) {
+            throw "No signing log at '$signLog': the sign hook never ran."
+          }
+          $hookFailures = @(Select-String -LiteralPath $signLog -Pattern '^ERROR: ')
+          if ($hookFailures.Count -gt 0) {
+            $hookFailures | ForEach-Object { Write-Host $_.Line }
+            throw "The Windows sign hook reported $($hookFailures.Count) failure(s)."
+          }
+
           $releaseDir = "apps/desktop/release/${{ steps.desktop_version.outputs.value }}"
           $installer = Get-ChildItem -Path $releaseDir -Filter "*-setup.exe" |
             Select-Object -First 1
