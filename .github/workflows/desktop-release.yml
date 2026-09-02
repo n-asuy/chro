@@ -295,6 +295,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun ./apps/desktop/scripts/deployer.ts package --project desktop -- --win --x64
 
+      # The sign hook's own output never reaches the build log (the bundler
+      # captures it), so this is the only readable trace of a signing failure.
+      - name: Show Windows signing log
+        if: failure()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "sign-windows.log"
+          if (Test-Path -LiteralPath $log) {
+            Get-Content -LiteralPath $log
+          } else {
+            Write-Host "No signing log at $log: the sign hook never started."
+          }
+
       - name: Package unsigned desktop (manual test build)
         if: >
           !startsWith(github.ref, 'refs/tags/') &&

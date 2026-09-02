@@ -7,6 +7,26 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# Tauri runs this hook with captured output and reports any failure only as
+# "failed to run pwsh", so everything is also appended to a log file that the
+# release workflow prints when the build fails.
+$logDirectory = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
+$logPath = Join-Path $logDirectory "sign-windows.log"
+
+function Write-SignLog {
+  param([string]$Message)
+  Add-Content -LiteralPath $logPath -Value $Message
+  Write-Host $Message
+}
+
+function Fail-Signing {
+  param([string]$Message)
+  Write-SignLog "ERROR: $Message"
+  throw $Message
+}
+
+Write-SignLog "--- sign-windows.ps1 $(Get-Date -Format o) file=$FilePath cwd=$(Get-Location)"
+
 $requiredEnvironmentVariables = @(
   "CODE_SIGN_TOOL_PATH",
   "ES_USERNAME",
@@ -22,14 +42,14 @@ $missingEnvironmentVariables = @(
 )
 
 if ($missingEnvironmentVariables.Count -gt 0) {
-  throw "Missing Windows code-signing environment variables: $($missingEnvironmentVariables -join ', ')."
+  Fail-Signing "Missing Windows code-signing environment variables: $($missingEnvironmentVariables -join ', ')."
 }
 
 $resolvedFilePath = (Resolve-Path -LiteralPath $FilePath).Path
 $codeSignTool = Join-Path $env:CODE_SIGN_TOOL_PATH "CodeSignTool.bat"
 
 if (-not (Test-Path -LiteralPath $codeSignTool -PathType Leaf)) {
-  throw "SSL.com CodeSignTool was not found at '$codeSignTool'."
+  Fail-Signing "SSL.com CodeSignTool was not found at '$codeSignTool'."
 }
 
 # CodeSignTool normally writes a signed copy to a separate directory. Tauri's
@@ -46,18 +66,18 @@ $signerOutput = @(
     "-override=true" 2>&1
 )
 $signerExitCode = $LASTEXITCODE
-$signerOutput | ForEach-Object { Write-Host $_ }
+$signerOutput | ForEach-Object { Write-SignLog "$_" }
 
 $signerText = $signerOutput -join "`n"
 $reportedFailure = $signerText -match "Error|Exception|Missing required option|Unmatched argument"
 if ($signerExitCode -ne 0 -or $reportedFailure) {
-  throw "SSL.com CodeSignTool failed to sign '$resolvedFilePath' (exit code $signerExitCode)."
+  Fail-Signing "SSL.com CodeSignTool failed to sign '$resolvedFilePath' (exit code $signerExitCode)."
 }
 
 $signature = Get-AuthenticodeSignature -FilePath $resolvedFilePath
 if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
-  throw "Authenticode verification failed for '$resolvedFilePath': $($signature.StatusMessage)"
+  Fail-Signing "Authenticode verification failed for '$resolvedFilePath': $($signature.StatusMessage)"
 }
 
-Write-Host "Verified Authenticode signature: $resolvedFilePath"
-Write-Host "Signer: $($signature.SignerCertificate.Subject)"
+Write-SignLog "Verified Authenticode signature: $resolvedFilePath"
+Write-SignLog "Signer: $($signature.SignerCertificate.Subject)"
