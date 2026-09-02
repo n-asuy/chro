@@ -22,6 +22,37 @@ export type ConversationStreamAction =
   | { type: "idle" };
 
 /**
+ * Outcome of replaying a historic run's log stream.
+ *
+ * `complete` is the authority bit: it is true only when the server ended the
+ * replay itself (protocol `finished` marker or a clean close). When the client
+ * gave up — idle timeout, socket error, unclean close — the collected entries
+ * may be partial and MUST NOT be recorded as the run's true history.
+ */
+export type HistoricReplayResult = {
+  entries: DisplayEntry[];
+  complete: boolean;
+};
+
+/**
+ * Decide whether a finished-run replay may replace the entries accumulated
+ * from the live stream.
+ *
+ * Two hard rules protect content the user already watched stream in:
+ * - an incomplete replay never clobbers live entries, and
+ * - an authoritative-but-empty replay never erases a non-empty live turn
+ *   (a run whose log produced visible output cannot truly replay to nothing).
+ */
+export function shouldReplaceLiveEntriesWithReplay(
+  result: HistoricReplayResult,
+  liveEntryCount: number,
+): boolean {
+  if (!result.complete) return false;
+  if (result.entries.length === 0 && liveEntryCount > 0) return false;
+  return true;
+}
+
+/**
  * Reconcile DB-backed run status with an already-established live log socket.
  *
  * Starting a different active run replaces the old socket. A terminal DB patch

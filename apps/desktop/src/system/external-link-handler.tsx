@@ -1,4 +1,4 @@
-
+import { openExternalUrl } from "@/lib/open-external-url";
 import { useEffect } from "react";
 
 const isModifiedClick = (event: MouseEvent) =>
@@ -34,14 +34,14 @@ const shouldOpenExternally = (anchor: HTMLAnchorElement) => {
   }
 };
 
+/**
+ * Sends every left click on an external `<a>` to the system browser. The
+ * desktop shell has no place to put a second page — `target="_blank"` opens
+ * nothing there — so the anchor never navigates on its own.
+ */
 export function ExternalLinkHandler() {
   useEffect(() => {
     if (typeof window === "undefined") {
-      return undefined;
-    }
-
-    const openExternal = window.desktop?.openExternalUrl;
-    if (!openExternal) {
       return undefined;
     }
 
@@ -60,7 +60,7 @@ export function ExternalLinkHandler() {
       }
 
       event.preventDefault();
-      void openExternal(anchor.href);
+      openExternalUrl(anchor.href);
     };
 
     document.addEventListener("click", handleClick);

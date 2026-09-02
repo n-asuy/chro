@@ -78,6 +78,9 @@ apps/api/data
 apps/api/worktrees
 apps/cli/npx-cli/*.tgz
 
+# Dev-mode asset dir (debug builds write config, profiles and scratch chats here)
+/dev_assets/
+
 claude_code_config*.json
 /.mcp.json
 
@@ -92,6 +95,9 @@ skills-lock.json
 skills/agent-browser
 
 ref
+
+# Cloud control plane: operator-side code and secrets. Local only, never mirrored.
+/cloud
 
 # Playwright / Argos
 /test-results/

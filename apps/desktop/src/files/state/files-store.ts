@@ -3,11 +3,15 @@ import {
   createProjectDirectory,
   deleteProjectFile,
   renameProjectEntry,
+  resolveProjectFile,
+  resolveTaskRunFile,
   uploadProjectBinaryFile,
   writeProjectFile,
 } from "@/lib/project-client";
 import type { DiffRevealRequest } from "@/session/lib/diff-reveal";
 import { create } from "zustand";
+import { fileNamesEqual } from "../lib/file-name-key";
+import { normalizeFileOperationPaths } from "../lib/file-tree-selection";
 import type { FileNode } from "../types/file-tree";
 import {
   FileNodeType,
@@ -71,6 +75,19 @@ const findNodeInTree = (
   }
 
   return null;
+};
+
+/** Expand every ancestor directory of a tree path so the node is visible. */
+const expandAncestors = (
+  expandPath: (path: string) => void,
+  path: string,
+): void => {
+  const parts = path.split("/").filter(Boolean);
+  let currentPath = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    currentPath += `/${parts[i]}`;
+    expandPath(currentPath);
+  }
 };
 
 /**
@@ -190,6 +207,7 @@ interface FilesActions {
 
   // Selection
   selectNode: (path: string, multiSelect?: boolean) => void;
+  selectNodes: (paths: string[]) => void;
   clearSelection: () => void;
 
   // Select a path and ask the file tree to expand to and scroll it into view.
@@ -211,10 +229,12 @@ interface FilesActions {
   ) => Promise<void>;
   createFolder: (parentPath: string, name: string) => Promise<void>;
   deleteNode: (path: string) => Promise<void>;
+  deleteNodes: (paths: string[]) => Promise<void>;
   renameNode: (oldPath: string, newName: string) => Promise<void>;
   renameDisplayName: (path: string, displayName: string) => Promise<void>;
   duplicateNode: (path: string) => Promise<void>;
   moveNode: (sourcePath: string, targetParentPath: string) => Promise<void>;
+  moveNodes: (sourcePaths: string[], targetParentPath: string) => Promise<void>;
   importExternalFiles: (
     files: File[],
     targetParentPath: string,
@@ -333,6 +353,9 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
       }
       return { selectedPaths: [path] };
     }),
+
+  selectNodes: (paths) =>
+    set({ selectedPaths: Array.from(new Set(paths.filter(Boolean))) }),
 
   clearSelection: () => set({ selectedPaths: [] }),
 
@@ -510,27 +533,79 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
   },
 
   deleteNode: async (path) => {
+    await get().deleteNodes([path]);
+  },
+
+  deleteNodes: async (paths) => {
     const state = get();
     if (state.scopeTaskRunId) {
-      console.warn("[files-store] deleteNode is disabled in worktree scope");
+      console.warn("[files-store] deleteNodes is disabled in worktree scope");
       return;
     }
     if (!state.projectId) {
-      console.error("[files-store] deleteNode requires projectId");
+      console.error("[files-store] deleteNodes requires projectId");
       throw new Error("Project not initialized");
     }
-    const node = findNodeByPath(state.fileTree, path);
-    if (!node) {
-      console.warn("[files-store] deleteNode: node not found", path);
-      return;
+
+    const operationPaths = normalizeFileOperationPaths(paths);
+    const entries = operationPaths.flatMap((path) => {
+      const node = findNodeByPath(state.fileTree, path);
+      if (!node) {
+        console.warn("[files-store] deleteNodes: node not found", path);
+        return [];
+      }
+      return [
+        {
+          path,
+          relativePath: node.relativePath ?? path.replace(/^\/+/, ""),
+        },
+      ];
+    });
+    if (entries.length === 0) return;
+
+    const deletedPaths: string[] = [];
+    const failures: { path: string; error: unknown }[] = [];
+    for (const entry of entries) {
+      try {
+        await deleteProjectFile(state.projectId, entry.relativePath);
+        deletedPaths.push(entry.path);
+      } catch (error) {
+        failures.push({ path: entry.path, error });
+        console.error(
+          `[files-store] deleteProjectFile failed for ${entry.path}:`,
+          error,
+        );
+      }
     }
-    const relativePath = node.relativePath ?? path.replace(/^\/+/, "");
-    try {
-      await deleteProjectFile(state.projectId, relativePath);
+
+    for (const path of deletedPaths) {
       get().removeNode(path);
-    } catch (error) {
-      console.error("[files-store] deleteProjectFile failed:", error);
-      throw error;
+    }
+
+    const latestState = get();
+    const deletedCurrentFile = deletedPaths.some(
+      (path) =>
+        latestState.currentFilePath === path ||
+        latestState.currentFilePath?.startsWith(`${path}/`),
+    );
+    set((currentState) => ({
+      selectedPaths: currentState.selectedPaths.filter(
+        (selectedPath) =>
+          !deletedPaths.some(
+            (path) =>
+              selectedPath === path || selectedPath.startsWith(`${path}/`),
+          ),
+      ),
+      currentFilePath: deletedCurrentFile ? null : currentState.currentFilePath,
+    }));
+    if (deletedCurrentFile) {
+      latestState._onFilePathChange?.(null);
+    }
+
+    if (failures.length > 0) {
+      throw new Error(
+        `Failed to delete ${failures.length} of ${entries.length} selected items`,
+      );
     }
   },
 
@@ -813,6 +888,73 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     useFileTreeStore.getState().expandPath(targetParentPath);
   },
 
+  moveNodes: async (sourcePaths, targetParentPath) => {
+    const state = get();
+    if (state.scopeTaskRunId) {
+      console.warn("[files-store] moveNodes is disabled in worktree scope");
+      return;
+    }
+    if (!state.projectId) {
+      console.error("[files-store] moveNodes requires projectId");
+      throw new Error("Project not initialized");
+    }
+
+    const operationPaths = normalizeFileOperationPaths(sourcePaths);
+    const sourceNodes = operationPaths.flatMap((path) => {
+      const node = findNodeByPath(state.fileTree, path);
+      if (!node) {
+        console.warn("[files-store] moveNodes: source node not found", path);
+        return [];
+      }
+      return [node];
+    });
+    if (sourceNodes.length === 0) return;
+
+    const targetParentNode = findNodeByPath(state.fileTree, targetParentPath);
+    if (
+      targetParentPath !== "/" &&
+      targetParentPath !== state.rootPath &&
+      targetParentNode?.type !== FileNodeType.Directory
+    ) {
+      throw new Error("Move target must be a folder");
+    }
+
+    for (const node of sourceNodes) {
+      if (
+        node.type === FileNodeType.Directory &&
+        (targetParentPath === node.path ||
+          targetParentPath.startsWith(`${node.path}/`))
+      ) {
+        throw new Error("A folder cannot be moved into itself");
+      }
+    }
+
+    const destinationNames = new Map<string, string>();
+    for (const node of sourceNodes) {
+      const previousSource = destinationNames.get(node.name);
+      if (previousSource && previousSource !== node.path) {
+        throw new Error(
+          `Multiple selected items are named ${node.name}; they cannot share a destination`,
+        );
+      }
+      destinationNames.set(node.name, node.path);
+    }
+
+    const targetChildren = targetParentNode?.children ?? state.fileTree;
+    for (const node of sourceNodes) {
+      const existing = targetChildren.find((child) => child.name === node.name);
+      if (existing && existing.path !== node.path) {
+        throw new Error(
+          `A file named ${node.name} already exists in the target folder`,
+        );
+      }
+    }
+
+    for (const node of sourceNodes) {
+      await get().moveNode(node.path, targetParentPath);
+    }
+  },
+
   importExternalFiles: async (files, targetParentPath) => {
     const state = get();
     if (state.scopeTaskRunId) {
@@ -1005,83 +1147,97 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     // Remove any anchor/section references for now (subpath handled later)
     const cleanPath = linkPath.split("#")[0];
 
-    // Try to find the file in the tree
-    // Obsidian allows referencing files by:
-    // 1. Full relative path: folder/subfolder/note.md
-    // 2. Just filename: note.md or note (without extension)
-    // 3. Display name
-
+    // Fast path over the already-loaded tree. Obsidian allows referencing
+    // files by full relative path, bare filename (with or without .md), or
+    // display name. All comparisons use normalized keys (NFC + lowercase) so
+    // macOS NFD names match typed NFC references. The tree is lazily loaded,
+    // so a miss here is NOT authoritative — the server index decides below.
     let targetNode: FileNode | null = null;
 
-    // First, try exact path match (with .md extension if not present)
     const pathWithExt = cleanPath.endsWith(".md")
       ? cleanPath
       : `${cleanPath}.md`;
     const fullPath = `/${pathWithExt}`;
-    targetNode = findNodeByPath(fileTree, fullPath);
+    targetNode = findNodeInTree(fileTree, (node) =>
+      fileNamesEqual(node.path, fullPath),
+    );
 
-    // If not found, search by filename
     if (!targetNode) {
       const searchFileName = pathWithExt.split("/").pop() ?? pathWithExt;
       targetNode = findNodeInTree(
         fileTree,
         (node) =>
-          node.type === FileNodeType.File && node.name === searchFileName,
+          node.type === FileNodeType.File &&
+          fileNamesEqual(node.name, searchFileName),
       );
     }
 
-    // If still not found, try matching display name
     if (!targetNode) {
       const searchDisplayName = cleanPath.split("/").pop() ?? cleanPath;
       targetNode = findNodeInTree(
         fileTree,
         (node) =>
           node.type === FileNodeType.File &&
-          node.displayName === searchDisplayName,
+          fileNamesEqual(node.displayName ?? "", searchDisplayName),
       );
     }
 
     if (targetNode) {
-      // Expand parent folders
-      const parts = targetNode.path.split("/").filter(Boolean);
-      let currentPath = "";
-      for (let i = 0; i < parts.length - 1; i++) {
-        currentPath += `/${parts[i]}`;
-        expandPath(currentPath);
-      }
-
-      // Select and open the file
+      expandAncestors(expandPath, targetNode.path);
       selectNode(targetNode.path);
       openFile(targetNode.path);
-    } else {
-      // In worktree (read-only) scope we never create files; just attempt to
-      // open so the server resolves the path against the run's worktree.
-      if (state.scopeTaskRunId) {
-        openFile(`/${pathWithExt}`);
-        return;
-      }
-      // Create the file if it doesn't exist (Obsidian behavior)
-      const { projectId, rootPath, addNodeToTree } = state;
-      if (!projectId) {
-        console.error("[files-store] Cannot create file: projectId not set");
-        return;
-      }
+      return;
+    }
 
-      // Determine the path for the new file
-      // If linkPath contains '/', treat it as a relative path from root
-      // Otherwise, create it in the root directory
-      const relativePath = pathWithExt.startsWith("/")
-        ? pathWithExt.slice(1)
-        : pathWithExt;
+    // In worktree (read-only) scope we never create files. Resolve against
+    // the run's candidate roots (worktree, project, siblings); the server
+    // skips roots deleted from disk.
+    if (state.scopeTaskRunId) {
+      const runId = state.scopeTaskRunId;
+      resolveTaskRunFile(runId, cleanPath)
+        .then((resolved) => {
+          if (resolved.root && resolved.relative_path) {
+            openFile(`${resolved.root}/${resolved.relative_path}`, runId);
+          } else {
+            openFile(`/${pathWithExt}`);
+          }
+        })
+        .catch(() => openFile(`/${pathWithExt}`));
+      return;
+    }
 
-      // Create parent directories if needed
-      const pathParts = relativePath.split("/");
-      const fileName = pathParts.pop() ?? relativePath;
-      const parentRelative = pathParts.join("/");
+    const { projectId, rootPath, addNodeToTree } = state;
+    if (!projectId) {
+      console.error("[files-store] Cannot create file: projectId not set");
+      return;
+    }
 
-      // Create the file
-      writeProjectFile(projectId, relativePath, "")
-        .then(() => {
+    // The loaded tree missed, but the target may live in a directory the
+    // user never expanded. Ask the server's name index before concluding the
+    // note does not exist; only a server-confirmed miss creates a new file
+    // (Obsidian behavior). Creating on a tree miss alone would silently
+    // produce duplicates of existing notes.
+    resolveProjectFile(projectId, cleanPath)
+      .then((resolved) => {
+        if (resolved.relative_path) {
+          const resolvedPath = `/${resolved.relative_path}`;
+          expandAncestors(expandPath, resolvedPath);
+          selectNode(resolvedPath);
+          openFile(resolvedPath);
+          return;
+        }
+
+        // Confirmed absent: create it. A '/' in the link is a path from the
+        // root; otherwise the note lands in the root directory.
+        const relativePath = pathWithExt.startsWith("/")
+          ? pathWithExt.slice(1)
+          : pathWithExt;
+
+        const pathParts = relativePath.split("/");
+        const fileName = pathParts.pop() ?? relativePath;
+        const parentRelative = pathParts.join("/");
+
+        return writeProjectFile(projectId, relativePath, "").then(() => {
           const newPath = `/${relativePath}`;
           const displayName = getDisplayName(fileName, FileNodeType.File);
 
@@ -1097,32 +1253,25 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
             },
           };
 
-          // Determine parent path for tree insertion
           const parentPath = parentRelative
             ? `/${parentRelative}`
             : rootPath ?? "/";
           addNodeToTree(parentPath, newNode);
 
-          // Expand parent folders
           if (parentRelative) {
-            let currentPath = "";
-            for (const part of pathParts) {
-              currentPath += `/${part}`;
-              expandPath(currentPath);
-            }
+            expandAncestors(expandPath, newPath);
           }
 
-          // Select and open the new file
           selectNode(newPath);
           openFile(newPath);
-        })
-        .catch((error) => {
-          console.error(
-            "[files-store] Failed to create wikilink target:",
-            error,
-          );
         });
-    }
+      })
+      .catch((error) => {
+        console.error(
+          "[files-store] Failed to resolve wikilink target:",
+          error,
+        );
+      });
   },
 
   openFilePath: (rawPath: string, taskRunId?: string) => {
@@ -1134,19 +1283,35 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
     const stripped = rawPath.trim().replace(/:\d+(?::\d+)?$/, "");
     if (!stripped) return;
 
-    // When opening through a task run, the file lives in that run's worktree
-    // and is read by the server (which normalizes any prefix — project root or
-    // worktree absolute — against the run's roots; see `path_resolve` in the
-    // server crate). The path is therefore passed through unchanged.
+    const isAbsolute = stripped.startsWith("/") || /^[A-Za-z]:[\\/]/.test(stripped);
+
+    // When opening through a task run, absolute paths go straight to the
+    // reader (the server normalizes known-root prefixes and skips deleted
+    // worktrees; see `path_resolve`). Relative references — a bare filename
+    // from chat output — are resolved against the run's candidate roots
+    // first, so `note.md` opens the real file instead of failing a literal
+    // join under the worktree root.
     if (taskRunId) {
-      openFile(stripped, taskRunId);
+      if (isAbsolute) {
+        openFile(stripped, taskRunId);
+        return;
+      }
+      resolveTaskRunFile(taskRunId, stripped)
+        .then((resolved) => {
+          if (resolved.root && resolved.relative_path) {
+            openFile(`${resolved.root}/${resolved.relative_path}`, taskRunId);
+          } else {
+            openFile(stripped, taskRunId);
+          }
+        })
+        .catch(() => openFile(stripped, taskRunId));
       return;
     }
 
     // For project-scoped opens the client maintains a virtual file tree keyed
     // by a leading slash; try to land on a node so the tree can highlight /
-    // expand the right ancestors. The server will normalize the eventual
-    // request, so a missing node is not fatal — just a UX nicety.
+    // expand the right ancestors. Comparisons use normalized keys so macOS
+    // NFD names match typed NFC references.
     const normalized = stripped.startsWith("/") ? stripped : `/${stripped}`;
     let targetNode = findNodeByPath(fileTree, normalized);
 
@@ -1155,24 +1320,40 @@ export const useFilesStore = create<FilesStore>()((set, get) => ({
       if (fileName) {
         targetNode = findNodeInTree(
           fileTree,
-          (node) => node.type === FileNodeType.File && node.name === fileName,
+          (node) =>
+            node.type === FileNodeType.File &&
+            fileNamesEqual(node.name, fileName),
         );
       }
     }
 
-    const resolvedPath = targetNode?.path ?? normalized;
-
     if (targetNode) {
-      const parts = targetNode.path.split("/").filter(Boolean);
-      let currentPath = "";
-      for (let i = 0; i < parts.length - 1; i++) {
-        currentPath += `/${parts[i]}`;
-        expandPath(currentPath);
-      }
+      expandAncestors(expandPath, targetNode.path);
       selectNode(targetNode.path);
+      openFile(targetNode.path);
+      return;
     }
 
-    openFile(resolvedPath);
+    // Tree miss: the lazily loaded tree is not authoritative. For relative
+    // references, ask the server's name index (shortest-path rule) before
+    // falling back to the literal path.
+    const { projectId } = state;
+    if (!projectId || isAbsolute) {
+      openFile(normalized);
+      return;
+    }
+    resolveProjectFile(projectId, stripped)
+      .then((resolved) => {
+        if (resolved.relative_path) {
+          const resolvedPath = `/${resolved.relative_path}`;
+          expandAncestors(expandPath, resolvedPath);
+          selectNode(resolvedPath);
+          openFile(resolvedPath);
+        } else {
+          openFile(normalized);
+        }
+      })
+      .catch(() => openFile(normalized));
   },
 
   notifyFileModified: (path) => {

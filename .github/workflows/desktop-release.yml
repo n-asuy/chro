@@ -201,8 +201,8 @@ jobs:
        github.event.inputs.target_os == 'windows')
     runs-on: windows-latest
     # SSL.com eSigner (cloud code signing) credentials. Exposed as env so step
-    # `if:` guards can detect their presence; the signing action reads them from
-    # `secrets` directly. Absent on forks/PRs, so those builds stay unsigned.
+    # `if:` guards and Tauri's signCommand wrapper can detect/use them. Absent
+    # on forks/manual test builds, so those builds stay unsigned.
     env:
       ES_USERNAME: ${{ secrets.ES_USERNAME }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
@@ -218,7 +218,12 @@ jobs:
       # App Control on end-user machines, so refuse to publish one. Manual
       # (workflow_dispatch) builds may stay unsigned for internal testing.
       - name: Require code-signing for tagged releases
-        if: startsWith(github.ref, 'refs/tags/') && env.ES_USERNAME == ''
+        if: >
+          startsWith(github.ref, 'refs/tags/') &&
+          (env.ES_USERNAME == '' ||
+           env.ES_PASSWORD == '' ||
+           env.ES_CREDENTIAL_ID == '' ||
+           env.ES_TOTP_SECRET == '')
         shell: bash
         run: |
           echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET). Refusing to publish an unsigned Windows release that Smart App Control will block." >&2
@@ -256,53 +261,98 @@ jobs:
           VERSION=$(node -p "require('./apps/desktop/package.json').version")
           echo "value=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Package desktop (Windows x64)
+      # The action bootstraps SSL.com's Java CodeSignTool and exports
+      # CODE_SIGN_TOOL_PATH. Tauri then calls scripts/sign-windows.ps1 through
+      # bundle.windows.signCommand for every Windows binary at the correct point
+      # in the bundle lifecycle.
+      - name: Setup SSL.com CodeSignTool
+        if: >
+          env.ES_USERNAME != '' &&
+          env.ES_PASSWORD != '' &&
+          env.ES_CREDENTIAL_ID != '' &&
+          env.ES_TOTP_SECRET != ''
+        uses: sslcom/esigner-codesign@v1.3.2
+        with:
+          command: --version
+          environment_name: PROD
+
+      - name: Package signed desktop (Windows x64)
+        if: >
+          env.ES_USERNAME != '' &&
+          env.ES_PASSWORD != '' &&
+          env.ES_CREDENTIAL_ID != '' &&
+          env.ES_TOTP_SECRET != ''
         env:
           NODE_ENV: production
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun ./apps/desktop/scripts/deployer.ts package --project desktop -- --win --x64
+
+      - name: Package unsigned desktop (manual test build)
+        if: >
+          !startsWith(github.ref, 'refs/tags/') &&
+          (env.ES_USERNAME == '' ||
+           env.ES_PASSWORD == '' ||
+           env.ES_CREDENTIAL_ID == '' ||
+           env.ES_TOTP_SECRET == '')
+        env:
+          NODE_ENV: production
         run: bun ./apps/desktop/scripts/deployer.ts package --project desktop --skip-sign -- --win --x64
 
-      # Sign the NSIS installer with SSL.com eSigner (cloud). The Windows build
-      # runs with --skip-sign, which disables Tauri updater artifacts, so there
-      # is no updater hash/signature to invalidate by signing the installer
-      # post-build. Skipped entirely when eSigner secrets are absent, so
-      # unsigned test builds keep working unchanged.
-      #
-      # NOTE: this signs the downloaded installer (the artifact Smart App Control
-      # inspects at install time). Signing the inner app binaries so the
-      # installed chro.exe also clears SAC at launch requires build-time signing
-      # via Tauri `bundle.windows.signCommand`; tracked as a follow-up.
-      - name: Locate Windows installer
-        id: win_installer
-        if: env.ES_USERNAME != ''
-        shell: bash
+      - name: Verify packaged Windows signatures
+        if: >
+          env.ES_USERNAME != '' &&
+          env.ES_PASSWORD != '' &&
+          env.ES_CREDENTIAL_ID != '' &&
+          env.ES_TOTP_SECRET != ''
+        shell: pwsh
         run: |
-          set -euo pipefail
-          exe="$(ls apps/desktop/release/${{ steps.desktop_version.outputs.value }}/*-setup.exe | head -1)"
-          echo "path=$exe" >> "$GITHUB_OUTPUT"
+          $releaseDir = "apps/desktop/release/${{ steps.desktop_version.outputs.value }}"
+          $installer = Get-ChildItem -Path $releaseDir -Filter "*-setup.exe" |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "No Windows installer found in '$releaseDir'."
+          }
 
-      - name: Sign Windows installer (SSL.com eSigner)
-        if: env.ES_USERNAME != ''
-        uses: sslcom/esigner-codesign@v1.3.2
-        with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ steps.win_installer.outputs.path }}
-          output_path: ${{ runner.temp }}/esigner-signed
-          environment_name: PROD
+          $installerSignature = Get-AuthenticodeSignature -FilePath $installer.FullName
+          if ($installerSignature.Status -ne "Valid" -or
+              $null -eq $installerSignature.SignerCertificate) {
+            throw "Installer signature is not valid: $($installerSignature.StatusMessage)"
+          }
+          Write-Host "Installer signer:" $installerSignature.SignerCertificate.Subject
 
-      - name: Replace installer with signed copy
-        if: env.ES_USERNAME != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          signed="${{ runner.temp }}/esigner-signed/$(basename '${{ steps.win_installer.outputs.path }}')"
-          test -f "$signed"
-          cp "$signed" "${{ steps.win_installer.outputs.path }}"
+          # Inspect the actual payload that users receive, not the build tree
+          # that Tauri restores to its unsigned state after bundling.
+          $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
+          $extractDir = Join-Path $env:RUNNER_TEMP "chro-installer-$([guid]::NewGuid())"
+          New-Item -ItemType Directory -Path $extractDir | Out-Null
+          & $sevenZip x $installer.FullName "-o$extractDir" -y | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed to extract the Windows installer."
+          }
+
+          $packagedExecutables = @(
+            Get-ChildItem -Path $extractDir -Recurse -File -Filter "*.exe"
+          )
+          $expectedFiles = @(
+            "chro-desktop.exe",
+            "chro-server.exe",
+            "chro.exe"
+          )
+          foreach ($expectedFile in $expectedFiles) {
+            $packagedFile = $packagedExecutables |
+              Where-Object { $_.Name -eq $expectedFile } |
+              Select-Object -First 1
+            if ($null -eq $packagedFile) {
+              throw "Installer payload is missing an expected binary: $expectedFile"
+            }
+            $packagedSignature = Get-AuthenticodeSignature -FilePath $packagedFile.FullName
+            if ($packagedSignature.Status -ne "Valid" -or
+                $null -eq $packagedSignature.SignerCertificate) {
+              throw "Packaged binary signature is not valid for '$expectedFile': $($packagedSignature.StatusMessage)"
+            }
+            Write-Host "$expectedFile signer:" $packagedSignature.SignerCertificate.Subject
+          }
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

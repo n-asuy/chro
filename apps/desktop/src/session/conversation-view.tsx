@@ -37,6 +37,7 @@ import { Markdown } from "./components/markdown";
 import RawLogText from "./components/raw-log-text";
 import { TextShimmer } from "./components/text-shimmer";
 import { ThinkingStep, ThinkingSteps } from "./components/thinking-steps";
+import { useOpenPathLink, usePathLink } from "./components/use-path-link";
 import { useConversationActions } from "./conversation-actions";
 import { useImageMetadata } from "./hooks/use-image-metadata";
 import type {
@@ -253,7 +254,9 @@ const MessageActions = ({
                 <GitBranch className="h-3.5 w-3.5" />
               </button>
             </TooltipTrigger>
-            <TooltipContent side="bottom">{t("continueFromHere")}</TooltipContent>
+            <TooltipContent side="bottom">
+              {t("continueFromHere")}
+            </TooltipContent>
           </Tooltip>
         </TooltipProvider>
       ) : null}
@@ -533,7 +536,6 @@ const ApiErrorEntry = ({ content }: { content: string }) => {
 
 type AgentThinkingStepsProps = {
   segment: ThinkingStepsSegment;
-  onFilePathClick?: (path: string) => void;
 };
 
 /**
@@ -543,10 +545,7 @@ type AgentThinkingStepsProps = {
  * stays collapsed until the user opens it; the one exception is a tool
  * waiting for approval, which forces it open so the prompt is reachable.
  */
-const AgentThinkingSteps = ({
-  segment,
-  onFilePathClick,
-}: AgentThinkingStepsProps) => {
+const AgentThinkingSteps = ({ segment }: AgentThinkingStepsProps) => {
   const { t } = useLanguage();
   const { entries, live, awaitingApproval } = segment;
   const [open, setOpen] = useState(awaitingApproval);
@@ -584,10 +583,7 @@ const AgentThinkingSteps = ({
               animateIn={live}
               isLast={isLast}
             >
-              <ToolCallEntryContent
-                entry={entry as ToolUseEntry}
-                onFilePathClick={onFilePathClick}
-              />
+              <ToolCallEntryContent entry={entry as ToolUseEntry} />
             </ThinkingStep>
           );
         }
@@ -898,13 +894,54 @@ const toolStatusTone = (status: ToolStatus): string => {
 
 type ToolCallEntryContentProps = {
   entry: ToolUseEntry;
-  onFilePathClick?: (path: string) => void;
 };
 
-const ToolCallEntryContent = ({
-  entry,
-  onFilePathClick,
-}: ToolCallEntryContentProps) => {
+/**
+ * The one-line summary shown beside a tool call. When the summary is exactly
+ * the file the tool touched, and that file resolves, it doubles as a link to
+ * open it.
+ */
+const ToolSummaryText = ({
+  summary,
+  path,
+}: {
+  summary: string;
+  path: string | null;
+}) => {
+  const target = usePathLink(path && summary === path ? path : null);
+  const openPathLink = useOpenPathLink();
+
+  if (!target) {
+    return (
+      <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+        {summary}
+      </span>
+    );
+  }
+
+  const activate = (event: React.SyntheticEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openPathLink(target);
+  };
+
+  return (
+    <span
+      role="link"
+      tabIndex={0}
+      onClick={activate}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") activate(event);
+      }}
+      className="min-w-0 flex-1 truncate font-mono text-[11px] text-blue-600 dark:text-blue-400 hover:underline underline-offset-2 cursor-pointer"
+      title={target.absolutePath}
+    >
+      {summary}
+    </span>
+  );
+};
+
+const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
   const { action_type: action, status, tool_name } = entry.entry_type;
   const { t } = useLanguage();
 
@@ -1248,17 +1285,6 @@ const ToolCallEntryContent = ({
     action.path.length > 0
       ? action.path
       : null;
-  const handleFilePathClick = (event: React.SyntheticEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (filePathTarget && onFilePathClick) {
-      onFilePathClick(filePathTarget);
-    }
-  };
-  const isClickablePathSummary =
-    Boolean(filePathTarget) &&
-    Boolean(onFilePathClick) &&
-    summaryText === filePathTarget;
 
   const handleHeaderKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (
     event,
@@ -1285,27 +1311,9 @@ const ToolCallEntryContent = ({
         )}
       >
         <span className="min-w-0 shrink font-medium">{label}</span>
-        {summaryText &&
-          (isClickablePathSummary ? (
-            <span
-              role="link"
-              tabIndex={0}
-              onClick={handleFilePathClick}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  handleFilePathClick(event);
-                }
-              }}
-              className="min-w-0 flex-1 truncate font-mono text-[11px] text-blue-600 hover:underline underline-offset-2 cursor-pointer"
-              title={summaryText}
-            >
-              {summaryText}
-            </span>
-          ) : (
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-              {summaryText}
-            </span>
-          ))}
+        {summaryText && (
+          <ToolSummaryText summary={summaryText} path={filePathTarget} />
+        )}
         {canExpand && (
           <ChevronDown
             className={cn(
@@ -1433,7 +1441,6 @@ export const UserMessageContent = ({ content }: { content: string }) => {
 const renderEntryBody = (
   entry: NormalizedEntry,
   onWikilinkClick?: (path: string, subpath?: string) => void,
-  onFilePathClick?: (path: string) => void,
 ) => {
   switch (entry.entry_type.type) {
     case "user_message":
@@ -1441,12 +1448,7 @@ const renderEntryBody = (
     case "assistant_message":
       return (
         <div {...{ [SESSION_SELECT_TEXT_ATTR]: "true" }}>
-          <Markdown
-            onWikilinkClick={onWikilinkClick}
-            onFilePathClick={onFilePathClick}
-          >
-            {entry.content}
-          </Markdown>
+          <Markdown onWikilinkClick={onWikilinkClick}>{entry.content}</Markdown>
         </div>
       );
     case "system_message": {
@@ -1500,7 +1502,6 @@ type ConversationEntriesProps = {
   entries: DisplayEntry[];
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
   onWikilinkClick?: (path: string, subpath?: string) => void;
-  onFilePathClick?: (path: string) => void;
   scrollContainerRef?: MutableRefObject<HTMLDivElement | null>;
   onScrollAnchorWillAdjust?: () => void;
   onScrollAnchorAdjusted?: () => void;
@@ -1535,7 +1536,6 @@ export const ConversationEntries = memo(
     entries,
     endRef,
     onWikilinkClick,
-    onFilePathClick,
     scrollContainerRef,
     onScrollAnchorWillAdjust,
     onScrollAnchorAdjusted,
@@ -1564,16 +1564,6 @@ export const ConversationEntries = memo(
       [hasWikilinkClick],
     );
 
-    const onFilePathClickRef = useRef(onFilePathClick);
-    onFilePathClickRef.current = onFilePathClick;
-    const hasFilePathClick = onFilePathClick !== undefined;
-    const stableOnFilePathClick = useMemo(
-      () =>
-        hasFilePathClick
-          ? (path: string) => onFilePathClickRef.current?.(path)
-          : undefined,
-      [hasFilePathClick],
-    );
     const internalScrollRef = useRef<HTMLDivElement>(null);
     const prevVisibleEntriesLengthRef = useRef(entries.length);
     const prevFirstEntryKeyRef = useRef<string | null>(entries[0]?.key ?? null);
@@ -1758,7 +1748,6 @@ export const ConversationEntries = memo(
           <EntryList
             entries={visibleEntries}
             onWikilinkClick={stableOnWikilinkClick}
-            onFilePathClick={stableOnFilePathClick}
             endRef={endRef}
             onForkFromRun={onForkFromRun}
           />
@@ -1773,7 +1762,6 @@ export const ConversationEntries = memo(
         <EntryList
           entries={visibleEntries}
           onWikilinkClick={stableOnWikilinkClick}
-          onFilePathClick={stableOnFilePathClick}
           endRef={endRef}
           onForkFromRun={onForkFromRun}
         />
@@ -1785,7 +1773,6 @@ export const ConversationEntries = memo(
 interface EntryListProps {
   entries: DisplayEntry[];
   onWikilinkClick?: (path: string, subpath?: string) => void;
-  onFilePathClick?: (path: string) => void;
   endRef?: MutableRefObject<HTMLDivElement | null> | null;
   onForkFromRun?: (runId: string) => void;
 }
@@ -1880,14 +1867,13 @@ function createGroupingCache(): GroupingCache {
 interface GroupProps {
   group: EntryGroup;
   onWikilinkClick?: (path: string, subpath?: string) => void;
-  onFilePathClick?: (path: string) => void;
   /** Branch from the run this turn belongs to. Omitted when the session cannot
    * be forked (e.g. its worktree is gone). */
   onForkFromRun?: (runId: string) => void;
 }
 
 const Group = memo(
-  ({ group, onWikilinkClick, onFilePathClick, onForkFromRun }: GroupProps) => {
+  ({ group, onWikilinkClick, onForkFromRun }: GroupProps) => {
     const userMessage =
       group.userEntry?.type === "NORMALIZED_ENTRY"
         ? group.userEntry.content
@@ -1936,7 +1922,6 @@ const Group = memo(
             <EntryRenderer
               displayEntry={group.userEntry}
               onWikilinkClick={onWikilinkClick}
-              onFilePathClick={onFilePathClick}
             />
           </ExpandableUserMessage>
         )}
@@ -1944,15 +1929,11 @@ const Group = memo(
           <div key={segment.key} className="mx-auto w-full max-w-2xl">
             <div className="pb-2">
               {segment.type === "THINKING_STEPS" ? (
-                <AgentThinkingSteps
-                  segment={segment}
-                  onFilePathClick={onFilePathClick}
-                />
+                <AgentThinkingSteps segment={segment} />
               ) : (
                 <EntryRenderer
                   displayEntry={segment.entry}
                   onWikilinkClick={onWikilinkClick}
-                  onFilePathClick={onFilePathClick}
                   messageTimestamp={turnTimestamp}
                   showActions={segment.key === lastAssistantKey}
                   onFork={
@@ -1971,18 +1952,11 @@ const Group = memo(
   (prev, next) =>
     prev.group === next.group &&
     prev.onWikilinkClick === next.onWikilinkClick &&
-    prev.onFilePathClick === next.onFilePathClick &&
     prev.onForkFromRun === next.onForkFromRun,
 );
 
 export const EntryList = memo(
-  ({
-    entries,
-    onWikilinkClick,
-    onFilePathClick,
-    endRef,
-    onForkFromRun,
-  }: EntryListProps) => {
+  ({ entries, onWikilinkClick, endRef, onForkFromRun }: EntryListProps) => {
     const groupingCacheRef = useRef<GroupingCache | null>(null);
     if (groupingCacheRef.current === null) {
       groupingCacheRef.current = createGroupingCache();
@@ -1997,7 +1971,6 @@ export const EntryList = memo(
             onForkFromRun={onForkFromRun}
             group={group}
             onWikilinkClick={onWikilinkClick}
-            onFilePathClick={onFilePathClick}
           />
         ))}
         <div
@@ -2016,7 +1989,6 @@ export const EntryList = memo(
 interface EntryRendererProps {
   displayEntry: DisplayEntry;
   onWikilinkClick?: (path: string, subpath?: string) => void;
-  onFilePathClick?: (path: string) => void;
   /**
    * Fallback timestamp for assistant messages, taken from the turn's user
    * message (run creation time). The backend does not stamp individual
@@ -2037,7 +2009,6 @@ const EntryRenderer = memo(
   ({
     displayEntry,
     onWikilinkClick,
-    onFilePathClick,
     messageTimestamp,
     showActions,
     onFork,
@@ -2081,7 +2052,7 @@ const EntryRenderer = memo(
       >
         <div className="flex items-start gap-3">
           <div className="flex-1 space-y-2">
-            {renderEntryBody(entry, onWikilinkClick, onFilePathClick)}
+            {renderEntryBody(entry, onWikilinkClick)}
             {showAssistantActions && (
               <MessageActions
                 copyText={entry.content}

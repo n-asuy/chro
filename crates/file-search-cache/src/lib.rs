@@ -2,29 +2,74 @@ use std::{
     collections::{HashMap, HashSet},
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{Arc, RwLock},
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
-use fst::{Map, MapBuilder};
 use git2::{Repository, Sort};
 use ignore::WalkBuilder;
-use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
+use unicode_normalization::UnicodeNormalization;
 
+mod matcher;
 mod query;
 
+use matcher::{
+    match_contiguous, match_fuzzy, reference_keys, reference_matches, shorter_path, HISTORY_MAX,
+};
+
 /// Search mode for different use cases
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     #[default]
     TaskForm, // Default: exclude ignored files (clean results)
     Settings, // Include ignored files (for project config like .env)
+}
+
+/// What a name search should consider and how much of it to return.
+///
+/// `files_only` is applied before `limit`, which matters: a caller that
+/// inserts a file reference and discards directories client-side would
+/// otherwise lose result slots to entries it can never use.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchOptions {
+    pub mode: SearchMode,
+    pub files_only: bool,
+    pub limit: usize,
+}
+
+impl SearchOptions {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            mode: SearchMode::default(),
+            files_only: false,
+            limit,
+        }
+    }
+
+    pub fn with_mode(mut self, mode: SearchMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn files_only(mut self, files_only: bool) -> Self {
+        self.files_only = files_only;
+        self
+    }
+
+    /// Whether an indexed entry is eligible under these options.
+    fn includes(&self, file: &IndexedFile) -> bool {
+        if self.files_only && !file.is_file {
+            return false;
+        }
+        !(matches!(self.mode, SearchMode::TaskForm) && file.is_ignored)
+    }
 }
 
 /// Search result returned to clients
@@ -58,31 +103,121 @@ pub struct FileStat {
 /// File statistics for a repository
 pub type FileStats = HashMap<String, FileStat>;
 
-/// FST-indexed file search result
+/// One entry of the per-repository name index.
 #[derive(Clone, Debug)]
 pub struct IndexedFile {
     pub path: String,
     pub is_file: bool,
-    pub match_type: SearchMatchType,
-    pub path_lowercase: Arc<str>,
+    /// Comparison key: NFC-normalized and lowercased relative path. macOS
+    /// (APFS/HFS+) hands back decomposed (NFD) names while queries typed in a
+    /// webview are precomposed (NFC); comparing normalized keys makes the two
+    /// meet. See [`normalize_key`].
+    pub path_key: Arc<str>,
+    /// Normalized `aliases` declared in the document's frontmatter: the other
+    /// names it answers to. Empty for everything but markdown.
+    pub alias_keys: Vec<Arc<str>>,
     pub is_ignored: bool,
 }
 
-/// Cached repository data with FST index and git stats
-#[derive(Clone)]
-pub struct CachedRepo {
-    pub head_sha: String,
-    pub fst_index: Map<Vec<u8>>,
-    pub indexed_files: Vec<IndexedFile>,
+/// Every name-facing fact about one repository root.
+///
+/// The name side (`NameIndex`) comes from a filesystem walk and changes when
+/// files are created, deleted, renamed or re-aliased. The history side
+/// (`stats`) comes from git and changes when HEAD moves. They are refreshed
+/// independently, so a commit never forces a walk and a file write never
+/// forces a revwalk.
+pub struct RepoIndex {
+    names: Arc<NameIndex>,
     pub stats: Arc<FileStats>,
-    pub build_ts: Instant,
 }
 
-/// Cache miss error
-#[derive(Debug)]
-pub enum CacheError {
-    Miss,
-    BuildError(String),
+/// The walk product: entries plus the lookups that make link resolution a
+/// hash probe instead of a scan over every entry.
+struct NameIndex {
+    files: Vec<IndexedFile>,
+    /// Normalized basename -> positions in `files`.
+    by_name: HashMap<Arc<str>, Vec<u32>>,
+    /// Normalized frontmatter alias -> positions in `files`.
+    by_alias: HashMap<Arc<str>, Vec<u32>>,
+    /// The walk hit [`MAX_INDEX_ENTRIES`] and was abandoned. A partial index
+    /// would resolve links to the wrong file, so `files` is left empty.
+    overflowed: bool,
+}
+
+impl RepoIndex {
+    pub fn new(files: Vec<IndexedFile>, stats: Arc<FileStats>) -> Self {
+        Self::from_walk(
+            IndexWalk {
+                files,
+                overflowed: false,
+            },
+            stats,
+        )
+    }
+
+    fn from_walk(walk: IndexWalk, stats: Arc<FileStats>) -> Self {
+        let files = if walk.overflowed {
+            Vec::new()
+        } else {
+            walk.files
+        };
+        let mut by_name: HashMap<Arc<str>, Vec<u32>> = HashMap::new();
+        let mut by_alias: HashMap<Arc<str>, Vec<u32>> = HashMap::new();
+        for (position, file) in files.iter().enumerate() {
+            let position = position as u32;
+            let basename = file.path_key.rsplit('/').next().unwrap_or(&file.path_key);
+            by_name
+                .entry(Arc::from(basename))
+                .or_default()
+                .push(position);
+            for alias in &file.alias_keys {
+                by_alias.entry(alias.clone()).or_default().push(position);
+            }
+        }
+        Self {
+            names: Arc::new(NameIndex {
+                files,
+                by_name,
+                by_alias,
+                overflowed: walk.overflowed,
+            }),
+            stats,
+        }
+    }
+
+    /// The same names with fresh git history: what a HEAD move produces.
+    pub fn with_stats(&self, stats: Arc<FileStats>) -> Self {
+        Self {
+            names: self.names.clone(),
+            stats,
+        }
+    }
+
+    pub fn files(&self) -> &[IndexedFile] {
+        &self.names.files
+    }
+
+    pub fn is_overflowed(&self) -> bool {
+        self.names.overflowed
+    }
+
+    fn entry_by_path_key(&self, path_key: &str) -> Option<&IndexedFile> {
+        let basename = path_key.rsplit('/').next().unwrap_or(path_key);
+        self.names
+            .by_name
+            .get(basename)?
+            .iter()
+            .map(|&position| &self.names.files[position as usize])
+            .find(|file| file.path_key.as_ref() == path_key)
+    }
+}
+
+/// Canonical comparison key for file-name matching: Unicode NFC normalization
+/// followed by full lowercasing. Every name comparison in this crate goes
+/// through this single function so index keys and queries can never disagree
+/// on normalization form or case folding.
+pub fn normalize_key(input: &str) -> String {
+    input.nfc().collect::<String>().to_lowercase()
 }
 
 #[derive(Debug, Error)]
@@ -91,58 +226,136 @@ pub enum FileSearchError {
     RepoMissing(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Git(#[from] git2::Error),
-    #[error(transparent)]
-    Fst(#[from] fst::Error),
     #[error("invalid repository: {0}")]
     InvalidRepository(String),
 }
 
 /// Configuration constants for ranking algorithm
 const DEFAULT_COMMIT_LIMIT: usize = 100;
-const BASE_MATCH_SCORE_FILENAME: i64 = 100;
-const BASE_MATCH_SCORE_DIRNAME: i64 = 10;
-const BASE_MATCH_SCORE_FULLPATH: i64 = 1;
-const RECENCY_WEIGHT: i64 = 2;
+/// Weights for the git-history component. Recency dominates frequency: a file
+/// touched in the last commit matters more than one touched often long ago.
+const RECENCY_WEIGHT: i64 = 8;
 const FREQUENCY_WEIGHT: i64 = 1;
-/// Approximate aggregate memory budget for cached repository indexes. Moka's
-/// capacity is expressed in KiB via `cached_repo_weight_kib`.
-const CACHE_MAX_WEIGHT_KIB: u64 = 128 * 1024;
+/// Extensions whose frontmatter is read for aliases during an index build.
+const ALIAS_BEARING_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+/// Entries a single root may contribute before its walk is abandoned. A root
+/// past this (a home directory registered as a project, a monorepo with
+/// build output checked in) is not something links resolve against; the cap
+/// bounds both the walk and the memory an index can take.
+pub const MAX_INDEX_ENTRIES: usize = 250_000;
+/// Roots indexed at the same time. Cold multi-root probes ask for many
+/// indexes at once; this keeps them from saturating the blocking pool.
+const BUILD_CONCURRENCY: usize = 2;
 
-/// File search cache with FST indexing
+/// Which side of a [`RepoIndex`] a request wants rebuilt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rebuild {
+    /// Filesystem walk: files appeared, vanished, moved or changed aliases.
+    Names,
+    /// Git revwalk: HEAD moved.
+    History,
+    Full,
+}
+
+impl Rebuild {
+    fn merge(self, other: Rebuild) -> Rebuild {
+        if self == other {
+            self
+        } else {
+            Rebuild::Full
+        }
+    }
+}
+
+struct BuildRequest {
+    repo: PathBuf,
+    scope: Rebuild,
+}
+
+type IndexMap = Arc<RwLock<HashMap<PathBuf, Arc<RepoIndex>>>>;
+
+/// Per-root name indexes with watcher-driven freshness.
+///
+/// Reads never touch the filesystem or git: a warm index is served as-is, and
+/// stays served while a rebuild runs in the background. Freshness is the
+/// watchers' job (see `invalidate` / `invalidate_history` /
+/// `note_worktree_changes`), not something a read re-verifies. A cold read
+/// waits for the first build instead of answering from a directory walk, so
+/// warm and cold callers can never disagree about what a name resolves to.
 pub struct FileSearchCache {
-    // Cache values are shared so a lookup does not clone a repository's full
-    // FST and path vectors into a second large allocation.
-    cache: Cache<PathBuf, Arc<CachedRepo>>,
-    build_queue: mpsc::Sender<PathBuf>,
+    indexes: IndexMap,
+    build_queue: mpsc::Sender<BuildRequest>,
+    /// Bumped after every completed build; cold readers wait on it.
+    built: watch::Sender<u64>,
 }
 
 impl FileSearchCache {
     pub fn new() -> Self {
         // A bounded queue prevents rapid watcher invalidations from retaining
-        // an unbounded number of repository paths.
+        // an unbounded number of repository paths; the worker coalesces.
         let (build_sender, build_receiver) = mpsc::channel(64);
+        let (built, _) = watch::channel(0u64);
+        let indexes: IndexMap = Arc::new(RwLock::new(HashMap::new()));
 
-        let cache = Cache::builder()
-            .weigher(|_path: &PathBuf, repo: &Arc<CachedRepo>| cached_repo_weight_kib(repo))
-            .max_capacity(CACHE_MAX_WEIGHT_KIB)
-            .time_to_live(Duration::from_secs(3600))
-            .build();
-
-        let cache_for_worker = cache.clone();
-
-        tokio::spawn(async move {
-            Self::background_worker(build_receiver, cache_for_worker).await;
-        });
+        tokio::spawn(Self::background_worker(
+            build_receiver,
+            indexes.clone(),
+            built.clone(),
+        ));
 
         Self {
-            cache,
+            indexes,
             build_queue: build_sender,
+            built,
         }
     }
 
-    /// Search files by name/path in a repository using the cached index.
+    fn cached(&self, repo_path: &Path) -> Option<Arc<RepoIndex>> {
+        self.indexes
+            .read()
+            .expect("index map poisoned")
+            .get(repo_path)
+            .cloned()
+    }
+
+    fn enqueue(&self, repo_path: &Path, scope: Rebuild) {
+        let request = BuildRequest {
+            repo: repo_path.to_path_buf(),
+            scope,
+        };
+        match self.build_queue.try_send(request) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(request)) => {
+                debug!(repo = %request.repo.display(), "index build queue full; request coalesces with a queued one")
+            }
+            Err(mpsc::error::TrySendError::Closed(request)) => {
+                warn!(repo = %request.repo.display(), "index build queue closed")
+            }
+        }
+    }
+
+    /// The root's index, building it first if this is the root's first
+    /// request. Waits only for a cold build; a stale index is returned
+    /// immediately while its rebuild runs.
+    pub async fn index(&self, repo_path: &Path) -> Arc<RepoIndex> {
+        let mut built = self.built.subscribe();
+        loop {
+            // Mark the current generation seen *before* the lookup so a build
+            // that lands between the lookup and the wait still wakes us.
+            built.borrow_and_update();
+            if let Some(index) = self.cached(repo_path) {
+                return index;
+            }
+            self.enqueue(repo_path, Rebuild::Full);
+            if built.changed().await.is_err() {
+                // The worker is gone; an empty index answers "nothing here"
+                // rather than hanging every caller.
+                return Arc::new(RepoIndex::new(Vec::new(), Arc::new(FileStats::new())));
+            }
+        }
+    }
+
+    /// Search files by name/path in a repository.
     ///
     /// This is a pure name/path search: it never falls back to scanning file
     /// contents. Full-text search is a separate, explicit operation
@@ -152,94 +365,107 @@ impl FileSearchCache {
         &self,
         repo_path: &Path,
         query: &str,
-        mode: SearchMode,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>, CacheError> {
-        let repo_path_buf = repo_path.to_path_buf();
-
-        if let Some(cached) = self.cache.get(&repo_path_buf).await {
-            if let Ok(head_sha) = get_head_sha(&repo_path_buf) {
-                if head_sha == cached.head_sha {
-                    return Ok(search_names_in_cache(&cached, query, mode, limit));
-                }
-            }
-        }
-
-        if let Err(mpsc::error::TrySendError::Closed(path)) =
-            self.build_queue.try_send(repo_path_buf)
-        {
-            warn!("Cache build queue closed before enqueuing {:?}", path);
-        }
-
-        Err(CacheError::Miss)
+        options: SearchOptions,
+    ) -> Vec<SearchResult> {
+        let index = self.index(repo_path).await;
+        search_names_in_index(&index, query, options)
     }
 
-    /// Pre-warm cache for given repository
-    pub async fn warm(&self, repo_path: &Path) -> Result<(), FileSearchError> {
-        if !repo_path.exists() {
-            return Err(FileSearchError::RepoMissing(
-                repo_path.display().to_string(),
-            ));
-        }
-
-        if let Err(mpsc::error::TrySendError::Closed(path)) =
-            self.build_queue.try_send(repo_path.to_path_buf())
-        {
-            error!("Cache build queue closed before warming {:?}", path);
-        }
-        Ok(())
+    /// Resolve a file reference (bare name like `note.md`, or a path suffix
+    /// like `docs/note.md`) to its repository-relative path.
+    pub async fn resolve(&self, repo_path: &Path, reference: &str) -> Option<String> {
+        let index = self.index(repo_path).await;
+        resolve_name_in_index(&index, reference)
     }
 
-    /// Queue a rebuild of the repository's index. Called by the git state
-    /// watcher when HEAD moves (branch switch, commit), so the next search
-    /// hits a fresh cache instead of the slow filesystem fallback.
+    /// Build the root's index ahead of its first request. A no-op for a root
+    /// that already has one.
+    pub fn warm(&self, repo_path: &Path) {
+        if self.cached(repo_path).is_none() {
+            self.enqueue(repo_path, Rebuild::Full);
+        }
+    }
+
+    /// Rebuild both sides. For the watcher's overflow signal, when it cannot
+    /// say what changed.
     pub fn invalidate(&self, repo_path: &Path) {
-        if let Err(mpsc::error::TrySendError::Closed(path)) =
-            self.build_queue.try_send(repo_path.to_path_buf())
-        {
-            warn!("Cache build queue closed before invalidating {:?}", path);
+        self.enqueue(repo_path, Rebuild::Full);
+    }
+
+    /// HEAD moved: refresh the git history ranking. The files on disk are the
+    /// watcher's concern, so this never walks the tree.
+    pub fn invalidate_history(&self, repo_path: &Path) {
+        self.enqueue(repo_path, Rebuild::History);
+    }
+
+    /// Feed a batch of worktree file events into the freshness logic. Queues a
+    /// walk only when the batch can change the name index (create, delete,
+    /// rename, ignore-rule change, alias edit); pure content modifications are
+    /// ignored.
+    ///
+    /// A repository nobody has searched yet has no index to keep fresh, so
+    /// those batches are dropped instead of triggering speculative builds.
+    pub fn note_worktree_changes(&self, repo_path: &Path, changes: &[WorktreeChange]) {
+        let Some(index) = self.cached(repo_path) else {
+            return;
+        };
+        if changes_require_rebuild(&index, repo_path, changes) {
+            self.enqueue(repo_path, Rebuild::Names);
         }
     }
 
-    /// Background worker for cache building
     async fn background_worker(
-        mut build_receiver: mpsc::Receiver<PathBuf>,
-        cache: Cache<PathBuf, Arc<CachedRepo>>,
+        mut requests: mpsc::Receiver<BuildRequest>,
+        indexes: IndexMap,
+        built: watch::Sender<u64>,
     ) {
-        while let Some(repo_path) = build_receiver.recv().await {
-            // Coalesce duplicate invalidations already waiting in the queue.
-            let mut pending = HashSet::from([repo_path]);
-            while let Ok(path) = build_receiver.try_recv() {
-                pending.insert(path);
+        let limiter = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
+        while let Some(first) = requests.recv().await {
+            // Coalesce everything already waiting: one build per root, with
+            // the union of the requested scopes.
+            let mut pending: HashMap<PathBuf, Rebuild> = HashMap::new();
+            pending.insert(first.repo, first.scope);
+            while let Ok(request) = requests.try_recv() {
+                pending
+                    .entry(request.repo)
+                    .and_modify(|scope| *scope = scope.merge(request.scope))
+                    .or_insert(request.scope);
             }
-            for repo_path in pending {
-                let build_path = repo_path.clone();
-                let built =
-                    tokio::task::spawn_blocking(move || build_repo_cache(&build_path)).await;
-                match built {
-                    Ok(Ok(cached_repo)) => {
-                        cache.insert(repo_path.clone(), Arc::new(cached_repo)).await;
-                        info!("Successfully cached repo: {:?}", repo_path);
+
+            let mut builds = JoinSet::new();
+            for (repo, scope) in pending {
+                let current = indexes
+                    .read()
+                    .expect("index map poisoned")
+                    .get(&repo)
+                    .cloned();
+                let limiter = limiter.clone();
+                builds.spawn(async move {
+                    let _permit = limiter.acquire_owned().await;
+                    let build_repo = repo.clone();
+                    let index = tokio::task::spawn_blocking(move || {
+                        build_index(&build_repo, scope, current)
+                    })
+                    .await;
+                    (repo, index)
+                });
+            }
+            while let Some(joined) = builds.join_next().await {
+                match joined {
+                    Ok((repo, Ok(index))) => {
+                        indexes
+                            .write()
+                            .expect("index map poisoned")
+                            .insert(repo, Arc::new(index));
+                        built.send_modify(|generation| *generation += 1);
                     }
-                    Ok(Err(e)) => {
-                        error!("Failed to cache repo {:?}: {}", repo_path, e);
+                    Ok((repo, Err(error))) => {
+                        warn!(repo = %repo.display(), %error, "index build panicked");
                     }
-                    Err(e) => {
-                        error!("Cache worker failed for {:?}: {}", repo_path, e);
-                    }
+                    Err(error) => warn!(%error, "index build task failed"),
                 }
             }
         }
-    }
-
-    /// Fallback search without cache (filesystem traversal with content search)
-    pub fn search_fallback(
-        &self,
-        repo_path: &Path,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>, FileSearchError> {
-        search_combined(repo_path, query, limit)
     }
 }
 
@@ -249,73 +475,46 @@ impl Default for FileSearchCache {
     }
 }
 
-fn cached_repo_weight_kib(repo: &CachedRepo) -> u32 {
-    let indexed_bytes = repo.indexed_files.iter().fold(0usize, |total, file| {
-        total
-            .saturating_add(std::mem::size_of::<IndexedFile>())
-            .saturating_add(file.path.len())
-            .saturating_add(file.path_lowercase.len())
-    });
-    let stats_bytes = repo.stats.iter().fold(0usize, |total, (path, _stat)| {
-        total
-            .saturating_add(std::mem::size_of::<FileStat>())
-            .saturating_add(path.len())
-    });
-    // The FST stores another compact copy of every lowercase path. Counting
-    // path_lowercase a second time is a conservative proxy for that buffer.
-    let bytes = indexed_bytes
-        .saturating_add(stats_bytes)
-        .saturating_add(
-            repo.indexed_files
-                .iter()
-                .map(|file| file.path_lowercase.len())
-                .sum::<usize>(),
-        )
-        .saturating_add(repo.head_sha.len());
-    bytes
-        .div_ceil(1024)
-        .clamp(1, u32::MAX as usize)
-        .try_into()
-        .unwrap_or(u32::MAX)
+/// Produce the index a request asked for, reusing the untouched side of the
+/// current one. Without a current index every scope is a full build.
+fn build_index(repo_path: &Path, scope: Rebuild, current: Option<Arc<RepoIndex>>) -> RepoIndex {
+    let started = Instant::now();
+    let index = match (scope, current) {
+        (Rebuild::History, Some(current)) => {
+            current.with_stats(Arc::new(collect_file_stats(repo_path)))
+        }
+        (Rebuild::Names, Some(current)) => {
+            RepoIndex::from_walk(walk_index(repo_path), current.stats.clone())
+        }
+        _ => RepoIndex::from_walk(
+            walk_index(repo_path),
+            Arc::new(collect_file_stats(repo_path)),
+        ),
+    };
+    info!(
+        repo = %repo_path.display(),
+        ?scope,
+        entries = index.files().len(),
+        overflowed = index.is_overflowed(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "built name index"
+    );
+    index
 }
 
-/// Build cache entry for a repository
-fn build_repo_cache(repo_path: &Path) -> Result<CachedRepo, FileSearchError> {
-    info!("Building cache for repo: {:?}", repo_path);
-
-    let head_sha = get_head_sha(repo_path)?;
-    let stats = collect_file_stats(repo_path)?;
-    let (indexed_files, fst_map) = build_file_index(repo_path)?;
-
-    Ok(CachedRepo {
-        head_sha,
-        fst_index: fst_map,
-        indexed_files,
-        stats: Arc::new(stats),
-        build_ts: Instant::now(),
-    })
-}
-
-/// Get HEAD SHA from repository
-fn get_head_sha(repo_path: &Path) -> Result<String, FileSearchError> {
-    let repo = Repository::open(repo_path)?;
-    let head = repo.head()?;
-    let oid = head
-        .target()
-        .ok_or_else(|| FileSearchError::InvalidRepository("HEAD has no target".into()))?;
-    Ok(oid.to_string())
-}
-
-/// Collect file statistics from git history
-fn collect_file_stats(repo_path: &Path) -> Result<FileStats, FileSearchError> {
-    let repo = Repository::open(repo_path)?;
+/// File statistics from recent git history. A root that is not a repository
+/// (or has no commits) has no history: every file ranks equally.
+fn collect_file_stats(repo_path: &Path) -> FileStats {
     let mut stats: FileStats = HashMap::new();
-
-    let mut revwalk = repo.revwalk()?;
-    if revwalk.push_head().is_err() {
-        return Ok(stats);
+    let Ok(repo) = Repository::open(repo_path) else {
+        return stats;
+    };
+    let Ok(mut revwalk) = repo.revwalk() else {
+        return stats;
+    };
+    if revwalk.push_head().is_err() || revwalk.set_sorting(Sort::TIME).is_err() {
+        return stats;
     }
-    revwalk.set_sorting(Sort::TIME)?;
 
     for (commit_index, oid_result) in revwalk.take(DEFAULT_COMMIT_LIMIT).enumerate() {
         let Ok(oid) = oid_result else { continue };
@@ -362,13 +561,24 @@ fn collect_file_stats(repo_path: &Path) -> Result<FileStats, FileSearchError> {
         );
     }
 
-    Ok(stats)
+    stats
 }
 
-/// Build FST index from filesystem traversal
-fn build_file_index(repo_path: &Path) -> Result<(Vec<IndexedFile>, Map<Vec<u8>>), FileSearchError> {
+/// The product of a filesystem walk, before it is keyed into a [`RepoIndex`].
+struct IndexWalk {
+    files: Vec<IndexedFile>,
+    overflowed: bool,
+}
+
+/// Walk the root into index entries. See [`walk_index_with_limit`].
+fn walk_index(repo_path: &Path) -> IndexWalk {
+    walk_index_with_limit(repo_path, MAX_INDEX_ENTRIES)
+}
+
+/// Walk the root into index entries, giving up past `limit` entries. A root
+/// that does not exist or cannot be read yields an empty walk.
+fn walk_index_with_limit(repo_path: &Path, limit: usize) -> IndexWalk {
     let mut indexed_files = Vec::new();
-    let mut fst_keys = Vec::new();
 
     let mut builder = WalkBuilder::new(repo_path);
     builder
@@ -403,11 +613,15 @@ fn build_file_index(repo_path: &Path) -> Result<(Vec<IndexedFile>, Map<Vec<u8>>)
         if let Ok(relative_path) = result.path().strip_prefix(repo_path) {
             non_ignored_paths.insert(relative_path.to_path_buf());
         }
+        if non_ignored_paths.len() > limit {
+            return IndexWalk {
+                files: Vec::new(),
+                overflowed: true,
+            };
+        }
     }
 
-    for result in walker {
-        let entry =
-            result.map_err(|e| FileSearchError::Io(std::io::Error::other(e.to_string())))?;
+    for entry in walker.flatten() {
         let path = entry.path();
 
         if path == repo_path {
@@ -418,83 +632,84 @@ fn build_file_index(repo_path: &Path) -> Result<(Vec<IndexedFile>, Map<Vec<u8>>)
             continue;
         };
         let relative_path_str = relative_path.to_string_lossy().to_string();
-        let relative_path_lower = relative_path_str.to_lowercase();
+        let relative_path_key = normalize_key(&relative_path_str);
 
-        if relative_path_lower.is_empty() {
+        if relative_path_key.is_empty() {
             continue;
         }
 
         let is_ignored = !non_ignored_paths.contains(relative_path);
+        let is_file = path.is_file();
 
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-
-        let match_type = if !file_name.is_empty() {
-            SearchMatchType::FileName
-        } else if path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|name| name.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-            != relative_path_lower
-        {
-            SearchMatchType::DirectoryName
-        } else {
-            SearchMatchType::FullPath
-        };
-
-        let indexed_file = IndexedFile {
+        if indexed_files.len() >= limit {
+            return IndexWalk {
+                files: Vec::new(),
+                overflowed: true,
+            };
+        }
+        indexed_files.push(IndexedFile {
+            alias_keys: if is_file && !is_ignored {
+                read_alias_keys(path)
+            } else {
+                Vec::new()
+            },
             path: relative_path_str,
-            is_file: path.is_file(),
-            match_type,
-            path_lowercase: Arc::from(relative_path_lower.as_str()),
+            is_file,
+            path_key: Arc::from(relative_path_key.as_str()),
             is_ignored,
-        };
-
-        let file_index = indexed_files.len() as u64;
-        fst_keys.push((relative_path_lower, file_index));
-        indexed_files.push(indexed_file);
+        });
     }
 
-    fst_keys.sort_by(|a, b| a.0.cmp(&b.0));
-    fst_keys.dedup_by(|a, b| a.0 == b.0);
+    IndexWalk {
+        files: indexed_files,
+        overflowed: false,
+    }
+}
 
-    let mut fst_builder = MapBuilder::memory();
-    for (key, value) in fst_keys {
-        fst_builder.insert(&key, value)?;
+/// Normalized aliases declared in a markdown document's frontmatter.
+///
+/// Only the leading `---` block is read (see `document::frontmatter::read_file_properties`),
+/// and only for markdown, so indexing a repository of source files costs no
+/// extra I/O at all. A file that cannot be read contributes no aliases rather
+/// than failing the index build.
+fn read_alias_keys(path: &Path) -> Vec<Arc<str>> {
+    let is_alias_bearing = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ALIAS_BEARING_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+    if !is_alias_bearing {
+        return Vec::new();
     }
 
-    let fst_map = fst_builder.into_map();
-    Ok((indexed_files, fst_map))
-}
-
-/// Re-rank search results based on git history statistics
-fn rerank(results: &mut [SearchResult], stats: &FileStats) {
-    results.sort_by(|a, b| {
-        let score_a = calculate_score(a, stats);
-        let score_b = calculate_score(b, stats);
-        score_b.cmp(&score_a)
-    });
-}
-
-/// Calculate relevance score for a search result
-fn calculate_score(result: &SearchResult, stats: &FileStats) -> i64 {
-    let base_score = match result.match_type {
-        SearchMatchType::FileName => BASE_MATCH_SCORE_FILENAME,
-        SearchMatchType::DirectoryName => BASE_MATCH_SCORE_DIRNAME,
-        SearchMatchType::FullPath => BASE_MATCH_SCORE_FULLPATH,
-        SearchMatchType::ContentMatch => BASE_MATCH_SCORE_FULLPATH / 2,
+    let Ok(properties) = document::frontmatter::read_file_properties(path) else {
+        return Vec::new();
     };
+    document::frontmatter::aliases(&properties)
+        .into_iter()
+        .map(|alias| Arc::from(normalize_key(&alias).as_str()))
+        .collect()
+}
 
-    if let Some(stat) = stats.get(&result.path) {
-        let recency_bonus = (100 - stat.last_index.min(99) as i64) * RECENCY_WEIGHT;
-        let frequency_bonus = stat.commit_count as i64 * FREQUENCY_WEIGHT;
-        base_score * 1000 + recency_bonus * 10 + frequency_bonus
-    } else {
-        base_score * 1000
-    }
+/// How much a file's git history argues for it, in `0..=HISTORY_MAX`. Used
+/// only to break ties between matches of equal quality — see [`matcher`].
+/// A file absent from recent history scores zero rather than being penalized.
+fn history_score(path: &str, stats: &FileStats) -> i64 {
+    let Some(stat) = stats.get(path) else {
+        return 0;
+    };
+    let recency = (100 - stat.last_index.min(99) as i64) * RECENCY_WEIGHT;
+    let frequency = stat.commit_count as i64 * FREQUENCY_WEIGHT;
+    (recency + frequency).clamp(0, HISTORY_MAX)
+}
+
+/// Order scored results best-first, with the path as a final tiebreak so the
+/// output is deterministic regardless of index or walk order.
+fn rank(mut scored: Vec<(i64, SearchResult)>, limit: usize) -> Vec<SearchResult> {
+    scored.sort_by(|(score_a, a), (score_b, b)| score_b.cmp(score_a).then(a.path.cmp(&b.path)));
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, result)| result).collect()
 }
 
 /// Longest snippet (in bytes) kept verbatim before a match window is applied.
@@ -937,110 +1152,158 @@ fn is_likely_binary(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Filter a cached repository index by name/path substring, ranked by relevance.
-fn search_names_in_cache(
-    cached: &CachedRepo,
+/// Search a cached repository index by name, ranked by relevance.
+///
+/// Contiguous matching runs first; fuzzy (subsequence) matching only fills in
+/// behind it when the contiguous pass came up short, so a query that matches
+/// real names never has those results displaced by scattered ones — and the
+/// scan only pays for fuzzy when it would actually change the answer.
+fn search_names_in_index(
+    index: &RepoIndex,
     query: &str,
-    mode: SearchMode,
-    limit: usize,
+    options: SearchOptions,
 ) -> Vec<SearchResult> {
-    let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
+    let query_key = normalize_key(query);
 
-    for indexed_file in &cached.indexed_files {
-        if !indexed_file.path_lowercase.contains(&query_lower) {
-            continue;
-        }
-        if matches!(mode, SearchMode::TaskForm) && indexed_file.is_ignored {
-            continue;
-        }
-        results.push(SearchResult {
-            path: indexed_file.path.clone(),
-            is_file: indexed_file.is_file,
-            match_type: indexed_file.match_type.clone(),
-        });
+    let mut scored: Vec<(i64, SearchResult)> = index
+        .files()
+        .iter()
+        .filter(|file| options.includes(file))
+        .filter_map(|file| {
+            let found = match_contiguous(&file.path_key, &file.alias_keys, &query_key)?;
+            Some((
+                found.score(history_score(&file.path, &index.stats)),
+                SearchResult {
+                    path: file.path.clone(),
+                    is_file: file.is_file,
+                    match_type: found.match_type(),
+                },
+            ))
+        })
+        .collect();
+
+    if scored.len() < options.limit {
+        let already: HashSet<&str> = scored
+            .iter()
+            .map(|(_, result)| result.path.as_str())
+            .collect();
+        let fuzzy: Vec<(i64, SearchResult)> = index
+            .files()
+            .iter()
+            .filter(|file| options.includes(file) && !already.contains(file.path.as_str()))
+            .filter_map(|file| {
+                let found = match_fuzzy(&file.path_key, &query_key)?;
+                Some((
+                    found.score(history_score(&file.path, &index.stats)),
+                    SearchResult {
+                        path: file.path.clone(),
+                        is_file: file.is_file,
+                        match_type: found.match_type(),
+                    },
+                ))
+            })
+            .collect();
+        scored.extend(fuzzy);
     }
 
-    rerank(&mut results, &cached.stats);
-    results.truncate(limit);
-    results
+    rank(scored, options.limit)
 }
 
-/// Name/path search by walking the filesystem, for use when no cache is warm.
+/// A worktree file event in the minimal shape the freshness logic needs.
+/// Mirrors the filesystem watcher's event kinds without depending on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeChange {
+    pub kind: WorktreeChangeKind,
+    /// Path relative to the repository root, `/`-separated. An empty path is
+    /// the watcher's overflow/resync marker.
+    pub relative_path: String,
+}
+
+/// Whether a batch of worktree events can change the name index.
 ///
-/// Pure name search: it never scans file contents. Full-text search is the
-/// separate `search_content_grouped` operation.
-pub fn search_combined(
+/// Creates and deletes always can. Modifications need a closer look because
+/// macOS reports renames as `Modified` on both the old and the new path:
+/// - the overflow marker (empty path) means events were dropped, so assume yes;
+/// - a `.gitignore` edit changes which entries are `is_ignored`;
+/// - a path that no longer exists on disk is the old side of a rename (or a
+///   delete reported as modify);
+/// - a path missing from the index is the new side of a rename;
+/// - anything else is a pure content write and cannot move the index.
+fn changes_require_rebuild(
+    index: &RepoIndex,
     repo_path: &Path,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchResult>, FileSearchError> {
-    if !repo_path.exists() {
-        return Err(FileSearchError::RepoMissing(
-            repo_path.display().to_string(),
-        ));
-    }
-
-    let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
-
-    let walker = WalkBuilder::new(repo_path)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            name != ".git"
-                && name != "node_modules"
-                && name != "target"
-                && name != "dist"
-                && name != "build"
-        })
-        .build();
-
-    for entry in walker.flatten() {
-        if results.len() >= limit {
-            break;
-        }
-
-        let path = entry.path();
-        if path == repo_path {
-            continue;
-        }
-
-        if let Ok(relative) = path.strip_prefix(repo_path) {
-            let rel_str = relative.to_string_lossy();
-            let rel_lower = rel_str.to_lowercase();
-
-            if rel_lower.contains(&query_lower) {
-                let file_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
-
-                let match_type = if file_name.contains(&query_lower) {
-                    SearchMatchType::FileName
-                } else if path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_lowercase().contains(&query_lower))
-                    .unwrap_or(false)
-                {
-                    SearchMatchType::DirectoryName
-                } else {
-                    SearchMatchType::FullPath
-                };
-
-                results.push(SearchResult {
-                    path: rel_str.to_string(),
-                    is_file: path.is_file(),
-                    match_type,
-                });
+    changes: &[WorktreeChange],
+) -> bool {
+    changes.iter().any(|change| match change.kind {
+        WorktreeChangeKind::Created | WorktreeChangeKind::Deleted => true,
+        WorktreeChangeKind::Modified => {
+            if change.relative_path.is_empty() {
+                return true;
             }
+            if change.relative_path == ".gitignore" || change.relative_path.ends_with("/.gitignore")
+            {
+                return true;
+            }
+            if !repo_path.join(&change.relative_path).exists() {
+                return true;
+            }
+            let key = normalize_key(&change.relative_path);
+            let Some(indexed) = index.entry_by_path_key(&key) else {
+                // Not in the index: the new side of a rename.
+                return true;
+            };
+            // Editing a note can change its declared aliases, which are part
+            // of the index. Re-read the block (cheap: markdown only, and only
+            // its head) instead of assuming the write was body-only.
+            read_alias_keys(&repo_path.join(&change.relative_path)) != indexed.alias_keys
+        }
+    })
+}
+
+/// Resolve a reference against the index.
+///
+/// The file's own name is tried before any alias, so a document cannot hijack
+/// a link to a real file by declaring its name as an alias. Ignored files
+/// never resolve: a link target is vault content, not build output.
+fn resolve_name_in_index(index: &RepoIndex, reference: &str) -> Option<String> {
+    let names = &index.names;
+    let file_at = |position: &u32| &names.files[*position as usize];
+    let resolvable = |file: &&IndexedFile| file.is_file && !file.is_ignored;
+    let best = |candidates: Option<&Vec<u32>>, accept: &dyn Fn(&IndexedFile) -> bool| {
+        candidates?
+            .iter()
+            .map(file_at)
+            .filter(resolvable)
+            .filter(|file| accept(file))
+            .min_by(|a, b| shorter_path(&a.path_key, &b.path_key))
+            .map(|file| file.path.clone())
+    };
+
+    // Every key is tried by name before any key is tried by alias: `[[note]]`
+    // must land on `note.md` even when another document claims `note` as an
+    // alias, and that only holds if the `.md` form is exhausted first.
+    let keys = reference_keys(reference);
+    for key in &keys {
+        let basename = key.rsplit('/').next().unwrap_or(key);
+        if let Some(path) = best(names.by_name.get(basename), &|file| {
+            reference_matches(&file.path_key, key)
+        }) {
+            return Some(path);
         }
     }
-
-    Ok(results)
+    for key in &keys {
+        if let Some(path) = best(names.by_alias.get(key.as_str()), &|_| true) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1304,15 +1567,526 @@ mod tests {
     }
 
     #[test]
-    fn name_search_does_not_fall_back_to_content() {
+    fn name_search_does_not_match_on_content() {
         let dir = TempDir::new().unwrap();
         // File name has no "needle"; only its contents do.
         write(&dir, "unrelated.rs", "the needle lives here\n");
 
-        let results = search_combined(dir.path(), "needle", 10).unwrap();
+        let index = RepoIndex::from_walk(walk_index(dir.path()), Arc::new(FileStats::new()));
+        let results = search_names_in_index(&index, "needle", SearchOptions::new(10));
         assert!(
             results.is_empty(),
             "name search must not match on file contents, got {results:?}"
         );
+    }
+
+    fn entry(path: &str, is_file: bool, is_ignored: bool, aliases: &[&str]) -> IndexedFile {
+        IndexedFile {
+            path: path.to_string(),
+            is_file,
+            path_key: Arc::from(normalize_key(path).as_str()),
+            alias_keys: aliases
+                .iter()
+                .map(|alias| Arc::from(normalize_key(alias).as_str()))
+                .collect(),
+            is_ignored,
+        }
+    }
+
+    /// Build a minimal index directly, bypassing git and the filesystem, so
+    /// matching and freshness rules can be tested in isolation.
+    fn cached_repo(paths: &[(&str, bool)]) -> RepoIndex {
+        cached_repo_with_aliases(
+            &paths
+                .iter()
+                .map(|&(p, i)| (p, i, &[][..]))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// As [`cached_repo`], with declared frontmatter aliases per entry.
+    fn cached_repo_with_aliases(entries: &[(&str, bool, &[&str])]) -> RepoIndex {
+        RepoIndex::new(
+            entries
+                .iter()
+                .map(|(path, is_ignored, aliases)| entry(path, true, *is_ignored, aliases))
+                .collect(),
+            Arc::new(FileStats::new()),
+        )
+    }
+
+    #[test]
+    fn normalize_key_folds_nfd_to_nfc_and_case() {
+        // "が" typed (NFC, U+304C) vs stored decomposed (NFD, か + U+3099).
+        assert_eq!(normalize_key("\u{304C}"), normalize_key("\u{304B}\u{3099}"));
+        // "É" decomposed vs "é" precomposed.
+        assert_eq!(normalize_key("E\u{0301}"), normalize_key("\u{00E9}"));
+    }
+
+    #[test]
+    fn resolve_matches_nfd_stored_name_with_nfc_reference() {
+        // Simulates macOS: the filesystem stores the decomposed form
+        // (か + combining voiced mark), the user types the precomposed が.
+        let cached = cached_repo(&[("docs/設計か\u{3099}き.md", false)]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "設計\u{304C}き.md"),
+            Some("docs/設計か\u{3099}き.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn resolve_bare_name_prefers_shortest_path() {
+        let cached = cached_repo(&[
+            ("a/very/deep/note.md", false),
+            ("docs/note.md", false),
+            ("docs/archive/note.md", false),
+        ]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "note.md"),
+            Some("docs/note.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn resolve_path_reference_requires_suffix_boundary() {
+        let cached = cached_repo(&[("guides/docs/note.md", false), ("mydocs/note.md", false)]);
+        // "docs/note.md" must match a whole trailing path, not "mydocs/...".
+        assert_eq!(
+            resolve_name_in_index(&cached, "docs/note.md"),
+            Some("guides/docs/note.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn resolve_appends_md_for_extensionless_reference() {
+        let cached = cached_repo(&[("docs/note.md", false), ("note", false)]);
+        // The exact form wins over the .md form when both exist.
+        assert_eq!(
+            resolve_name_in_index(&cached, "note"),
+            Some("note".to_string()),
+        );
+        let cached = cached_repo(&[("docs/note.md", false)]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "note"),
+            Some("docs/note.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn resolve_skips_ignored_files() {
+        let cached = cached_repo(&[("dist/note.md", true), ("src/note.md", false)]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "note.md"),
+            Some("src/note.md".to_string()),
+        );
+        let only_ignored = cached_repo(&[("dist/note.md", true)]);
+        assert_eq!(resolve_name_in_index(&only_ignored, "note.md"), None);
+    }
+
+    #[test]
+    fn resolve_is_case_insensitive() {
+        let cached = cached_repo(&[("docs/README.md", false)]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "readme.md"),
+            Some("docs/README.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn walked_index_resolves_with_the_shortest_path_rule() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "a/deep/nested/note.md", "x");
+        write(&dir, "docs/note.md", "x");
+
+        let index = RepoIndex::from_walk(walk_index(dir.path()), Arc::new(FileStats::new()));
+        assert_eq!(
+            resolve_name_in_index(&index, "note"),
+            Some("docs/note.md".to_string()),
+        );
+        assert_eq!(resolve_name_in_index(&index, "absent.md"), None);
+    }
+
+    #[test]
+    fn a_root_past_the_entry_cap_indexes_nothing() {
+        let dir = TempDir::new().unwrap();
+        for n in 0..8 {
+            write(&dir, &format!("notes/{n}.md"), "x");
+        }
+
+        let walk = walk_index_with_limit(dir.path(), 4);
+        assert!(walk.overflowed);
+        let index = RepoIndex::from_walk(walk, Arc::new(FileStats::new()));
+        assert!(index.is_overflowed());
+        assert!(
+            index.files().is_empty(),
+            "a partial index must not resolve anything"
+        );
+        assert_eq!(resolve_name_in_index(&index, "0.md"), None);
+    }
+
+    #[test]
+    fn a_missing_root_walks_to_an_empty_index() {
+        let walk = walk_index(Path::new("/definitely/not/a/directory"));
+        assert!(!walk.overflowed);
+        assert!(walk.files.is_empty());
+    }
+
+    #[test]
+    fn history_refresh_keeps_the_walked_names() {
+        let index = cached_repo(&[("note.md", false)]);
+        let mut stats = FileStats::new();
+        stats.insert(
+            "note.md".to_string(),
+            FileStat {
+                last_index: 0,
+                commit_count: 1,
+                last_time: Utc::now(),
+            },
+        );
+        let refreshed = index.with_stats(Arc::new(stats));
+        assert_eq!(refreshed.files().len(), 1);
+        assert_eq!(refreshed.stats.len(), 1);
+        assert_eq!(
+            resolve_name_in_index(&refreshed, "note"),
+            Some("note.md".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_reads_wait_for_the_first_build_and_stale_reads_do_not_wait() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "docs/note.md", "x");
+        let cache = FileSearchCache::new();
+
+        assert_eq!(
+            cache.resolve(dir.path(), "note").await,
+            Some("docs/note.md".to_string())
+        );
+
+        // A structural change queues a rebuild; the read that follows is
+        // answered by the index already in hand, never by a walk.
+        write(&dir, "docs/other.md", "x");
+        cache.note_worktree_changes(
+            dir.path(),
+            &[change(WorktreeChangeKind::Created, "docs/other.md")],
+        );
+        let served = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            cache.resolve(dir.path(), "note"),
+        )
+        .await
+        .expect("a warm root answers without waiting for its rebuild");
+        assert_eq!(served, Some("docs/note.md".to_string()));
+
+        // And the rebuild lands.
+        let mut generation = cache.built.subscribe();
+        generation.borrow_and_update();
+        while cache.resolve(dir.path(), "other").await.is_none() {
+            generation.changed().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn rebuild_scopes_merge_to_a_full_build() {
+        assert_eq!(Rebuild::Names.merge(Rebuild::Names), Rebuild::Names);
+        assert_eq!(Rebuild::History.merge(Rebuild::History), Rebuild::History);
+        assert_eq!(Rebuild::Names.merge(Rebuild::History), Rebuild::Full);
+        assert_eq!(Rebuild::Full.merge(Rebuild::Names), Rebuild::Full);
+    }
+
+    fn change(kind: WorktreeChangeKind, path: &str) -> WorktreeChange {
+        WorktreeChange {
+            kind,
+            relative_path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn creates_and_deletes_require_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let cached = cached_repo(&[("src/main.rs", false)]);
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Created, "src/new.rs")],
+        ));
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Deleted, "src/main.rs")],
+        ));
+    }
+
+    #[test]
+    fn content_modification_of_indexed_file_does_not_rebuild() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "src/main.rs", "fn main() {}");
+        let cached = cached_repo(&[("src/main.rs", false)]);
+        assert!(!changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "src/main.rs")],
+        ));
+    }
+
+    #[test]
+    fn rename_reported_as_modified_requires_rebuild() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "src/renamed.rs", "fn main() {}");
+        let cached = cached_repo(&[("src/original.rs", false)]);
+
+        // Old side: indexed but no longer on disk.
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "src/original.rs")],
+        ));
+        // New side: on disk but not indexed.
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "src/renamed.rs")],
+        ));
+    }
+
+    #[test]
+    fn gitignore_edit_and_overflow_marker_require_rebuild() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, ".gitignore", "dist\n");
+        write(&dir, "pkg/.gitignore", "out\n");
+        let cached = cached_repo(&[
+            (".gitignore", false),
+            ("pkg/.gitignore", false),
+            ("src/main.rs", false),
+        ]);
+
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, ".gitignore")],
+        ));
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "pkg/.gitignore")],
+        ));
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "")],
+        ));
+    }
+
+    fn paths_of(results: &[SearchResult]) -> Vec<&str> {
+        results.iter().map(|r| r.path.as_str()).collect()
+    }
+
+    #[test]
+    fn search_ranks_name_matches_above_directory_and_path_matches() {
+        let cached = cached_repo(&[
+            ("src/note/other.rs", false),
+            ("deep/a/b/note.rs", false),
+            ("note.rs", false),
+        ]);
+        let results = search_names_in_index(&cached, "note", SearchOptions::new(10));
+        assert_eq!(
+            paths_of(&results),
+            vec!["note.rs", "deep/a/b/note.rs", "src/note/other.rs"],
+            "name match, then the shallower name match, then the directory match"
+        );
+    }
+
+    #[test]
+    fn search_reports_the_match_kind_the_query_actually_hit() {
+        let cached = cached_repo(&[("src/note/other.rs", false)]);
+        let results = search_names_in_index(&cached, "note", SearchOptions::new(10));
+        assert!(matches!(
+            results[0].match_type,
+            SearchMatchType::DirectoryName
+        ));
+
+        let cached = cached_repo(&[("src/note.rs", false)]);
+        let results = search_names_in_index(&cached, "note", SearchOptions::new(10));
+        assert!(matches!(results[0].match_type, SearchMatchType::FileName));
+    }
+
+    #[test]
+    fn search_falls_back_to_fuzzy_only_behind_contiguous_matches() {
+        let cached = cached_repo(&[
+            ("file-search-cache/src/lib.rs", false),
+            ("fsc.rs", false),
+            ("noise.rs", false),
+        ]);
+        let results = search_names_in_index(&cached, "fsc", SearchOptions::new(10));
+        assert_eq!(
+            results[0].path, "fsc.rs",
+            "the contiguous match must come first"
+        );
+        assert!(
+            paths_of(&results).contains(&"file-search-cache/src/lib.rs"),
+            "the fuzzy acronym match must still be reachable, got {:?}",
+            paths_of(&results)
+        );
+        assert!(!paths_of(&results).contains(&"noise.rs"));
+    }
+
+    #[test]
+    fn files_only_drops_directories_before_the_limit_applies() {
+        let cached = RepoIndex::new(
+            vec![
+                entry("note", false, false, &[]),
+                entry("note.md", true, false, &[]),
+            ],
+            Arc::new(FileStats::new()),
+        );
+
+        let with_dirs = search_names_in_index(&cached, "note", SearchOptions::new(1));
+        assert_eq!(
+            paths_of(&with_dirs),
+            vec!["note"],
+            "the directory outranks the file on name-exactness, taking the only slot"
+        );
+
+        let files_only =
+            search_names_in_index(&cached, "note", SearchOptions::new(1).files_only(true));
+        assert_eq!(
+            paths_of(&files_only),
+            vec!["note.md"],
+            "filtering must happen before the limit, not after"
+        );
+    }
+
+    #[test]
+    fn search_matches_frontmatter_aliases() {
+        let cached = cached_repo_with_aliases(&[
+            ("docs/20260805.md", false, &["Engine Design"][..]),
+            ("docs/unrelated.md", false, &[][..]),
+        ]);
+        let results = search_names_in_index(&cached, "engine design", SearchOptions::new(10));
+        assert_eq!(paths_of(&results), vec!["docs/20260805.md"]);
+    }
+
+    #[test]
+    fn search_ranks_git_history_only_among_equal_matches() {
+        let mut stats = FileStats::new();
+        stats.insert(
+            "b/note.md".to_string(),
+            FileStat {
+                last_index: 0,
+                commit_count: 20,
+                last_time: Utc::now(),
+            },
+        );
+        let cached =
+            cached_repo(&[("a/note.md", false), ("b/note.md", false)]).with_stats(Arc::new(stats));
+
+        let results = search_names_in_index(&cached, "note", SearchOptions::new(10));
+        assert_eq!(
+            paths_of(&results),
+            vec!["b/note.md", "a/note.md"],
+            "equal-quality matches are ordered by git history"
+        );
+    }
+
+    #[test]
+    fn empty_query_lists_the_most_recently_touched_files() {
+        let mut stats = FileStats::new();
+        stats.insert(
+            "rarely.md".to_string(),
+            FileStat {
+                last_index: 90,
+                commit_count: 1,
+                last_time: Utc::now(),
+            },
+        );
+        stats.insert(
+            "hot.md".to_string(),
+            FileStat {
+                last_index: 0,
+                commit_count: 30,
+                last_time: Utc::now(),
+            },
+        );
+        let cached = cached_repo(&[("rarely.md", false), ("hot.md", false), ("cold.md", false)])
+            .with_stats(Arc::new(stats));
+
+        let results = search_names_in_index(&cached, "", SearchOptions::new(10));
+        assert_eq!(paths_of(&results), vec!["hot.md", "rarely.md", "cold.md"]);
+    }
+
+    #[test]
+    fn resolve_prefers_a_real_file_name_over_another_file_s_alias() {
+        let cached = cached_repo_with_aliases(&[
+            ("archive/hijack.md", false, &["note"][..]),
+            ("deep/a/b/note.md", false, &[][..]),
+        ]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "note"),
+            Some("deep/a/b/note.md".to_string()),
+            "an alias must not shadow a file that really has that name",
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_an_alias_when_no_file_has_the_name() {
+        let cached = cached_repo_with_aliases(&[
+            ("docs/20260805.md", false, &["Engine Design"][..]),
+            ("docs/other.md", false, &[][..]),
+        ]);
+        assert_eq!(
+            resolve_name_in_index(&cached, "Engine Design"),
+            Some("docs/20260805.md".to_string()),
+        );
+    }
+
+    #[test]
+    fn index_build_reads_aliases_from_markdown_only() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "note.md", "---\naliases:\n  - Alpha\n---\nbody\n");
+        write(&dir, "code.rs", "---\naliases:\n  - Beta\n---\n");
+
+        let indexed = walk_index(dir.path()).files;
+        let alias_of = |name: &str| {
+            indexed
+                .iter()
+                .find(|file| file.path == name)
+                .map(|file| file.alias_keys.clone())
+                .unwrap()
+        };
+        assert_eq!(alias_of("note.md"), vec![Arc::from("alpha")]);
+        assert!(
+            alias_of("code.rs").is_empty(),
+            "non-markdown files must cost no frontmatter read"
+        );
+    }
+
+    #[test]
+    fn editing_a_note_s_aliases_requires_rebuild_but_editing_its_body_does_not() {
+        let dir = TempDir::new().unwrap();
+        write(&dir, "note.md", "---\naliases:\n  - Alpha\n---\nbody\n");
+        let cached = cached_repo_with_aliases(&[("note.md", false, &["Alpha"][..])]);
+
+        assert!(!changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "note.md")],
+        ));
+
+        write(&dir, "note.md", "---\naliases:\n  - Alpha\n  - Beta\n---\n");
+        assert!(changes_require_rebuild(
+            &cached,
+            dir.path(),
+            &[change(WorktreeChangeKind::Modified, "note.md")],
+        ));
+    }
+
+    #[test]
+    fn name_search_matches_across_normalization_forms() {
+        let dir = TempDir::new().unwrap();
+        // Write the decomposed form to disk; query with the precomposed form.
+        write(&dir, "設計か\u{3099}き.md", "x");
+        let index = RepoIndex::from_walk(walk_index(dir.path()), Arc::new(FileStats::new()));
+        let results = search_names_in_index(&index, "設計\u{304C}", SearchOptions::new(10));
+        assert_eq!(results.len(), 1, "NFC query must match NFD file name");
     }
 }

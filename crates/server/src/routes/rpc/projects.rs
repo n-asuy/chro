@@ -7,11 +7,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use db::models::ProjectRecord;
+use db::models::{normalize_badge_color, ProjectRecord};
 use filesystem::{
     MediaEntry, WorkspaceEntry, WorkspaceEntryDetail, WorkspaceEntryType, WorkspaceFile,
 };
-use runtime::{ProjectFileService, Runtime, RuntimeError};
+use runtime::{ProjectFileService, Runtime};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -21,6 +21,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use super::asset_response::{stream_asset_response, AssetQuery};
+use super::path_link::{PathProbeBatchResponse, PathProbeRequest};
 use super::path_resolve::{
     read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
 };
@@ -56,9 +57,55 @@ pub(super) fn router() -> Router<AppState> {
         .route("/projects/:project_id/copy", post(copy_project_entry))
         .route("/projects/:project_id/search", get(search_project_files))
         .route(
+            "/projects/:project_id/resolve-file",
+            get(resolve_project_file),
+        )
+        .route(
+            "/projects/:project_id/probe-paths",
+            post(probe_project_paths),
+        )
+        .route(
             "/projects/:project_id/reveal-in-finder",
             post(reveal_in_finder),
         )
+        .route(
+            "/projects/:project_id/badge-color",
+            post(set_project_badge_color),
+        )
+}
+
+#[derive(Debug, Deserialize)]
+struct SetBadgeColorRequest {
+    /// Preset palette name or hex color ("#rrggbb", "#rgb", with or without
+    /// the hash); `null` removes the color.
+    badge_color: Option<String>,
+}
+
+/// Set or clear a project's identity color. The value is normalized to
+/// `#rrggbb`; invalid input is rejected rather than silently dropped.
+async fn set_project_badge_color(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+    Json(payload): Json<SetBadgeColorRequest>,
+) -> Result<Json<ProjectEnvelope>, ApiError> {
+    let project = ProjectRecord::get_by_identifier(state.pool(), &identifier)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => ApiError::NotFound,
+            other => ApiError::Sqlx(other),
+        })?;
+
+    let normalized = match payload.badge_color.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            normalize_badge_color(raw)
+                .ok_or_else(|| ApiError::BadRequest(format!("invalid badge color: {raw:?}")))?,
+        ),
+    };
+
+    let updated =
+        ProjectRecord::set_badge_color(state.pool(), project.id, normalized.as_deref()).await?;
+    Ok(Json(ProjectEnvelope::new(updated)))
 }
 
 #[derive(Debug, Serialize)]
@@ -657,6 +704,11 @@ struct ProjectSearchQuery {
     /// "modified-asc", "name-asc", "name-desc", "path-asc", "path-desc".
     #[serde(default)]
     sort: Option<String>,
+    /// Drop directory results from a name search. Callers that insert a file
+    /// reference (the composer's `@` picker) need this applied before `limit`,
+    /// or directories consume slots the caller then discards.
+    #[serde(default)]
+    files_only: Option<bool>,
     limit: Option<usize>,
 }
 
@@ -701,14 +753,9 @@ async fn search_project_files(
     Path(project_id): Path<String>,
     Query(query): Query<ProjectSearchQuery>,
 ) -> Result<Json<ProjectSearchResponse>, ApiError> {
-    use file_search_cache::{CacheError, SearchMatchType, SearchMode, SearchSort};
+    use file_search_cache::{SearchMatchType, SearchMode, SearchOptions, SearchSort};
 
     let needle = query.q.trim();
-    if needle.is_empty() {
-        return Err(ApiError::BadRequest(
-            "query parameter 'q' is required".into(),
-        ));
-    }
 
     let (_, project_path) = resolve_project_path(&state, &project_id).await?;
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
@@ -716,6 +763,11 @@ async fn search_project_files(
     // Full-text content search: grouped line matches with highlight ranges.
     // This is stateless (a fresh repository walk), independent of the name cache.
     if query.kind.as_deref() == Some("content") {
+        if needle.is_empty() {
+            return Err(ApiError::BadRequest(
+                "query parameter 'q' is required".into(),
+            ));
+        }
         let case_sensitive = match query.case.as_deref() {
             Some("sensitive") => Some(true),
             Some("insensitive") => Some(false),
@@ -785,44 +837,24 @@ async fn search_project_files(
     }
 
     // Name/path search (default): resolves a known filename without scanning
-    // file contents.
+    // file contents. An empty query matches every entry, so the git-history
+    // ranking surfaces the repository's most recently touched files — the
+    // default suggestion list for pickers opened without input.
     let mode = match query.mode.as_deref() {
         Some("settings") => SearchMode::Settings,
         _ => SearchMode::TaskForm,
     };
 
+    let options = SearchOptions::new(limit)
+        .with_mode(mode)
+        .files_only(query.files_only.unwrap_or(false));
+
     state.runtime().ensure_search_cache_watch(&project_path);
-    let file_search_cache = state.runtime().file_search_cache();
-    let search_results = match file_search_cache
-        .search(&project_path, needle, mode, limit)
-        .await
-    {
-        Ok(results) => results,
-        Err(CacheError::Miss) => {
-            let permit = repository_search_semaphore()
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|error| ApiError::Internal(format!("search semaphore closed: {error}")))?;
-            let fallback_cache = file_search_cache.clone();
-            let fallback_path = project_path.clone();
-            let fallback_needle = needle.to_string();
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                fallback_cache.search_fallback(&fallback_path, &fallback_needle, limit)
-            })
-            .await
-            .map_err(|error| {
-                ApiError::Internal(format!("file search fallback task failed: {error}"))
-            })??
-        }
-        Err(CacheError::BuildError(e)) => {
-            return Err(ApiError::Runtime(RuntimeError::Other(anyhow::anyhow!(
-                "Search cache build error: {}",
-                e
-            ))));
-        }
-    };
+    let search_results = state
+        .runtime()
+        .file_search_cache()
+        .search(&project_path, needle, options)
+        .await;
 
     let results = search_results
         .into_iter()
@@ -847,6 +879,83 @@ async fn search_project_files(
         total_line_matches: 0,
         truncated: false,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveFileQuery {
+    /// A file reference from a link or chat: a bare name (`note.md`), an
+    /// extensionless wikilink target (`note`), or a path suffix
+    /// (`docs/note.md`).
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolveFileResponse {
+    /// Workspace root the file was found under, or `None` when unresolved.
+    root: Option<String>,
+    /// Path relative to `root`, or `None` when unresolved.
+    relative_path: Option<String>,
+}
+
+/// Resolve a file reference against the project's name index (Obsidian-style:
+/// NFC/case-insensitive match, `.md` appended to extensionless references,
+/// shortest path wins among duplicate basenames). Falls back to a filesystem
+/// walk when no warm index exists.
+async fn resolve_project_file(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<ResolveFileQuery>,
+) -> Result<Json<ResolveFileResponse>, ApiError> {
+    let name = query.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter 'name' is required".into(),
+        ));
+    }
+
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let resolved = resolve_in_root(&state, &project_path, &name).await;
+
+    Ok(Json(ResolveFileResponse {
+        root: resolved
+            .is_some()
+            .then(|| project_path.to_string_lossy().to_string()),
+        relative_path: resolved,
+    }))
+}
+
+/// Probe a path-like reference against the project checkout. See `path_link`
+/// for why link rendering resolves up front.
+async fn probe_project_paths(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<PathProbeRequest>,
+) -> Result<Json<PathProbeBatchResponse>, ApiError> {
+    let (_, project_path) = resolve_project_path(&state, &project_id).await?;
+    let candidates = vec![project_path.to_string_lossy().into_owned()];
+
+    Ok(Json(
+        super::path_link::probe_paths(&state, request, &candidates).await?,
+    ))
+}
+
+/// Resolve `name` under a single workspace root through its name index. A
+/// root that does not exist resolves to `None` instead of erroring, so
+/// multi-root callers can skip deleted worktrees.
+pub(super) async fn resolve_in_root(
+    state: &AppState,
+    root: &std::path::Path,
+    name: &str,
+) -> Option<String> {
+    if !root.is_dir() {
+        return None;
+    }
+    state.runtime().ensure_search_cache_watch(root);
+    state
+        .runtime()
+        .file_search_cache()
+        .resolve(root, name)
+        .await
 }
 
 #[derive(Debug, Deserialize)]

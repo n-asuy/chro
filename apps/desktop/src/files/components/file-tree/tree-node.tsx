@@ -67,9 +67,11 @@ export const TreeNode = ({
   node,
   isExpanded,
   isSelected,
+  isFocused,
   indentPx,
   onToggle,
   onSelect,
+  onContextMenu,
   onOpen,
   isDragOver,
   isDragging,
@@ -128,7 +130,14 @@ export const TreeNode = ({
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isEditing) return;
-    onSelect();
+    onSelect(e);
+
+    // Obsidian reserves Cmd/Ctrl-click for opening rather than selection.
+    if (e.ctrlKey || e.metaKey) {
+      if (node.type === FileNodeType.File) onOpen?.();
+      return;
+    }
+    if (e.altKey || e.shiftKey) return;
 
     if (node.type === FileNodeType.File) {
       onOpen?.();
@@ -228,10 +237,15 @@ export const TreeNode = ({
   }, [node, t]);
 
   const nodeContent = (
+    // Keyboard selection/opening is handled by the parent role="tree".
+    // biome-ignore lint/a11y/useKeyWithClickEvents: this row delegates keyboard handling to the tree container
     <div
       className={cn(
         "font-workspace text-[12px] leading-[1.35] group flex min-h-[28px] cursor-pointer items-center rounded-md mx-1 pr-2 text-custom-sidebar-text-200 transition-colors duration-150 ease-out hover:bg-custom-sidebar-background-80 hover:text-custom-sidebar-text-100",
         isSelected && "bg-primary/10 text-custom-sidebar-text-100",
+        isFocused &&
+          !isSelected &&
+          "ring-1 ring-inset ring-custom-primary-100/60 text-custom-sidebar-text-100",
         isDragOver &&
           "ring-2 ring-custom-primary-100 ring-inset bg-custom-primary-100/10",
         isDragging && "opacity-50",
@@ -241,9 +255,11 @@ export const TreeNode = ({
       data-node-id={node.id}
       data-file-path={node.path}
       data-is-dir={isDirectory ? "true" : "false"}
+      data-focused={isFocused ? "true" : undefined}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleMouseDown}
+      onContextMenu={onContextMenu}
     >
       <span
         aria-hidden="true"

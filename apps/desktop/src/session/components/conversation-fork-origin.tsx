@@ -150,7 +150,9 @@ export function ConversationForkOrigin({
           const exchange = await desktopFetch<{
             user: string | null;
             assistant: string | null;
-          }>(`/rpc/tasks/${encodeURIComponent(edge.sourceTaskId)}/last-message`);
+          }>(
+            `/rpc/tasks/${encodeURIComponent(edge.sourceTaskId)}/last-message`,
+          );
           if (!cancelled) setSummary(exchange);
         } catch (error) {
           console.warn("[fork-origin] failed to load source summary", error);
@@ -181,11 +183,12 @@ export function ConversationForkOrigin({
 
         const perRun = new Map<string, DisplayEntry[]>();
         await Promise.allSettled(
-          window.map((run) =>
-            loadHistoricTaskRunEntries(run.id, (runEntries) => {
-              perRun.set(run.id, runEntries);
-            }),
-          ),
+          window.map(async (run) => {
+            // Inherited history is display-only context: partial entries are
+            // still better than a gap, so accept incomplete replays here.
+            const result = await loadHistoricTaskRunEntries(run.id);
+            perRun.set(run.id, result.entries);
+          }),
         );
         if (cancelled) return;
         setEntries(window.flatMap((run) => perRun.get(run.id) ?? []));

@@ -5,4 +5,10 @@
  *
  * Represents a project with its git repository and associated scripts.
  */
-export type ProjectRecord = { id: string, slug: string | null, name: string, git_repo_path: string, setup_script: string | null, dev_script: string | null, cleanup_script: string | null, copy_files: string | null, created_at: string, updated_at: string, };
+export type ProjectRecord = { id: string, slug: string | null, name: string, git_repo_path: string, setup_script: string | null, dev_script: string | null, cleanup_script: string | null, copy_files: string | null, 
+/**
+ * Identity color rendered as a small dot on cross-project surfaces.
+ * Normalized "#rrggbb"; `None` means the client auto-assigns from the
+ * project id.
+ */
+badge_color: string | null, created_at: string, updated_at: string, };

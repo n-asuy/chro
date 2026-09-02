@@ -126,8 +126,6 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 
     perf::set_perf_enabled(args.perf);
 
-    config::migrate_legacy_dirs();
-
     // Initialize PostHog analytics (no-op when POSTHOG_API_KEY is unset)
     {
         let config_service = config::ConfigService::new(config::config_path());
@@ -138,6 +136,13 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         });
     }
+
+    // Local activity recording for dogfooding. Independent of the telemetry
+    // opt-in above because nothing it writes leaves the machine.
+    analytics::dev::init(analytics::dev::Config {
+        dir: config::asset_dir().join("dev-events"),
+        enabled: analytics::dev::should_enable(),
+    });
 
     let log_db_path = args.db_path.clone().unwrap_or_else(DBService::default_path);
     info!(path = %log_db_path.display(), "using sqlite");
@@ -196,7 +201,14 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .layer(middleware::from_fn_with_state(
             allowed_origins.clone(),
             cors::enforce_allowed_origin,
-        ));
+        ))
+        // Outermost on the API surface on purpose: every user action already
+        // passes through here, so recording at this one point keeps
+        // instrumentation out of individual handlers, and requests rejected
+        // before routing still show up. No-op unless the local dev sink is
+        // running; static assets are served by the fallback below and are not
+        // covered.
+        .layer(middleware::from_fn(routes::rpc::dev_events_recorder));
 
     let mut app = api_routes
         .fallback(routes::frontend::serve_fallback)

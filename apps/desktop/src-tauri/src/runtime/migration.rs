@@ -1,10 +1,9 @@
 //! Reconcile the user-data directory used by previous Chro builds.
 //!
 //! History of the path the desktop app has put its data in:
-//!   1. `<appData>/Chronist/`            earliest build
-//!   2. `<appData>/Chro/`                renamed product
-//!   3. `<appData>/Chro/chro/db.sqlite`  chro-server runtime nested under userData
-//!   4. `<appData>/chro/db.sqlite`       current; matches the Rust server's
+//!   1. `<appData>/Chro/`                earlier build
+//!   2. `<appData>/Chro/chro/db.sqlite`  chro-server runtime nested under userData
+//!   3. `<appData>/chro/db.sqlite`       current; matches the Rust server's
 //!                                       `DBService::default_path()` so the CLI
 //!                                       binary opens the same SQLite file.
 //!
@@ -23,19 +22,10 @@ const USER_DATA_DIR_ENV: &str = "CHRO_USER_DATA_DIR";
 /// rename fails, we log and keep going so a single corrupt entry doesn't
 /// prevent the app from starting.
 pub fn migrate_legacy_user_data(app_data_dir: &Path) {
-    // Step 1: `<appData>/Chronist/` → `<appData>/Chro/`
-    migrate_directory(&app_data_dir.join("Chronist"), &app_data_dir.join("Chro"));
-
-    // Step 2: `<appData>/Chro/chronist/` → `<appData>/Chro/chro/`
-    let chro_caps = app_data_dir.join("Chro");
-    if chro_caps.exists() {
-        migrate_directory(&chro_caps.join("chronist"), &chro_caps.join("chro"));
-    }
-
-    // Step 3: `<appData>/Chro/` → `<appData>/chro/`
+    // Step 1: `<appData>/Chro/` → `<appData>/chro/`
     migrate_directory(&app_data_dir.join("Chro"), &app_data_dir.join("chro"));
 
-    // Step 4: flatten the nested chro-server runtime dir so `db.sqlite*` sits
+    // Step 2: flatten the nested chro-server runtime dir so `db.sqlite*` sits
     // directly under `<appData>/chro/`.
     let root = app_data_dir.join("chro");
     let nested = root.join("chro");

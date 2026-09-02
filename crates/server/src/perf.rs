@@ -103,7 +103,7 @@ impl RpcAggregator {
 /// Normalize UUID segments in a path to `{id}` for aggregation grouping.
 ///
 /// e.g. `/rpc/projects/042ebded-656a-4bdf-b451-4b266f57b604/file` → `/rpc/projects/{id}/file`
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     path.split('/')
         .map(|seg| if is_uuid_like(seg) { "{id}" } else { seg })
         .collect::<Vec<_>>()

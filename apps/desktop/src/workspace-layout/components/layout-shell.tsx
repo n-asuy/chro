@@ -4,14 +4,12 @@ import { ProjectTasksProvider } from "@/session/context/project-tasks-context";
 import { useSessionReadSync } from "@/session/hooks";
 import { useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
+import { inferKindFromLocation } from "../domain/route-tab-kind";
 import { useCloseTabShortcut } from "../hooks/use-close-tab-shortcut";
 import { useGlobalShortcuts } from "../hooks/use-global-shortcuts";
 import { useLeaderKeyShortcuts } from "../hooks/use-leader-key-shortcuts";
 import { useOpenProjectsSync } from "../hooks/use-open-projects-sync";
-import {
-  inferKindFromLocation,
-  useRouteTabSync,
-} from "../hooks/use-route-tab-sync";
+import { useRouteTabSync } from "../hooks/use-route-tab-sync";
 import { useSessionTabArchiveSync } from "../hooks/use-session-tab-archive-sync";
 import { useSessionTabTitleSync } from "../hooks/use-session-tab-title-sync";
 import { ensurePaneItemsRegistered } from "../registry";

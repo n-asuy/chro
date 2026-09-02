@@ -23,6 +23,10 @@ const NATIVE_PROJECT_RPC_PATTERN = /^\/rpc\/projects\/([^/]+)\/(entries|file)$/;
 const nativeFsEnabled = process.env.CHRO_ENABLE_NAPI_FS !== "0";
 const perfEnabled =
   process.env.CHRO_PERF === "1" || process.argv.includes("--perf");
+// Local activity recording is on by default in dev builds. This define only
+// exists to force it on in a production build for dogfooding; it mirrors the
+// backend's CHRO_DEV_EVENTS environment switch.
+const devEventsForced = process.env.CHRO_DEV_EVENTS === "1";
 const packageJsonPath = path.resolve(__dirname, "package.json");
 const viteBaseLogger = createLogger();
 
@@ -540,6 +544,7 @@ export default defineConfig({
   ],
   define: {
     __PERF_ENABLED__: JSON.stringify(perfEnabled),
+    __DEV_EVENTS_FORCED__: JSON.stringify(devEventsForced),
     __APP_VERSION__: JSON.stringify(appVersion),
     __TAURI_PLATFORM__: JSON.stringify(TAURI_PLATFORM ?? null),
   },

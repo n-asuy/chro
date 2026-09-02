@@ -1,5 +1,7 @@
 mod approvals;
 mod client;
+#[cfg(feature = "cloud")]
+mod cloud;
 mod task;
 
 pub use approvals::ApprovalCommand;
@@ -16,6 +18,13 @@ use crate::args::Commands;
 /// it launches. Keeping the dispatch in one place is what lets the two share a
 /// single implementation of every command.
 pub fn run(command: &Commands, project: Option<&Path>) -> anyhow::Result<()> {
+    // Instance lifecycle runs before any chro server exists to talk to, so it
+    // must not require one.
+    #[cfg(feature = "cloud")]
+    if let Commands::Cloud { command } = command {
+        return cloud::run(command).map_err(|e| anyhow::anyhow!("{e}"));
+    }
+
     let client = client::ServerClient::connect().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     match command {
@@ -25,5 +34,7 @@ pub fn run(command: &Commands, project: Option<&Path>) -> anyhow::Result<()> {
         Commands::Approvals { command } => {
             approvals::run(command, &client).map_err(|e| anyhow::anyhow!("{e}"))
         }
+        #[cfg(feature = "cloud")]
+        Commands::Cloud { .. } => unreachable!("handled above"),
     }
 }

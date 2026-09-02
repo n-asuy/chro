@@ -1,6 +1,5 @@
 import { useProjectContext } from "@/files/context/project-context";
 import { useArchivedSessions, useProjectTasksStream } from "@/session/hooks";
-import type { StoredTask } from "@/session/types";
 import { useEffect, useMemo } from "react";
 import { useLayoutStore } from "../state/layout-store";
 import type { PaneNode, Tab } from "../types";

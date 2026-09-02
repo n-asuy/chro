@@ -1,8 +1,6 @@
 mod assets;
-mod legacy_migration;
 
 pub use assets::{asset_dir, chats_dir, config_path, profiles_path};
-pub use legacy_migration::migrate_legacy_dirs;
 
 use std::{
     fs, io,

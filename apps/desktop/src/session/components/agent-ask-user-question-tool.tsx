@@ -1,5 +1,5 @@
 import { HelpCircle } from "lucide-react";
-import { memo, type ReactNode } from "react";
+import { type ReactNode, memo } from "react";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
   QUESTIONS_TIMED_OUT_MESSAGE,
@@ -249,6 +249,9 @@ export const AgentAskUserQuestionTool = memo(function AgentAskUserQuestionTool({
 
   // Not streaming and state is "call" - it was truly interrupted
   return (
-    <QuestionStatusLine label={firstQuestion || "Question"} status="Interrupted" />
+    <QuestionStatusLine
+      label={firstQuestion || "Question"}
+      status="Interrupted"
+    />
   );
 }, arePropsEqual);

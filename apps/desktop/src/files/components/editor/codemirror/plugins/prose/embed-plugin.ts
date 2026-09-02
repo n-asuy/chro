@@ -8,7 +8,7 @@
  * - ![[note.md#section]] - Section embeds
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import {
   Decoration,
   EditorView,
@@ -556,7 +556,7 @@ export function createEmbedPlugin(config: EmbedPluginConfig): Extension {
       return RangeSet.of(buildEmbedDecorations(state, config), true);
     },
     update(value, tr) {
-      if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+      if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
         return RangeSet.of(buildEmbedDecorations(tr.state, config), true);
       }
       return value.map(tr.changes);

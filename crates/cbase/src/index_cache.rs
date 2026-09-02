@@ -24,7 +24,7 @@ use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 
 use crate::error::CbaseError;
-use crate::frontmatter::read_file_properties;
+use document::frontmatter::read_file_properties;
 use crate::glob::DatasetMatcher;
 use crate::types::{CbaseDataset, CbaseRow};
 
@@ -103,7 +103,7 @@ impl CbaseIndexCache {
 
             rows.push(CbaseRow {
                 file_path: relative_path.clone(),
-                display_name: display_name(&relative_path),
+                display_name: document::name::display_name(&relative_path),
                 modified_at: cached.modified_at,
                 values: cached.values,
             });
@@ -168,13 +168,7 @@ impl CbaseIndexCache {
     }
 }
 
-fn display_name(relative_path: &str) -> String {
-    let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
-    match file_name.rfind('.') {
-        Some(index) if index > 0 => file_name[..index].to_string(),
-        _ => file_name.to_string(),
-    }
-}
+
 
 fn to_relative_string(relative: &Path) -> String {
     relative

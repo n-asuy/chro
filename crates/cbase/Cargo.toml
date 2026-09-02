@@ -12,6 +12,7 @@ indexmap = { version = "2", features = ["serde"] }
 chrono = { version = "0.4", features = ["clock"] }
 regex = "1"
 ignore = "0.4"
+document = { path = "../document" }
 thiserror = "1.0"
 
 [dev-dependencies]

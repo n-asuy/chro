@@ -648,12 +648,16 @@ const runProjectSearch = (
     kind?: SearchKind;
     case?: SearchCase;
     sort?: ContentSortOrder;
+    filesOnly?: boolean;
     signal?: AbortSignal;
   },
 ): Promise<ProjectSearchResponse> => {
   const params = new URLSearchParams({ q: query });
   if (options?.mode) {
     params.set("mode", options.mode);
+  }
+  if (options?.filesOnly) {
+    params.set("files_only", "true");
   }
   if (options?.limit) {
     params.set("limit", options.limit.toString());
@@ -689,6 +693,116 @@ export const searchProjectFiles = async (
     return [];
   }
   const { results } = await runProjectSearch(projectId, query, options);
+  return results;
+};
+
+/**
+ * The repository's most relevant files with no query: the server matches every
+ * indexed entry and its git-history ranking surfaces recently touched files.
+ * Default suggestion list for pickers opened without input. Directories are
+ * dropped server-side so they never consume result slots.
+ */
+export const listTopProjectFiles = async (
+  projectId: string,
+  options?: { limit?: number; signal?: AbortSignal },
+): Promise<ProjectSearchResult[]> => {
+  const { results } = await runProjectSearch(projectId, "", {
+    ...options,
+    filesOnly: true,
+  });
+  return results;
+};
+
+/**
+ * Where a resolved file reference lives: the workspace root it was found
+ * under plus the path relative to that root, or `null`s when unresolved.
+ */
+export type ResolvedFileLocation = {
+  root: string | null;
+  relative_path: string | null;
+};
+
+/**
+ * Resolve a file reference (bare name, extensionless wikilink target, or path
+ * suffix) against the project's name index: NFC/case-insensitive, `.md`
+ * appended to extensionless references, shortest path wins among duplicates.
+ */
+export const resolveProjectFile = (
+  projectId: string,
+  name: string,
+): Promise<ResolvedFileLocation> => {
+  const params = new URLSearchParams({ name });
+  return desktopFetch<ResolvedFileLocation>(
+    `/rpc/projects/${projectId}/resolve-file?${params.toString()}`,
+  );
+};
+
+/**
+ * {@link resolveProjectFile} but against a task run's candidate roots in
+ * priority order (worktree, own project, sibling projects). Roots deleted
+ * from disk are skipped server-side.
+ */
+export const resolveTaskRunFile = (
+  taskRunId: string,
+  name: string,
+): Promise<ResolvedFileLocation> => {
+  const params = new URLSearchParams({ name });
+  return desktopFetch<ResolvedFileLocation>(
+    `/rpc/task-runs/${taskRunId}/resolve-file?${params.toString()}`,
+  );
+};
+
+/**
+ * What a path-like reference from agent output actually names on disk, as
+ * reported by the server's probe. `exists: false` means the reference resolves
+ * to nothing and must not be rendered as a link.
+ */
+export type PathProbe = {
+  exists: boolean;
+  kind?: "file" | "directory";
+  absolute_path?: string;
+  root?: string;
+  relative_path?: string;
+  line?: number;
+  column?: number;
+};
+
+type PathProbeBatch = { results: PathProbe[] };
+
+/**
+ * Probe references against a task's candidate roots (its latest run's
+ * worktree, own project, sibling projects). Batched: one request carries every
+ * reference a rendered message wants to check. Results are index-aligned with
+ * `paths`.
+ */
+export const probeTaskPaths = async (
+  taskId: string,
+  paths: string[],
+): Promise<PathProbe[]> => {
+  const { results } = await desktopFetch<PathProbeBatch>(
+    `/rpc/tasks/${taskId}/probe-paths`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
+    },
+  );
+  return results;
+};
+
+/** {@link probeTaskPaths} against a project checkout. */
+export const probeProjectPaths = async (
+  projectId: string,
+  paths: string[],
+): Promise<PathProbe[]> => {
+  const { results } = await desktopFetch<PathProbeBatch>(
+    `/rpc/projects/${projectId}/probe-paths`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
+    },
+  );
   return results;
 };
 

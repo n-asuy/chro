@@ -20,6 +20,7 @@ import {
   List,
   Trash2,
   Code,
+  Braces,
   LayoutList,
 } from "lucide-react";
 import { Button } from "@chro/ui/button";
@@ -27,8 +28,10 @@ import { Input } from "@chro/ui/input";
 import { cn } from "@chro/ui/utils";
 import {
   type Frontmatter,
+  type FrontmatterScalar,
   type FrontmatterValue,
   getFrontmatterValueType,
+  formatNestedValue,
   formatDateValue,
   parseDateValue,
 } from "../../lib/frontmatter";
@@ -43,6 +46,13 @@ interface FrontmatterEditorProps {
   onViewModeChange: (mode: FrontmatterViewMode) => void;
 }
 
+/**
+ * The property types this panel can edit
+ *
+ * Values outside this set (nested maps, lists holding structure) are shown
+ * read-only: every editable control here writes its draft back into the
+ * document, so offering one for a value it cannot represent would rewrite it.
+ */
 type PropertyType = "text" | "number" | "boolean" | "date" | "tags";
 
 const PROPERTY_TYPE_ICONS: Record<PropertyType, typeof Type> = {
@@ -342,22 +352,31 @@ function PropertyRow({
     [onStopEditing],
   );
 
-  const propertyType: PropertyType =
-    valueType === "null" ? "text" : (valueType as PropertyType);
-  const TypeIcon = PROPERTY_TYPE_ICONS[propertyType] ?? Type;
+  const propertyType: PropertyType | null =
+    valueType === "nested" ? null : valueType === "null" ? "text" : valueType;
+  const TypeIcon = propertyType ? PROPERTY_TYPE_ICONS[propertyType] : Braces;
 
   return (
     <div className="group flex items-start gap-1 rounded px-1 py-0.5 hover:bg-muted/30">
       <div className="relative">
-        <button
-          type="button"
-          onClick={() => setShowTypeMenu((prev) => !prev)}
-          className="mt-0.5 flex size-5 items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground"
-          title={`Type: ${PROPERTY_TYPE_LABELS[propertyType]}`}
-        >
-          <TypeIcon className="size-3.5" />
-        </button>
-        {showTypeMenu && (
+        {propertyType ? (
+          <button
+            type="button"
+            onClick={() => setShowTypeMenu((prev) => !prev)}
+            className="mt-0.5 flex size-5 items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground"
+            title={`Type: ${PROPERTY_TYPE_LABELS[propertyType]}`}
+          >
+            <TypeIcon className="size-3.5" />
+          </button>
+        ) : (
+          <span
+            className="mt-0.5 flex size-5 items-center justify-center text-muted-foreground/40"
+            title="Nested (read-only)"
+          >
+            <TypeIcon className="size-3.5" />
+          </span>
+        )}
+        {showTypeMenu && propertyType && (
           <PropertyTypeMenu
             currentType={propertyType}
             onSelect={(type) => {
@@ -373,16 +392,20 @@ function PropertyRow({
         <span className="text-[11px] font-medium text-foreground leading-tight">
           {propertyKey}
         </span>
-        <PropertyValueEditor
-          ref={inputRef}
-          type={propertyType}
-          value={value}
-          isEditing={isEditing}
-          onStartEditing={onStartEditing}
-          onStopEditing={onStopEditing}
-          onUpdate={onUpdate}
-          onKeyDown={handleKeyDown}
-        />
+        {propertyType ? (
+          <PropertyValueEditor
+            ref={inputRef}
+            type={propertyType}
+            value={value}
+            isEditing={isEditing}
+            onStartEditing={onStartEditing}
+            onStopEditing={onStopEditing}
+            onUpdate={onUpdate}
+            onKeyDown={handleKeyDown}
+          />
+        ) : (
+          <NestedValuePreview value={value} />
+        )}
       </div>
 
       <Button
@@ -454,21 +477,24 @@ const PropertyValueEditor = ({
       );
     case "tags":
       return (
-        <TagsValueEditor value={value as string[] | null} onUpdate={onUpdate} />
-      );
-    default:
-      return (
-        <TextValueEditor
-          value={String(value ?? "")}
-          isEditing={isEditing}
-          onStartEditing={onStartEditing}
-          onStopEditing={onStopEditing}
+        <TagsValueEditor
+          value={value as FrontmatterScalar[] | null}
           onUpdate={onUpdate}
-          onKeyDown={onKeyDown}
         />
       );
   }
 };
+
+/**
+ * Read-only YAML rendering of a value the panel cannot edit
+ */
+function NestedValuePreview({ value }: { value: FrontmatterValue }) {
+  return (
+    <pre className="m-0 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground/80 leading-relaxed">
+      {formatNestedValue(value)}
+    </pre>
+  );
+}
 
 interface TextValueEditorProps {
   value: string | null;
@@ -661,8 +687,8 @@ function DateValueEditor({ value, onUpdate }: DateValueEditorProps) {
 }
 
 interface TagsValueEditorProps {
-  value: string[] | null;
-  onUpdate: (value: string[]) => void;
+  value: FrontmatterScalar[] | null;
+  onUpdate: (value: FrontmatterScalar[]) => void;
 }
 
 function TagsValueEditor({ value, onUpdate }: TagsValueEditorProps) {
@@ -677,7 +703,7 @@ function TagsValueEditor({ value, onUpdate }: TagsValueEditorProps) {
     }
   }, [isAdding]);
 
-  const handleRemoveTag = (tag: string) => {
+  const handleRemoveTag = (tag: FrontmatterScalar) => {
     onUpdate(tags.filter((t) => t !== tag));
   };
 
@@ -705,10 +731,10 @@ function TagsValueEditor({ value, onUpdate }: TagsValueEditorProps) {
     <div className="flex flex-wrap items-center gap-1">
       {tags.map((tag) => (
         <span
-          key={tag}
+          key={String(tag)}
           className="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 py-0.5 text-[11px] text-foreground"
         >
-          {tag}
+          {String(tag)}
           <button
             type="button"
             onClick={() => handleRemoveTag(tag)}

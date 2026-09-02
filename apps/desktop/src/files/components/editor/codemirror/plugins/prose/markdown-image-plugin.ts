@@ -4,7 +4,7 @@
  * In live preview mode, displays the image when not editing
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import {
   Decoration,
   EditorView,
@@ -218,7 +218,7 @@ export function createMarkdownImagePlugin(
       return RangeSet.of(buildMarkdownImageDecorations(state, config), true);
     },
     update(value, tr) {
-      if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+      if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
         return RangeSet.of(
           buildMarkdownImageDecorations(tr.state, config),
           true,

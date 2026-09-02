@@ -113,7 +113,7 @@ TanStack Router with file-based routing in `src/routes/`. Dynamic segments use `
 ## Building & Packaging
 
 ```bash
-bun run build             # Vite build + tauri build
+bun run build               # Vite build + unsigned Tauri build
 bun run package:mac:nosign  # Local unsigned macOS bundle, for QA
 bun run package:win:nosign  # Local unsigned Windows bundle, for QA
 ```

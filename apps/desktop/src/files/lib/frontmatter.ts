@@ -6,15 +6,23 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /**
+ * A frontmatter value the property UI can render in a single input
+ */
+export type FrontmatterScalar = string | number | boolean;
+
+/**
  * Represents a single frontmatter property value
- * Supports string, number, boolean, date, array of strings, or null
+ *
+ * Mirrors what YAML can express, including nested maps and lists. The property
+ * UI can only edit a subset of it (see `getFrontmatterValueType`), but parsing
+ * must never narrow a value it cannot edit: a document is re-serialized on
+ * every body edit, so a lossy parse silently rewrites the file.
  */
 export type FrontmatterValue =
-  | string
-  | number
-  | boolean
+  | FrontmatterScalar
   | Date
-  | string[]
+  | FrontmatterValue[]
+  | { [key: string]: FrontmatterValue }
   | null;
 
 /**
@@ -76,14 +84,11 @@ export function parseFrontmatter(content: string): ParsedContent {
   const body = content.slice(match[0].length);
 
   try {
-    const parsed = parseYaml(rawYaml);
+    const parsed: unknown = parseYaml(rawYaml);
     const frontmatter: Frontmatter =
-      typeof parsed === "object" && parsed !== null ? parsed : {};
-
-    // Normalize values to supported types
-    for (const key of Object.keys(frontmatter)) {
-      frontmatter[key] = normalizeValue(frontmatter[key]);
-    }
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Frontmatter)
+        : {};
 
     return { frontmatter, body, rawYaml };
   } catch {
@@ -94,35 +99,6 @@ export function parseFrontmatter(content: string): ParsedContent {
       rawYaml,
     };
   }
-}
-
-/**
- * Normalize a parsed YAML value to a supported FrontmatterValue type
- */
-function normalizeValue(value: unknown): FrontmatterValue {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-
-  if (value instanceof Date) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    // Convert array items to strings
-    return value.map((item) => String(item));
-  }
-
-  // For objects or other types, convert to string representation
-  return String(value);
 }
 
 /**
@@ -242,18 +218,50 @@ export function hasFrontmatter(content: string): boolean {
 }
 
 /**
+ * The shape of a frontmatter value, as the property UI sees it
+ *
+ * `nested` covers maps and lists holding structure. The UI has no input that
+ * can represent those, so it must show them read-only rather than flatten them.
+ */
+export type FrontmatterValueType =
+  | "text"
+  | "number"
+  | "boolean"
+  | "date"
+  | "tags"
+  | "nested"
+  | "null";
+
+function isScalar(value: FrontmatterValue): value is FrontmatterScalar {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+/**
  * Get the type of a frontmatter value for UI display
  */
 export function getFrontmatterValueType(
   value: FrontmatterValue,
-): "text" | "number" | "boolean" | "date" | "tags" | "null" {
+): FrontmatterValueType {
   if (value === null) return "null";
   if (typeof value === "string") return "text";
   if (typeof value === "number") return "number";
   if (typeof value === "boolean") return "boolean";
   if (value instanceof Date) return "date";
-  if (Array.isArray(value)) return "tags";
-  return "text";
+  if (Array.isArray(value)) {
+    return value.every(isScalar) ? "tags" : "nested";
+  }
+  return "nested";
+}
+
+/**
+ * Render a nested value as YAML for read-only display
+ */
+export function formatNestedValue(value: FrontmatterValue): string {
+  return stringifyYaml(value, { indent: 2, lineWidth: 0 }).trim();
 }
 
 /**

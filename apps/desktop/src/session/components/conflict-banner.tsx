@@ -1,6 +1,6 @@
-import { AlertCircle } from "lucide-react";
-import { Button } from "@chro/ui/button";
 import type { ConflictOp } from "@/hooks/use-branch-status";
+import { Button } from "@chro/ui/button";
+import { AlertCircle } from "lucide-react";
 
 type ConflictBannerProps = Readonly<{
   attemptBranch: string | null;

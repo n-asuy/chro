@@ -133,6 +133,17 @@ pub trait Runtime: Clone + Send + Sync + 'static {
 
     fn file_search_cache(&self) -> &Arc<FileSearchCache>;
 
+    /// Start watching `repo_path` so the file-search cache is invalidated when
+    /// HEAD moves or the worktree changes on disk. Idempotent per repo.
+    ///
+    /// This sits next to `file_search_cache` deliberately: the cache serves
+    /// results keyed on a HEAD sha it cannot notice changing on its own, so a
+    /// runtime that hands out the cache without also wiring its invalidation
+    /// returns stale file lists after every branch switch. Requiring both on
+    /// the trait means a new runtime has to answer for the second one rather
+    /// than inheriting the gap silently.
+    fn ensure_search_cache_watch(&self, repo_path: &Path);
+
     fn container(&self) -> &(dyn ContainerService + Send + Sync);
 
     async fn stream_diff(
@@ -228,6 +239,16 @@ pub trait Runtime: Clone + Send + Sync + 'static {
     /// by the sidebar to preview the last conversation turn on hover without
     /// opening the full conversation stream.
     async fn task_last_exchange(&self, task_id: Uuid) -> Result<LastExchange, RuntimeError>;
+
+    /// Return the user prompt and final assistant reply for one conversation
+    /// turn (a task session), used by the hover preview's history rail to show
+    /// past turns on demand. `None` when the session does not belong to the
+    /// task.
+    async fn task_session_exchange(
+        &self,
+        task_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<LastExchange>, RuntimeError>;
 
     fn touch_session(&self, session_id: &str) {
         let _ = session_id;

@@ -30,26 +30,35 @@ export interface TreeNodeProps {
   node: FileNode;
   isExpanded: boolean;
   isSelected: boolean;
+  isFocused: boolean;
   indentPx: number;
   onToggle: () => void;
-  onSelect: () => void;
+  onSelect: (event: React.MouseEvent) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
   onOpen?: () => void;
 }
 
-const HIDDEN_EXTENSIONS = ["md", "excalidraw", "cbase"];
+/**
+ * Extensions chro renders as documents, whose extension is therefore hidden.
+ * Mirrors `DOCUMENT_EXTENSIONS` in the Rust `document::name` module — the
+ * server sends `displayName` with entries it lists, and this computes the
+ * same name for nodes the client creates locally, so a file does not change
+ * its name depending on which side produced the node.
+ */
+const DOCUMENT_EXTENSIONS = ["md", "markdown", "excalidraw", "cbase"];
 
 /**
- * Get display name — strips the extension for known file types.
+ * The name a file is shown under: without the extension when chro renders
+ * that format as a document, unchanged otherwise (the extension of `main.rs`
+ * is information, not noise). Directories never hide anything.
  */
 export const getDisplayName = (name: string, type: FileNodeType): string => {
   if (type !== FileNodeType.File) return name;
-  for (const ext of HIDDEN_EXTENSIONS) {
-    if (name.endsWith(`.${ext}`)) {
-      return name.slice(0, -(ext.length + 1));
-    }
-  }
-  return name;
+  const dotIndex = name.lastIndexOf(".");
+  // A leading dot is not an extension separator: `.gitignore` is a name.
+  if (dotIndex <= 0) return name;
+  const extension = name.slice(dotIndex + 1).toLowerCase();
+  return DOCUMENT_EXTENSIONS.includes(extension) ? name.slice(0, dotIndex) : name;
 };
 
 /**

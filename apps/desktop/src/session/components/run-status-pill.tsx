@@ -1,4 +1,5 @@
 import { useLanguage } from "@/i18n";
+import { useRightDockStore } from "@/workspace-layout/state/right-dock-store";
 import {
   Tooltip,
   TooltipContent,
@@ -6,7 +7,6 @@ import {
   TooltipTrigger,
 } from "@chro/ui/tooltip";
 import { GitBranch as GitBranchIcon } from "lucide-react";
-import { useRightDockStore } from "@/workspace-layout/state/right-dock-store";
 
 type RunStatusPillProps = {
   /** Task identity, surfaced in the facts tooltip. */

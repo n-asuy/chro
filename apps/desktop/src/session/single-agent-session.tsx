@@ -22,11 +22,6 @@ import {
 } from "@/lib/agent-runtime-options";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
-import { forkTaskRun } from "@/lib/fork-client";
-import {
-  ConversationForkOrigin,
-  useForkEdge,
-} from "@/session/components/conversation-fork-origin";
 import {
   type BaseCodingAgent,
   type ExecutorConfigs,
@@ -37,10 +32,14 @@ import {
   fetchPiModels,
 } from "@/lib/executor-client";
 import { useFlag } from "@/lib/feature-flags-store";
+import { forkTaskRun } from "@/lib/fork-client";
 import { slugOrId } from "@/lib/slug";
 import { isUuidIdentifier } from "@/lib/uuid";
+import {
+  ConversationForkOrigin,
+  useForkEdge,
+} from "@/session/components/conversation-fork-origin";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
-import { ResizableSidebar } from "@/sidebar/resizable-sidebar";
 import { updateTaskTitle } from "@/tasks/task-api";
 import { ProjectOverview } from "@/workspace-layout/components/project-overview";
 import {
@@ -98,13 +97,13 @@ import { ConflictBanner } from "./components/conflict-banner";
 import { ConversationFindBar } from "./components/conversation-find-bar";
 import { ConversationMessageNav } from "./components/conversation-message-nav";
 import { NewSessionExecutionControls } from "./components/execution-options-controls";
-import { RunStatusPill } from "./components/run-status-pill";
 // DiffViewerPanel is no longer rendered inline; the "Open Diff" header
 // action now opens a dedicated diff tab via the layout store. The panel
 // itself is rendered by DiffTabBody under workspace-layout/registry.
 import { ImageUploadPreviewList } from "./components/image-upload-preview-list";
 import { McpToolApproval } from "./components/mcp-tool-approval";
 import type { AtPopoverHandle } from "./components/prompt-editor/at-popover";
+import { RunStatusPill } from "./components/run-status-pill";
 import { SessionHeader } from "./components/session-header";
 import {
   PromptEditorWithPopover,
@@ -112,6 +111,7 @@ import {
 } from "./components/session-input-controls";
 import { SessionReferencesPopover } from "./components/session-references-popover";
 import { TaskConversation } from "./components/task-conversation";
+import { PathLinkScopeProvider } from "./components/use-path-link";
 import { useOptionalProjectTasks } from "./context/project-tasks-context";
 import { ConversationActionsContext } from "./conversation-actions";
 import {
@@ -1275,6 +1275,14 @@ export function SingleAgentSessionView({
     [retryTurnWith],
   );
 
+  // A task resolves references against its worktree plus every project
+  // checkout; before the task exists, the project alone is the scope. The run
+  // is only for opening what resolved (see `PathLinkScope`).
+  const pathLinkScope = useMemo(
+    () => ({ taskId: activeTaskId, taskRunId, projectId: resolvedProjectId }),
+    [activeTaskId, taskRunId, resolvedProjectId],
+  );
+
   const conversationActions = useMemo(
     () => ({
       onRetryMalformedToolCall: handleRetryMalformedToolCall,
@@ -2191,39 +2199,38 @@ export function SingleAgentSessionView({
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTaskId || pendingSubmission ? (
           <ConversationActionsContext.Provider value={conversationActions}>
-            <TaskConversation
-              key={conversationScrollKey}
-              entries={entries}
-              onForkFromRun={forkFromRun}
-              forkOrigin={
-                forkEdge ? (
-                  <ConversationForkOrigin
-                    edge={forkEdge}
-                    onNavigateToSource={(sourceTaskId) =>
-                      navigateToSession(sourceTaskId, null)
-                    }
-                    scrollContainerRef={conversationScrollRef}
-                    t={t}
-                  />
-                ) : undefined
-              }
-              isLoading={isConversationLoading}
-              error={conversationError}
-              messagesEndRef={messagesEndRef}
-              scrollContainerRef={conversationScrollRef}
-              searchActive={find.searchActive}
-              expandAll={conversationExpandAll}
-              scrollCacheKey={conversationScrollKey}
-              isStreaming={isConversationStreaming}
-              scrollToBottomSignal={scrollToBottomSignal}
-              hasMoreHistory={hasMoreHistory}
-              isLoadingMoreHistory={isLoadingMoreHistory}
-              onLoadMoreHistory={loadMoreHistory}
-              onWikilinkClick={navigateToWikilink}
-              onFilePathClick={(path) =>
-                openFilePath(path, taskRunId ?? undefined)
-              }
-            />
+            <PathLinkScopeProvider value={pathLinkScope}>
+              <TaskConversation
+                key={conversationScrollKey}
+                entries={entries}
+                onForkFromRun={forkFromRun}
+                forkOrigin={
+                  forkEdge ? (
+                    <ConversationForkOrigin
+                      edge={forkEdge}
+                      onNavigateToSource={(sourceTaskId) =>
+                        navigateToSession(sourceTaskId, null)
+                      }
+                      scrollContainerRef={conversationScrollRef}
+                      t={t}
+                    />
+                  ) : undefined
+                }
+                isLoading={isConversationLoading}
+                error={conversationError}
+                messagesEndRef={messagesEndRef}
+                scrollContainerRef={conversationScrollRef}
+                searchActive={find.searchActive}
+                expandAll={conversationExpandAll}
+                scrollCacheKey={conversationScrollKey}
+                isStreaming={isConversationStreaming}
+                scrollToBottomSignal={scrollToBottomSignal}
+                hasMoreHistory={hasMoreHistory}
+                isLoadingMoreHistory={isLoadingMoreHistory}
+                onLoadMoreHistory={loadMoreHistory}
+                onWikilinkClick={navigateToWikilink}
+              />
+            </PathLinkScopeProvider>
           </ConversationActionsContext.Provider>
         ) : (
           <ProjectOverview />
@@ -2236,9 +2243,8 @@ export function SingleAgentSessionView({
     <>
       <div className="flex h-full w-full justify-end bg-muted text-foreground">
         <div className="flex h-full w-full max-w-full bg-background">
-          {/* The session list previously lived here as a ResizableSidebar.
-              It now lives in the LeftDock's Sessions panel and is hidden
-              from the tab body to avoid a double-sidebar. */}
+          {/* The session list lives in the LeftDock's Sessions panel and is
+              hidden from the tab body to avoid a double-sidebar. */}
           <div
             ref={sessionRootRef}
             className="flex min-w-0 flex-1 flex-col bg-background"

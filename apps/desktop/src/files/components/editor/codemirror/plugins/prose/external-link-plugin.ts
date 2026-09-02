@@ -8,6 +8,7 @@
  * In live preview mode, displays only the link text when not editing
  */
 
+import { openExternalUrl } from "@/lib/open-external-url";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import type { EditorState, Range as EditorRange } from "@codemirror/state";
@@ -455,20 +456,6 @@ export const externalLinkPlugin = createProsePlugin({
   rebuildOnDocChange: true,
   rebuildOnSelection: true,
 });
-
-const openExternalUrl = (url: string) => {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const openExternal = window.desktop?.openExternalUrl;
-  if (openExternal) {
-    void openExternal(url);
-    return;
-  }
-
-  window.open(url, "_blank", "noopener");
-};
 
 /**
  * Click handler for external links

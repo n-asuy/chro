@@ -57,7 +57,6 @@ function SingleFileEditor({
   taskRunId?: string;
   tabId: string;
 }) {
-  const selectNode = useFilesStore((s) => s.selectNode);
   const expandToPath = useFileTreeStore((s) => s.expandToPath);
   const closeTab = useLayoutStore((s) => s.closeTab);
 
@@ -69,9 +68,11 @@ function SingleFileEditor({
     // Skip project-tree reflection for task-run-scoped tabs: the file may not
     // exist in the project tree at all.
     if (taskRunId) return;
-    selectNode(path);
+    // The active editor and the File Explorer selection are separate states.
+    // In particular, Cmd/Ctrl-click opens a file without collapsing an
+    // existing Alt/Option multi-selection.
     expandToPath(path);
-  }, [expandToPath, isActiveLeaf, path, selectNode, taskRunId]);
+  }, [expandToPath, isActiveLeaf, path, taskRunId]);
 
   return (
     <div className="h-full w-full">

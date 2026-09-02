@@ -51,6 +51,24 @@ import("./lib/preferences-client").then(({ fetchPreferences }) =>
     }),
 );
 
+// Local activity recording: instruments the UI at the document level and
+// Console access to feature flags (`chroFlags.force(...)`), dev builds only.
+if (import.meta.env.DEV) {
+  void import("./lib/flags-dev-console");
+}
+
+// flushes to a JSONL file on this machine. Dev builds only, and nothing it
+// records is transmitted.
+if (import.meta.env.DEV || __DEV_EVENTS_FORCED__) {
+  void Promise.all([
+    import("./lib/dev-events"),
+    import("./lib/dev-autocapture"),
+  ]).then(([{ startDevEventFlushing }, { installDevAutocapture }]) => {
+    startDevEventFlushing();
+    installDevAutocapture({ router });
+  });
+}
+
 if (__PERF_ENABLED__) {
   import("./perf/recorder").then(
     ({ startPerfRecording, observeRouteTransitions }) => {

@@ -1,8 +1,14 @@
 import { useOptionalProjectContext } from "@/files/context/project-context";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
+import {
+  inferKindFromLocation,
+  isSameRouteKind,
+  pathFromKind,
+  projectIdFromPathname,
+} from "../domain/route-tab-kind";
 import { useLayoutStore } from "../state/layout-store";
-import type { PaneLayout, Tab, TabKind } from "../types";
+import type { PaneLayout, Tab } from "../types";
 
 /**
  * Two-way sync between TanStack Router URL and the layout store's active tab,
@@ -13,6 +19,11 @@ import type { PaneLayout, Tab, TabKind } from "../types";
  *
  * Layout tree shape is NOT in the URL; only the focused tab's logical
  * resource. Other tabs/panes are layout-store + persistence.
+ *
+ * This is a mirror, not a command channel: in-app openers (session rows, the
+ * search palette) call `openTab` and let the second effect write the URL. A
+ * URL that already equals its target produces no location change and so
+ * cannot reopen anything — see `domain/route-tab-kind`.
  */
 export function useRouteTabSync() {
   const params = useParams({ strict: false }) as {
@@ -110,129 +121,4 @@ export function findFocusedTab(layout: PaneLayout): Tab | null {
     }
   }
   return null;
-}
-
-function isSameRouteKind(a: TabKind, b: TabKind): boolean {
-  if (a.type !== b.type) return false;
-  switch (a.type) {
-    case "overview":
-      return b.type === "overview";
-    case "session":
-      return (
-        b.type === "session" &&
-        a.taskId === b.taskId &&
-        (a.runId ?? null) === (b.runId ?? null)
-      );
-    case "settings":
-      return true;
-    case "file":
-      return (
-        b.type === "file" &&
-        a.path === b.path &&
-        (a.taskRunId ?? null) === (b.taskRunId ?? null)
-      );
-    case "diff":
-      return b.type === "diff" && a.runId === b.runId;
-    case "project-diff":
-      return b.type === "project-diff" && a.projectId === b.projectId;
-    case "browser":
-      return b.type === "browser" && a.browserId === b.browserId;
-    case "cdp-browser":
-      return b.type === "cdp-browser" && a.browserId === b.browserId;
-    case "skills":
-      return b.type === "skills";
-    case "gallery":
-      return (
-        b.type === "gallery" && (a.taskRunId ?? null) === (b.taskRunId ?? null)
-      );
-  }
-}
-
-export function inferKindFromLocation(pathname: string): TabKind | null {
-  if (!projectIdFromPathname(pathname)) return null;
-  // /projects/$id (project root) — the project home / overview surface.
-  if (/^\/projects\/[^/]+\/?$/.test(pathname)) {
-    return { type: "overview" };
-  }
-  // /projects/$id/session/$taskId/$runId
-  const sessionMatch = pathname.match(
-    /^\/projects\/[^/]+\/session(?:\/([^/]+))?(?:\/([^/]+))?\/?$/,
-  );
-  if (sessionMatch?.[1]) {
-    return {
-      type: "session",
-      taskId: decodePathSegment(sessionMatch[1]),
-      runId: decodePathSegment(sessionMatch[2]),
-    };
-  }
-  // /projects/$id/session (root) — open a fresh "new session" tab so the
-  // chat-start surface renders inside the pane.
-  if (sessionMatch) {
-    return { type: "session" };
-  }
-  // /projects/$id/files
-  if (pathname.endsWith("/files")) {
-    // No specific path — defer to user; do not auto-open
-    return null;
-  }
-  if (pathname.endsWith("/settings")) {
-    return { type: "settings" };
-  }
-  if (pathname.endsWith("/skills")) {
-    return { type: "skills" };
-  }
-  // /projects/$id/gallery — the project-scoped media gallery. Run-scoped
-  // galleries are opened imperatively (no URL), like diff tabs.
-  if (pathname.endsWith("/gallery")) {
-    return { type: "gallery" };
-  }
-  return null;
-}
-
-function projectIdFromPathname(pathname: string): string | undefined {
-  return decodePathSegment(pathname.match(/^\/projects\/([^/]+)/)?.[1]);
-}
-
-function decodePathSegment(segment: string | undefined): string | undefined {
-  if (!segment) return undefined;
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
-}
-
-export function pathFromKind(
-  kind: TabKind,
-  projectIdParam: string | undefined,
-): string | null {
-  if (!projectIdParam) return null;
-  const base = `/projects/${projectIdParam}`;
-  switch (kind.type) {
-    case "overview":
-      return base;
-    case "session":
-      if (!kind.taskId) return `${base}/session/`;
-      return kind.runId
-        ? `${base}/session/${kind.taskId}/${kind.runId}`
-        : `${base}/session/${kind.taskId}`;
-    case "file":
-      return `${base}/files`;
-    case "diff":
-      return null;
-    case "project-diff":
-      return null;
-    case "browser":
-      return null;
-    case "cdp-browser":
-      return null;
-    case "settings":
-      return `${base}/settings`;
-    case "skills":
-      return `${base}/skills`;
-    case "gallery":
-      // Only the project-scoped gallery owns a URL; run-scoped galleries are
-      // imperative tabs (like diff) and do not round-trip through the path.
-      return kind.taskRunId ? null : `${base}/gallery`;
-  }
 }

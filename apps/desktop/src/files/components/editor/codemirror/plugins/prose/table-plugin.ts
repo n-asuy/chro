@@ -8,7 +8,8 @@
  * Edits are synced back to the markdown source via CodeMirror transactions.
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { openExternalUrl } from "@/lib/open-external-url";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { syntaxTree } from "@codemirror/language";
 import {
   type ChangeSpec,
@@ -131,20 +132,6 @@ const caretRangeFromPoint = (
   if (!range) return null;
   if (!container.contains(range.startContainer)) return null;
   return range;
-};
-
-const openExternalUrl = (url: string) => {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const openExternal = window.desktop?.openExternalUrl;
-  if (openExternal) {
-    void openExternal(url);
-    return;
-  }
-
-  window.open(url, "_blank", "noopener");
 };
 
 function findWikilinkAliasSeparator(rawTarget: string): {
@@ -1304,7 +1291,7 @@ export function createTablePlugin(config: TablePluginConfig = {}): Extension {
         }
         return value;
       }
-      if (tr.docChanged || hasDecorationRefresh(tr) || rawChanged) {
+      if (tr.docChanged || needsDecorationRebuild(tr) || rawChanged) {
         return RangeSet.of(buildTableDecorations(tr.state, config), true);
       }
       return value;

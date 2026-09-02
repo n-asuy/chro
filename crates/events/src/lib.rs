@@ -23,7 +23,7 @@ use serde_json::Value;
 use sqlx::sqlite::SqliteOperation;
 use sqlx::{Decode, Error as SqlxError, Pool, Row, Sqlite};
 use thiserror::Error;
-use tokio::{runtime::Handle, sync::RwLock as AsyncRwLock};
+use tokio::{runtime::Handle, sync::mpsc, sync::RwLock as AsyncRwLock};
 use tracing::error;
 use uuid::Uuid;
 
@@ -321,14 +321,26 @@ impl EventService {
 
     /// Build a SQLite hook closure that pushes DB changes into the shared [`MsgStore`].
     ///
-    /// Uses a dual-hook architecture matching the reference project:
-    /// - **preupdate hook** (synchronous): handles DELETE operations by reading
-    ///   old column values directly before the row is removed.
-    /// - **update hook** (async): handles INSERT/UPDATE by querying the committed
-    ///   row from a separate connection.
+    /// The hooks only *record* which rows a statement touched; nothing is
+    /// published from inside them:
+    /// - **preupdate hook** (synchronous): a DELETE's id can only be read before
+    ///   the row is gone, so it is captured here and buffered.
+    /// - **update hook** (synchronous): buffers the rowid of every INSERT/UPDATE.
+    /// - **commit hook**: hands the buffer to the dispatcher.
+    /// - **rollback hook**: drops the buffer, so an abandoned write publishes
+    ///   nothing.
     ///
-    /// With `JournalMode::Delete`, the update hook fires after the row is
-    /// accessible to other connections, so no sleep delay is needed.
+    /// Publishing is deferred because the update hook fires *inside* the writing
+    /// statement, before its transaction commits, while the row is read back on a
+    /// different pool connection. Under WAL that reader sees the last committed
+    /// snapshot, so publishing from the hook races the writer's own commit and
+    /// can broadcast the pre-update row — and since no further change fires for
+    /// that row, the stale value stays the last word (a finished run left
+    /// `running`, pinning the composer's Stop button until a reload).
+    ///
+    /// The dispatcher is a single consumer, so reads also happen in commit order:
+    /// concurrent per-row tasks could otherwise let an older read land after a
+    /// newer one and reintroduce the same staleness.
     pub fn create_hook(
         resources: &EventResources,
         db_service: DBService,
@@ -343,25 +355,50 @@ impl EventService {
         let entry_counter = resources.entry_counter();
         let indexes = resources.indexes();
 
+        let (dispatch_tx, dispatch_rx) = mpsc::unbounded_channel::<Vec<PendingChange>>();
+        let dispatch_rx = Arc::new(std::sync::Mutex::new(Some(dispatch_rx)));
+
         move |conn: &mut sqlx::sqlite::SqliteConnection| {
             let msg_store = msg_store.clone();
             let entry_counter = entry_counter.clone();
             let indexes = indexes.clone();
             let db_for_hook = db_service.clone();
+            let dispatch_tx = dispatch_tx.clone();
+            let dispatch_rx = dispatch_rx.clone();
             Box::pin(async move {
                 let mut handle = conn.lock_handle().await?;
-                let runtime_handle = Handle::current();
 
-                // Preupdate hook: fires synchronously before DELETE commits.
-                // Read old column values (id UUID at column 0) directly from
-                // the row before it is removed.
-                let msg_store_for_preupdate = msg_store.clone();
+                // One dispatcher serves every pooled connection; the first one to
+                // connect starts it.
+                let receiver = dispatch_rx.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(receiver) = receiver {
+                    Handle::current().spawn(dispatch_committed_changes(
+                        db_for_hook,
+                        msg_store,
+                        indexes,
+                        entry_counter,
+                        receiver,
+                    ));
+                }
+
+                // Buffer of rows this connection has touched since its last
+                // commit or rollback.
+                let pending: Arc<parking_lot::Mutex<Vec<PendingChange>>> =
+                    Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+                let pending_for_preupdate = pending.clone();
                 handle.set_preupdate_hook(
                     move |preupdate: sqlx::sqlite::PreupdateHookResult<'_>| {
                         if preupdate.operation != SqliteOperation::Delete {
                             return;
                         }
 
+                        let Some(collection) = collection_for_table(preupdate.table) else {
+                            return;
+                        };
+
+                        // The id (column 0) is only readable while the row still
+                        // exists, so it is decoded now and published on commit.
                         let id = preupdate
                             .get_old_column_value(0)
                             .ok()
@@ -369,57 +406,40 @@ impl EventService {
 
                         let Some(id) = id else { return };
 
-                        match preupdate.table {
-                            "task_records" => {
-                                msg_store_for_preupdate.push_patch(remove_patch("tasks", id));
-                            }
-                            "task_runs" => {
-                                msg_store_for_preupdate.push_patch(remove_patch("task_runs", id));
-                            }
-                            "task_sessions" => {
-                                msg_store_for_preupdate
-                                    .push_patch(remove_patch("task_sessions", id));
-                            }
-                            "task_drafts" => {
-                                msg_store_for_preupdate.push_patch(remove_patch("task_drafts", id));
-                            }
-                            _ => {}
-                        }
+                        pending_for_preupdate
+                            .lock()
+                            .push(PendingChange::Delete { collection, id });
                     },
                 );
 
-                // Update hook: fires for INSERT/UPDATE/DELETE.
-                // DELETE is already handled by the preupdate hook above, so
-                // we skip it here. INSERT/UPDATE are handled asynchronously
-                // by querying the row from a separate pool connection.
+                let pending_for_update = pending.clone();
                 handle.set_update_hook(move |hook| {
+                    // DELETE is captured by the preupdate hook above, which is the
+                    // only place the row is still readable.
                     if matches!(hook.operation, SqliteOperation::Delete) {
                         return;
                     }
 
-                    let runtime_handle = runtime_handle.clone();
-                    let msg_store = msg_store.clone();
-                    let entry_counter = entry_counter.clone();
-                    let indexes = indexes.clone();
-                    let db = db_for_hook.clone();
-                    let table = hook.table.to_string();
-                    let operation = hook.operation.clone();
-                    let rowid = hook.rowid;
-                    runtime_handle.spawn(async move {
-                        if let Err(err) = process_update_hook(
-                            &db,
-                            &msg_store,
-                            &indexes,
-                            &entry_counter,
-                            table,
-                            operation,
-                            rowid,
-                        )
-                        .await
-                        {
-                            error!("event hook error: {err}");
-                        }
+                    pending_for_update.lock().push(PendingChange::Upsert {
+                        table: hook.table.to_string(),
+                        operation: hook.operation.clone(),
+                        rowid: hook.rowid,
                     });
+                });
+
+                let pending_for_commit = pending.clone();
+                handle.set_commit_hook(move || {
+                    let changes = std::mem::take(&mut *pending_for_commit.lock());
+                    if !changes.is_empty() {
+                        let _ = dispatch_tx.send(changes);
+                    }
+                    // Never veto the commit.
+                    true
+                });
+
+                let pending_for_rollback = pending;
+                handle.set_rollback_hook(move || {
+                    pending_for_rollback.lock().clear();
                 });
 
                 Ok(())
@@ -428,166 +448,250 @@ impl EventService {
     }
 }
 
-/// Process INSERT/UPDATE operations from the update hook.
-/// DELETE is handled separately by the preupdate hook.
-async fn process_update_hook(
-    db: &DBService,
-    msg_store: &Arc<MsgStore>,
-    indexes: &EventIndexes,
-    counter: &Arc<AsyncRwLock<usize>>,
-    table: String,
-    operation: SqliteOperation,
-    rowid: i64,
-) -> Result<(), sqlx::Error> {
-    match table.as_str() {
-        "task_records" => handle_task_upsert(db, msg_store, indexes, operation, rowid).await?,
-        "task_runs" => handle_run_upsert(db, msg_store, indexes, operation, rowid).await?,
-        "task_sessions" => handle_session_upsert(db, msg_store, indexes, operation, rowid).await?,
-        "task_drafts" => handle_draft_upsert(db, msg_store, indexes, operation, rowid).await?,
-        _ => {
-            let mut guard = counter.write().await;
-            *guard += 1;
-            let path = format!("/entries/{}", *guard);
-            let payload = serde_json::json!({
-                "table": table,
-                "operation": format_sqlite_op(operation),
-                "rowid": rowid,
-            });
-            msg_store.push_patch(Patch(vec![PatchOperation::Add(AddOperation {
-                path,
-                value: payload,
-            })]));
-        }
-    }
-    Ok(())
+/// A row a statement touched, waiting for its transaction to be decided.
+enum PendingChange {
+    Upsert {
+        table: String,
+        operation: SqliteOperation,
+        rowid: i64,
+    },
+    Delete {
+        collection: &'static str,
+        id: Uuid,
+    },
 }
 
-async fn handle_task_upsert(
-    db: &DBService,
-    msg_store: &Arc<MsgStore>,
-    indexes: &EventIndexes,
-    operation: SqliteOperation,
-    rowid: i64,
-) -> Result<(), sqlx::Error> {
-    match TaskRecord::find_by_rowid(db.pool(), rowid).await? {
-        Some(task) => {
-            indexes.record_task(task.id, task.project_id);
-            indexes.track_task_rowid(rowid, task.id);
-            match operation {
-                SqliteOperation::Insert => msg_store.push_patch(add_patch("tasks", task.id, &task)),
-                _ => msg_store.push_patch(replace_patch("tasks", task.id, &task)),
-            }
-        }
-        None => {
-            error!(
-                table = "task_records",
-                rowid,
-                op = format_sqlite_op(operation),
-                "find_by_rowid returned None for upsert"
-            );
-        }
+/// The patch collection a table's rows are published under, or `None` for tables
+/// that are not part of the streamed state.
+fn collection_for_table(table: &str) -> Option<&'static str> {
+    match table {
+        "task_records" => Some("tasks"),
+        "task_runs" => Some("task_runs"),
+        "task_sessions" => Some("task_sessions"),
+        "task_drafts" => Some("task_drafts"),
+        _ => None,
     }
-    Ok(())
 }
 
-async fn handle_run_upsert(
-    db: &DBService,
-    msg_store: &Arc<MsgStore>,
-    indexes: &EventIndexes,
-    operation: SqliteOperation,
-    rowid: i64,
-) -> Result<(), sqlx::Error> {
-    match TaskRun::find_by_rowid(db.pool(), rowid).await? {
-        Some(run) => {
-            if let Some(project_id) = resolve_project_id(indexes, db, run.task_id).await? {
-                indexes.record_run(run.id, run.task_id, project_id);
-                indexes.track_run_rowid(rowid, run.id);
-                let payload = TaskRunEventValue::new(run, project_id);
-                match operation {
-                    SqliteOperation::Insert => {
-                        msg_store.push_patch(add_patch("task_runs", payload.run.id, &payload))
+/// How long to keep re-reading a row that still looks unchanged before giving up
+/// and publishing whatever is there. The commit being waited on is already
+/// in-flight on another thread, so this is microseconds in practice; the budget
+/// only bounds the pathological case (a write that genuinely changed nothing).
+const READ_BACK_YIELDS: usize = 8;
+const READ_BACK_SLEEPS: usize = 20;
+const READ_BACK_SLEEP: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Read back and publish committed rows, one batch at a time in commit order.
+///
+/// Single-consumer on purpose: a task per row would let an older read land after
+/// a newer one and leave the stale value as the last word for that row.
+async fn dispatch_committed_changes(
+    db: DBService,
+    msg_store: Arc<MsgStore>,
+    indexes: EventIndexes,
+    entry_counter: Arc<AsyncRwLock<usize>>,
+    mut receiver: mpsc::UnboundedReceiver<Vec<PendingChange>>,
+) {
+    // Fingerprint of the last value published per row. A read-back that returns
+    // exactly what was published last has not observed the change it is
+    // reporting, which is how a pre-commit read is recognised without needing to
+    // know what the new value should be.
+    let mut published: HashMap<(&'static str, Uuid), u64> = HashMap::new();
+
+    while let Some(batch) = receiver.recv().await {
+        for change in batch {
+            match change {
+                PendingChange::Delete { collection, id } => {
+                    published.remove(&(collection, id));
+                    msg_store.push_patch(remove_patch(collection, id));
+                }
+                PendingChange::Upsert {
+                    table,
+                    operation,
+                    rowid,
+                } => {
+                    if collection_for_table(&table).is_none() {
+                        let mut guard = entry_counter.write().await;
+                        *guard += 1;
+                        let path = format!("/entries/{}", *guard);
+                        msg_store.push_patch(Patch(vec![PatchOperation::Add(AddOperation {
+                            path,
+                            value: serde_json::json!({
+                                "table": table,
+                                "operation": format_sqlite_op(operation),
+                                "rowid": rowid,
+                            }),
+                        })]));
+                        continue;
                     }
-                    _ => msg_store.push_patch(replace_patch("task_runs", payload.run.id, &payload)),
+
+                    publish_changed_row(
+                        &db,
+                        &msg_store,
+                        &indexes,
+                        &mut published,
+                        &table,
+                        operation,
+                        rowid,
+                    )
+                    .await;
                 }
             }
         }
-        None => {
-            error!(
-                table = "task_runs",
-                rowid,
-                op = format_sqlite_op(operation),
-                "find_by_rowid returned None for upsert"
-            );
-        }
     }
-    Ok(())
 }
 
-async fn handle_session_upsert(
+/// Publish a changed row once the read-back actually reflects the change.
+async fn publish_changed_row(
     db: &DBService,
     msg_store: &Arc<MsgStore>,
     indexes: &EventIndexes,
+    published: &mut HashMap<(&'static str, Uuid), u64>,
+    table: &str,
     operation: SqliteOperation,
     rowid: i64,
-) -> Result<(), sqlx::Error> {
-    match TaskSession::find_by_rowid(db.pool(), rowid).await? {
-        Some(session) => {
-            indexes.record_session(session.id, session.task_id);
-            indexes.track_session_rowid(rowid, session.id);
-            match operation {
-                SqliteOperation::Insert => {
-                    msg_store.push_patch(add_patch("task_sessions", session.id, &session))
-                }
-                _ => msg_store.push_patch(replace_patch("task_sessions", session.id, &session)),
+) {
+    let attempts = READ_BACK_YIELDS + READ_BACK_SLEEPS;
+    for attempt in 0..=attempts {
+        let snapshot = match read_changed_row(db, indexes, table, rowid).await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                error!("event hook error: {err}");
+                return;
             }
+        };
+
+        let last_attempt = attempt == attempts;
+        if let Some(snapshot) = snapshot {
+            let key = (snapshot.collection, snapshot.id);
+            let fingerprint = fingerprint(&snapshot.value);
+            if !last_attempt && published.get(&key) == Some(&fingerprint) {
+                // Still the value already on the wire: the change is not
+                // visible on this connection yet.
+                back_off(attempt).await;
+                continue;
+            }
+
+            published.insert(key, fingerprint);
+            let path = format!(
+                "/{}/{}",
+                snapshot.collection,
+                escape_segment(&snapshot.id.to_string())
+            );
+            let value = snapshot.value;
+            msg_store.push_patch(Patch(vec![match operation {
+                SqliteOperation::Insert => PatchOperation::Add(AddOperation { path, value }),
+                _ => PatchOperation::Replace(ReplaceOperation { path, value }),
+            }]));
+            return;
         }
-        None => {
+
+        // An insert whose row is not there yet is the same race seen from the
+        // other side; dropping it silently is what left rows missing from the UI.
+        if last_attempt {
             error!(
-                table = "task_sessions",
+                table,
                 rowid,
                 op = format_sqlite_op(operation),
-                "find_by_rowid returned None for upsert"
+                "row was never visible after its commit; change not published"
             );
+            return;
         }
+        back_off(attempt).await;
     }
-    Ok(())
 }
 
-async fn handle_draft_upsert(
-    db: &DBService,
-    msg_store: &Arc<MsgStore>,
-    indexes: &EventIndexes,
-    operation: SqliteOperation,
-    rowid: i64,
-) -> Result<(), sqlx::Error> {
-    match TaskDraft::find_by_rowid(db.pool(), rowid).await? {
-        Some(draft) => {
-            if let Some(project_id) = resolve_project_id(indexes, db, draft.task_id).await? {
-                indexes.record_draft(draft.id, project_id);
-                indexes.track_draft_rowid(rowid, draft.id);
-                let payload = TaskDraftEventValue::new(draft, project_id);
-                match operation {
-                    SqliteOperation::Insert => {
-                        msg_store.push_patch(add_patch("task_drafts", payload.draft.id, &payload))
-                    }
-                    _ => msg_store.push_patch(replace_patch(
-                        "task_drafts",
-                        payload.draft.id,
-                        &payload,
-                    )),
-                }
-            }
-        }
-        None => {
-            error!(
-                table = "task_drafts",
-                rowid,
-                op = format_sqlite_op(operation),
-                "find_by_rowid returned None for upsert"
-            );
-        }
+async fn back_off(attempt: usize) {
+    if attempt < READ_BACK_YIELDS {
+        tokio::task::yield_now().await;
+    } else {
+        tokio::time::sleep(READ_BACK_SLEEP).await;
     }
-    Ok(())
+}
+
+/// A committed row, ready to publish.
+struct RowSnapshot {
+    collection: &'static str,
+    id: Uuid,
+    value: Value,
+}
+
+/// Read back the row a change refers to, refreshing the routing indexes.
+///
+/// `Ok(None)` means the row is not visible on this connection: either it was
+/// deleted again, or — the case this whole path guards against — the writer's
+/// transaction has not landed yet.
+async fn read_changed_row(
+    db: &DBService,
+    indexes: &EventIndexes,
+    table: &str,
+    rowid: i64,
+) -> Result<Option<RowSnapshot>, sqlx::Error> {
+    let snapshot = match table {
+        "task_records" => TaskRecord::find_by_rowid(db.pool(), rowid)
+            .await?
+            .map(|task| {
+                indexes.record_task(task.id, task.project_id);
+                indexes.track_task_rowid(rowid, task.id);
+                RowSnapshot {
+                    collection: "tasks",
+                    id: task.id,
+                    value: serde_json::to_value(&task).unwrap_or(Value::Null),
+                }
+            }),
+        "task_runs" => match TaskRun::find_by_rowid(db.pool(), rowid).await? {
+            Some(run) => match resolve_project_id(indexes, db, run.task_id).await? {
+                Some(project_id) => {
+                    indexes.record_run(run.id, run.task_id, project_id);
+                    indexes.track_run_rowid(rowid, run.id);
+                    let payload = TaskRunEventValue::new(run, project_id);
+                    Some(RowSnapshot {
+                        collection: "task_runs",
+                        id: payload.run.id,
+                        value: serde_json::to_value(&payload).unwrap_or(Value::Null),
+                    })
+                }
+                None => None,
+            },
+            None => None,
+        },
+        "task_sessions" => TaskSession::find_by_rowid(db.pool(), rowid)
+            .await?
+            .map(|session| {
+                indexes.record_session(session.id, session.task_id);
+                indexes.track_session_rowid(rowid, session.id);
+                RowSnapshot {
+                    collection: "task_sessions",
+                    id: session.id,
+                    value: serde_json::to_value(&session).unwrap_or(Value::Null),
+                }
+            }),
+        "task_drafts" => match TaskDraft::find_by_rowid(db.pool(), rowid).await? {
+            Some(draft) => match resolve_project_id(indexes, db, draft.task_id).await? {
+                Some(project_id) => {
+                    indexes.record_draft(draft.id, project_id);
+                    indexes.track_draft_rowid(rowid, draft.id);
+                    let payload = TaskDraftEventValue::new(draft, project_id);
+                    Some(RowSnapshot {
+                        collection: "task_drafts",
+                        id: payload.draft.id,
+                        value: serde_json::to_value(&payload).unwrap_or(Value::Null),
+                    })
+                }
+                None => None,
+            },
+            None => None,
+        },
+        _ => None,
+    };
+    Ok(snapshot)
+}
+
+fn fingerprint(value: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
 }
 
 async fn resolve_project_id(
@@ -614,20 +718,6 @@ fn format_sqlite_op(op: SqliteOperation) -> &'static str {
         SqliteOperation::Delete => "delete",
         SqliteOperation::Unknown(_) => "unknown",
     }
-}
-
-fn add_patch<T: Serialize>(category: &str, id: Uuid, value: &T) -> Patch {
-    Patch(vec![PatchOperation::Add(AddOperation {
-        path: format!("/{}/{}", category, escape_segment(&id.to_string())),
-        value: serde_json::to_value(value).unwrap_or(Value::Null),
-    })])
-}
-
-fn replace_patch<T: Serialize>(category: &str, id: Uuid, value: &T) -> Patch {
-    Patch(vec![PatchOperation::Replace(ReplaceOperation {
-        path: format!("/{}/{}", category, escape_segment(&id.to_string())),
-        value: serde_json::to_value(value).unwrap_or(Value::Null),
-    })])
 }
 
 fn remove_patch(category: &str, id: Uuid) -> Patch {

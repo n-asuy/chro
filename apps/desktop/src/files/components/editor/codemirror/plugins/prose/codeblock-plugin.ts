@@ -3,7 +3,7 @@
  * Adds styling to fenced code block elements
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { Decoration, EditorView } from "@codemirror/view";
 import { StateField, RangeSet } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
@@ -73,7 +73,7 @@ export const codeblockPlugin = StateField.define<DecorationSet>({
   update(value, tr) {
     // Code-block line styling depends only on the document, so cursor movement
     // does not need a rebuild (only doc edits or an explicit refresh do).
-    if (tr.docChanged || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildCodeblockDecorations(tr.state), true);
     }
     return value.map(tr.changes);

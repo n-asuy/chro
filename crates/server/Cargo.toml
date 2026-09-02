@@ -1,8 +1,13 @@
 [package]
 name = "chro-server"
-version = "0.1.48"
+version = "0.1.49"
 edition = "2021"
 license = "Apache-2.0"
+
+[features]
+default = []
+# Instance lifecycle against a control plane. Off in published builds.
+cloud = ["dep:dirs"]
 
 [dependencies]
 anyhow = "1.0"
@@ -40,7 +45,6 @@ file-search-cache = { path = "../file-search-cache" }
 analytics = { path = "../analytics" }
 skills = { path = "../skills" }
 cbase = { path = "../cbase" }
-conversation = { path = "../conversation" }
 rust-embed = "8"
 mime_guess = "2"
 open = "5"
@@ -48,6 +52,8 @@ ureq = { version = "2", features = ["json"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 browser = { path = "../browser" }
 base64 = "0.22"
+# Only needed to locate the cloud config file.
+dirs = { version = "5.0", optional = true }
 
 [dev-dependencies]
 dirs = "5.0"

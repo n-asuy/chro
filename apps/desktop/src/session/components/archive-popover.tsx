@@ -1,19 +1,7 @@
-
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@chro/ui/popover";
 import { Input } from "@chro/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import { Archive, RotateCcw, Search } from "lucide-react";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArchivedSession } from "../hooks/use-archived-sessions";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
@@ -65,14 +53,14 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
       e.stopPropagation();
       onRestore(session.id);
     },
-    [onRestore, session.id]
+    [onRestore, session.id],
   );
 
   const handleRef = useCallback(
     (el: HTMLDivElement | null) => {
       setRef(index, el);
     },
-    [setRef, index]
+    [setRef, index],
   );
 
   return (
@@ -83,7 +71,7 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
         "outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring/70",
         isSelected
           ? "bg-custom-sidebar-background-80 text-foreground"
-          : "text-muted-foreground hover:bg-custom-sidebar-background-80 hover:text-foreground"
+          : "text-muted-foreground hover:bg-custom-sidebar-background-80 hover:text-foreground",
       )}
     >
       <div className="flex items-start gap-2.5">
@@ -152,7 +140,7 @@ export const ArchivePopover = memo(function ArchivePopover({
       })
       .sort(
         (a, b) =>
-          new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime()
+          new Date(b.archivedAt).getTime() - new Date(a.archivedAt).getTime(),
       );
   }, [archivedSessions, searchQuery]);
 
@@ -178,7 +166,7 @@ export const ArchivePopover = memo(function ArchivePopover({
         e.preventDefault();
         setSelectedIndex(
           (prev) =>
-            (prev - 1 + filteredSessions.length) % filteredSessions.length
+            (prev - 1 + filteredSessions.length) % filteredSessions.length,
         );
       } else if (e.key === "Enter") {
         e.preventDefault();
@@ -189,7 +177,7 @@ export const ArchivePopover = memo(function ArchivePopover({
         }
       }
     },
-    [filteredSessions, selectedIndex, onRestore]
+    [filteredSessions, selectedIndex, onRestore],
   );
 
   // Reset selected index when search changes
@@ -221,21 +209,21 @@ export const ArchivePopover = memo(function ArchivePopover({
     (id: string) => {
       onRestore(id);
     },
-    [onRestore]
+    [onRestore],
   );
 
   const handleSetRef = useCallback(
     (index: number, el: HTMLDivElement | null) => {
       itemRefs.current[index] = el;
     },
-    []
+    [],
   );
 
   const handleSearchChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setSearchQuery(e.target.value);
     },
-    []
+    [],
   );
 
   return (

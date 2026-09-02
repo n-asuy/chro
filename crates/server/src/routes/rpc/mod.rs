@@ -10,6 +10,7 @@
 //! - `config`: Preferences and executor configuration
 //! - `events`: Global event triggers
 //! - `developer`: Developer tools (worktree management)
+//! - `dev_events`: Local activity recording (dev builds only)
 //! - `images`: Image upload/serve (merged from api.rs)
 //! - `merges`: Merge record management (merged from api.rs)
 
@@ -19,6 +20,7 @@ mod cbase;
 pub(crate) mod cli_status;
 mod config;
 mod context_refs;
+mod dev_events;
 mod developer;
 mod events;
 mod filesystem;
@@ -26,6 +28,7 @@ mod flags;
 mod git;
 mod images;
 mod merges;
+mod path_link;
 mod path_resolve;
 mod projects;
 mod sessions;
@@ -38,6 +41,10 @@ mod workspace;
 use axum::Router;
 
 use crate::AppState;
+
+/// Records every API request. Applied once, at the outermost layer of the API
+/// surface; see `dev_events` for why it lives outside the handlers.
+pub(crate) use dev_events::recorder as dev_events_recorder;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -59,6 +66,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(git::router())
         .merge(filesystem::router())
         .merge(cbase::router())
+        .merge(dev_events::router())
 }
 
 pub(crate) fn sessions_router() -> Router<AppState> {

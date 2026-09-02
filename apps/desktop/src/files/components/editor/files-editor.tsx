@@ -3,6 +3,7 @@ import {
   isPdfExtension as isPdfFile,
   isVideoExtension as isVideoFile,
 } from "@/files/media-types";
+import { openExternalUrl } from "@/lib/open-external-url";
 import {
   getProjectAssetUrl,
   getProjectBinaryFileUrl,
@@ -13,7 +14,7 @@ import {
   readProjectFile,
   readTaskRunFile,
   readWorkspaceFileAtPath,
-  searchProjectFiles,
+  resolveProjectFile,
 } from "@/lib/project-client";
 import type { DesktopWorkspaceFile } from "@/types/desktop";
 import { Button } from "@chro/ui/button";
@@ -35,7 +36,13 @@ import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
 import { useAutoSave } from "../../hooks/use-auto-save";
 import { delimiterForExtension } from "../../lib/csv";
+import {
+  type HtmlViewMode,
+  isLargeTextSafeMode,
+  resolveCodeViewState,
+} from "../../lib/editor-safe-mode";
 import { resolveEmbedPath } from "../../lib/embed-path";
+import { fileNamesEqual } from "../../lib/file-name-key";
 import {
   type Frontmatter,
   combineFrontmatterAndBody,
@@ -73,7 +80,6 @@ const CSV_EXTENSIONS = new Set(["csv", "tsv"]);
 
 /** Extensions rendered as prose (WYSIWYG markdown editor) */
 const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
-const LARGE_TEXT_SAFE_MODE_BYTES = 512 * 1024;
 
 const setIframeKeydownListener = (
   frameWindow: Window | null,
@@ -289,9 +295,7 @@ export const FilesEditor = ({
     useState<FrontmatterViewMode>("ui");
 
   // HTML viewer toggle: "preview" renders an iframe, "raw" shows source in CodeMirror
-  const [htmlViewMode, setHtmlViewMode] = useState<"preview" | "raw">(
-    "preview",
-  );
+  const [htmlViewMode, setHtmlViewMode] = useState<HtmlViewMode>("preview");
   // Bumped manually to force the preview iframe to reload after a save / refresh
   const [htmlPreviewKey, setHtmlPreviewKey] = useState(0);
   // Expands the HTML preview to fill the entire app window. Exits on Escape,
@@ -368,9 +372,11 @@ export const FilesEditor = ({
   const isHtml = isHtmlFile(fileExtension);
   const isCsv = isCsvFile(fileExtension);
   const isProse = isProseFile(fileExtension);
-  const useLargeTextSafeMode =
-    loadedFilePath === editorFilePath &&
-    (workspaceFile?.size ?? 0) > LARGE_TEXT_SAFE_MODE_BYTES;
+  // Until the open file's content has loaded the editor still holds the
+  // previous file's bytes, so its size says nothing about what is on screen.
+  const loadedFileSize =
+    loadedFilePath === editorFilePath ? workspaceFile?.size ?? 0 : 0;
+  const useLargeTextSafeMode = isLargeTextSafeMode(loadedFileSize);
   const headerPathLabel = currentNode
     ? relativePath ?? currentNode.path.replace(/^\/+/, "")
     : taskRunId
@@ -622,12 +628,13 @@ export const FilesEditor = ({
         : linkFileName;
       const linkNameWithExt = `${linkNameWithoutExt}.md`;
 
-      // 1. Fast path: search in already-loaded fileTree
+      // 1. Fast path: search in already-loaded fileTree, comparing normalized
+      // keys so macOS NFD names match typed NFC link text.
       const searchInTree = (nodes: FileNode[]): FileNode | null => {
         for (const node of nodes) {
           if (
-            node.name === linkNameWithExt ||
-            node.displayName === linkNameWithoutExt
+            fileNamesEqual(node.name, linkNameWithExt) ||
+            fileNamesEqual(node.displayName ?? "", linkNameWithoutExt)
           ) {
             return node;
           }
@@ -645,27 +652,13 @@ export const FilesEditor = ({
         return;
       }
 
-      // 2. Slow path: API search for files not yet loaded
+      // 2. Slow path: the server's name index applies the same rules as chat
+      // wikilinks (`.md` appended to extensionless references, shortest path
+      // wins among duplicate basenames).
       try {
-        const results = await searchProjectFiles(
-          projectId,
-          linkNameWithoutExt,
-          { limit: 10 },
-        );
-
-        // Find best match: prefer exact filename match
-        const exactMatch = results.find(
-          (r) =>
-            r.is_file &&
-            (r.path.endsWith(`/${linkNameWithExt}`) ||
-              r.path === linkNameWithExt),
-        );
-        const fileMatch = exactMatch ?? results.find((r) => r.is_file);
-
-        if (fileMatch) {
-          const normalizedPath = fileMatch.path.startsWith("/")
-            ? fileMatch.path
-            : `/${fileMatch.path}`;
+        const resolved = await resolveProjectFile(projectId, cleanPath);
+        if (resolved.relative_path) {
+          const normalizedPath = `/${resolved.relative_path}`;
           expandToPath(normalizedPath);
           selectNode(normalizedPath);
           openFile(normalizedPath);
@@ -676,7 +669,7 @@ export const FilesEditor = ({
         }
       } catch (error) {
         console.error(
-          `[FilesEditor] Error searching for link target: "${linkPath}"`,
+          `[FilesEditor] Error resolving link target: "${linkPath}"`,
           error,
         );
       }
@@ -765,8 +758,7 @@ export const FilesEditor = ({
       const target = resolvePreviewLinkTarget(message, relativePath);
       if (!target) return;
       if (target.kind === "external") {
-        const openExternal = window.desktop?.openExternalUrl;
-        if (openExternal) void openExternal(target.url);
+        openExternalUrl(target.url);
         return;
       }
       openFilePath(target.path, taskRunId);
@@ -1004,9 +996,14 @@ export const FilesEditor = ({
 
   // Code file layout: no title editing, no frontmatter, line numbers
   if (!isProse || useLargeTextSafeMode) {
-    const showHtmlPreview =
-      isHtml && !useLargeTextSafeMode && htmlViewMode === "preview";
-    const htmlFullscreen = showHtmlPreview && isHtmlFullscreen;
+    const codeView = resolveCodeViewState({
+      fileSizeBytes: loadedFileSize,
+      isHtml,
+      htmlViewMode,
+      fullscreenRequested: isHtmlFullscreen,
+    });
+    const { showHtmlPreview } = codeView;
+    const htmlFullscreen = codeView.showHtmlFullscreen;
     const codeLayout = (
       <div
         className={cn(
@@ -1023,7 +1020,7 @@ export const FilesEditor = ({
               {currentNode?.name ?? fallbackFileName}
             </span>
             <span className="text-muted-foreground">{headerPathLabel}</span>
-            {isHtml && !useLargeTextSafeMode && (
+            {codeView.showHtmlToolbar && (
               <div className="ml-auto flex items-center gap-1">
                 {htmlViewMode === "preview" && (
                   <>
@@ -1094,11 +1091,13 @@ export const FilesEditor = ({
               </div>
             )}
           </header>
-          {useLargeTextSafeMode && (
+          {codeView.showSafeModeNotice && (
             <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-custom-text-200">
-              Large text file ({formatFileSize(workspaceFile?.size)}). Rich-text
-              rendering, syntax highlighting, and line wrapping are disabled;
-              editing remains available in plain-text mode.
+              Large text file ({formatFileSize(loadedFileSize)}).{" "}
+              {isProse
+                ? "Rich-text rendering, syntax highlighting, and line wrapping"
+                : "Syntax highlighting and line wrapping"}{" "}
+              are disabled; editing remains available in plain-text mode.
             </div>
           )}
           <div className="flex flex-1 flex-col overflow-hidden">
@@ -1125,7 +1124,7 @@ export const FilesEditor = ({
                 </div>
                 <CodeMirrorEditor
                   key={
-                    useLargeTextSafeMode
+                    codeView.largeTextSafeMode
                       ? `large-safe-${loadedFilePath ?? ""}`
                       : "standard-code-editor"
                   }
@@ -1135,11 +1134,11 @@ export const FilesEditor = ({
                   onChange={(value) => setContent(value)}
                   className="min-h-0 h-full w-full flex-1"
                   mode="code"
-                  lineWrapping={!useLargeTextSafeMode}
+                  lineWrapping={codeView.lineWrapping}
                   fileExtension={
-                    useLargeTextSafeMode
-                      ? undefined
-                      : fileExtension ?? undefined
+                    codeView.syntaxHighlighting
+                      ? fileExtension ?? undefined
+                      : undefined
                   }
                   onFindRequest={openFindBar}
                 />

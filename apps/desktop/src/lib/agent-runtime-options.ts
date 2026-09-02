@@ -52,11 +52,11 @@ const CODEX_EFFORT_LEVELS: ReasoningEffort[] = [
 // (`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current model
 // snapshot, so `label` carries the human-facing generation (Opus 5 /
 // Sonnet 5 / Haiku 4.5) so the selector shows which model the alias points at.
-// Fable 5 has no short alias, so it uses its pinned model id directly.
+// Fable has no short alias, so it uses its pinned model id directly.
 const CLAUDE_MODELS: ModelOption[] = [
   {
-    value: "claude-fable-5",
-    label: "Fable 5",
+    value: "claude-fable-5-1",
+    label: "Fable 5.1",
     executor: "CLAUDE_CODE",
     description: "Most capable model for demanding, long-horizon work.",
   },

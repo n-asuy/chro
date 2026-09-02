@@ -1,7 +1,7 @@
 import type { BaseCodingAgent, ReasoningEffort } from "@/lib/executor-client";
 import {
   type ProjectSearchResult,
-  listProjectEntries,
+  listTopProjectFiles,
   searchProjectFiles,
 } from "@/lib/project-client";
 import {
@@ -232,23 +232,16 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
         });
     }, [projectId, debouncedQuery, onActiveIndexChange]);
 
-    // Load default file suggestions when popover opens with no query
+    // Load default file suggestions when popover opens with no query. The
+    // empty-query name search matches every indexed entry, so the server's
+    // git-history ranking surfaces recently touched files from the whole
+    // workspace rather than whatever happens to sit at the root directory.
     useEffect(() => {
       if (!open || !projectId) return;
       const id = ++defaultRequestIdRef.current;
-      listProjectEntries(projectId, { detail: "basic" })
-        .then((entries) => {
+      listTopProjectFiles(projectId, { limit: DEFAULT_FILE_SUGGESTIONS })
+        .then((files) => {
           if (id !== defaultRequestIdRef.current) return;
-          const files = entries
-            .filter((e) => e.type === "file")
-            .slice(0, DEFAULT_FILE_SUGGESTIONS)
-            .map<ProjectSearchResult>((e) => ({
-              path: e.relativePath,
-              is_file: true,
-              match_type: "FileName",
-              line_matches: [],
-              modified_at: null,
-            }));
           setDefaultFiles(files);
         })
         .catch(() => {

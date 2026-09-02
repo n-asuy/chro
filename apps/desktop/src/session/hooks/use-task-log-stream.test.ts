@@ -1,8 +1,44 @@
 import { describe, expect, it } from "vitest";
 
-import { applyTaskRunPatchOperations } from "./use-task-log-stream";
+import {
+  type TaskRunPatchState,
+  applyTaskRunPatchOperations,
+} from "./use-task-log-stream";
 
 describe("applyTaskRunPatchOperations", () => {
+  it("upserts out-of-range cumulative replaces instead of duplicating entries", () => {
+    let state: TaskRunPatchState = {
+      entries: [],
+      document: {
+        diffs: {},
+        approvals: {},
+      },
+    };
+
+    for (const content of ["partial", "partial update", "final response"]) {
+      state = applyTaskRunPatchOperations(state, [
+        {
+          op: "replace",
+          path: "/entries/400",
+          value: {
+            type: "NORMALIZED_ENTRY",
+            content: {
+              type: { type: "assistant_message" },
+              content,
+            },
+          },
+        },
+      ]);
+    }
+
+    expect(state.entries).toHaveLength(1);
+    expect(state.entries[0]).toMatchObject({
+      type: "NORMALIZED_ENTRY",
+      key: "task-run:stream-entry:400",
+      content: { content: "final response" },
+    });
+  });
+
   it("replays history against an empty state without retaining stale entries", () => {
     const staleState = {
       entries: [

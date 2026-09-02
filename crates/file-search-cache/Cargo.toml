@@ -6,15 +6,16 @@ license = "Apache-2.0"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-fst = "0.4"
 git2 = { version = "0.18", features = ["vendored-libgit2", "vendored-openssl"] }
+document = { path = "../document" }
 ignore = "0.4"
-moka = { version = "0.12", features = ["future"] }
+
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

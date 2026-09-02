@@ -1,7 +1,18 @@
 import { cn } from "@/lib/cn";
 import { useEffect, useState } from "react";
 
-const BRAILLE_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"] as const;
+const BRAILLE_FRAMES = [
+  "\u280b",
+  "\u2819",
+  "\u2839",
+  "\u2838",
+  "\u283c",
+  "\u2834",
+  "\u2826",
+  "\u2827",
+  "\u2807",
+  "\u280f",
+] as const;
 
 interface BrailleSpinnerProps {
   className?: string;

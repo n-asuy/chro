@@ -702,10 +702,9 @@ function tauriBuildEnv(skipSigning: boolean): NodeJS.ProcessEnv | undefined {
   if (!skipSigning) {
     return undefined;
   }
-  // `--skip-sign` only disables Apple code signing/notarization. Updater
-  // artifact signing is independent and is disabled by runTauriBuild for local
-  // unsigned builds, so leave TAURI_SIGNING_PRIVATE_KEY untouched for CI builds
-  // that still provide it.
+  // Updater artifact signing is independent and is disabled by runTauriBuild
+  // for local unsigned builds, so leave TAURI_SIGNING_PRIVATE_KEY untouched for
+  // CI builds that still provide it.
   return {
     APPLE_CERTIFICATE: undefined,
     APPLE_CERTIFICATE_PASSWORD: undefined,
@@ -780,6 +779,12 @@ function runTauriBuild(
     "--bundles",
     tauriBundles.join(","),
   ];
+  if (skipSigning) {
+    // This is Tauri's native signing switch. It keeps local/OSS builds working
+    // even though the checked-in Windows configuration has a release-only
+    // SSL.com signCommand.
+    tauriArgs.push("--no-sign");
+  }
   withUnsignedTauriConfig(skipSigning, () => {
     runCommand("bunx", tauriArgs, {
       cwd: desktopProjectDir,
@@ -1044,10 +1049,9 @@ interface UpdaterManifestPlatform {
   url: string;
 }
 
-// macOS is the only platform with a working updater feed: Windows is built
-// `--skip-sign` so it carries no updater signature (the EV-signed installer is
-// its own distribution channel). Each row maps an arch-scoped bundle suffix to
-// the platform key the updater plugin looks up.
+// macOS is currently the only platform whose updater feed is assembled and
+// published by desktop-release.yml. Each row maps an arch-scoped bundle suffix
+// to the platform key the updater plugin looks up.
 const MAC_UPDATER_TARGETS: ReadonlyArray<{
   suffix: string;
   platform: string;

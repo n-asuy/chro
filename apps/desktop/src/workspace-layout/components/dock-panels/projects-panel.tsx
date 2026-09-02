@@ -6,11 +6,11 @@ import { getUiValue, isUiStateReady, setUiValue } from "@/lib/ui-state-client";
 import { ArchivePopover } from "@/session/components/archive-popover";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
 import { SessionLeadingMarker } from "@/session/components/session-leading-marker";
-import { formatRelativeTime } from "@/session/lib/relative-time";
 import {
   SessionPreviewProvider,
   useSessionPreviewTrigger,
 } from "@/session/components/session-preview";
+import { projectBadgeColor } from "@/session/domain/project-color";
 import {
   type GroupLabels,
   type SessionGroup,
@@ -25,12 +25,14 @@ import {
   useMarkViewedWhenActive,
   useTaskStatusDot,
 } from "@/session/hooks";
+import { formatRelativeTime } from "@/session/lib/relative-time";
 import { useAllPendingSessionSubmissions } from "@/session/state/pending-session-submissions-store";
 import type { StoredTask } from "@/session/types";
 import {
   SESSION_DRAG_DATA_TYPE,
   serializeSessionDragPayload,
 } from "@/session/utils/session-dnd";
+import type { ProjectResponse } from "@/tasks/task-api";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -80,7 +82,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { useAllProjects } from "../../hooks/use-all-projects";
+import {
+  useAllProjects,
+  useSetProjectBadgeColor,
+} from "../../hooks/use-all-projects";
 import { useNewChat } from "../../hooks/use-new-chat";
 import { useOpenSession } from "../../hooks/use-open-session";
 import { usePinnedSessions } from "../../hooks/use-pinned-sessions";
@@ -92,6 +97,8 @@ import {
   useOpenProjectsStore,
 } from "../../state/open-projects-store";
 import { KeyboardHint } from "../keyboard-hint";
+import { ProjectColorDot } from "../project-color-dot";
+import { ProjectColorPicker } from "../project-color-picker";
 import { ProjectSwitcherDropdown } from "../project-switcher-dropdown";
 
 const ICON_BUTTON_CLASS =
@@ -216,6 +223,7 @@ export function ProjectsDockPanel() {
   const { tasks: streamTasks, isLoading } = useInboxTasksStream(true);
   const pendingGroups = useAllPendingSessionSubmissions();
   const projectsById = useAllProjects(true);
+  const setProjectBadgeColor = useSetProjectBadgeColor();
   const { isArchived, archiveSession } = useArchivedSessions();
   const { pins, isPinned, togglePin } = usePinnedSessions();
   const openSession = useOpenSession();
@@ -612,8 +620,12 @@ export function ProjectsDockPanel() {
                           }
                           onOpen={() => openSession(task)}
                           onArchive={() => archiveSession(task)}
-                          onFork={(workspace) => void forkSession(task, workspace)}
-                          canUseWorktree={!scratchProjectIds.has(task.project_id)}
+                          onFork={(workspace) =>
+                            void forkSession(task, workspace)
+                          }
+                          canUseWorktree={
+                            !scratchProjectIds.has(task.project_id)
+                          }
                           t={t}
                         />
                       ))}
@@ -639,6 +651,12 @@ export function ProjectsDockPanel() {
                             ? openProjectsById[group.projectId] ?? null
                             : null
                         }
+                        projectRecord={
+                          group.projectId
+                            ? projectsById[group.projectId] ?? null
+                            : null
+                        }
+                        onSetBadgeColor={setProjectBadgeColor}
                         archived={
                           group.projectId
                             ? archivedByProject[group.projectId] ??
@@ -676,8 +694,12 @@ export function ProjectsDockPanel() {
                           }
                           onOpen={() => openSession(task)}
                           onArchive={() => archiveSession(task)}
-                          onFork={(workspace) => void forkSession(task, workspace)}
-                          canUseWorktree={!scratchProjectIds.has(task.project_id)}
+                          onFork={(workspace) =>
+                            void forkSession(task, workspace)
+                          }
+                          canUseWorktree={
+                            !scratchProjectIds.has(task.project_id)
+                          }
                           t={t}
                         />
                       ))}
@@ -776,6 +798,9 @@ interface SessionGroupSectionProps {
   onToggle: () => void;
   /** The open-project tab when this is a project section for an open project. */
   project: OpenProjectTab | null;
+  /** The backend project record (badge color source), when known. */
+  projectRecord: ProjectResponse | null;
+  onSetBadgeColor: (projectId: string, badgeColor: string | null) => void;
   /** Archived sessions for this project (project sections only). */
   archived: readonly ArchivedSessionSummary[];
   isPinned: (taskId: string) => boolean;
@@ -788,6 +813,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
   collapsed,
   onToggle,
   project,
+  projectRecord,
+  onSetBadgeColor,
   archived,
   isPinned,
   onTogglePin,
@@ -832,6 +859,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
         group={group}
         collapsed={collapsed}
         project={project}
+        projectRecord={projectRecord}
+        onSetBadgeColor={onSetBadgeColor}
         archived={archived}
         onToggleChevron={onToggle}
         onHeaderClick={handleHeaderClick}
@@ -890,6 +919,8 @@ interface GroupHeaderProps {
   group: SessionGroup;
   collapsed: boolean;
   project: OpenProjectTab | null;
+  projectRecord: ProjectResponse | null;
+  onSetBadgeColor: (projectId: string, badgeColor: string | null) => void;
   archived: readonly ArchivedSessionSummary[];
   onToggleChevron: () => void;
   onHeaderClick: () => void;
@@ -904,6 +935,8 @@ function GroupHeader({
   group,
   collapsed,
   project,
+  projectRecord,
+  onSetBadgeColor,
   archived,
   onToggleChevron,
   onHeaderClick,
@@ -914,6 +947,11 @@ function GroupHeader({
   t,
 }: GroupHeaderProps) {
   const stop = (event: ReactMouseEvent) => event.stopPropagation();
+  // Only an explicitly assigned color renders a dot; unset projects stay
+  // undecorated (and scratch groups never carry one).
+  const headerColor = projectRecord?.isGeneral
+    ? null
+    : projectBadgeColor(projectRecord?.badgeColor);
 
   const header = (
     <div
@@ -954,6 +992,7 @@ function GroupHeader({
           )}
         />
       </button>
+      {headerColor ? <ProjectColorDot color={headerColor} /> : null}
       <span className="min-w-0 flex-1 truncate text-sm">{group.label}</span>
       <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
         {archived.length > 0 ? (
@@ -1005,6 +1044,34 @@ function GroupHeader({
           <span>{t("revealInFinder")}</span>
         </ContextMenuItem>
         <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+        {group.projectId && !projectRecord?.isGeneral ? (
+          <>
+            <ContextMenuSub>
+              <ContextMenuSubTrigger className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100 data-[state=open]:bg-custom-background-90 data-[state=open]:text-custom-text-100">
+                {headerColor ? (
+                  <ProjectColorDot color={headerColor} />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border border-custom-text-400"
+                  />
+                )}
+                <span>{t("projectColor")}</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent className="z-20 rounded-xl border border-custom-border-200 bg-custom-background-100 p-0 shadow-sm">
+                <ProjectColorPicker
+                  badgeColor={projectRecord?.badgeColor ?? null}
+                  onChange={(badgeColor) => {
+                    if (group.projectId)
+                      onSetBadgeColor(group.projectId, badgeColor);
+                  }}
+                  t={t}
+                />
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+          </>
+        ) : null}
         <ContextMenuItem
           onSelect={onRemove}
           className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"

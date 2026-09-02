@@ -1,3 +1,4 @@
+import { useOptionalLanguage } from "@/i18n";
 import { getBackendBaseUrl } from "@/lib/backend-client";
 import { recordPerfEvent } from "@/perf/recorder";
 /**
@@ -12,8 +13,10 @@ import { recordPerfEvent } from "@/perf/recorder";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ConversationFlattenCache,
+  type HistoricReplayResult,
   createConversationFlattenCache,
   resolveConversationStreamAction,
+  shouldReplaceLiveEntriesWithReplay,
   withAuthoritativeRunOrder,
 } from "../domain/conversation-history";
 import {
@@ -27,6 +30,7 @@ import type {
   TaskSessionRecord,
 } from "../types";
 import type { ApprovalRecord } from "../types/api";
+import { applyIndexedDisplayEntryOperation } from "../utils/indexed-display-entry";
 import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 import { useTaskRunsStream } from "./use-task-runs-stream";
 import { useTaskSessionsStream } from "./use-task-sessions-stream";
@@ -110,12 +114,18 @@ const INITIAL_HISTORY_RUN_COUNT = 3;
 const HISTORY_RUN_PAGE_SIZE = 3;
 /**
  * Idle timeout for a single historic-run log replay: give up only after the
- * stream goes silent this long without finishing/closing. Because it re-arms on
- * every message, a large run that keeps streaming is never truncated; a wedged
- * run (silent, no `finished`) is abandoned quickly so `isLoading` always
- * resolves. Short by design — a healthy replay sends data continuously.
+ * stream goes silent this long without finishing/closing. It re-arms on every
+ * message, and the server sends a liveness marker immediately on connect, so
+ * this measures true silence — not replay duration. Giving up marks the replay
+ * incomplete (retryable); it never fabricates an authoritative empty history.
  */
-const HISTORIC_LOAD_IDLE_TIMEOUT_MS = 3_000;
+const HISTORIC_LOAD_IDLE_TIMEOUT_MS = 30_000;
+/**
+ * Backoff between automatic retries of an incomplete historic replay. Length
+ * bounds the retry count; after that the runs stay unloaded so the
+ * load-earlier-history affordance can retry manually.
+ */
+const HISTORY_RETRY_BACKOFF_MS = [1_000, 3_000];
 
 function sortRunsByCreatedAtAscending(
   taskRuns: TaskRunRecord[],
@@ -206,57 +216,40 @@ function applyEntriesPatch(
     return entries;
   }
 
-  const next = [...entries];
-  const existingEntry = index < next.length ? next[index] : undefined;
-
-  if (op.op === "remove") {
-    if (index < next.length) {
-      next.splice(index, 1);
-    }
-    return next;
-  }
-
-  if (!op.value) {
-    return entries;
-  }
-
-  let displayEntry: DisplayEntry | null = null;
-  if (op.value.type === "NORMALIZED_ENTRY") {
-    displayEntry = createNormalizedDisplayEntry(
-      op.value.content,
-      taskRunId,
-      existingEntry,
-    );
-  } else if (op.value.type === "STDOUT") {
-    displayEntry = createStdoutDisplayEntry(
-      op.value.content,
-      taskRunId,
-      existingEntry,
-    );
-  } else if (op.value.type === "STDERR") {
-    displayEntry = createStderrDisplayEntry(
-      op.value.content,
-      taskRunId,
-      existingEntry,
-    );
-  }
-
-  if (!displayEntry) {
-    return entries;
-  }
-
-  if (op.op === "add") {
-    next.splice(index, 0, displayEntry);
-  } else if (index < next.length) {
-    next[index] = displayEntry;
-  } else {
-    next.push(displayEntry);
-  }
-
-  return next;
+  return applyIndexedDisplayEntryOperation({
+    entries,
+    scope: taskRunId,
+    serverIndex: index,
+    operation: op.op,
+    createEntry: (existingEntry) => {
+      if (!op.value) return null;
+      if (op.value.type === "NORMALIZED_ENTRY") {
+        return createNormalizedDisplayEntry(
+          op.value.content,
+          taskRunId,
+          existingEntry,
+        );
+      }
+      if (op.value.type === "STDOUT") {
+        return createStdoutDisplayEntry(
+          op.value.content,
+          taskRunId,
+          existingEntry,
+        );
+      }
+      if (op.value.type === "STDERR") {
+        return createStderrDisplayEntry(
+          op.value.content,
+          taskRunId,
+          existingEntry,
+        );
+      }
+      return null;
+    },
+  });
 }
 
-function applyEntriesPatches(
+export function applyConversationEntriesPatches(
   entries: DisplayEntry[],
   ops: JsonPatchOperation[],
   taskRunId: string,
@@ -269,16 +262,20 @@ function applyEntriesPatches(
 
 /**
  * Load entries from a historic (non-running) TaskRun via WebSocket.
- * Returns a promise that resolves when the stream finishes.
+ *
+ * Never rejects. The returned result's `complete` flag says whether the
+ * replay is authoritative: true only when the server ended it (protocol
+ * `finished` marker or a clean close). An idle timeout, socket error, or
+ * unclean close yields `complete: false` — the caller must treat that as a
+ * retryable failure, not as the run's true (empty) history.
  */
 /// Exported for the fork-origin block: a fork renders its source's history the
 /// same way this hook replays its own historic runs, and the replay stream is
 /// run-scoped so a foreign task's runs load identically.
 export function loadHistoricTaskRunEntries(
   taskRunId: string,
-  onEntries: (entries: DisplayEntry[]) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
+): Promise<HistoricReplayResult> {
+  return new Promise((resolve) => {
     const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
     const endpoint = httpToWs(
       `${baseUrl}/streams/task-runs/${encodeURIComponent(taskRunId)}/logs`,
@@ -286,37 +283,34 @@ export function loadHistoricTaskRunEntries(
     const ws = new WebSocket(endpoint);
     let entries: DisplayEntry[] = [];
     let settled = false;
-    let timer: number | null = null;
+    let finishedMarkerSeen = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const cleanup = () => {
-      if (timer !== null) {
-        window.clearTimeout(timer);
-        timer = null;
-      }
-    };
-
-    const resolveWithEntries = () => {
+    const settle = (complete: boolean) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      onEntries(entries);
-      resolve();
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      resolve({ entries, complete });
     };
 
     // Safety net: a historic replay must terminate. This is an *idle* timeout,
-    // not an absolute one — it is re-armed on every message, so a large run that
-    // legitimately streams for a while is never truncated, while a wedged run
-    // (opens, then goes silent without `finished`/close) gives up quickly so the
-    // conversation pane never sits in `isLoading` forever.
+    // not an absolute one — it is re-armed on every message (the server sends a
+    // liveness marker right after connect, then the replayed patches), so a
+    // large run that legitimately streams for a while is never truncated. A
+    // stream that goes truly silent is abandoned as incomplete so `isLoading`
+    // always resolves and the caller can retry.
     const armIdleTimer = () => {
-      if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        settle(false);
         try {
           ws.close();
         } catch {
           // ignore
         }
-        resolveWithEntries();
       }, HISTORIC_LOAD_IDLE_TIMEOUT_MS);
     };
     armIdleTimer();
@@ -327,11 +321,16 @@ export function loadHistoricTaskRunEntries(
         const msg = JSON.parse(event.data) as LogEntryMessage;
 
         if (msg.JsonPatch) {
-          entries = applyEntriesPatches(entries, msg.JsonPatch, taskRunId);
+          entries = applyConversationEntriesPatches(
+            entries,
+            msg.JsonPatch,
+            taskRunId,
+          );
         }
 
         if (msg.finished) {
-          resolveWithEntries();
+          finishedMarkerSeen = true;
+          settle(true);
           ws.close(1000, "finished");
         }
       } catch (err) {
@@ -343,17 +342,16 @@ export function loadHistoricTaskRunEntries(
     };
 
     ws.onerror = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error(`Failed to load entries for TaskRun ${taskRunId}`));
+      settle(false);
     };
 
-    ws.onclose = () => {
-      // Some persisted runs have no replayable log entries. The server closes
-      // those streams normally without a finished marker, so still unblock
-      // history loading with whatever was replayed.
-      resolveWithEntries();
+    ws.onclose = (event) => {
+      // Some persisted runs genuinely have no replayable log entries; the
+      // server ends those replays with a clean close. Only a clean close is
+      // authoritative — an unclean one (server died, network dropped) must
+      // surface as incomplete so the caller retries instead of recording an
+      // empty history.
+      settle(finishedMarkerSeen || event.wasClean);
     };
   });
 }
@@ -531,6 +529,11 @@ export function useConversationHistory({
   const [approvals, setApprovals] = useState<Record<string, ApprovalRecord>>(
     {},
   );
+
+  // Optional so the hook stays usable outside a LanguageProvider (tests).
+  const language = useOptionalLanguage();
+  const translateRef = useRef(language?.t ?? null);
+  translateRef.current = language?.t ?? null;
 
   const hasProvidedRuns = providedRuns !== undefined;
   const hasProvidedSessions = providedSessions !== undefined;
@@ -713,28 +716,59 @@ export function useConversationHistory({
         // Replay the runs in parallel, not one-after-another: a single wedged
         // replay (one that hits HISTORIC_LOAD_IDLE_TIMEOUT_MS instead of finishing)
         // must not serialize behind the others. Worst-case wait for the page is
-        // one timeout, not N.
-        await Promise.allSettled(
-          historicRuns.map((run) => {
-            if (options.cancelled?.()) return Promise.resolve();
-            return loadHistoricTaskRunEntries(run.id, (entries) => {
+        // one timeout, not N. An incomplete replay is retried with backoff;
+        // it is never committed as the run's history, so a transiently
+        // overloaded server can no longer turn a conversation blank.
+        let targets = historicRuns;
+        for (let attempt = 0; targets.length > 0; attempt += 1) {
+          const incomplete: TaskRunRecord[] = [];
+          await Promise.allSettled(
+            targets.map(async (run) => {
               if (options.cancelled?.()) return;
+              const result = await loadHistoricTaskRunEntries(run.id);
+              if (options.cancelled?.()) return;
+              if (!result.complete) {
+                incomplete.push(run);
+                recordPerfEvent("conv_history_replay_incomplete", {
+                  task_run_id: run.id,
+                  attempt,
+                  partial_entries: result.entries.length,
+                });
+                return;
+              }
               taskRunEntriesRef.current.set(run.id, {
                 taskRunId: run.id,
                 createdAt: run.created_at,
-                entries,
+                entries: result.entries,
                 finished: true,
               });
               loadedRunIdsRef.current.add(run.id);
               updateEntriesVersion();
-            }).catch((err) => {
-              console.error(
-                `[useConversationHistory] Failed to load TaskRun ${run.id}:`,
-                err,
-              );
+            }),
+          );
+
+          if (options.cancelled?.()) return;
+          if (incomplete.length === 0) {
+            setError(null);
+            return;
+          }
+          if (attempt >= HISTORY_RETRY_BACKOFF_MS.length) {
+            recordPerfEvent("conv_history_replay_gave_up", {
+              task_id: taskId,
+              failed_runs: incomplete.length,
             });
-          }),
-        );
+            setError(
+              translateRef.current?.("conversationHistoryLoadFailed") ??
+                "Couldn't load conversation history.",
+            );
+            return;
+          }
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, HISTORY_RETRY_BACKOFF_MS[attempt]),
+          );
+          if (options.cancelled?.()) return;
+          targets = incomplete;
+        }
       } finally {
         historyLoadingRef.current = false;
         if (!options.cancelled?.()) {
@@ -836,7 +870,11 @@ export function useConversationHistory({
         (patchOps) => {
           const state = taskRunEntriesRef.current.get(runId);
           if (state) {
-            state.entries = applyEntriesPatches(state.entries, patchOps, runId);
+            state.entries = applyConversationEntriesPatches(
+              state.entries,
+              patchOps,
+              runId,
+            );
             updateEntriesVersion();
           }
           applyApprovalPatches(patchOps);
@@ -847,22 +885,29 @@ export function useConversationHistory({
           setStreamingRunId(null);
           activeStreamRef.current = null;
 
-          void loadHistoricTaskRunEntries(runId, (entries) => {
-            taskRunEntriesRef.current.set(runId, {
-              taskRunId: runId,
-              createdAt: createdAt,
-              entries,
-              finished: true,
-            });
-            updateEntriesVersion();
-          })
-            .catch((err) => {
-              console.error(
-                `[useConversationHistory] Failed to replay finished TaskRun ${runId}:`,
-                err,
-              );
-              const state = taskRunEntriesRef.current.get(runId);
-              if (state) state.finished = true;
+          void loadHistoricTaskRunEntries(runId)
+            .then((result) => {
+              const liveState = taskRunEntriesRef.current.get(runId);
+              const liveEntryCount = liveState?.entries.length ?? 0;
+              if (shouldReplaceLiveEntriesWithReplay(result, liveEntryCount)) {
+                taskRunEntriesRef.current.set(runId, {
+                  taskRunId: runId,
+                  createdAt: createdAt,
+                  entries: result.entries,
+                  finished: true,
+                });
+                return;
+              }
+              // The replay was incomplete (or authoritative-empty against a
+              // non-empty live turn). Keep what the user already watched
+              // stream in rather than clobbering it.
+              if (liveState) liveState.finished = true;
+              recordPerfEvent("conv_finished_replay_kept_live", {
+                task_run_id: runId,
+                replay_complete: result.complete,
+                replay_entries: result.entries.length,
+                live_entries: liveEntryCount,
+              });
             })
             .finally(() => {
               callbacksRef.current?.onFinished?.();

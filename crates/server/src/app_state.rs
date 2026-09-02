@@ -59,8 +59,8 @@ impl AppState {
 
     /// Warm the lazy indexes for a project the user just opened, in the
     /// background: the cbase frontmatter index (any later `.cbase` query hits
-    /// warm per-file entries) and, for git repos, the name-search FST plus its
-    /// HeadMoved invalidation wiring. Best-effort and once per process per
+    /// warm per-file entries) and, for git repos, the name-search index plus its
+    /// watcher invalidation wiring (HEAD moves and worktree file changes). Best-effort and once per process per
     /// path; never blocks the calling request.
     pub(crate) fn spawn_index_prewarm(&self, repo_path: PathBuf) {
         if !repo_path.is_dir() || !self.prewarm.first_visit(&repo_path) {
@@ -74,9 +74,7 @@ impl AppState {
             let is_git_repo = repo_path.join(".git").exists();
             if is_git_repo {
                 runtime.ensure_search_cache_watch(&repo_path);
-                if let Err(err) = runtime.file_search_cache().warm(&repo_path).await {
-                    tracing::debug!(root = %repo_path.display(), "file-search warm skipped: {err}");
-                }
+                runtime.file_search_cache().warm(&repo_path);
             }
 
             let started = std::time::Instant::now();
@@ -102,7 +100,7 @@ impl AppState {
                             "root": repo_path.display().to_string(),
                             "cbase_files": rows.len(),
                             "cbase_ms": perf::elapsed_ms(started),
-                            "fst_enqueued": is_git_repo,
+                            "name_index_enqueued": is_git_repo,
                         }),
                     );
                 }

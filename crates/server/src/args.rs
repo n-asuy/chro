@@ -59,4 +59,34 @@ pub enum Commands {
         #[command(subcommand)]
         command: crate::cli::ApprovalCommand,
     },
+    /// Run chro on a machine managed by a control plane
+    #[cfg(feature = "cloud")]
+    Cloud {
+        #[command(subcommand)]
+        command: CloudCommand,
+    },
+}
+
+/// Instance lifecycle, for a chro server run by a control plane instead of this
+/// machine.
+#[cfg(feature = "cloud")]
+#[derive(Subcommand, Debug)]
+pub enum CloudCommand {
+    /// Record which control plane to use and how to authenticate to it
+    Login {
+        /// Base URL of the control plane
+        url: String,
+        /// Token issued by that control plane. Falls back to CHRO_CLOUD_TOKEN,
+        /// so it need not appear in shell history.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Make the instance usable, creating it the first time
+    Up,
+    /// Stop the instance, keeping its disk
+    Down,
+    /// Show the instance and where it can be reached
+    Status,
+    /// Destroy the instance and everything on it
+    Destroy,
 }

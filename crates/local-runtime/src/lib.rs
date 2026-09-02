@@ -400,6 +400,10 @@ impl Runtime for LocalRuntime {
         &self.file_search_cache
     }
 
+    fn ensure_search_cache_watch(&self, repo_path: &Path) {
+        self.ensure_search_cache_watch_inner(repo_path);
+    }
+
     fn container(&self) -> &(dyn ContainerService + Send + Sync) {
         &self.container
     }
@@ -410,32 +414,16 @@ impl Runtime for LocalRuntime {
         needle: &str,
         limit: usize,
     ) -> Result<Vec<PathBuf>, RuntimeError> {
-        use file_search_cache::{CacheError, SearchMode};
-
-        self.ensure_search_cache_watch(repo_path);
-        match self
+        let options = file_search_cache::SearchOptions::new(limit);
+        self.ensure_search_cache_watch_inner(repo_path);
+        let hits = self
             .file_search_cache
-            .search(repo_path, needle, SearchMode::TaskForm, limit)
-            .await
-        {
-            Ok(hits) => Ok(hits
-                .into_iter()
-                .map(|hit| PathBuf::from(hit.path))
-                .collect()),
-            Err(CacheError::Miss) => {
-                let hits = self
-                    .file_search_cache
-                    .search_fallback(repo_path, needle, limit)?;
-                Ok(hits
-                    .into_iter()
-                    .map(|hit| PathBuf::from(hit.path))
-                    .collect())
-            }
-            Err(CacheError::BuildError(e)) => Err(RuntimeError::Other(anyhow::anyhow!(
-                "Search cache build error: {}",
-                e
-            ))),
-        }
+            .search(repo_path, needle, options)
+            .await;
+        Ok(hits
+            .into_iter()
+            .map(|hit| PathBuf::from(hit.path))
+            .collect())
     }
 
     async fn append_logs(
@@ -516,7 +504,10 @@ impl Runtime for LocalRuntime {
 
         let raw_entries = self.container.fetch_logs(task_run_id).await?;
         if raw_entries.is_empty() {
-            return Ok(stream::empty().boxed());
+            // Authoritative "no replayable history": end the replay with the
+            // protocol's `finished` marker instead of a bare close, so clients
+            // can distinguish a genuinely empty run from a stream that died.
+            return Ok(stream::iter([Ok(LogEntry::Finished)]).boxed());
         }
 
         let executor_kind_from_logs = Self::infer_executor_kind_from_logs(&raw_entries);
@@ -556,18 +547,28 @@ impl Runtime for LocalRuntime {
         // task and the stream consumer. The previous approach spawned an async
         // normalize task that raced with push_finished(), causing the normalizer
         // to terminate before producing JsonPatch entries.
-        let mut normalized = executor.replay_log_entries(&raw_entries, Path::new(&worktree_path));
-        if !normalized
-            .last()
-            .is_some_and(|e| matches!(e, LogEntry::Finished))
-        {
-            normalized.push(LogEntry::Finished);
-        }
+        //
+        // Normalization is CPU-bound and proportional to the log size (up to
+        // MAX_RUN_LOG_BYTES), so it runs on the blocking pool: on the async
+        // workers, concurrent replays starved live log streams and each other,
+        // delaying a replay's first byte by tens of seconds under load.
+        let entries = tokio::task::spawn_blocking(move || {
+            let mut normalized =
+                executor.replay_log_entries(&raw_entries, Path::new(&worktree_path));
+            if !normalized
+                .last()
+                .is_some_and(|e| matches!(e, LogEntry::Finished))
+            {
+                normalized.push(LogEntry::Finished);
+            }
 
-        let entries = normalized
-            .into_iter()
-            .filter(|entry| matches!(entry, LogEntry::JsonPatch(_) | LogEntry::Finished))
-            .collect::<Vec<_>>();
+            normalized
+                .into_iter()
+                .filter(|entry| matches!(entry, LogEntry::JsonPatch(_) | LogEntry::Finished))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|join_error| RuntimeError::Io(std::io::Error::other(join_error)))?;
 
         if is_run_cacheable {
             self.normalized_log_cache
@@ -588,6 +589,14 @@ impl Runtime for LocalRuntime {
         task_id: Uuid,
     ) -> Result<runtime::LastExchange, RuntimeError> {
         self.task_last_exchange(task_id).await
+    }
+
+    async fn task_session_exchange(
+        &self,
+        task_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<runtime::LastExchange>, RuntimeError> {
+        self.task_session_exchange(task_id, session_id).await
     }
 }
 
@@ -653,17 +662,27 @@ impl LocalRuntime {
         &self.git_state_watchers
     }
 
-    /// Keep `repo_path`'s file-search index fresh: on the first call per repo,
-    /// spawn a listener that queues an index rebuild whenever HEAD moves
-    /// (branch switch, commit), so searches after a switch hit a warm cache
-    /// instead of the slow filesystem fallback.
-    pub fn ensure_search_cache_watch(&self, repo_path: &Path) {
+    /// Keep `repo_path`'s file-search index fresh. On the first call per repo,
+    /// spawn two listeners:
+    /// - a git-state listener that refreshes the git-history ranking whenever
+    ///   HEAD moves (branch switch, commit); the files a switch changes reach
+    ///   the index through the worktree listener, so this never walks, and
+    /// - a worktree file listener that queues a rebuild when uncommitted
+    ///   creates/deletes/renames (or `.gitignore` edits) change the set of
+    ///   file names, so a file an agent just wrote is searchable immediately
+    ///   instead of after the next commit or cache TTL.
+    ///
+    /// Exposed on the `Runtime` trait as `ensure_search_cache_watch`; this is
+    /// the inherent implementation so internal callers skip dynamic dispatch.
+    fn ensure_search_cache_watch_inner(&self, repo_path: &Path) {
         {
             let mut watched = self.search_cache_watches.lock().unwrap();
             if !watched.insert(repo_path.to_path_buf()) {
                 return;
             }
         }
+
+        use tokio::sync::broadcast::error::RecvError;
 
         let cache = self.file_search_cache.clone();
         let watchers = self.git_state_watchers.clone();
@@ -681,7 +700,6 @@ impl LocalRuntime {
                 return;
             };
 
-            use tokio::sync::broadcast::error::RecvError;
             loop {
                 match subscription.receiver.recv().await {
                     Ok(batch) => {
@@ -689,10 +707,44 @@ impl LocalRuntime {
                             .relevant_kinds(&batch)
                             .contains(&filesystem::GitStateEventKind::HeadMoved)
                         {
-                            cache.invalidate(&repo);
+                            cache.invalidate_history(&repo);
                         }
                     }
                     // Events were dropped; assume HEAD may have moved.
+                    Err(RecvError::Lagged(_)) => cache.invalidate(&repo),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        let cache = self.file_search_cache.clone();
+        let worktree_watchers = self.worktree_watchers.clone();
+        let repo = repo_path.to_path_buf();
+        tokio::spawn(async move {
+            let mut receiver = worktree_watchers.subscribe(repo.clone());
+            loop {
+                match receiver.recv().await {
+                    Ok(batch) => {
+                        let changes: Vec<file_search_cache::WorktreeChange> = batch
+                            .iter()
+                            .map(|event| file_search_cache::WorktreeChange {
+                                kind: match event.kind {
+                                    filesystem::WorktreeEventKind::Created => {
+                                        file_search_cache::WorktreeChangeKind::Created
+                                    }
+                                    filesystem::WorktreeEventKind::Modified => {
+                                        file_search_cache::WorktreeChangeKind::Modified
+                                    }
+                                    filesystem::WorktreeEventKind::Deleted => {
+                                        file_search_cache::WorktreeChangeKind::Deleted
+                                    }
+                                },
+                                relative_path: event.relative_path.clone(),
+                            })
+                            .collect();
+                        cache.note_worktree_changes(&repo, &changes);
+                    }
+                    // Events were dropped; the index may be stale either way.
                     Err(RecvError::Lagged(_)) => cache.invalidate(&repo),
                     Err(RecvError::Closed) => break,
                 }

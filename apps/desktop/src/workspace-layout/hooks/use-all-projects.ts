@@ -1,5 +1,5 @@
 import { type ProjectResponse, taskApi } from "@/tasks/task-api";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 /**
@@ -25,4 +25,39 @@ export function useAllProjects(
     for (const project of data ?? []) byId[project.id] = project;
     return byId;
   }, [data]);
+}
+
+/**
+ * Persist a project's badge color (or null for auto). Applies the change to
+ * the cached project list optimistically so every dot repaints immediately,
+ * then reconciles with the server response.
+ */
+export function useSetProjectBadgeColor(): (
+  projectId: string,
+  badgeColor: string | null,
+) => void {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: ({
+      projectId,
+      badgeColor,
+    }: {
+      projectId: string;
+      badgeColor: string | null;
+    }) => taskApi.setProjectBadgeColor(projectId, badgeColor),
+    onMutate: async ({ projectId, badgeColor }) => {
+      await queryClient.cancelQueries({ queryKey: ["all-projects"] });
+      queryClient.setQueryData<ProjectResponse[]>(
+        ["all-projects"],
+        (projects) =>
+          projects?.map((project) =>
+            project.id === projectId ? { ...project, badgeColor } : project,
+          ),
+      );
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["all-projects"] });
+    },
+  });
+  return (projectId, badgeColor) => mutation.mutate({ projectId, badgeColor });
 }

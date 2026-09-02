@@ -46,8 +46,10 @@ import { FileNodeType } from "../../types/file-tree";
 interface TreeContextMenuProps {
   children: React.ReactNode;
   node: FileNode;
+  selectedPaths: string[];
   workspacePath: string | null;
-  onDelete: (path: string) => void;
+  onDelete: (paths: string[]) => void;
+  onMove: (paths: string[]) => void;
   onRename: (path: string, name: string) => void;
   onDuplicate: (path: string) => void;
   onCreateFile: (parentPath: string, kind?: NewFileKind) => void;
@@ -74,8 +76,10 @@ interface TreeContextMenuProps {
 export const TreeContextMenu = ({
   children,
   node,
+  selectedPaths,
   workspacePath,
   onDelete,
+  onMove,
   onRename,
   onDuplicate,
   onCreateFile,
@@ -90,6 +94,12 @@ export const TreeContextMenu = ({
   const { t } = useLanguage();
   const projectId = useProjectId();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deletePaths, setDeletePaths] = useState<string[]>([]);
+  const operationPaths = selectedPaths.length > 0 ? selectedPaths : [node.path];
+  const selectionCount = operationPaths.length;
+  const pendingDeletePaths =
+    deletePaths.length > 0 ? deletePaths : operationPaths;
+  const pendingDeleteCount = pendingDeletePaths.length;
 
   const handleRename = () => {
     onRename(node.path, node.name);
@@ -100,12 +110,22 @@ export const TreeContextMenu = ({
   };
 
   const handleDeleteClick = () => {
+    setDeletePaths(operationPaths);
     setShowDeleteDialog(true);
   };
 
+  const handleMove = () => {
+    onMove(operationPaths);
+  };
+
   const handleDeleteConfirm = () => {
-    onDelete(node.path);
+    onDelete(pendingDeletePaths);
     setShowDeleteDialog(false);
+  };
+
+  const handleDeleteDialogOpenChange = (open: boolean) => {
+    setShowDeleteDialog(open);
+    if (!open) setDeletePaths([]);
   };
 
   const handleCopyFullPath = async () => {
@@ -334,6 +354,18 @@ export const TreeContextMenu = ({
           </ContextMenuItem>
           <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
           <ContextMenuItem
+            onSelect={handleMove}
+            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+          >
+            <FolderInput className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              {selectionCount === 1
+                ? t("moveSingleItemMenu")
+                : t("moveItemsMenu", { count: selectionCount })}
+            </span>
+          </ContextMenuItem>
+          <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
+          <ContextMenuItem
             onSelect={handleCopyFullPath}
             className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
           >
@@ -356,40 +388,56 @@ export const TreeContextMenu = ({
             <span>{t("revealInFinder")}</span>
           </ContextMenuItem>
           <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
-          <ContextMenuItem
-            onSelect={handleDuplicate}
-            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-          >
-            <CopyPlus className="h-3.5 w-3.5 shrink-0" />
-            <span>Duplicate</span>
-          </ContextMenuItem>
-          <ContextMenuItem
-            onSelect={handleRename}
-            className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
-          >
-            <Pencil className="h-3.5 w-3.5 shrink-0" />
-            <span>Rename</span>
-          </ContextMenuItem>
+          {selectionCount === 1 && (
+            <>
+              <ContextMenuItem
+                onSelect={handleDuplicate}
+                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <CopyPlus className="h-3.5 w-3.5 shrink-0" />
+                <span>Duplicate</span>
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={handleRename}
+                className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-custom-background-90 focus:text-custom-text-100"
+              >
+                <Pencil className="h-3.5 w-3.5 shrink-0" />
+                <span>Rename</span>
+              </ContextMenuItem>
+            </>
+          )}
           <ContextMenuSeparator className="mx-1 my-1 bg-custom-border-200" />
           <ContextMenuItem
             onSelect={handleDeleteClick}
             className="font-workspace flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-red-50 focus:text-red-600"
           >
             <Trash2 className="h-3.5 w-3.5 shrink-0" />
-            <span>Delete</span>
+            <span>
+              {selectionCount === 1
+                ? "Delete"
+                : `Delete ${selectionCount} items`}
+            </span>
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
 
-      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+      <AlertDialog
+        open={showDeleteDialog}
+        onOpenChange={handleDeleteDialogOpenChange}
+      >
         <AlertDialogContent className="border border-custom-border-200 bg-custom-background-100">
           <AlertDialogHeader>
             <AlertDialogTitle className="text-custom-text-100">
-              Delete {node.name}?
+              {pendingDeleteCount === 1
+                ? `Delete ${node.name}?`
+                : `Delete ${pendingDeleteCount} items?`}
             </AlertDialogTitle>
             <AlertDialogDescription className="text-custom-text-300">
-              This action cannot be undone. This will permanently delete the{" "}
-              {isDirectory ? "folder and all its contents" : "file"}.
+              {pendingDeleteCount === 1
+                ? `This action cannot be undone. This will permanently delete the ${
+                    isDirectory ? "folder and all its contents" : "file"
+                  }.`
+                : "This action cannot be undone. All selected files and folders will be permanently deleted."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -9,6 +9,7 @@ import {
   filterConversationLogEntries,
   flattenConversationEntries,
   resolveConversationStreamAction,
+  shouldReplaceLiveEntriesWithReplay,
   withAuthoritativeRunOrder,
 } from "../conversation-history";
 
@@ -87,6 +88,55 @@ describe("resolveConversationStreamAction", () => {
     expect(resolveConversationStreamAction(null, null)).toEqual({
       type: "idle",
     });
+  });
+});
+
+describe("shouldReplaceLiveEntriesWithReplay", () => {
+  const entry = (id: string): DisplayEntry => ({
+    type: "NORMALIZED_ENTRY",
+    key: `run:${id}`,
+    content: {
+      id,
+      timestamp: null,
+      entry_type: { type: "assistant_message" },
+      content: "reply",
+    },
+  });
+
+  it("commits an authoritative replay with entries", () => {
+    expect(
+      shouldReplaceLiveEntriesWithReplay(
+        { entries: [entry("a")], complete: true },
+        0,
+      ),
+    ).toBe(true);
+  });
+
+  it("commits an authoritative empty replay when nothing streamed live", () => {
+    expect(
+      shouldReplaceLiveEntriesWithReplay({ entries: [], complete: true }, 0),
+    ).toBe(true);
+  });
+
+  it("never clobbers live entries with an incomplete replay", () => {
+    expect(
+      shouldReplaceLiveEntriesWithReplay(
+        { entries: [entry("a")], complete: false },
+        3,
+      ),
+    ).toBe(false);
+  });
+
+  it("never erases a non-empty live turn with an authoritative empty replay", () => {
+    expect(
+      shouldReplaceLiveEntriesWithReplay({ entries: [], complete: true }, 3),
+    ).toBe(false);
+  });
+
+  it("rejects an incomplete replay even when nothing streamed live", () => {
+    expect(
+      shouldReplaceLiveEntriesWithReplay({ entries: [], complete: false }, 0),
+    ).toBe(false);
   });
 });
 

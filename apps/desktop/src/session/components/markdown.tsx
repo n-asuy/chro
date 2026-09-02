@@ -1,27 +1,30 @@
+import { useLanguage } from "@/i18n";
+import { openExpandedView } from "@/lib/mermaid-expanded-view";
+import { openExternalUrl } from "@/lib/open-external-url";
+import type { LocalImageMetadata } from "@/session/context/local-images-context";
+import { useImageMetadata } from "@/session/hooks/use-image-metadata";
+import { HelpCircle, Loader2, Maximize2 } from "lucide-react";
 import {
+  type ReactElement,
+  type ReactNode,
   isValidElement,
   memo,
   useEffect,
   useId,
   useMemo,
   useState,
-  type ReactElement,
-  type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-import { HelpCircle, Loader2, Maximize2 } from "lucide-react";
+import { normalizeFilePathHref } from "./file-path-utils";
 import { remarkWikilink } from "./remark-wikilink";
-import { looksLikeFilePath, stripLineColumnSuffix } from "./file-path-utils";
-import { openExpandedView } from "@/lib/mermaid-expanded-view";
-import { useLanguage } from "@/i18n";
-import type { LocalImageMetadata } from "@/session/context/local-images-context";
-import { useImageMetadata } from "@/session/hooks/use-image-metadata";
+import { useOpenPathLink, usePathLink } from "./use-path-link";
+import { resolveWebUrl } from "./web-address";
 
 type MarkdownProps = {
   children: string;
   onWikilinkClick?: (path: string, subpath?: string) => void;
-  onFilePathClick?: (path: string) => void;
   tone?: "default" | "muted";
   /** "document" renders the full heading scale; "flat" renders every heading
    * at body size in bold, for preview surfaces where document-scale headings
@@ -110,6 +113,14 @@ const resolveSafeHref = (href?: string): string | null => {
 
   if (trimmed.startsWith("#")) {
     return trimmed;
+  }
+
+  // A destination written without a scheme (`[配布](chro-ai.com)`) is still a
+  // web address, and `new URL` cannot parse it — resolve it first so it does
+  // not fall through to the local path handling below.
+  const webUrl = resolveWebUrl(trimmed);
+  if (webUrl) {
+    return webUrl;
   }
 
   try {
@@ -276,76 +287,99 @@ const MermaidCodeBlock = ({ code }: { code: string }) => {
   );
 };
 
-const createCodeRenderer = (
-  onFilePathClick?: (path: string) => void,
-): NonNullable<Components["code"]> => {
-  const CodeRenderer: NonNullable<Components["code"]> = ({
-    children,
-    node,
-    className,
-    ...props
-  }) => {
-    const text = extractText(children);
-    const isCodeBlock =
-      (node?.position
-        ? node.position.start.line !== node.position.end.line
-        : false) || text.includes("\n");
-    const mergedClassName = [
-      className,
-      "font-mono text-xs text-foreground [overflow-wrap:anywhere]",
-    ]
-      .filter(Boolean)
-      .join(" ");
+/** Shared by the plain and interactive forms, minus the text color: a link's
+ * color must not compete with `text-foreground` in the same class list, where
+ * stylesheet order and not authoring order decides the winner. */
+const INLINE_CODE_CLASS =
+  "box-decoration-clone rounded bg-muted px-1 font-mono text-xs [overflow-wrap:anywhere]";
+const INTERACTIVE_CODE_CLASS =
+  "cursor-pointer text-blue-600 dark:text-blue-400 hover:underline underline-offset-2";
 
-    if (isCodeBlock) {
-      return (
-        <code className={mergedClassName} {...props}>
-          {children}
-        </code>
-      );
-    }
+const CodeRenderer: NonNullable<Components["code"]> = ({
+  children,
+  node,
+  className,
+  ...props
+}) => {
+  const text = extractText(children);
+  const isCodeBlock =
+    (node?.position
+      ? node.position.start.line !== node.position.end.line
+      : false) || text.includes("\n");
 
-    const inlineClassName = [
-      className,
-      "box-decoration-clone rounded bg-muted px-1 font-mono text-xs text-foreground [overflow-wrap:anywhere]",
-    ]
-      .filter(Boolean)
-      .join(" ");
+  // A web address reads as a link wherever it is written, and agents write them
+  // in code spans (`chro-ai.com`). It is resolved before the file path branch
+  // below: `chro-ai.com` also parses as a file name ending in a `.com`
+  // extension, and opening it as a file is the wrong action.
+  const webUrl = isCodeBlock ? null : resolveWebUrl(text);
+  // Only what actually exists on disk becomes a link, so a decorated span
+  // always opens something. Nothing is probed for code blocks or web addresses.
+  const pathTarget = usePathLink(isCodeBlock || webUrl ? null : text);
+  const openPathLink = useOpenPathLink();
 
-    if (onFilePathClick && looksLikeFilePath(text)) {
-      const target = stripLineColumnSuffix(text.trim());
-      const handle = (event: React.SyntheticEvent) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onFilePathClick(target);
-      };
-      const interactiveClassName = [
-        inlineClassName,
-        "cursor-pointer text-blue-600 hover:underline underline-offset-2",
-      ].join(" ");
-      return (
-        <code
-          className={interactiveClassName}
-          role="link"
-          tabIndex={0}
-          onClick={handle}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") handle(event);
-          }}
-          {...props}
-        >
-          {children}
-        </code>
-      );
-    }
-
+  if (isCodeBlock) {
     return (
-      <code className={inlineClassName} {...props}>
+      <code
+        className={[
+          className,
+          "font-mono text-xs text-foreground [overflow-wrap:anywhere]",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        {...props}
+      >
         {children}
       </code>
     );
-  };
-  return CodeRenderer;
+  }
+
+  const interactiveCode = (
+    activate: (event: React.SyntheticEvent) => void,
+    title?: string,
+  ) => (
+    <code
+      className={[className, INLINE_CODE_CLASS, INTERACTIVE_CODE_CLASS]
+        .filter(Boolean)
+        .join(" ")}
+      role="link"
+      tabIndex={0}
+      title={title}
+      onClick={activate}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") activate(event);
+      }}
+      {...props}
+    >
+      {children}
+    </code>
+  );
+
+  if (webUrl) {
+    return interactiveCode((event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openExternalUrl(webUrl);
+    }, webUrl);
+  }
+
+  if (pathTarget) {
+    return interactiveCode((event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openPathLink(pathTarget);
+    }, pathTarget.absolutePath);
+  }
+
+  return (
+    <code
+      className={[className, INLINE_CODE_CLASS, "text-foreground"]
+        .filter(Boolean)
+        .join(" ")}
+      {...props}
+    >
+      {children}
+    </code>
+  );
 };
 
 const preRenderer: NonNullable<Components["pre"]> = ({
@@ -462,9 +496,56 @@ const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
   );
 };
 
+/**
+ * A Markdown link whose href is a local path rather than a URL
+ * (`[report](~/notes/report.html)`). It becomes a link only once the path is
+ * confirmed to exist, and otherwise stays as the text the agent wrote.
+ */
+const LocalPathAnchor = ({
+  href,
+  textClass,
+  children,
+}: {
+  href: string;
+  textClass: string;
+  children?: ReactNode;
+}) => {
+  const target = usePathLink(normalizeFilePathHref(href));
+  const openPathLink = useOpenPathLink();
+
+  if (!target) {
+    return (
+      <span className={`break-words [overflow-wrap:anywhere] ${textClass}`}>
+        {children}
+      </span>
+    );
+  }
+
+  const handle = (event: React.SyntheticEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openPathLink(target);
+  };
+
+  return (
+    <a
+      href={href}
+      title={target.absolutePath}
+      className="break-words [overflow-wrap:anywhere] font-medium text-blue-600 dark:text-blue-400 underline-offset-2 hover:underline cursor-pointer"
+      role="link"
+      tabIndex={0}
+      onClick={handle}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") handle(event);
+      }}
+    >
+      {children}
+    </a>
+  );
+};
+
 const createComponents = (
   onWikilinkClick?: (path: string, subpath?: string) => void,
-  onFilePathClick?: (path: string) => void,
   tone: MarkdownProps["tone"] = "default",
   localImages?: LocalImageMetadata[],
   headings: MarkdownProps["headings"] = "document",
@@ -494,9 +575,13 @@ const createComponents = (
     img: ({ src, alt }) => (
       <MarkdownImage src={src} alt={alt} localImages={localImages} />
     ),
+    // Paragraphs own their leading gap: the wrapper's `space-y-3` only reaches
+    // top-level blocks, so paragraphs nested in a blockquote or a loose list
+    // item would otherwise sit flush against each other and a blank line in the
+    // source would look identical to a single newline.
     p: ({ children }) => (
       <p
-        className={`break-words [overflow-wrap:anywhere] text-sm leading-relaxed ${textClass}`}
+        className={`mt-3 break-words [overflow-wrap:anywhere] text-sm leading-relaxed first:mt-0 ${textClass}`}
       >
         {children}
       </p>
@@ -569,30 +654,11 @@ const createComponents = (
       const safeHref = resolveSafeHref(href);
 
       if (!safeHref) {
-        if (
-          onFilePathClick &&
-          typeof href === "string" &&
-          looksLikeFilePath(href)
-        ) {
-          const target = stripLineColumnSuffix(href.trim());
-          const handle = (event: React.SyntheticEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onFilePathClick(target);
-          };
+        if (typeof href === "string") {
           return (
-            <a
-              href={href}
-              className="break-words [overflow-wrap:anywhere] font-medium text-blue-600 underline-offset-2 hover:underline cursor-pointer"
-              role="link"
-              tabIndex={0}
-              onClick={handle}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") handle(event);
-              }}
-            >
+            <LocalPathAnchor href={href} textClass={textClass}>
               {children}
-            </a>
+            </LocalPathAnchor>
           );
         }
         return (
@@ -643,7 +709,7 @@ const createComponents = (
         {children}
       </h6>
     ),
-    code: createCodeRenderer(onFilePathClick),
+    code: CodeRenderer,
     pre: preRenderer,
     hr: () => <hr className="my-6 border-muted" />,
     table: ({ children }) => (
@@ -730,7 +796,6 @@ export const Markdown = memo(
   ({
     children,
     onWikilinkClick,
-    onFilePathClick,
     tone = "default",
     headings = "document",
     localImages,
@@ -740,15 +805,8 @@ export const Markdown = memo(
       [children],
     );
     const components = useMemo(
-      () =>
-        createComponents(
-          onWikilinkClick,
-          onFilePathClick,
-          tone,
-          localImages,
-          headings,
-        ),
-      [onWikilinkClick, onFilePathClick, tone, localImages, headings],
+      () => createComponents(onWikilinkClick, tone, localImages, headings),
+      [onWikilinkClick, tone, localImages, headings],
     );
     const toneClass =
       tone === "muted" ? "text-muted-foreground" : "text-foreground";
@@ -758,7 +816,10 @@ export const Markdown = memo(
         className={`min-w-0 max-w-full overflow-hidden space-y-3 break-words [overflow-wrap:anywhere] text-sm leading-relaxed ${toneClass}`}
       >
         <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkWikilink]}
+          // remarkBreaks runs last so wikilink parsing still sees whole text
+          // nodes. Agent output is chat prose, not a CommonMark document: a
+          // newline the agent typed is a newline the reader is meant to see.
+          remarkPlugins={[remarkGfm, remarkWikilink, remarkBreaks]}
           components={components}
         >
           {formatted}

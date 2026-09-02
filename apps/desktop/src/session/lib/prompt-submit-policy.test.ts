@@ -4,11 +4,12 @@ import {
   shouldSubmitPrompt,
 } from "./prompt-submit-policy";
 
+/** A Cmd+Return, i.e. the submit chord. Override to build the other cases. */
 const stroke = (over: Partial<PromptKeystroke> = {}): PromptKeystroke => ({
   key: "Enter",
   shiftKey: false,
   altKey: false,
-  metaKey: false,
+  metaKey: true,
   ctrlKey: false,
   isComposing: false,
   keyCode: 13,
@@ -16,16 +17,20 @@ const stroke = (over: Partial<PromptKeystroke> = {}): PromptKeystroke => ({
 });
 
 describe("prompt submit policy", () => {
-  it("submits on a bare Return", () => {
+  it("submits on Cmd+Return and on Ctrl+Return", () => {
     expect(shouldSubmitPrompt(stroke())).toBe(true);
+    expect(shouldSubmitPrompt(stroke({ metaKey: false, ctrlKey: true }))).toBe(
+      true,
+    );
   });
 
-  it("submits on Cmd/Ctrl+Return so the old shortcut keeps working", () => {
-    expect(shouldSubmitPrompt(stroke({ metaKey: true }))).toBe(true);
-    expect(shouldSubmitPrompt(stroke({ ctrlKey: true }))).toBe(true);
+  // The composer holds multi-line prompts, so an unmodified Return is a
+  // newline — not a send.
+  it("inserts a newline on a bare Return", () => {
+    expect(shouldSubmitPrompt(stroke({ metaKey: false }))).toBe(false);
   });
 
-  it("inserts a newline on Shift+Return and Alt+Return", () => {
+  it("inserts a newline when Shift or Alt joins the chord", () => {
     expect(shouldSubmitPrompt(stroke({ shiftKey: true }))).toBe(false);
     expect(shouldSubmitPrompt(stroke({ altKey: true }))).toBe(false);
   });
@@ -35,8 +40,8 @@ describe("prompt submit policy", () => {
     expect(shouldSubmitPrompt(stroke({ key: "Escape" }))).toBe(false);
   });
 
-  // The Return that confirms an IME conversion must never send the message.
-  it("never submits the Return that confirms an IME conversion", () => {
+  // Sending mid-conversion would submit text the IME has not committed yet.
+  it("never submits a Return the IME still owns", () => {
     // Blink: keydown fires mid-composition with isComposing set.
     expect(shouldSubmitPrompt(stroke({ isComposing: true }))).toBe(false);
     // WebKit (the desktop app's webview): compositionend lands before the

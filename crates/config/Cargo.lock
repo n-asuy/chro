@@ -874,13 +874,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "directories",
- "dirs 5.0.1",
  "executors",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "tracing",
  "uuid",
 ]
 

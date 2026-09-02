@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::context_refs::{resolve_context_refs, ContextRefRequest};
+use super::path_link::{PathProbeBatchResponse, PathProbeRequest};
 use crate::{identifiers::resolve_task_id, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
@@ -27,10 +28,31 @@ pub(super) fn router() -> Router<AppState> {
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
         .route("/tasks/:id/last-message", get(get_task_last_message))
+        .route("/tasks/:id/exchanges", get(list_task_exchanges))
+        .route(
+            "/tasks/:id/exchanges/:session_id",
+            get(get_task_session_exchange),
+        )
         .route(
             "/tasks/:id/pending-question",
             get(get_task_pending_question),
         )
+        .route("/tasks/:id/probe-paths", post(probe_task_paths))
+}
+
+/// Probe path-like references from this task's conversation against the
+/// task's candidate roots. See `path_link` for why link rendering resolves
+/// up front, and `task_path_candidates` for why the scope is the task.
+async fn probe_task_paths(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<PathProbeRequest>,
+) -> Result<Json<PathProbeBatchResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let candidates = super::task_runs::task_path_candidates(&state, task_id).await?;
+    Ok(Json(
+        super::path_link::probe_paths(&state, request, &candidates).await?,
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +158,79 @@ async fn get_task_last_message(
 ) -> Result<Json<TaskLastMessageResponse>, ApiError> {
     let task_id = resolve_task_id(state.pool(), &identifier).await?;
     let exchange = state.runtime().task_last_exchange(task_id).await?;
+    Ok(Json(TaskLastMessageResponse {
+        user: exchange.user,
+        assistant: exchange.assistant,
+    }))
+}
+
+/// Character budget for a turn's prompt preview in the exchange-turn list.
+/// The rail renders one line per turn, so shipping full prompts (which can be
+/// many KB) would only inflate the payload.
+const TURN_PREVIEW_MAX_CHARS: usize = 280;
+
+/// Newest-first cap on the exchange-turn list. Bounds the hover-preview
+/// payload for long-lived tasks; older turns are simply not listed.
+const TURN_LIST_MAX: usize = 100;
+
+#[derive(Debug, Serialize)]
+struct TaskExchangeTurn {
+    session_id: Uuid,
+    user: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskExchangeTurnsResponse {
+    turns: Vec<TaskExchangeTurn>,
+}
+
+/// List a task's conversation turns (newest first) for the hover preview's
+/// history rail. Each turn is a task session that carries a user prompt; the
+/// prompt is truncated to a one-line preview and the full exchange is fetched
+/// per turn via `get_task_session_exchange`.
+async fn list_task_exchanges(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<TaskExchangeTurnsResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let sessions = db::models::TaskSession::list_by_task_id(state.pool(), task_id).await?;
+    let turns = sessions
+        .iter()
+        .rev()
+        .filter_map(|session| {
+            let prompt = session.prompt.as_deref().map(str::trim)?;
+            if prompt.is_empty() {
+                return None;
+            }
+            let user = if prompt.chars().count() > TURN_PREVIEW_MAX_CHARS {
+                let truncated: String = prompt.chars().take(TURN_PREVIEW_MAX_CHARS).collect();
+                format!("{}…", truncated.trim_end())
+            } else {
+                prompt.to_owned()
+            };
+            Some(TaskExchangeTurn {
+                session_id: session.id,
+                user,
+                created_at: session.created_at,
+            })
+        })
+        .take(TURN_LIST_MAX)
+        .collect();
+    Ok(Json(TaskExchangeTurnsResponse { turns }))
+}
+
+/// Return the full user prompt and assistant reply for one conversation turn.
+async fn get_task_session_exchange(
+    State(state): State<AppState>,
+    Path((identifier, session_id)): Path<(String, Uuid)>,
+) -> Result<Json<TaskLastMessageResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let exchange = state
+        .runtime()
+        .task_session_exchange(task_id, session_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(TaskLastMessageResponse {
         user: exchange.user,
         assistant: exchange.assistant,

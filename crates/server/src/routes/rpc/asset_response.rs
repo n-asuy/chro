@@ -87,9 +87,8 @@ async fn stream_with_suffix(
         .await
         .map_err(filesystem::FilesystemError::Io)?
         .len();
-    let tail = stream::once(async move {
-        Ok::<_, std::io::Error>(Bytes::from_static(suffix.as_bytes()))
-    });
+    let tail =
+        stream::once(async move { Ok::<_, std::io::Error>(Bytes::from_static(suffix.as_bytes())) });
     let body = Body::from_stream(ReaderStream::new(file).chain(tail));
 
     Response::builder()
@@ -169,12 +168,10 @@ mod tests {
         let source = "<html><body><a href=\"notes/todo.md\">todo</a></body></html>";
         std::fs::write(&path, source).expect("write html");
 
-        let response = stream_asset_response(
-            html_file(path, source.len() as u64),
-            &query(Some("1")),
-        )
-        .await
-        .expect("response");
+        let response =
+            stream_asset_response(html_file(path, source.len() as u64), &query(Some("1")))
+                .await
+                .expect("response");
 
         let content_length: u64 = response
             .headers()

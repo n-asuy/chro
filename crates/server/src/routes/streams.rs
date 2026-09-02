@@ -288,6 +288,20 @@ async fn handle_stream_task_run_logs_ws(mut socket: WebSocket, state: AppState, 
         }),
     );
 
+    // First-byte liveness marker, sent before the (potentially expensive)
+    // history replay is built. Clients measure replay health as idle time
+    // between messages; without this, a slow cold replay is indistinguishable
+    // from a dead stream during the entire normalization.
+    if socket
+        .send(Message::Text(r#"{"replayStarted":true}"#.into()))
+        .await
+        .is_err()
+    {
+        first_patch_seen.store(true, Ordering::Relaxed);
+        stall_timer.abort();
+        return;
+    }
+
     let stream_result = state.runtime().stream_logs(task_run_id).await;
     let mut stream = match stream_result {
         Ok(s) => s,

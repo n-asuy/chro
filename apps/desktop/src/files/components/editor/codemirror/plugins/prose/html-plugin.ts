@@ -26,8 +26,8 @@ import {
 import type { DecorationSet } from "@codemirror/view";
 import DOMPurify from "dompurify";
 import { cursorInNode } from "../../utility/tools";
-import { memoizeByDoc } from "../decoration-cache";
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { memoizeByParsedDoc } from "../decoration-cache";
+import { needsDecorationRebuild } from "../decoration-refresh";
 
 // Store view reference for click handling
 let currentView: EditorView | null = null;
@@ -316,7 +316,7 @@ function findHtmlContent(state: EditorState): HtmlBlockInfo[] {
 
 // The scan depends only on the document; memoize it so moving the cursor
 // reuses the scan instead of re-walking the syntax tree.
-const findHtmlContentCached = memoizeByDoc(findHtmlContent);
+const findHtmlContentCached = memoizeByParsedDoc(findHtmlContent);
 
 /**
  * Build decorations for HTML content
@@ -371,7 +371,7 @@ const htmlDecorationField = StateField.define<DecorationSet>({
     return RangeSet.of(buildHtmlDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildHtmlDecorations(tr.state), true);
     }
     return value.map(tr.changes);

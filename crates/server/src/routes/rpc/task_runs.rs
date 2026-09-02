@@ -28,9 +28,10 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::asset_response::{stream_asset_response, AssetQuery};
 use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use super::images::{ImageListResponse, ImageResponse};
-use super::asset_response::{stream_asset_response, AssetQuery};
+use super::path_link::{PathProbeBatchResponse, PathProbeRequest};
 use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
@@ -86,6 +87,8 @@ pub(super) fn router() -> Router<AppState> {
             get(read_task_run_asset),
         )
         .route("/task-runs/:id/file", get(read_task_run_file))
+        .route("/task-runs/:id/resolve-file", get(resolve_task_run_file))
+        .route("/task-runs/:id/probe-paths", post(probe_task_run_paths))
         .route(
             "/task-runs/:id/absolute-path",
             get(get_task_run_absolute_path),
@@ -1279,6 +1282,30 @@ async fn task_run_path_candidates(
     Ok((worktree, candidates))
 }
 
+/// The roots a task's conversation resolves references against: its latest
+/// run's candidates when it has run, otherwise the project checkout plus the
+/// rest of the workspace. Keyed by task rather than run so a follow-up (a new
+/// run on the same worktree) does not change what already-rendered links
+/// resolve to.
+pub(super) async fn task_path_candidates(
+    state: &AppState,
+    task_id: Uuid,
+) -> Result<Vec<String>, ApiError> {
+    if let Some(run) = TaskRun::latest_for_task(state.pool(), task_id).await? {
+        return task_run_path_candidates(state, &run)
+            .await
+            .map(|(_, candidates)| candidates);
+    }
+    let task = TaskRecord::get(state.pool(), task_id).await?;
+    let project = ProjectRecord::get(state.pool(), task.project_id).await?;
+    let mut candidates = Vec::new();
+    if !project.git_repo_path.is_empty() {
+        candidates.push(project.git_repo_path);
+    }
+    candidates.extend(workspace_extra_roots(state, &candidates).await);
+    Ok(candidates)
+}
+
 /// Every registered project's git checkout root, excluding any already in
 /// `existing`. Backs multi-root path resolution: a relative reference with no
 /// project identity resolves against the whole workspace of projects. A DB
@@ -1301,6 +1328,74 @@ async fn workspace_extra_roots(state: &AppState, existing: &[String]) -> Vec<Str
         roots.push(root);
     }
     roots
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskRunResolveFileQuery {
+    /// A file reference from a link or chat: a bare name (`note.md`), an
+    /// extensionless wikilink target (`note`), or a path suffix
+    /// (`docs/note.md`).
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskRunResolveFileResponse {
+    /// Workspace root the file was found under, or `None` when unresolved.
+    root: Option<String>,
+    /// Path relative to `root`, or `None` when unresolved.
+    relative_path: Option<String>,
+}
+
+/// Resolve a file reference against the run's candidate roots in priority
+/// order (worktree, own project checkout, sibling projects). Roots that no
+/// longer exist on disk — a cleaned-up worktree — are skipped instead of
+/// failing the whole resolution.
+async fn resolve_task_run_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TaskRunResolveFileQuery>,
+) -> Result<Json<TaskRunResolveFileResponse>, ApiError> {
+    let name = query.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "query parameter 'name' is required".into(),
+        ));
+    }
+
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (_, candidates) = task_run_path_candidates(&state, &run).await?;
+
+    for candidate in &candidates {
+        let root = std::path::Path::new(candidate);
+        if let Some(relative) = super::projects::resolve_in_root(&state, root, &name).await {
+            return Ok(Json(TaskRunResolveFileResponse {
+                root: Some(candidate.clone()),
+                relative_path: Some(relative),
+            }));
+        }
+    }
+
+    Ok(Json(TaskRunResolveFileResponse {
+        root: None,
+        relative_path: None,
+    }))
+}
+
+/// Probe a path-like reference from this run's conversation against the run's
+/// candidate roots. See `path_link` for why link rendering resolves up front.
+async fn probe_task_run_paths(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<PathProbeRequest>,
+) -> Result<Json<PathProbeBatchResponse>, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (_, candidates) = task_run_path_candidates(&state, &run).await?;
+
+    Ok(Json(
+        super::path_link::probe_paths(&state, request, &candidates).await?,
+    ))
 }
 
 async fn read_task_run_binary_file(

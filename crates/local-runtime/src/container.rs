@@ -332,6 +332,36 @@ impl LocalContainerService {
         }
     }
 
+    /// Settle a finished run, then hand the outcome to post-completion
+    /// housekeeping.
+    ///
+    /// The order is load-bearing. `mark_run_completion` clears the task's
+    /// `active_session_id`, and that is the single fact the UI reads to stop
+    /// showing the session as running. Housekeeping — today a full
+    /// `git status` + `add` + `commit` — can take many seconds and can stall
+    /// on a large or locked worktree, so it must never sit between the agent
+    /// exiting and the run being recorded as finished. Awaiting it first once
+    /// left the sidebar spinning long after the conversation showed the turn
+    /// was done.
+    ///
+    /// Expressing the sequence here rather than as two adjacent statements at
+    /// the call site keeps the ordering in one place and lets a test observe
+    /// it: `housekeeping` runs with the completion already persisted.
+    async fn finalize_run<F, Fut>(
+        &self,
+        run_id: Uuid,
+        exit_code: Option<i32>,
+        housekeeping: F,
+    ) -> Result<RunStatus, ContainerError>
+    where
+        F: FnOnce(RunStatus) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let status = self.mark_run_completion(run_id, exit_code).await?;
+        housekeeping(status).await;
+        Ok(status)
+    }
+
     async fn mark_run_completion(
         &self,
         run_id: Uuid,
@@ -536,12 +566,21 @@ impl LocalContainerService {
     }
 
     /// Drop the in-memory bookkeeping for a finished run: the child handle, the
-    /// execution handle, and the broadcast channel. Removing an absent key is a
-    /// no-op, so this is safe to call from any completion path.
+    /// execution handle, the broadcast channel and the log buffer. Removing an
+    /// absent key is a no-op, so this is safe to call from any completion path.
+    ///
+    /// The log buffer holds up to the store's history budget per run, so it
+    /// must not outlive the run: later readers replay the persisted JSONL
+    /// (flushed before completion is recorded). Streams still attached keep
+    /// the buffer alive until they observe `Finished`, which is pushed again
+    /// here for the abnormal paths that never pushed one.
     async fn drop_execution_registry(&self, run_id: Uuid) {
         self.child_store.write().await.remove(&run_id);
         self.executions.write().await.remove(&run_id);
         self.event_channels.write().await.remove(&run_id);
+        if let Some(msg_store) = self.msg_stores.write().await.remove(&run_id) {
+            msg_store.push(LogEntry::Finished);
+        }
     }
 
     /// Safety-net finalizer for a run whose execution task ended abnormally: an
@@ -1041,27 +1080,21 @@ impl LocalContainerService {
             signal: signal.clone(),
         });
 
-        tracing::debug!(%run_id, "[run_execution_process] calling mark_run_completion");
+        tracing::debug!(%run_id, "[run_execution_process] calling finalize_run");
 
-        // Mark the run complete (which clears the task's `active_session_id`)
-        // BEFORE the auto-commit. The agent process is already gone by this
-        // point, so the turn is done — the sidebar's "running" spinner must
-        // resolve now. The auto-commit below is a full `git status` + `add` +
-        // `commit` that can take many seconds (and stall on a large or locked
-        // worktree); awaiting it before clearing `active_session_id` left the
-        // sidebar spinning long after the conversation already showed the turn
-        // finished. Completion visibility must not be gated on housekeeping.
-        let completion_status = match self.mark_run_completion(run_id, exit_code).await {
-            Ok(status) => status,
-            Err(e) => {
-                tracing::error!(%run_id, error = %e, "[run_execution_process] mark_run_completion failed");
-                return Err(e);
-            }
-        };
-
-        if completion_status == RunStatus::Completed {
-            self.try_commit_changes(run_id, &params.workspace_path)
-                .await;
+        // The agent process is already gone, so the turn is done: record the
+        // completion first, auto-commit second. See `finalize_run`.
+        let commit_workspace = params.workspace_path.clone();
+        let finalize = self
+            .finalize_run(run_id, exit_code, move |status| async move {
+                if status == RunStatus::Completed {
+                    self.try_commit_changes(run_id, &commit_workspace).await;
+                }
+            })
+            .await;
+        if let Err(e) = finalize {
+            tracing::error!(%run_id, error = %e, "[run_execution_process] mark_run_completion failed");
+            return Err(e);
         }
 
         self.drop_execution_registry(run_id).await;
@@ -1874,6 +1907,46 @@ mod tests {
             .unwrap();
         assert_eq!(run_after.status, RunStatus::Failed);
         assert_eq!(run_after.exit_code, None);
+    }
+
+    /// Post-completion housekeeping (the auto-commit) must not gate the run
+    /// being recorded as finished: by the time it starts, the task's
+    /// `active_session_id` — the flag the UI reads to keep a session marked
+    /// running — is already cleared. Flipping the two back would leave the
+    /// sidebar spinning for the whole length of a `git status` + `commit`.
+    #[tokio::test]
+    async fn housekeeping_observes_the_run_already_completed() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+        let pool = service.db.pool();
+
+        // Prove the precondition: the task looks busy before the run settles.
+        let before = TaskRecord::find_by_id(pool, task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(before.active_session_id.is_some());
+
+        let seen_active_session = Arc::new(RwLock::new(None));
+        let observer = seen_active_session.clone();
+
+        let status = service
+            .finalize_run(run_id, Some(0), move |_status| async move {
+                let task = TaskRecord::find_by_id(pool, task_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                *observer.write().await = Some(task.active_session_id);
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(status, RunStatus::Completed);
+        assert_eq!(
+            *seen_active_session.read().await,
+            Some(None),
+            "housekeeping ran before the completion was persisted"
+        );
     }
 
     /// Seed a project + task + run with the given statuses and NO session row,

@@ -50,6 +50,11 @@ export interface ProjectResponse {
    * "Choose project" picker in the new-chat composer.
    */
   isGeneral: boolean;
+  /**
+   * Identity color (preset palette name or "#rrggbb") shown as a small dot
+   * next to the project name in the sidebar. Null means no color.
+   */
+  badgeColor: string | null;
 }
 
 interface RawProjectPayload {
@@ -59,6 +64,7 @@ interface RawProjectPayload {
   git_repo_path: string;
   /** Present on the project-list response; flags the hidden "General" project. */
   is_general?: boolean;
+  badge_color?: string | null;
 }
 
 interface EnsureProjectResponse {
@@ -80,6 +86,7 @@ const toProjectResponse = (
   name: payload.name,
   gitRepoPath: payload.git_repo_path,
   isGeneral,
+  badgeColor: payload.badge_color ?? null,
 });
 
 export const taskApi = {
@@ -139,6 +146,46 @@ export const taskApi = {
   },
 
   /**
+   * List a task's conversation turns (newest first) for the hover preview's
+   * history rail. Each turn is one user message; `user` is a server-truncated
+   * one-line preview and the full exchange is fetched per turn via
+   * {@link taskApi.sessionExchange}.
+   */
+  exchangeTurns: async (
+    taskId: string,
+  ): Promise<Array<{ sessionId: string; user: string; createdAt: string }>> => {
+    const response = await desktopFetch<{
+      turns: Array<{ session_id: string; user: string; created_at: string }>;
+    }>(`/rpc/tasks/${encodeURIComponent(taskId)}/exchanges`);
+    return response.turns.map((turn) => ({
+      sessionId: turn.session_id,
+      user: turn.user,
+      createdAt: turn.created_at,
+    }));
+  },
+
+  /**
+   * Fetch the full user prompt and assistant reply for one conversation turn
+   * (a task session), used when the hover preview's history rail selects a
+   * past turn.
+   */
+  sessionExchange: async (
+    taskId: string,
+    sessionId: string,
+  ): Promise<{ user: string | null; assistant: string | null }> => {
+    const response = await desktopFetch<{
+      user: string | null;
+      assistant: string | null;
+    }>(
+      `/rpc/tasks/${encodeURIComponent(taskId)}/exchanges/${encodeURIComponent(sessionId)}`,
+    );
+    return {
+      user: response.user ?? null,
+      assistant: response.assistant ?? null,
+    };
+  },
+
+  /**
    * Fetch the approval request the task's running agent is blocked on, if any
    * (signalled by `awaiting_input` on the task). `tool_input` carries the
    * AskUserQuestion payload so the hover preview can show the question text.
@@ -170,6 +217,22 @@ export const taskApi = {
   getProject: async (projectId: string): Promise<ProjectResponse> => {
     const response = await desktopFetch<GetProjectResponse>(
       `/rpc/projects/${encodeURIComponent(projectId)}`,
+    );
+    return toProjectResponse(response.project, response.is_general);
+  },
+
+  /** Set (preset name or hex) or clear (null = no color) a project's color. */
+  setProjectBadgeColor: async (
+    projectId: string,
+    badgeColor: string | null,
+  ): Promise<ProjectResponse> => {
+    const response = await desktopFetch<GetProjectResponse>(
+      `/rpc/projects/${encodeURIComponent(projectId)}/badge-color`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ badge_color: badgeColor }),
+      },
     );
     return toProjectResponse(response.project, response.is_general);
   },

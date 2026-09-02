@@ -1,5 +1,6 @@
 import type { TranslationFunction } from "@/i18n";
 import type { BaseCodingAgent, ReasoningEffort } from "@/lib/executor-client";
+import { KeyboardHint } from "@/workspace-layout/components/keyboard-hint";
 import { Button } from "@chro/ui/button";
 import {
   Tooltip,
@@ -7,7 +8,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
-import { ArrowUp, Command, Loader2, Square, X } from "lucide-react";
+import { ArrowUp, Loader2, Square, X } from "lucide-react";
 import { useRef, useState } from "react";
 import type { PromptEditorHandle } from "../state/prompt-editor-store";
 import {
@@ -253,11 +254,9 @@ export function SendButtonWithState({
           {isSending ? (
             <span>{t("stopButtonLabel")}</span>
           ) : (
-            <span className="flex items-center gap-1">
-              <Command className="h-3.5 w-3.5" />
-              <span className="text-[11px] font-medium">+</span>
-              <span>Enter</span>
-            </span>
+            // The submit chord, spelled with the platform's own modifier —
+            // hardcoding ⌘ misnames the key everywhere but macOS.
+            <KeyboardHint keys={["mod", "Enter"]} />
           )}
         </TooltipContent>
       </Tooltip>

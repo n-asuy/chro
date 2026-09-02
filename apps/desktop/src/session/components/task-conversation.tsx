@@ -1,3 +1,4 @@
+import { useLanguage } from "@/i18n";
 import { Loader2 } from "lucide-react";
 import {
   type MutableRefObject,
@@ -8,8 +9,8 @@ import {
   useLayoutEffect,
   useRef,
 } from "react";
-import { ConversationEntries } from "../conversation-view";
 import type { ReactNode } from "react";
+import { ConversationEntries } from "../conversation-view";
 import type { DisplayEntry } from "../types";
 import {
   SESSION_SELECT_ACTIVE_ATTR,
@@ -44,7 +45,6 @@ interface TaskConversationProps {
   error: string | null;
   messagesEndRef?: RefObject<HTMLDivElement | null>;
   onWikilinkClick?: (wikilink: string) => void;
-  onFilePathClick?: (path: string) => void;
   /**
    * Optional externally-owned scroll container ref so a host (e.g. find) can
    * read the conversation viewport. Falls back to an internal ref.
@@ -75,7 +75,6 @@ export const TaskConversation = memo(function TaskConversation({
   error,
   messagesEndRef,
   onWikilinkClick,
-  onFilePathClick,
   scrollContainerRef: externalScrollContainerRef,
   searchActive,
   expandAll,
@@ -88,6 +87,7 @@ export const TaskConversation = memo(function TaskConversation({
   onForkFromRun,
   forkOrigin,
 }: TaskConversationProps) {
+  const { t } = useLanguage();
   const internalScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef =
     externalScrollContainerRef ?? internalScrollContainerRef;
@@ -343,6 +343,16 @@ export const TaskConversation = memo(function TaskConversation({
     error && entries.length === 0 ? (
       <div className="flex h-full flex-col items-center justify-center gap-2">
         <p className="text-sm text-muted-foreground">{error}</p>
+        {hasMoreHistory && onLoadMoreHistory ? (
+          <button
+            type="button"
+            className="rounded-sm px-3 py-1.5 text-xs font-medium text-muted-foreground transition hover:bg-custom-sidebar-background-80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            disabled={isLoadingMoreHistory}
+            onClick={() => void onLoadMoreHistory()}
+          >
+            {t("conversationHistoryRetry")}
+          </button>
+        ) : null}
       </div>
     ) : isLoading && entries.length === 0 ? (
       <div className="flex h-full flex-col items-center justify-center gap-2">
@@ -355,7 +365,6 @@ export const TaskConversation = memo(function TaskConversation({
         leading={forkOrigin}
         endRef={messagesEndRef}
         onWikilinkClick={onWikilinkClick}
-        onFilePathClick={onFilePathClick}
         scrollContainerRef={scrollContainerRef}
         searchActive={searchActive}
         expandAll={expandAll}

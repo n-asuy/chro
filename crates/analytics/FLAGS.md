@@ -6,3 +6,10 @@
 | Key | Status | Rollout | Owner | Created | Retire by | Default | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `session_references_popover` | rolling_out | remote | @n-asuy | 2026-06-14 | 2026-09-01 | off | Show the task references popover (Uses / Referenced by) in the session composer. |
+
+## Trying a flag on your own machine
+
+The renderer receives only `key` + resolved value; there is no user-facing force. To exercise a flag whose rollout has not reached you:
+
+- Preferred: add a release condition for yourself in the PostHog dashboard (internal cohort / your distinct id). The client then runs the exact production path.
+- Dev builds only: `chroFlags.force("<key>", true)` in the devtools console (`chroFlags.list()`, `.unforce()`, `.reset()`). Forces persist in localStorage. Release builds compile this out, so the remote kill switch stays authoritative for every shipped binary.

@@ -45,6 +45,16 @@ describe("resolveGitError", () => {
     );
   });
 
+  it("explains a rebase refused because it would only drop the fork's starting point", () => {
+    const err = new Error(
+      "bad request: this session was forked from an earlier point and has no commits of its own yet, so rebasing would replace that starting point with the base branch and nothing else. Commit its work first, or start a new session on the base branch.",
+    );
+
+    expect(resolveGitError(err, t, "rebaseErrorMessage")).toBe(
+      "gitForkAnchorRebaseBlocked",
+    );
+  });
+
   it("maps a half-finished rebase to the in-progress message", () => {
     const err = new Error("bad request: rebase in progress");
 

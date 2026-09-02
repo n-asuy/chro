@@ -137,8 +137,10 @@ pub(crate) async fn read_binary_resolving<R: Runtime>(
 ) -> Result<WorkspaceBinaryFile, RuntimeError> {
     match resolve_workspace_path(raw, candidates.iter().copied()) {
         WorkspacePath::Internal(relative) => {
-            first_readable_root(candidates, |root| service.read_binary_file_in(root, &relative))
-                .await
+            first_readable_root(candidates, |root| {
+                service.read_binary_file_in(root, &relative)
+            })
+            .await
         }
         WorkspacePath::Scoped { root, relative } => {
             service.read_binary_file_in(&root, &relative).await
@@ -190,12 +192,18 @@ pub(crate) async fn read_text_resolving<R: Runtime>(
 }
 
 /// Whether a read error means "this root does not have the file" (`NotFound` /
-/// `NotFile`), as opposed to a hard failure (containment violation, IO error).
-/// Only a missing-file error may fall through to the next candidate root.
+/// `NotFile`) or "this root is not there at all" (`WorkspaceMissing` — e.g. a
+/// task-run worktree that was cleaned up while the project checkout still has
+/// the file), as opposed to a hard failure (containment violation, IO error).
+/// Only these errors may fall through to the next candidate root.
 fn is_missing(error: &RuntimeError) -> bool {
     matches!(
         error,
-        RuntimeError::Filesystem(FilesystemError::NotFound | FilesystemError::NotFile)
+        RuntimeError::Filesystem(
+            FilesystemError::NotFound
+                | FilesystemError::NotFile
+                | FilesystemError::WorkspaceMissing
+        )
     )
 }
 
@@ -204,9 +212,11 @@ fn is_missing(error: &RuntimeError) -> bool {
 /// path shown in one project's session may name a file that lives in another
 /// project's checkout; trying each candidate root (the run's own worktree
 /// first, then sibling project roots) lets it resolve instead of failing under
-/// the caller's root alone. A missing file falls through to the next root; any
-/// other error stops immediately. If every root is missing, the first
-/// missing-file error is surfaced (preserving the original "File not found").
+/// the caller's root alone. A missing file — or a missing root, e.g. a cleaned
+/// up worktree — falls through to the next root; any other error stops
+/// immediately. If every root misses, a file-level error ("File not found") is
+/// preferred over a root-level one ("workspace directory does not exist"),
+/// because at least one root existed and genuinely lacked the file.
 async fn first_readable_root<'c, T, F, Fut>(
     candidates: &'c [&'c str],
     mut read_in: F,
@@ -215,17 +225,27 @@ where
     F: FnMut(&'c Path) -> Fut,
     Fut: Future<Output = Result<T, RuntimeError>> + Send,
 {
-    let mut first_missing: Option<RuntimeError> = None;
+    let mut first_file_missing: Option<RuntimeError> = None;
+    let mut first_root_missing: Option<RuntimeError> = None;
     for &root in candidates {
         match read_in(Path::new(root)).await {
             Ok(value) => return Ok(value),
             Err(error) if is_missing(&error) => {
-                first_missing.get_or_insert(error);
+                if matches!(
+                    error,
+                    RuntimeError::Filesystem(FilesystemError::WorkspaceMissing)
+                ) {
+                    first_root_missing.get_or_insert(error);
+                } else {
+                    first_file_missing.get_or_insert(error);
+                }
             }
             Err(error) => return Err(error),
         }
     }
-    Err(first_missing.unwrap_or(RuntimeError::Filesystem(FilesystemError::NotFound)))
+    Err(first_file_missing
+        .or(first_root_missing)
+        .unwrap_or(RuntimeError::Filesystem(FilesystemError::NotFound)))
 }
 
 /// Resolve `raw` for a mutating endpoint (write/delete), which must stay inside
@@ -520,18 +540,44 @@ mod tests {
         );
     }
 
-    /// Only a genuinely missing file (`NotFound` / `NotFile`) may fall through
-    /// to the next candidate root; every other error is a hard stop.
+    /// A missing file (`NotFound` / `NotFile`) or a missing root directory
+    /// (`WorkspaceMissing`) may fall through to the next candidate root; every
+    /// other error is a hard stop.
     #[test]
     fn is_missing_only_covers_absent_file_errors() {
         assert!(is_missing(&RuntimeError::Filesystem(
             FilesystemError::NotFound
         )));
-        assert!(is_missing(&RuntimeError::Filesystem(FilesystemError::NotFile)));
+        assert!(is_missing(&RuntimeError::Filesystem(
+            FilesystemError::NotFile
+        )));
+        assert!(is_missing(&RuntimeError::Filesystem(
+            FilesystemError::WorkspaceMissing
+        )));
         assert!(!is_missing(&RuntimeError::Filesystem(
             FilesystemError::OutsideWorkspace
         )));
         assert!(!is_missing(&RuntimeError::NotFound("run")));
+    }
+
+    /// The original "workspace directory does not exist" bug: candidate #1 (a
+    /// deleted task-run worktree) must not stop the walk before the project
+    /// checkout that still has the file is tried.
+    #[tokio::test]
+    async fn first_readable_root_skips_deleted_worktree_root() {
+        let candidates = ["/deleted-worktree", "/project"];
+        let result = first_readable_root(&candidates, |root| {
+            let root = root.to_string_lossy().into_owned();
+            async move {
+                if root == "/deleted-worktree" {
+                    Err::<String, _>(RuntimeError::Filesystem(FilesystemError::WorkspaceMissing))
+                } else {
+                    Ok(format!("read@{root}"))
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "read@/project");
     }
 
     fn missing() -> RuntimeError {
@@ -577,6 +623,28 @@ mod tests {
         assert!(matches!(
             result,
             Err(RuntimeError::Filesystem(FilesystemError::OutsideWorkspace))
+        ));
+    }
+
+    /// When one root is gone and the surviving root lacks the file, the
+    /// file-level "not found" is surfaced, not the missing-root error.
+    #[tokio::test]
+    async fn first_readable_root_prefers_file_missing_over_root_missing() {
+        let candidates = ["/deleted-worktree", "/project"];
+        let result: Result<String, _> = first_readable_root(&candidates, |root| {
+            let root = root.to_string_lossy().into_owned();
+            async move {
+                if root == "/deleted-worktree" {
+                    Err(RuntimeError::Filesystem(FilesystemError::WorkspaceMissing))
+                } else {
+                    Err(missing())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Filesystem(FilesystemError::NotFound))
         ));
     }
 

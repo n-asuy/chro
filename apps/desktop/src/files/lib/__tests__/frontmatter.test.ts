@@ -8,6 +8,7 @@ import {
   removeTag,
   hasFrontmatter,
   getFrontmatterValueType,
+  formatNestedValue,
   formatDateValue,
   parseDateValue,
 } from "../frontmatter";
@@ -164,6 +165,76 @@ Body`;
       expect(frontmatter).toEqual({});
       expect(body).toBe("\nBody");
     });
+
+    it("should preserve a nested map instead of stringifying it", () => {
+      const content = `---
+name: reference-server-inventory
+metadata:
+  category: infrastructure
+  count: 4
+---
+
+Body`;
+
+      const { frontmatter } = parseFrontmatter(content);
+
+      expect(frontmatter.metadata).toEqual({
+        category: "infrastructure",
+        count: 4,
+      });
+    });
+
+    it("should preserve deeply nested structures", () => {
+      const content = `---
+metadata:
+  servers:
+    - host: etvox
+      free: true
+    - host: curino
+      free: false
+---
+
+Body`;
+
+      const { frontmatter } = parseFrontmatter(content);
+
+      expect(frontmatter.metadata).toEqual({
+        servers: [
+          { host: "etvox", free: true },
+          { host: "curino", free: false },
+        ],
+      });
+    });
+
+    it("should preserve non-string list item types", () => {
+      const content = `---
+ports:
+  - 80
+  - 443
+enabled:
+  - true
+---
+
+Body`;
+
+      const { frontmatter } = parseFrontmatter(content);
+
+      expect(frontmatter.ports).toEqual([80, 443]);
+      expect(frontmatter.enabled).toEqual([true]);
+    });
+
+    it("should ignore a top-level YAML sequence", () => {
+      const content = `---
+- one
+- two
+---
+
+Body`;
+
+      const { frontmatter } = parseFrontmatter(content);
+
+      expect(frontmatter).toEqual({});
+    });
   });
 
   describe("serializeFrontmatter", () => {
@@ -207,6 +278,72 @@ Body`;
     it("should return empty string for empty frontmatter", () => {
       const yaml = serializeFrontmatter({});
       expect(yaml).toBe("");
+    });
+
+    it("should serialize a nested map back to YAML", () => {
+      const yaml = serializeFrontmatter({
+        metadata: { category: "infrastructure", count: 4 },
+      });
+
+      expect(yaml).toContain("metadata:");
+      expect(yaml).toContain("category: infrastructure");
+      expect(yaml).toContain("count: 4");
+      expect(yaml).not.toContain("[object Object]");
+    });
+  });
+
+  describe("round-trip fidelity", () => {
+    // A document is rewritten on every body edit, so anything the property UI
+    // cannot represent still has to survive parse -> serialize untouched.
+    const content = `---
+name: reference-server-inventory
+description: Server inventory
+metadata:
+  category: infrastructure
+  count: 4
+  servers:
+    - host: etvox
+      free: true
+    - host: curino
+      free: false
+tags:
+  - infra
+  - reference
+---
+
+# Body
+`;
+
+    it("should preserve nested values through parse and re-serialize", () => {
+      const first = parseFrontmatter(content);
+      const rewritten = combineFrontmatterAndBody(
+        first.frontmatter,
+        first.body,
+      );
+      const second = parseFrontmatter(rewritten);
+
+      expect(second.frontmatter).toEqual(first.frontmatter);
+      expect(rewritten).not.toContain("[object Object]");
+      expect(second.body).toBe(first.body);
+    });
+
+    it("should preserve nested values when an unrelated property is edited", () => {
+      const updated = updateFrontmatterProperty(
+        content,
+        "description",
+        "Updated",
+      );
+      const { frontmatter } = parseFrontmatter(updated);
+
+      expect(frontmatter.description).toBe("Updated");
+      expect(frontmatter.metadata).toEqual({
+        category: "infrastructure",
+        count: 4,
+        servers: [
+          { host: "etvox", free: true },
+          { host: "curino", free: false },
+        ],
+      });
     });
   });
 
@@ -426,6 +563,37 @@ Body`;
       expect(getFrontmatterValueType(new Date())).toBe("date");
       expect(getFrontmatterValueType(["a", "b"])).toBe("tags");
       expect(getFrontmatterValueType(null)).toBe("null");
+    });
+
+    it("should treat scalar lists as tags", () => {
+      expect(getFrontmatterValueType([])).toBe("tags");
+      expect(getFrontmatterValueType([80, 443])).toBe("tags");
+      expect(getFrontmatterValueType(["a", 1, true])).toBe("tags");
+    });
+
+    it("should report structured values as nested", () => {
+      expect(getFrontmatterValueType({ a: 1 })).toBe("nested");
+      expect(getFrontmatterValueType([{ host: "etvox" }])).toBe("nested");
+      expect(getFrontmatterValueType([["a"]])).toBe("nested");
+    });
+  });
+
+  describe("formatNestedValue", () => {
+    it("should render a nested map as YAML", () => {
+      const formatted = formatNestedValue({
+        category: "infrastructure",
+        count: 4,
+      });
+
+      expect(formatted).toBe("category: infrastructure\ncount: 4");
+    });
+
+    it("should render a list of maps as YAML", () => {
+      const formatted = formatNestedValue([{ host: "etvox", free: true }]);
+
+      expect(formatted).toContain("- host: etvox");
+      expect(formatted).toContain("free: true");
+      expect(formatted).not.toContain("[object Object]");
     });
   });
 

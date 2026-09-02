@@ -22,8 +22,40 @@ pub struct ProjectRecord {
     pub dev_script: Option<String>,
     pub cleanup_script: Option<String>,
     pub copy_files: Option<String>,
+    /// Identity color rendered as a small dot next to the project name.
+    /// A preset palette name or normalized "#rrggbb"; `None` means no color.
+    pub badge_color: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Preset palette names the client resolves to theme-aware CSS variables.
+/// Stored verbatim so a preset keeps adapting to light/dark; custom picks are
+/// stored as concrete hex instead.
+const BADGE_COLOR_PRESETS: [&str; 9] = [
+    "neutral", "red", "orange", "amber", "green", "teal", "blue", "purple", "pink",
+];
+
+/// Normalize a user-supplied badge color.
+///
+/// Accepts a preset palette name (stored verbatim) or 3-/6-digit hex with or
+/// without the leading `#` (canonicalized to `#rrggbb`). Anything else is
+/// rejected with `None` so callers can 400.
+pub fn normalize_badge_color(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if BADGE_COLOR_PRESETS.contains(&trimmed) {
+        return Some(trimmed.to_string());
+    }
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let expanded = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).collect::<String>(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    Some(format!("#{}", expanded.to_ascii_lowercase()))
 }
 
 impl ProjectRecord {
@@ -39,9 +71,27 @@ impl ProjectRecord {
             dev_script: None,
             cleanup_script: None,
             copy_files: None,
+            badge_color: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Set or clear the badge color. Callers must pass an already-normalized
+    /// value (see [`normalize_badge_color`]); `None` removes the color.
+    pub async fn set_badge_color(
+        pool: &Pool<Sqlite>,
+        id: Uuid,
+        badge_color: Option<&str>,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query(
+            "UPDATE project_records SET badge_color = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(badge_color)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Self::get(pool, id).await
     }
 
     /// Fetch a project by its primary key, returning a row-not-found error if missing.
@@ -168,5 +218,62 @@ mod tests {
         assert_eq!(project.name, "test-project");
         assert_eq!(project.git_repo_path, "/path/to/repo");
         assert!(project.setup_script.is_none());
+        assert!(project.badge_color.is_none());
+    }
+
+    #[test]
+    fn normalize_badge_color_accepts_hex_forms() {
+        assert_eq!(
+            normalize_badge_color("#8A6AD2").as_deref(),
+            Some("#8a6ad2")
+        );
+        assert_eq!(normalize_badge_color("8a6ad2").as_deref(), Some("#8a6ad2"));
+        assert_eq!(normalize_badge_color("#fa0").as_deref(), Some("#ffaa00"));
+        assert_eq!(
+            normalize_badge_color("  #45a49b ").as_deref(),
+            Some("#45a49b")
+        );
+    }
+
+    #[test]
+    fn normalize_badge_color_accepts_preset_names() {
+        assert_eq!(normalize_badge_color("teal").as_deref(), Some("teal"));
+        assert_eq!(normalize_badge_color(" purple ").as_deref(), Some("purple"));
+    }
+
+    #[test]
+    fn normalize_badge_color_rejects_garbage() {
+        for invalid in ["", "#", "#12", "#12345", "#1234567", "crimson", "#ggg", "rgb(1,2,3)"] {
+            assert_eq!(normalize_badge_color(invalid), None, "input: {invalid}");
+        }
+    }
+
+    async fn migrated_pool() -> Pool<Sqlite> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn badge_color_roundtrip() {
+        let pool = migrated_pool().await;
+        let project = ProjectRecord::ensure_with_name_hint(&pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        assert!(project.badge_color.is_none());
+
+        let updated = ProjectRecord::set_badge_color(&pool, project.id, Some("#8a6ad2"))
+            .await
+            .unwrap();
+        assert_eq!(updated.badge_color.as_deref(), Some("#8a6ad2"));
+
+        let cleared = ProjectRecord::set_badge_color(&pool, project.id, None)
+            .await
+            .unwrap();
+        assert!(cleared.badge_color.is_none());
     }
 }

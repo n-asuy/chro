@@ -98,14 +98,14 @@ pub fn classify_media(extension: Option<&str>) -> Option<MediaKind> {
     }
 }
 
-/// Get display name (without .md extension for markdown files)
+/// The name an entry is listed under. Delegates to the shared rule so the
+/// tree, the view engine, and the name index all agree on what a file is
+/// called (see `document::name`).
 fn get_display_name(name: &str, entry_type: WorkspaceEntryType) -> String {
-    if entry_type == WorkspaceEntryType::File {
-        if let Some(stripped) = name.strip_suffix(".md") {
-            return stripped.to_string();
-        }
+    match entry_type {
+        WorkspaceEntryType::File => document::name::display_name(name),
+        WorkspaceEntryType::Directory => document::name::directory_display_name(name),
     }
-    name.to_string()
 }
 
 #[derive(Debug, Clone)]

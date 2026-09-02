@@ -251,51 +251,80 @@ impl WorktreeManager {
         repo_path: Option<impl AsRef<Path>>,
     ) -> Result<(), WorktreeError> {
         let worktree_path = worktree_path.as_ref().to_path_buf();
+        let repo_path = repo_path.map(|path| path.as_ref().to_path_buf());
         let lock = acquire_lock(&worktree_path).await;
+        let result = self.remove_worktree(&worktree_path, repo_path).await;
+        drop(lock);
+        result
+    }
 
-        if !self.is_within_base_dir(&worktree_path) {
-            drop(lock);
+    /// Cleanup without taking the path lock, for callers that already hold it.
+    /// The lock is a plain mutex, so re-entering it deadlocks the request.
+    async fn remove_worktree(
+        &self,
+        worktree_path: &Path,
+        repo_path: Option<PathBuf>,
+    ) -> Result<(), WorktreeError> {
+        if !self.is_within_base_dir(worktree_path) {
             return Err(WorktreeError::InvalidArgument(format!(
                 "worktree path outside base dir: {}",
                 worktree_path.display()
             )));
         }
 
-        let repo = if let Some(path) = repo_path {
-            path.as_ref().to_path_buf()
-        } else {
-            match infer_repo_from_worktree(&worktree_path).await? {
+        let repo = match repo_path {
+            Some(path) => path,
+            None => match infer_repo_from_worktree(worktree_path).await? {
                 Some(path) => path,
                 None => {
                     if worktree_path.exists() {
-                        remove_dir_recursive(&worktree_path).await?;
+                        remove_dir_recursive(worktree_path).await?;
                     }
-                    drop(lock);
                     return Ok(());
                 }
-            }
+            },
         };
 
         let _ = run_git_command(
             &repo,
-            &["worktree", "remove", "--force", path_to_arg(&worktree_path)],
+            &["worktree", "remove", "--force", path_to_arg(worktree_path)],
         )
         .await;
-        force_remove_metadata(&repo, &worktree_path)?;
-        remove_dir_recursive(&worktree_path).await?;
+        force_remove_metadata(&repo, worktree_path)?;
+        remove_dir_recursive(worktree_path).await?;
+        // `git worktree remove` gives up on the whole entry when it cannot
+        // delete the checkout (a build directory being written to is enough),
+        // so the registration can outlive the files it names. Prune
+        // unconditionally: the branch has to be free for the next provision.
+        self.prune_registrations(&repo).await?;
 
-        drop(lock);
         Ok(())
     }
 
+    /// Worktrees this repo recognises and can still open. A registration git
+    /// reports as prunable is not one of them.
     pub async fn list_registered_worktrees(
         &self,
         repo_path: impl AsRef<Path>,
     ) -> Result<Vec<PathBuf>, WorktreeError> {
         let repo_path = repo_path.as_ref().to_path_buf();
-        let output =
-            run_git_command_with_output(&repo_path, &["worktree", "list", "--porcelain"]).await?;
-        Ok(parse_worktree_list(&output))
+        let git = self.git.clone();
+        let paths = tokio::task::spawn_blocking(move || git.live_worktree_paths(&repo_path))
+            .await
+            .map_err(|err| WorktreeError::Join(err.to_string()))??;
+        Ok(paths
+            .iter()
+            .filter_map(|path| canonicalize_if_exists(path))
+            .collect())
+    }
+
+    async fn prune_registrations(&self, repo_path: &Path) -> Result<(), WorktreeError> {
+        let repo_path = repo_path.to_path_buf();
+        let git = self.git.clone();
+        tokio::task::spawn_blocking(move || git.prune_worktrees(&repo_path))
+            .await
+            .map_err(|err| WorktreeError::Join(err.to_string()))??;
+        Ok(())
     }
 
     /// Removes every registered worktree that is not part of `keep_paths`.
@@ -332,8 +361,12 @@ impl WorktreeManager {
         branch: &str,
     ) -> Result<(), WorktreeError> {
         if worktree_path.exists() {
-            self.cleanup_worktree(worktree_path, Some(repo_path))
+            self.remove_worktree(worktree_path, Some(repo_path.to_path_buf()))
                 .await?;
+        } else {
+            // The checkout is already gone but its registration may not be, and
+            // git refuses to check the branch out again while one survives.
+            self.prune_registrations(repo_path).await?;
         }
 
         if let Some(existing_path) = self.find_worktree_for_branch(repo_path, branch).await? {
@@ -366,33 +399,26 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// Find the path of an existing worktree that has the given branch checked out.
+    /// Find the path of an existing, usable worktree that has the given branch
+    /// checked out.
     async fn find_worktree_for_branch(
         &self,
         repo_path: &Path,
         branch: &str,
     ) -> Result<Option<PathBuf>, WorktreeError> {
-        let output =
-            run_git_command_with_output(repo_path, &["worktree", "list", "--porcelain"]).await?;
-
-        let mut current_path: Option<PathBuf> = None;
-        for line in output.lines() {
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                current_path = Some(PathBuf::from(rest.trim()));
-            } else if let Some(rest) = line.strip_prefix("branch ") {
-                let wt_branch = rest
-                    .trim()
-                    .trim_start_matches("refs/heads/")
-                    .trim_start_matches("refs/remotes/origin/");
-                if wt_branch == branch {
-                    return Ok(current_path);
-                }
-                current_path = None;
-            }
-        }
-        Ok(None)
+        let repo_path = repo_path.to_path_buf();
+        let branch = branch.to_string();
+        let git = self.git.clone();
+        tokio::task::spawn_blocking(move || git.worktree_for_branch(&repo_path, &branch))
+            .await
+            .map_err(|err| WorktreeError::Join(err.to_string()))
     }
 
+    /// A worktree is ready only when it is both registered with the repo *and*
+    /// still openable. A cleanup that dies partway (or anything else that takes
+    /// the `.git` file with it) leaves a directory that exists and is listed,
+    /// but that every git operation rejects with "could not find repository".
+    /// Treating that residue as ready is what handed dead paths to callers.
     async fn is_worktree_ready(
         &self,
         repo_path: &Path,
@@ -405,6 +431,9 @@ impl WorktreeManager {
             Some(path) => path,
             None => return Ok(false),
         };
+        if !self.git.is_repository(&canonical) {
+            return Ok(false);
+        }
         let registered = self.list_registered_worktrees(repo_path).await?;
         Ok(registered.iter().any(|entry| entry == &canonical))
     }
@@ -432,15 +461,6 @@ pub enum WorktreeError {
 }
 
 async fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<(), WorktreeError> {
-    run_git_command_with_output(repo_path, args)
-        .await
-        .map(|_| ())
-}
-
-async fn run_git_command_with_output(
-    repo_path: &Path,
-    args: &[&str],
-) -> Result<String, WorktreeError> {
     let repo = repo_path.to_path_buf();
     let argv = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let argv_for_cmd = argv.clone();
@@ -454,22 +474,13 @@ async fn run_git_command_with_output(
     .map_err(|err| WorktreeError::Join(err.to_string()))??;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(())
     } else {
         Err(WorktreeError::GitCommand {
             command: format!("git {}", argv.join(" ")),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
     }
-}
-
-fn parse_worktree_list(output: &str) -> Vec<PathBuf> {
-    output
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .map(|path| PathBuf::from(path.trim()))
-        .filter_map(|path| canonicalize_if_exists(&path))
-        .collect()
 }
 
 async fn infer_repo_from_worktree(worktree_path: &Path) -> Result<Option<PathBuf>, WorktreeError> {
@@ -607,5 +618,113 @@ mod tests {
         let base = PathBuf::from("/tmp/worktrees");
         let resolved = resolve_worktree_path(&base, "Fix bug", "abcd-1234");
         assert!(resolved.starts_with(&base));
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .status()
+            .expect("git should be available");
+        assert!(status.success(), "git {args:?} failed in {cwd:?}");
+    }
+
+    /// A repo with one commit on `main`, plus an empty worktree base dir.
+    fn repo_and_base() -> (tempfile::TempDir, PathBuf, WorktreeManager) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let base = tmp.path().join("worktrees");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "tester@example.com"]);
+        git(&repo, &["config", "user.name", "tester"]);
+        fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let manager = WorktreeManager::new(Some(base));
+        (tmp, repo, manager)
+    }
+
+    /// The exact damage an interrupted cleanup leaves: the checkout directory
+    /// survives with its contents, its `.git` file does not. The directory
+    /// still exists and git still lists the registration, so the old readiness
+    /// check called it ready and handed back a path no git command can open.
+    #[tokio::test]
+    async fn residue_without_a_git_file_is_rebuilt() {
+        let (_tmp, repo, manager) = repo_and_base();
+
+        let handle = manager
+            .ensure_worktree(&repo, EnsureOptions::new("ch/76fe-vela").create_branch())
+            .await
+            .expect("first provision");
+        fs::write(handle.path.join("work.txt"), "agent output\n").unwrap();
+
+        fs::remove_file(handle.path.join(".git")).unwrap();
+        assert!(handle.path.is_dir());
+        assert!(!manager.git.is_repository(&handle.path));
+
+        let again = manager
+            .ensure_worktree(&repo, EnsureOptions::new("ch/76fe-vela"))
+            .await
+            .expect("a broken worktree must be rebuilt, not handed back");
+
+        assert_eq!(again.path, handle.path);
+        assert!(again.freshly_created);
+        assert!(
+            manager.git.is_repository(&again.path),
+            "the rebuilt worktree must be a real repository"
+        );
+        assert_eq!(
+            manager.git.get_current_branch(&again.path).unwrap(),
+            "ch/76fe-vela",
+            "and it must still be on the task's branch"
+        );
+    }
+
+    /// A checkout deleted outright leaves its registration behind, and git
+    /// refuses to check the branch out again while that registration stands.
+    #[tokio::test]
+    async fn deleted_checkout_does_not_keep_its_branch_reserved() {
+        let (_tmp, repo, manager) = repo_and_base();
+
+        let handle = manager
+            .ensure_worktree(&repo, EnsureOptions::new("ch/gone").create_branch())
+            .await
+            .expect("first provision");
+        fs::remove_dir_all(&handle.path).unwrap();
+
+        let again = manager
+            .ensure_worktree(&repo, EnsureOptions::new("ch/gone"))
+            .await
+            .expect("provisioning must recover from a deleted checkout");
+
+        assert!(manager.git.is_repository(&again.path));
+        assert_eq!(
+            manager.git.get_current_branch(&again.path).unwrap(),
+            "ch/gone"
+        );
+    }
+
+    /// Cleanup has to leave the branch free even when git's own removal only
+    /// gets partway.
+    #[tokio::test]
+    async fn cleanup_leaves_no_registration_behind() {
+        let (_tmp, repo, manager) = repo_and_base();
+
+        let handle = manager
+            .ensure_worktree(&repo, EnsureOptions::new("ch/cleanup").create_branch())
+            .await
+            .expect("first provision");
+        manager
+            .cleanup_worktree(&handle.path, Some(&repo))
+            .await
+            .expect("cleanup");
+
+        assert!(manager
+            .find_worktree_for_branch(&repo, "ch/cleanup")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!repo.join(".git/worktrees/ch-cleanup").exists());
     }
 }

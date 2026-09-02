@@ -70,6 +70,35 @@ impl LocalRuntime {
 
         Ok(runtime::LastExchange { user, assistant })
     }
+
+    /// Return the user prompt and final assistant reply for one conversation
+    /// turn. A turn is a task session: each send inserts a session row linked
+    /// to the run that executed it, so the turn's reply is the last assistant
+    /// text in that run's log. `None` when the session does not belong to the
+    /// task.
+    pub async fn task_session_exchange(
+        &self,
+        task_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<runtime::LastExchange>, RuntimeError> {
+        let sessions = db::models::TaskSession::list_by_task_id(self.db.pool(), task_id).await?;
+        let Some(session) = sessions.into_iter().find(|session| session.id == session_id) else {
+            return Ok(None);
+        };
+
+        let user = session
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_owned);
+        let assistant = match session.task_run_id {
+            Some(run_id) => last_assistant_text(&self.container.fetch_logs(run_id).await?),
+            None => None,
+        };
+
+        Ok(Some(runtime::LastExchange { user, assistant }))
+    }
 }
 
 /// Find the last assistant text message within a single run's log entries.

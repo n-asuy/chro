@@ -51,6 +51,12 @@ const GIT_ERROR_MATCHERS: Array<{
     match: (message) => message.includes("nothing to merge"),
     key: "gitNothingToMerge",
   },
+  // A forked session still sitting on the point it continued from: rebasing
+  // would replace that point with the base branch and carry nothing forward.
+  {
+    match: (message) => message.includes("no commits of its own yet"),
+    key: "gitForkAnchorRebaseBlocked",
+  },
   {
     match: (message) =>
       message.includes("merge conflict") ||

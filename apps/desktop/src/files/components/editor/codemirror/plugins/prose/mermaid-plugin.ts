@@ -9,8 +9,8 @@
  * ```
  */
 
-import { memoizeByDoc } from "../decoration-cache";
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { memoizeByParsedDoc } from "../decoration-cache";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { syntaxTree } from "@codemirror/language";
 import {
   type Range as EditorRange,
@@ -419,7 +419,7 @@ function findMermaidBlocks(state: EditorState): MermaidBlockInfo[] {
 
 // The block scan depends only on the document; memoize it so cursor movement
 // reuses the scan instead of re-walking the tree.
-const findMermaidBlocksCached = memoizeByDoc(findMermaidBlocks);
+const findMermaidBlocksCached = memoizeByParsedDoc(findMermaidBlocks);
 
 function buildMermaidDecorations(
   state: EditorState,
@@ -468,7 +468,7 @@ const mermaidDecorationField = StateField.define<DecorationSet>({
     return RangeSet.of(buildMermaidDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildMermaidDecorations(tr.state), true);
     }
     return value.map(tr.changes);

@@ -1,12 +1,10 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use git2::{
-    Branch, BranchType, DiffFindOptions, DiffFormat, DiffOptions, MergeOptions, ObjectType,
-    Reference, Repository, Tree,
+    Branch, BranchType, DiffFindOptions, DiffOptions, MergeOptions, Reference, Repository,
 };
 use log_types::{compute_line_change_counts, Diff, DiffChangeKind};
 use serde::{Deserialize, Serialize};
@@ -15,11 +13,10 @@ use thiserror::Error;
 mod cli;
 pub mod decorated_tree;
 
-pub use cli::GitCliError as CliError;
 use cli::{GitCli, GitCliError};
 pub use decorated_tree::{
-    build_changed_files_tree, build_decorations_from_entries, build_git_decorations,
-    collect_directory_paths, ChangedFileNode, DecorationStatus, GitDecorations, NodeKind,
+    build_changed_files_tree, build_git_decorations, ChangedFileNode, DecorationStatus,
+    GitDecorations, NodeKind,
 };
 
 #[derive(Debug, Error)]
@@ -76,7 +73,7 @@ const MAX_CUMULATIVE_INLINE_DIFF_BYTES: usize = 16 * 1024 * 1024;
 pub struct CommitId(git2::Oid);
 
 impl CommitId {
-    pub fn new(oid: git2::Oid) -> Self {
+    fn new(oid: git2::Oid) -> Self {
         Self(oid)
     }
 
@@ -282,7 +279,7 @@ impl GitService {
         branch_name: &str,
     ) -> Result<Option<PathBuf>, GitServiceError> {
         let git_cli = GitCli::new();
-        let worktrees = git_cli.list_worktrees(repo_path).map_err(|e| {
+        let worktrees = git_cli.list_live_worktrees(repo_path).map_err(|e| {
             GitServiceError::InvalidRepository(format!("git worktree list failed: {e}"))
         })?;
 
@@ -477,13 +474,35 @@ impl GitService {
     /// workspace path can drift (reclaimed and re-provisioned worktrees, a
     /// checkout the agent made itself), and acting on the stale record is what
     /// produces "already used by worktree" failures.
+    ///
+    /// Registrations whose checkout no longer opens are skipped: git keeps
+    /// listing them with their branch, and returning one hands the caller a
+    /// path that fails with "could not find repository".
     pub fn worktree_for_branch(&self, repo_path: &Path, branch: &str) -> Option<PathBuf> {
         GitCli::new()
-            .list_worktrees(repo_path)
+            .list_live_worktrees(repo_path)
             .ok()?
             .into_iter()
             .find(|wt| wt.branch.as_deref() == Some(branch))
             .map(|wt| wt.path)
+    }
+
+    /// Every worktree path git recognises, minus the ones whose checkout is
+    /// gone or broken.
+    pub fn live_worktree_paths(&self, repo_path: &Path) -> Result<Vec<PathBuf>, GitServiceError> {
+        let worktrees = GitCli::new().list_live_worktrees(repo_path).map_err(|e| {
+            GitServiceError::InvalidRepository(format!("git worktree list failed: {e}"))
+        })?;
+        Ok(worktrees.into_iter().map(|wt| wt.path).collect())
+    }
+
+    /// Drop registrations whose checkout is gone, releasing the branches they
+    /// hold. Without this a half-removed worktree keeps its branch reserved
+    /// forever and re-provisioning it fails with "already checked out".
+    pub fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitServiceError> {
+        GitCli::new().prune_worktrees(repo_path).map_err(|e| {
+            GitServiceError::InvalidRepository(format!("git worktree prune failed: {e}"))
+        })
     }
 
     pub fn rebase_branch(
@@ -502,7 +521,7 @@ impl GitService {
             None => {
                 let recorded_branch =
                     GitCli::new()
-                        .list_worktrees(repo_path)
+                        .list_live_worktrees(repo_path)
                         .ok()
                         .and_then(|worktrees| {
                             worktrees
@@ -632,7 +651,7 @@ impl GitService {
     }
 
     /// Abort an in-progress rebase in this worktree (no-op if none).
-    pub fn abort_rebase(&self, worktree_path: &Path) -> Result<(), GitServiceError> {
+    fn abort_rebase(&self, worktree_path: &Path) -> Result<(), GitServiceError> {
         let git = GitCli::new();
         git.abort_rebase(worktree_path).map_err(|e| {
             GitServiceError::InvalidRepository(format!("git rebase --abort failed: {e}"))
@@ -772,27 +791,6 @@ impl GitService {
         }
     }
 
-    pub fn diff_commits(
-        &self,
-        repo_path: impl AsRef<Path>,
-        from_ref: &str,
-        to_ref: &str,
-    ) -> Result<DiffSummary, GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        let from_tree = self.rev_to_tree(&repo, from_ref)?;
-        let to_tree = self.rev_to_tree(&repo, to_ref)?;
-
-        let mut options = DiffOptions::new();
-        options
-            .include_untracked(false)
-            .recurse_untracked_dirs(true)
-            .include_typechange(true);
-
-        let diff = repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), Some(&mut options))?;
-        let summary = DiffSummary::from_diff(&diff)?;
-        Ok(summary)
-    }
-
     fn diff_worktree(
         &self,
         worktree_path: &Path,
@@ -892,19 +890,6 @@ impl GitService {
         repo.find_branch(name, BranchType::Local)
             .or_else(|_| repo.find_branch(name, BranchType::Remote))
             .map_err(|_| GitServiceError::BranchNotFound(name.to_string()))
-    }
-
-    fn rev_to_tree<'repo>(
-        &self,
-        repo: &'repo Repository,
-        reference: &str,
-    ) -> Result<Tree<'repo>, GitServiceError> {
-        let object = repo.revparse_single(reference)?;
-        match object.kind() {
-            Some(ObjectType::Tree) => Ok(object.peel_to_tree()?),
-            Some(ObjectType::Commit) => Ok(object.peel_to_commit()?.tree()?),
-            _ => Err(GitServiceError::ReferenceNotFound(reference.to_string())),
-        }
     }
 
     /// Get the status of the working directory
@@ -1183,44 +1168,6 @@ pub enum FileChangeStatus {
     TypeChange,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct DiffSummary {
-    pub files: Vec<FileDiff>,
-    pub files_changed: usize,
-    pub insertions: usize,
-    pub deletions: usize,
-}
-
-impl DiffSummary {
-    fn from_diff(diff: &git2::Diff) -> Result<Self, git2::Error> {
-        let stats = diff.stats()?;
-        let mut builders: BTreeMap<PathBuf, FileDiffBuilder> = BTreeMap::new();
-
-        diff.print(DiffFormat::Patch, |delta, _hunk, line| {
-            let path = delta.new_file().path().or_else(|| delta.old_file().path());
-            if let Some(path) = path {
-                builders
-                    .entry(path.to_path_buf())
-                    .or_insert_with(|| FileDiffBuilder::new(path))
-                    .push_line(line);
-            }
-            true
-        })?;
-
-        let files = builders
-            .into_values()
-            .map(FileDiffBuilder::build)
-            .collect::<Vec<_>>();
-
-        Ok(Self {
-            files,
-            files_changed: stats.files_changed(),
-            insertions: stats.insertions(),
-            deletions: stats.deletions(),
-        })
-    }
-}
-
 fn build_worktree_diffs(
     repo: &Repository,
     base_tree: &git2::Tree,
@@ -1415,53 +1362,6 @@ fn finalize_diff_entry(diff: &mut Diff) {
         );
         diff.additions = Some(additions);
         diff.deletions = Some(deletions);
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct FileDiff {
-    pub path: String,
-    pub additions: usize,
-    pub deletions: usize,
-    pub patch: String,
-}
-
-struct FileDiffBuilder {
-    path: String,
-    additions: usize,
-    deletions: usize,
-    patch: String,
-}
-
-impl FileDiffBuilder {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.to_string_lossy().to_string(),
-            additions: 0,
-            deletions: 0,
-            patch: String::new(),
-        }
-    }
-
-    fn push_line(&mut self, line: git2::DiffLine<'_>) {
-        match line.origin() {
-            '+' => self.additions += 1,
-            '-' => self.deletions += 1,
-            _ => {}
-        }
-
-        self.patch.push(line.origin());
-        let content = std::str::from_utf8(line.content()).unwrap_or("");
-        self.patch.push_str(content);
-    }
-
-    fn build(self) -> FileDiff {
-        FileDiff {
-            path: self.path,
-            additions: self.additions,
-            deletions: self.deletions,
-            patch: self.patch,
-        }
     }
 }
 
@@ -1664,6 +1564,56 @@ mod tests {
         drop(repo);
     }
 
+    /// The worktree holding the branch was half-deleted: the directory is still
+    /// there but its `.git` file is gone, so git keeps listing the registration
+    /// (as prunable) with the branch attached. Following that listing handed
+    /// `Repository::open` a dead path and surfaced a raw libgit2
+    /// "could not find repository ...; class=Repository (6); code=NotFound (-3)".
+    #[test]
+    fn rebase_ignores_a_worktree_whose_checkout_is_dead() {
+        let (tmp, repo) = init_repo();
+        let service = GitService::new();
+        let root = tmp.path();
+        write_file(root, "base.txt", "base\n");
+        service.commit_all(root, "base commit").unwrap();
+        let base_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        service
+            .ensure_branch_exists(root, "ch/76fe-vela", Some(&base_branch))
+            .unwrap();
+        let wt_home = tempdir().unwrap();
+        let task_wt = wt_home.path().join("76fe-vela");
+        let added = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["worktree", "add", task_wt.to_str().unwrap(), "ch/76fe-vela"])
+            .output()
+            .unwrap();
+        assert!(added.status.success());
+
+        // Interrupted cleanup: the checkout loses its `.git` file, everything
+        // else stays put.
+        fs::remove_file(task_wt.join(".git")).unwrap();
+        assert!(task_wt.is_dir(), "the residue directory still exists");
+        assert!(
+            service.worktree_for_branch(root, "ch/76fe-vela").is_none(),
+            "a dead checkout is not where the branch lives"
+        );
+
+        let err = service
+            .rebase_branch(root, &task_wt, &base_branch, &base_branch, "ch/76fe-vela")
+            .expect_err("nothing usable holds the branch");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no worktree currently has"),
+            "expected chro's own wording, got: {msg}"
+        );
+        assert!(
+            !msg.contains("could not find repository"),
+            "raw libgit2 error leaked to the caller: {msg}"
+        );
+        drop(repo);
+    }
+
     /// Build a repo where the task branch is genuinely ahead of the base in
     /// commits, yet identical to it in content: its own change also reached the
     /// base independently, and the base was then merged back in. This is what a
@@ -1812,23 +1762,6 @@ mod tests {
         let current = service.get_current_branch(tmp.path()).unwrap();
         assert!(current == "feature/demo" || current == "master" || current == "main");
         drop(repo);
-    }
-
-    #[test]
-    fn commits_changes_and_generates_diff() {
-        let (tmp, repo) = init_repo();
-        let service = GitService::new();
-        write_file(tmp.path(), "README.md", "hello world\n");
-        service.commit_all(tmp.path(), "add readme").unwrap();
-        let head = repo.head().unwrap().target().unwrap();
-        write_file(tmp.path(), "README.md", "hello chro\n");
-        let new_commit = service.commit_all(tmp.path(), "update readme").unwrap();
-        let new_commit_sha = new_commit.expect("expected commit to be created");
-        let diff = service
-            .diff_commits(tmp.path(), &head.to_string(), &new_commit_sha)
-            .unwrap();
-        assert_eq!(diff.files.len(), 1);
-        assert!(diff.insertions >= 1);
     }
 
     #[test]

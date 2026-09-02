@@ -1,7 +1,30 @@
 import posthog from "posthog-js";
 
+import { recordDevEvent } from "./dev-events";
+
 const POSTHOG_KEY = "phc_ciDHQIDUgIxsl1Z5oqbhfHq6Hj2ktS4hdImRC649dZ9";
 const POSTHOG_HOST = "https://eu.i.posthog.com";
+
+/**
+ * Events allowed to leave the machine.
+ *
+ * Every captured event is mirrored into the local dev sink, which records far
+ * more than a user ever consented to share. This list -- not the call site --
+ * decides what reaches PostHog, so a new instrumentation point is local-only
+ * until it is deliberately added here. Keep it in step with `EGRESS_ALLOWLIST`
+ * in `crates/analytics/src/lib.rs`.
+ */
+const EGRESS_ALLOWLIST = new Set([
+  "execution_started",
+  "execution_completed",
+  "execution_failed",
+  "app_opened",
+  "error_boundary",
+]);
+
+export function isEgressAllowed(event: string): boolean {
+  return EGRESS_ALLOWLIST.has(event);
+}
 
 let initialized = false;
 
@@ -82,15 +105,26 @@ export function setAnalyticsEnabled(enabled: boolean): void {
 }
 
 /**
- * Capture a custom event. No-op when PostHog is not initialized or opted out.
- * Path-like properties are automatically masked to prevent leaking
- * user directory structures.
+ * Capture a custom event.
+ *
+ * Always mirrored to the local dev sink. Transmission to PostHog additionally
+ * requires initialization, the user opt-in, and membership of the egress
+ * allowlist; path-like properties are masked on the way out, never on the way
+ * to disk.
  */
 export function capture(
   event: string,
   properties?: Record<string, unknown>,
 ): void {
+  recordDevEvent(event, properties);
+
   if (!initialized) return;
+  if (!isEgressAllowed(event)) {
+    console.warn(
+      `[analytics] "${event}" is not on the egress allowlist; kept local`,
+    );
+    return;
+  }
   posthog.capture(event, {
     ...(properties ? sanitizeProperties(properties) : undefined),
     app_version: __APP_VERSION__,

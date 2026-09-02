@@ -1,7 +1,7 @@
+import { cn } from "@chro/ui/utils";
 import { motion } from "framer-motion";
 import type React from "react";
 import { type JSX, useMemo } from "react";
-import { cn } from "@chro/ui/utils";
 
 interface TextShimmerProps {
   children: string;

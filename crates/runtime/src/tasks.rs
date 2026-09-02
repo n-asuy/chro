@@ -35,6 +35,11 @@ use crate::{
 
 const FOLLOW_UP_MISSING_SESSION_ID_ERROR: &str =
     "cannot follow up because the previous executor session id is not available yet";
+/// Refusal for a rebase whose only effect would be to drop a fork's anchor.
+const REBASE_WOULD_DISCARD_FORK_ANCHOR: &str =
+    "this session was forked from an earlier point and has no commits of its own yet, \
+     so rebasing would replace that starting point with the base branch and nothing else. \
+     Commit its work first, or start a new session on the base branch.";
 const FOLLOW_UP_RESUME_SESSION_RETRY_ATTEMPTS: usize = 10;
 const FOLLOW_UP_RESUME_SESSION_RETRY_DELAY_MS: u64 = 200;
 
@@ -1400,14 +1405,20 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 )
             };
 
-            let resolved_branch_name = if let Some(ref existing) = run.branch_name {
-                Some(existing.clone())
-            } else {
-                Some(generate_attempt_branch_name(
-                    &task.title,
-                    &run.id.to_string(),
-                ))
-            };
+            // A later session continues the task it belongs to, so it works on
+            // the branch the task already has. Minting a second branch here
+            // would strand every commit the earlier sessions made, which is
+            // what happened whenever the task's worktree could not be adopted.
+            let resolved_branch_name = run
+                .branch_name
+                .clone()
+                .or_else(|| task.branch.clone())
+                .or_else(|| {
+                    Some(generate_attempt_branch_name(
+                        &task.title,
+                        &run.id.to_string(),
+                    ))
+                });
 
             let is_new_branch = run.branch_name.is_none();
             (resolved_branch_name, resolved_target_branch, is_new_branch)
@@ -1419,11 +1430,29 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         // prepares the directory (and branch) at fork time so the anchor
         // survives. Adopt it instead of cutting a fresh worktree from the
         // target branch.
+        //
+        // Adoption requires a checkout that still opens, not merely a directory
+        // that exists. An interrupted cleanup leaves the files behind without
+        // their `.git`, and adopting that skips provisioning altogether: the run
+        // records a path no git command can open, so its first rebase, diff or
+        // commit fails with "could not find repository". Refusing here sends the
+        // session through `ensure_worktree`, which rebuilds the worktree on the
+        // task's own branch.
         let adopted_workspace = task
             .worktree_path
             .clone()
             .filter(|_| run.branch_name.is_none())
-            .filter(|path| Path::new(path).is_dir());
+            .filter(|path| {
+                let usable = self.runtime().git().is_repository(path);
+                if !usable && Path::new(path).exists() {
+                    warn!(
+                        task_id = %task.id,
+                        workspace = %path,
+                        "task workspace is no longer a git worktree; re-provisioning"
+                    );
+                }
+                usable
+            });
 
         // The adopted workspace comes with the task's own branch (the fork
         // branch, or the shared source branch): the generated attempt branch
@@ -1695,6 +1724,66 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         .await
     }
 
+    /// The directory a run may actually be resumed in.
+    ///
+    /// A recorded workspace can stop being a worktree while its directory
+    /// survives: an interrupted cleanup takes the `.git` file and leaves the
+    /// files. Resuming there runs the agent, and every later git operation, in
+    /// a directory git does not recognise. When that happens the worktree is
+    /// rebuilt from the run's own branch, which restores everything the run
+    /// committed; only uncommitted leftovers are unrecoverable, and they were
+    /// already lost with the checkout.
+    async fn ensure_run_workspace(
+        &self,
+        run: &TaskRun,
+        project: &ProjectRecord,
+    ) -> Result<PathBuf, RuntimeError> {
+        let recorded = run
+            .workspace_path
+            .clone()
+            .or_else(|| run.container_ref.clone())
+            .ok_or(RuntimeError::BadRequest(
+                "workspace path missing on task run",
+            ))?;
+        let recorded = PathBuf::from(recorded);
+        let git = self.runtime().git();
+        if git.is_repository(&recorded) {
+            return Ok(recorded);
+        }
+
+        let repo_path = PathBuf::from(&project.git_repo_path);
+        let branch = match (git.is_repository(&repo_path), run.branch_name.clone()) {
+            (true, Some(branch)) => branch,
+            // Nothing to rebuild from (a project that is not a git repository,
+            // or a run with no branch): the directory is all there is.
+            _ => {
+                return if recorded.exists() {
+                    Ok(recorded)
+                } else {
+                    Err(RuntimeError::BadRequest("workspace path no longer exists"))
+                }
+            }
+        };
+
+        warn!(
+            task_run_id = %run.id,
+            workspace = %recorded.display(),
+            branch = %branch,
+            "run workspace is no longer a git worktree; rebuilding it from the branch"
+        );
+
+        let mut options = EnsureOptions::new(&branch).create_branch();
+        if let Some(target) = run.target_branch.clone() {
+            options = options.with_base_branch(target);
+        }
+        let handle = self
+            .runtime()
+            .worktree()
+            .ensure_worktree(&repo_path, options)
+            .await?;
+        Ok(handle.path)
+    }
+
     async fn follow_up_execution_with_options(
         &self,
         run_id: Uuid,
@@ -1719,17 +1808,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .await?,
         );
 
-        let workspace_path =
-            previous_run
-                .workspace_path
-                .clone()
-                .ok_or(RuntimeError::BadRequest(
-                    "workspace path missing on task run",
-                ))?;
-        let workspace_path_buf = PathBuf::from(&workspace_path);
-        if !workspace_path_buf.exists() {
-            return Err(RuntimeError::BadRequest("workspace path no longer exists"));
-        }
+        let workspace_path_buf = self.ensure_run_workspace(&previous_run, &project).await?;
+        let workspace_path = workspace_path_buf.to_string_lossy().to_string();
 
         let prompt = ImageService::canonicalize_worktree_links(&prompt, &workspace_path_buf);
         let project_workspace_path = PathBuf::from(&project.git_repo_path);
@@ -1783,8 +1863,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         new_run.executor_action = previous_run.executor_action.clone();
         new_run.branch_name = previous_run.branch_name.clone();
         new_run.target_branch = previous_run.target_branch.clone();
-        new_run.container_ref = previous_run.container_ref.clone();
-        new_run.workspace_path = previous_run.workspace_path.clone();
+        // The resolved workspace, not the previous run's record: a worktree
+        // that had to be rebuilt must not carry the stale path forward.
+        new_run.container_ref = Some(workspace_path.clone());
+        new_run.workspace_path = Some(workspace_path.clone());
         new_run.resume_session_id = resume_session_id.clone();
         new_run.status = RunStatus::Running;
         new_run.started_at = Some(Utc::now());
@@ -2251,11 +2333,29 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let task = TaskRecord::get(self.pool(), run.task_id).await?;
         let project = ProjectRecord::get(self.pool(), task.project_id).await?;
 
+        // A fork's branch starts on its anchor: the state the source session
+        // ended on, which is what the forked conversation is about. Until the
+        // fork commits something of its own there is nothing for a rebase to
+        // replay, so it would move the branch to the base tip and leave the
+        // anchor behind — undoing the one thing forking took care to preserve.
+        // Refuse, rather than let the "behind" badge talk the user into it.
+        let repo_path = PathBuf::from(&project.git_repo_path);
+        let anchor_commit =
+            fork_anchor_commit(&TaskContextRef::list_by_task_id(self.pool(), task.id).await?)
+                .and_then(|rev| self.runtime().git().resolve_commit_sha(&repo_path, &rev));
+        let branch_tip = self
+            .runtime()
+            .git()
+            .resolve_commit_sha(&repo_path, &branch_name);
+        if rebase_would_only_discard_anchor(branch_tip.as_deref(), anchor_commit.as_deref()) {
+            return Err(RuntimeError::BadRequest(REBASE_WOULD_DISCARD_FORK_ANCHOR));
+        }
+
         let old_base = old_base_branch.unwrap_or(default_target_branch.clone());
         self.runtime()
             .git()
             .rebase_branch(
-                Path::new(&project.git_repo_path),
+                &repo_path,
                 &worktree_path,
                 &new_base_branch,
                 &old_base,
@@ -2735,6 +2835,28 @@ fn build_barrier_wake_prompt(packets: &[String]) -> String {
     )
 }
 
+/// The commit a forked task started from, when it has one.
+///
+/// A task that was never forked carries no fork edge, and a non-git fork
+/// (General chat, non-git project) records an anchor without a commit: both
+/// mean there is no code checkpoint to protect.
+fn fork_anchor_commit(refs: &[TaskContextRef]) -> Option<String> {
+    refs.iter()
+        .find(|r| r.kind == "fork")
+        .and_then(|r| r.metadata_json.as_deref())
+        .and_then(|json| serde_json::from_str::<ForkAnchor>(json).ok())
+        .and_then(|anchor| anchor.commit)
+}
+
+/// True when a rebase would do nothing except move a fork off its anchor.
+///
+/// Both sides are resolved shas, so this is simply "the branch is still exactly
+/// where the fork put it". Without an anchor the caller is an ordinary task,
+/// whose no-commits-yet branch may legitimately catch up to its base.
+fn rebase_would_only_discard_anchor(branch_tip: Option<&str>, anchor_commit: Option<&str>) -> bool {
+    matches!((branch_tip, anchor_commit), (Some(tip), Some(anchor)) if tip == anchor)
+}
+
 fn fork_title(source_title: &str) -> String {
     let base = source_title.trim();
     let (stem, next) = match base.rsplit_once(" (") {
@@ -2886,6 +3008,77 @@ mod tests {
         assert!(prompt.contains("chro approvals respond appr-123 --approve"));
         assert!(prompt.contains("--deny"));
         assert!(prompt.contains("--answer"));
+    }
+
+    fn context_ref(kind: &str, metadata_json: Option<String>) -> TaskContextRef {
+        TaskContextRef {
+            id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            task_session_id: None,
+            task_run_id: None,
+            kind: kind.to_string(),
+            target_task_id: None,
+            target_session_id: None,
+            path: None,
+            branch: None,
+            mode: "native".to_string(),
+            label: None,
+            metadata_json,
+            sort_order: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// A fork records the commit it started from. The guard that keeps a rebase
+    /// from throwing that point away has to read it back off the edge.
+    #[test]
+    fn fork_anchor_commit_reads_the_git_anchor() {
+        let anchor = ForkAnchor {
+            run_id: Uuid::new_v4(),
+            message_uuid: None,
+            commit: Some("a4f2e1c".to_string()),
+        };
+        let refs = vec![
+            context_ref("file", None),
+            context_ref("fork", serde_json::to_string(&anchor).ok()),
+        ];
+        assert_eq!(fork_anchor_commit(&refs).as_deref(), Some("a4f2e1c"));
+
+        // A task nobody forked has no anchor at all, and a non-git fork
+        // (General chat) records one without a commit: neither has a code
+        // checkpoint to protect.
+        assert_eq!(fork_anchor_commit(&[context_ref("session", None)]), None);
+        let scratch = ForkAnchor {
+            run_id: Uuid::new_v4(),
+            message_uuid: None,
+            commit: None,
+        };
+        assert_eq!(
+            fork_anchor_commit(&[context_ref("fork", serde_json::to_string(&scratch).ok())]),
+            None
+        );
+    }
+
+    /// While a fork still sits on its anchor there is nothing to replay, so a
+    /// rebase would only move the branch to the base tip and leave the anchor
+    /// behind. That is the one state where the rebase has to be refused.
+    #[test]
+    fn rebase_is_refused_only_while_the_fork_sits_on_its_anchor() {
+        assert!(rebase_would_only_discard_anchor(
+            Some("a4f2e1c"),
+            Some("a4f2e1c")
+        ));
+        // Once the fork commits work of its own, the rebase has something to
+        // carry forward.
+        assert!(!rebase_would_only_discard_anchor(
+            Some("b7d9e2f"),
+            Some("a4f2e1c")
+        ));
+        // A task that was never forked keeps the plain catch-up rebase: a fresh
+        // branch with no commits is allowed to fast-forward onto its base.
+        assert!(!rebase_would_only_discard_anchor(Some("b7d9e2f"), None));
+        assert!(!rebase_would_only_discard_anchor(None, Some("a4f2e1c")));
     }
 
     #[test]

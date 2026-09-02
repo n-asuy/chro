@@ -11,7 +11,7 @@
  * This plugin transforms wikilinks into custom nodes that can be rendered as clickable links.
  */
 
-import type { Root, Text, PhrasingContent } from "mdast";
+import type { PhrasingContent, Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 
 interface WikilinkNode {

@@ -169,6 +169,22 @@
     --color-primary-800: 7, 50, 84;
     --color-primary-900: 7, 43, 71;
 
+    /*
+     * Project identity palette: mid-chroma, uniform lightness. Rendered as
+     * small dots wherever sessions from different projects mix. Azure is
+     * deliberately absent as a preset hue family leader — the brand ramp owns
+     * selection/running states — but the blue here is gray enough to coexist.
+     */
+    --color-project-neutral: #8b919c;
+    --color-project-red: #d25c55;
+    --color-project-orange: #d2793a;
+    --color-project-amber: #c99e38;
+    --color-project-green: #5aa860;
+    --color-project-teal: #45a49b;
+    --color-project-blue: #5b87d6;
+    --color-project-purple: #8a6ad2;
+    --color-project-pink: #cf6d9e;
+
     /* Cool-neutral surfaces: depth comes from borders + tonal steps, not float */
     --color-background-100: 255, 255, 255; /* primary bg */
     --color-background-90: 246, 247, 249; /* secondary bg */
@@ -388,6 +404,17 @@
     --color-primary-700: 154, 204, 246;
     --color-primary-800: 168, 212, 248;
     --color-primary-900: 179, 218, 250;
+
+    /* Project identity palette: same hues, one step lighter for dark surfaces */
+    --color-project-neutral: #9aa1ac;
+    --color-project-red: #e0736c;
+    --color-project-orange: #e08d4e;
+    --color-project-amber: #d9b04c;
+    --color-project-green: #6cba72;
+    --color-project-teal: #58b6ad;
+    --color-project-blue: #6f9be2;
+    --color-project-purple: #a086e0;
+    --color-project-pink: #dd82b1;
 
     /* Cool near-black surfaces, finely stepped (Obsidian-grade dark) */
     --color-background-100: 28, 29, 33; /* primary bg */

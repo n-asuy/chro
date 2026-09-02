@@ -9,6 +9,7 @@ import { recordPerfEvent } from "@/perf/recorder";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalRecord } from "../types/api";
 import type { DisplayEntry, NormalizedEntry } from "../types/normalized";
+import { applyIndexedDisplayEntryOperation } from "../utils/indexed-display-entry";
 import { dedupeJsonPatchOperations } from "../utils/json-patch-stream";
 
 export type DiffChangeKind =
@@ -265,9 +266,6 @@ export function applyTaskRunPatchOperations(
         continue;
       }
 
-      const existingEntry =
-        index < nextEntries.length ? nextEntries[index] : undefined;
-
       switch (op.op) {
         case "add":
         case "replace": {
@@ -275,42 +273,42 @@ export function applyTaskRunPatchOperations(
             continue;
           }
 
-          let displayEntry: DisplayEntry | null = null;
-
-          if (op.value.type === "NORMALIZED_ENTRY") {
-            displayEntry = createNormalizedDisplayEntry(
-              op.value.content,
-              existingEntry,
-            );
-          } else if (op.value.type === "STDOUT") {
-            displayEntry = createStdoutDisplayEntry(
-              op.value.content,
-              existingEntry,
-            );
-          } else if (op.value.type === "STDERR") {
-            displayEntry = createStderrDisplayEntry(
-              op.value.content,
-              existingEntry,
-            );
-          }
-
-          if (!displayEntry) {
-            continue;
-          }
-
-          if (op.op === "add") {
-            nextEntries.splice(index, 0, displayEntry);
-          } else if (index < nextEntries.length) {
-            nextEntries[index] = displayEntry;
-          } else {
-            nextEntries.push(displayEntry);
-          }
+          nextEntries = applyIndexedDisplayEntryOperation({
+            entries: nextEntries,
+            scope: "task-run",
+            serverIndex: index,
+            operation: op.op,
+            createEntry: (existingEntry) => {
+              if (op.value?.type === "NORMALIZED_ENTRY") {
+                return createNormalizedDisplayEntry(
+                  op.value.content,
+                  existingEntry,
+                );
+              }
+              if (op.value?.type === "STDOUT") {
+                return createStdoutDisplayEntry(
+                  op.value.content,
+                  existingEntry,
+                );
+              }
+              if (op.value?.type === "STDERR") {
+                return createStderrDisplayEntry(
+                  op.value.content,
+                  existingEntry,
+                );
+              }
+              return null;
+            },
+          });
           break;
         }
         case "remove": {
-          if (index < nextEntries.length) {
-            nextEntries.splice(index, 1);
-          }
+          nextEntries = applyIndexedDisplayEntryOperation({
+            entries: nextEntries,
+            scope: "task-run",
+            serverIndex: index,
+            operation: "remove",
+          });
           break;
         }
       }

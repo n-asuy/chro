@@ -44,6 +44,12 @@ import { useProjectContext } from "../../context/project-context";
 import { useDecoratedTree } from "../../hooks/use-decorated-tree";
 import { useFileTreeDnd } from "../../hooks/use-file-tree-dnd";
 import { useFileTreeExternalDrop } from "../../hooks/use-file-tree-external-drop";
+import {
+  getContextSelectionPaths,
+  getObsidianPointerSelectionMode,
+  getVisibleRangePaths,
+  normalizeFileOperationPaths,
+} from "../../lib/file-tree-selection";
 import { EMPTY_DECORATIONS } from "../../lib/git-status-decoration";
 import { useFileTreeStore } from "../../state/file-tree-store";
 import { type WorktreeScopeView, useFilesStore } from "../../state/files-store";
@@ -55,6 +61,7 @@ import {
   getActualFileName,
   getInitialContent,
 } from "../../types/file-tree";
+import { MoveSelectionDialog } from "./move-selection-dialog";
 import { TreeContextMenu } from "./tree-context-menu";
 import { TreeNode } from "./tree-node";
 
@@ -93,14 +100,15 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     revealRequest,
     scopeTaskRunId,
     selectNode,
+    selectNodes,
     clearSelection,
     createFile,
     createFolder,
-    deleteNode,
+    deleteNodes,
     duplicateNode,
     openFile,
     startEditing,
-    moveNode,
+    moveNodes,
     importExternalFiles,
     editingPath,
     addRoot,
@@ -141,6 +149,8 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   }, []);
 
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [moveDialogPaths, setMoveDialogPaths] = useState<string[]>([]);
 
   const handleAddFolderToProject = useCallback(() => {
     setFolderPickerOpen(true);
@@ -168,32 +178,68 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     [removeRoot],
   );
 
+  const handleMoveRequest = useCallback((paths: string[]) => {
+    const operationPaths = normalizeFileOperationPaths(paths);
+    if (operationPaths.length === 0) return;
+    setMoveDialogPaths(operationPaths);
+    setMoveDialogOpen(true);
+  }, []);
+
+  const handleMoveSelection = useCallback(
+    async (targetParentPath: string) => {
+      await moveNodes(moveDialogPaths, targetParentPath);
+    },
+    [moveDialogPaths, moveNodes],
+  );
+
   // Prompt editor handle (singleton, shared with the chat input).
   // Methods are no-ops when the editor is not mounted.
   const promptEditorHandle = usePromptEditorHandle();
 
   const handleDropToPromptEditor = useCallback(
     ({
-      node,
+      nodes,
       clientX,
       clientY,
     }: {
-      node: { path: string; name: string; isDir: boolean };
+      nodes: { path: string; name: string; isDir: boolean }[];
       clientX: number;
       clientY: number;
     }) => {
       if (!promptEditorHandle.editorRef.current) return;
       promptEditorHandle.setCursorFromPoint(clientX, clientY);
-      promptEditorHandle.addFilePart(node.path, !node.isDir);
+      for (const node of nodes) {
+        promptEditorHandle.addFilePart(node.path, !node.isDir);
+      }
     },
     [promptEditorHandle],
+  );
+
+  const selectedDragNodes = useMemo(() => {
+    const operationPaths = normalizeFileOperationPaths(selectedPaths);
+    return operationPaths.flatMap((path) => {
+      const node = findNodeByPath(fileTree, path);
+      return node ? [node] : [];
+    });
+  }, [fileTree, selectedPaths]);
+
+  const { expandedPaths, toggleFolderWithHydration, collapseAll } =
+    useFileTreeStore();
+  const handleHoverDirectory = useCallback(
+    (path: string) => {
+      if (useFileTreeStore.getState().expandedPaths.has(path)) return;
+      void toggleFolderWithHydration(path);
+    },
+    [toggleFolderWithHydration],
   );
 
   // Internal DnD hook (tree-to-tree moves + drop to chat input)
   const { dragState, handlers: dndHandlers } = useFileTreeDnd({
     rootPath,
-    onMove: moveNode,
+    selectedNodes: selectedDragNodes,
+    onMove: moveNodes,
     onDropToPromptEditor: handleDropToPromptEditor,
+    onHoverDirectory: handleHoverDirectory,
   });
 
   // External drop hook (files from OS). Disabled in worktree scope so OS file
@@ -203,9 +249,6 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     enabled: !isWorktreeScope,
     onDrop: importExternalFiles,
   });
-
-  const { expandedPaths, toggleFolderWithHydration, collapseAll } =
-    useFileTreeStore();
 
   // When a folder expands, fade its freshly-revealed descendant rows in (see
   // `.tree-row-reveal`). This is derived DURING render — not in an effect — so
@@ -319,6 +362,105 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   });
 
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
+  const workspaceRootPathSet = useMemo(
+    () => new Set(roots.map((root) => root.path)),
+    [roots],
+  );
+  const selectableVisiblePaths = useMemo(
+    () =>
+      visibleRows
+        .filter((row) => !row.isWorkspaceRoot)
+        .map((row) => row.node.path),
+    [visibleRows],
+  );
+  const selectionAnchorRef = useRef<string | null>(null);
+  const [keyboardFocusPath, setKeyboardFocusPath] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (
+      keyboardFocusPath &&
+      visibleRows.some((row) => row.node.path === keyboardFocusPath)
+    ) {
+      return;
+    }
+    const fallback =
+      [...selectedPaths]
+        .reverse()
+        .find((path) => selectableVisiblePaths.includes(path)) ?? null;
+    setKeyboardFocusPath(fallback);
+    if (!fallback) selectionAnchorRef.current = null;
+  }, [keyboardFocusPath, selectableVisiblePaths, selectedPaths, visibleRows]);
+
+  const replaceSelection = useCallback(
+    (path: string) => {
+      selectNode(path);
+      selectionAnchorRef.current = path;
+      setKeyboardFocusPath(path);
+    },
+    [selectNode],
+  );
+
+  const extendSelection = useCallback(
+    (targetPath: string) => {
+      const fallbackAnchor =
+        selectionAnchorRef.current ??
+        keyboardFocusPath ??
+        selectedPaths[selectedPaths.length - 1] ??
+        targetPath;
+      const anchorPath = selectableVisiblePaths.includes(fallbackAnchor)
+        ? fallbackAnchor
+        : targetPath;
+      selectNodes(
+        getVisibleRangePaths(selectableVisiblePaths, anchorPath, targetPath),
+      );
+      selectionAnchorRef.current = anchorPath;
+      setKeyboardFocusPath(targetPath);
+    },
+    [keyboardFocusPath, selectNodes, selectedPaths, selectableVisiblePaths],
+  );
+
+  const handleNodeSelect = useCallback(
+    (event: React.MouseEvent, path: string, isWorkspaceRoot: boolean) => {
+      const mode = getObsidianPointerSelectionMode({
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        primaryModifierKey: event.ctrlKey || event.metaKey,
+      });
+      if (isWorkspaceRoot) {
+        if (mode === "replace") replaceSelection(path);
+        else setKeyboardFocusPath(path);
+        return;
+      }
+      if (mode === "range") {
+        extendSelection(path);
+        return;
+      }
+      if (mode === "toggle") {
+        selectNode(path, true);
+        selectionAnchorRef.current = path;
+        setKeyboardFocusPath(path);
+        return;
+      }
+      if (mode === "preserve") {
+        selectionAnchorRef.current = path;
+        setKeyboardFocusPath(path);
+        return;
+      }
+      replaceSelection(path);
+    },
+    [extendSelection, replaceSelection, selectNode],
+  );
+
+  const handleNodeContextMenu = useCallback(
+    (path: string) => {
+      setKeyboardFocusPath(path);
+      if (selectedSet.has(path)) return;
+      replaceSelection(path);
+    },
+    [replaceSelection, selectedSet],
+  );
 
   const findNode = useCallback(
     (targetPath: string | null): FileNode | null => {
@@ -346,12 +488,12 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
   );
 
   const handleDelete = useCallback(
-    (path: string) => {
-      deleteNode(path).catch((error) => {
+    (paths: string[]) => {
+      deleteNodes(paths).catch((error) => {
         console.error("[file-tree] Delete operation failed:", error);
       });
     },
-    [deleteNode],
+    [deleteNodes],
   );
 
   const handleRename = useCallback(
@@ -510,7 +652,8 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         return;
       }
 
-      const currentPath = selectedPaths[selectedPaths.length - 1];
+      const currentPath =
+        keyboardFocusPath ?? selectedPaths[selectedPaths.length - 1];
       const currentIndex = visibleRows.findIndex(
         (r) => r.node.path === currentPath,
       );
@@ -527,11 +670,19 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
               : Math.min(visibleRows.length - 1, currentIndex + 1);
           const nextRow = visibleRows[next];
           if (nextRow) {
-            selectNode(nextRow.node.path);
-            rowVirtualizer.scrollToIndex(next);
-            if (nextRow.node.type === FileNodeType.File) {
+            if (e.shiftKey && !nextRow.isWorkspaceRoot) {
+              extendSelection(nextRow.node.path);
+            } else {
+              selectionAnchorRef.current = nextRow.node.path;
+              setKeyboardFocusPath(nextRow.node.path);
+            }
+            if (
+              (e.metaKey || e.ctrlKey) &&
+              nextRow.node.type === FileNodeType.File
+            ) {
               openFile(nextRow.node.path, scopeTaskRunId ?? undefined);
             }
+            rowVirtualizer.scrollToIndex(next);
           }
           break;
         }
@@ -540,18 +691,32 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           const prev = currentIndex === -1 ? 0 : Math.max(0, currentIndex - 1);
           const prevRow = visibleRows[prev];
           if (prevRow) {
-            selectNode(prevRow.node.path);
-            rowVirtualizer.scrollToIndex(prev);
-            if (prevRow.node.type === FileNodeType.File) {
+            if (e.shiftKey && !prevRow.isWorkspaceRoot) {
+              extendSelection(prevRow.node.path);
+            } else {
+              selectionAnchorRef.current = prevRow.node.path;
+              setKeyboardFocusPath(prevRow.node.path);
+            }
+            if (
+              (e.metaKey || e.ctrlKey) &&
+              prevRow.node.type === FileNodeType.File
+            ) {
               openFile(prevRow.node.path, scopeTaskRunId ?? undefined);
             }
+            rowVirtualizer.scrollToIndex(prev);
           }
           break;
         }
         case "Home": {
           e.preventDefault();
           if (visibleRows[0]) {
-            selectNode(visibleRows[0].node.path);
+            const firstRow = visibleRows[0];
+            if (e.shiftKey && !firstRow.isWorkspaceRoot) {
+              extendSelection(firstRow.node.path);
+            } else {
+              selectionAnchorRef.current = firstRow.node.path;
+              setKeyboardFocusPath(firstRow.node.path);
+            }
             rowVirtualizer.scrollToIndex(0);
           }
           break;
@@ -560,7 +725,13 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
           e.preventDefault();
           if (visibleRows.length) {
             const last = visibleRows.length - 1;
-            selectNode(visibleRows[last].node.path);
+            const lastRow = visibleRows[last];
+            if (e.shiftKey && !lastRow.isWorkspaceRoot) {
+              extendSelection(lastRow.node.path);
+            } else {
+              selectionAnchorRef.current = lastRow.node.path;
+              setKeyboardFocusPath(lastRow.node.path);
+            }
             rowVirtualizer.scrollToIndex(last);
           }
           break;
@@ -579,7 +750,8 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                 currentIndex >= 0 &&
                 child.depth === visibleRows[currentIndex].depth + 1
               ) {
-                selectNode(child.node.path);
+                selectionAnchorRef.current = child.node.path;
+                setKeyboardFocusPath(child.node.path);
                 rowVirtualizer.scrollToIndex(currentIndex + 1);
               }
             }
@@ -598,7 +770,8 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
               (r) => r.node.path === parentPath,
             );
             if (parentIdx >= 0) {
-              selectNode(parentPath);
+              selectionAnchorRef.current = parentPath;
+              setKeyboardFocusPath(parentPath);
               rowVirtualizer.scrollToIndex(parentIdx);
             }
           }
@@ -607,6 +780,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         case "Enter": {
           if (!current) break;
           e.preventDefault();
+          replaceSelection(current.path);
           if (isDir) {
             void toggleFolderWithHydration(current.path);
           } else {
@@ -618,9 +792,11 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     },
     [
       selectedPaths,
+      keyboardFocusPath,
       visibleRows,
       expandedPaths,
-      selectNode,
+      extendSelection,
+      replaceSelection,
       toggleFolderWithHydration,
       openFile,
       rowVirtualizer,
@@ -658,6 +834,8 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
       }
 
       clearSelection();
+      selectionAnchorRef.current = null;
+      setKeyboardFocusPath(null);
     },
     [clearSelection],
   );
@@ -884,10 +1062,20 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                     externalDropState.dropTarget?.path === node.path;
                   const isDragging =
                     dragState.isDragging &&
-                    dragState.draggedNode?.path === node.path;
+                    dragState.draggedNodes.some(
+                      (draggedNode) => draggedNode.path === node.path,
+                    );
                   const matchedRoot = isWorkspaceRoot
                     ? roots.find((r) => r.path === node.path)
                     : null;
+                  const operationPaths = normalizeFileOperationPaths(
+                    getContextSelectionPaths(
+                      selectedPaths.filter(
+                        (path) => !workspaceRootPathSet.has(path),
+                      ),
+                      node.path,
+                    ),
+                  );
                   // Decorate only primary-root nodes — their vault path is
                   // exactly `/${relativePath}`, so a match excludes ad-hoc roots
                   // whose git status we don't track.
@@ -918,10 +1106,12 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                       >
                         <TreeContextMenu
                           node={node}
+                          selectedPaths={operationPaths}
                           workspacePath={workspacePath}
                           readOnly={isWorktreeScope}
                           scopeTaskRunId={scopeTaskRunId}
                           onDelete={handleDelete}
+                          onMove={handleMoveRequest}
                           onRename={handleRename}
                           onDuplicate={handleDuplicate}
                           onCreateFile={(parentPath, kind) =>
@@ -941,6 +1131,7 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                             node={node}
                             isExpanded={isExpanded}
                             isSelected={isSelected}
+                            isFocused={keyboardFocusPath === node.path}
                             indentPx={indentPx}
                             isDragOver={isDragOver}
                             isDragging={isDragging}
@@ -950,12 +1141,23 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
                                 void toggleFolderWithHydration(node.path);
                               }
                             }}
-                            onSelect={() => selectNode(node.path)}
+                            onSelect={(event) =>
+                              handleNodeSelect(
+                                event,
+                                node.path,
+                                isWorkspaceRoot,
+                              )
+                            }
+                            onContextMenu={() =>
+                              handleNodeContextMenu(node.path)
+                            }
                             onOpen={() =>
                               openFile(node.path, scopeTaskRunId ?? undefined)
                             }
-                            onMouseDown={(e) =>
-                              dndHandlers.onMouseDown(e, node)
+                            onMouseDown={
+                              isWorkspaceRoot
+                                ? undefined
+                                : (e) => dndHandlers.onMouseDown(e, node)
                             }
                           />
                         </TreeContextMenu>
@@ -1041,6 +1243,14 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
         onSelect={handleFolderPickerSelect}
         title={t("addFolderToProject")}
         description={t("addFolderToProjectDescription")}
+      />
+      <MoveSelectionDialog
+        open={moveDialogOpen}
+        onOpenChange={setMoveDialogOpen}
+        fileTree={fileTree}
+        rootPath={rootPath ?? "/"}
+        selectedPaths={moveDialogPaths}
+        onMove={handleMoveSelection}
       />
     </div>
   );

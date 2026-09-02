@@ -22,7 +22,7 @@ describe("agent-runtime-options capability axes", () => {
       getModelSpeedOptions("CLAUDE_CODE", "opus").map((s) => s.value),
     ).toEqual(["standard", "fast"]);
     expect(getModelSpeedOptions("CLAUDE_CODE", "sonnet")).toEqual([]);
-    expect(getModelSpeedOptions("CLAUDE_CODE", "claude-fable-5")).toEqual([]);
+    expect(getModelSpeedOptions("CLAUDE_CODE", "claude-fable-5-1")).toEqual([]);
     expect(getModelSpeedOptions("CODEX", "gpt-5.6-terra")).toEqual([]);
   });
 

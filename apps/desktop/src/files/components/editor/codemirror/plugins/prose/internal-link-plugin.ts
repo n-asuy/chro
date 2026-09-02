@@ -3,7 +3,7 @@
  * Adds styling and click handling to [[internal links]]
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import {
   StateField,
@@ -168,7 +168,7 @@ export const internalLinkPlugin = StateField.define<DecorationSet>({
     return RangeSet.of(buildInternalLinkDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildInternalLinkDecorations(tr.state), true);
     }
     return value.map(tr.changes);

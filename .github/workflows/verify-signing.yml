@@ -15,13 +15,23 @@ jobs:
     runs-on: windows-latest
     env:
       ES_USERNAME: ${{ secrets.ES_USERNAME }}
+      ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+      ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+      ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
     steps:
       - name: Require eSigner secrets
-        if: env.ES_USERNAME == ''
+        if: >
+          env.ES_USERNAME == '' ||
+          env.ES_PASSWORD == '' ||
+          env.ES_CREDENTIAL_ID == '' ||
+          env.ES_TOTP_SECRET == ''
         shell: bash
         run: |
           echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET)." >&2
           exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       # A minimal real PE the signer can operate on. Windows PowerShell 5.1's
       # CodeDOM compiler emits a standalone unsigned exe; PowerShell 7 (pwsh)
@@ -34,25 +44,14 @@ jobs:
             -OutputAssembly test.exe -OutputType ConsoleApplication
           if (-not (Test-Path test.exe)) { throw 'test.exe was not created' }
 
-      - name: Sign with SSL.com eSigner
+      - name: Setup SSL.com CodeSignTool
         uses: sslcom/esigner-codesign@v1.3.2
         with:
-          command: sign
-          username: ${{ secrets.ES_USERNAME }}
-          password: ${{ secrets.ES_PASSWORD }}
-          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/test.exe
-          output_path: ${{ runner.temp }}/signed
+          command: --version
           environment_name: PROD
 
-      - name: Confirm the signature was applied
+      - name: Sign with the Tauri signCommand wrapper
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature "$env:RUNNER_TEMP\signed\test.exe"
-          Write-Host "Status:" $sig.Status
-          if ($sig.SignerCertificate) {
-            Write-Host "Signer:" $sig.SignerCertificate.Subject
-          } else {
-            throw "No signer certificate found; signing did not apply."
-          }
+          & "${{ github.workspace }}/apps/desktop/scripts/sign-windows.ps1" `
+            "${{ github.workspace }}/test.exe"

@@ -1,10 +1,10 @@
-
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FileNode } from "../types/file-tree";
 import { FileNodeType } from "../types/file-tree";
 
 const DRAG_THRESHOLD_PX = 5;
+const HOVER_EXPAND_DELAY_MS = 600;
 const PROMPT_EDITOR_DROP_SELECTOR = "[data-prompt-editor-drop]";
 const PROMPT_EDITOR_DROP_ACTIVE_ATTR = "data-prompt-editor-drop-active";
 
@@ -16,7 +16,7 @@ interface DraggedNodeInfo {
 
 interface DragState {
   isDragging: boolean;
-  draggedNode: DraggedNodeInfo | null;
+  draggedNodes: DraggedNodeInfo[];
   dropTargetPath: string | null;
   dropTargetIsDir: boolean;
   isOverPromptEditor: boolean;
@@ -25,7 +25,7 @@ interface DragState {
 
 const initialDragState: DragState = {
   isDragging: false,
-  draggedNode: null,
+  draggedNodes: [],
   dropTargetPath: null,
   dropTargetIsDir: false,
   isOverPromptEditor: false,
@@ -33,7 +33,7 @@ const initialDragState: DragState = {
 };
 
 interface PromptEditorDropPayload {
-  node: DraggedNodeInfo;
+  nodes: DraggedNodeInfo[];
   clientX: number;
   clientY: number;
   target: HTMLElement;
@@ -41,8 +41,10 @@ interface PromptEditorDropPayload {
 
 interface UseFileTreeDndOptions {
   rootPath: string | null;
-  onMove: (sourcePath: string, targetParentPath: string) => Promise<void>;
+  selectedNodes: FileNode[];
+  onMove: (sourcePaths: string[], targetParentPath: string) => Promise<void>;
   onDropToPromptEditor?: (payload: PromptEditorDropPayload) => void;
+  onHoverDirectory?: (path: string) => void;
 }
 
 interface UseFileTreeDndReturn {
@@ -55,20 +57,53 @@ interface UseFileTreeDndReturn {
 
 export function useFileTreeDnd({
   rootPath,
+  selectedNodes,
   onMove,
   onDropToPromptEditor,
+  onHoverDirectory,
 }: UseFileTreeDndOptions): UseFileTreeDndReturn {
   const [dragState, setDragState] = useState<DragState>(initialDragState);
   const dragPreviewRef = useRef<HTMLDivElement | null>(null);
+  const hoverExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const hoverExpandPathRef = useRef<string | null>(null);
   const mouseDownRef = useRef<{
     x: number;
     y: number;
-    node: FileNode;
+    nodes: FileNode[];
   } | null>(null);
+
+  const clearHoverExpansion = useCallback(() => {
+    if (hoverExpandTimerRef.current) {
+      clearTimeout(hoverExpandTimerRef.current);
+      hoverExpandTimerRef.current = null;
+    }
+    hoverExpandPathRef.current = null;
+  }, []);
+
+  const scheduleHoverExpansion = useCallback(
+    (path: string) => {
+      if (!onHoverDirectory || hoverExpandPathRef.current === path) return;
+      clearHoverExpansion();
+      hoverExpandPathRef.current = path;
+      hoverExpandTimerRef.current = setTimeout(() => {
+        onHoverDirectory(path);
+        hoverExpandTimerRef.current = null;
+      }, HOVER_EXPAND_DELAY_MS);
+    },
+    [clearHoverExpansion, onHoverDirectory],
+  );
+
+  useEffect(() => clearHoverExpansion, [clearHoverExpansion]);
 
   // Create/remove drag preview element
   useEffect(() => {
-    if (dragState.isDragging && dragState.draggedNode && !dragPreviewRef.current) {
+    if (
+      dragState.isDragging &&
+      dragState.draggedNodes.length > 0 &&
+      !dragPreviewRef.current
+    ) {
       const preview = document.createElement("div");
       preview.style.cssText = `
         position: fixed;
@@ -85,7 +120,10 @@ export function useFileTreeDnd({
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
         white-space: nowrap;
       `;
-      preview.textContent = dragState.draggedNode.name;
+      preview.textContent =
+        dragState.draggedNodes.length === 1
+          ? dragState.draggedNodes[0]?.name ?? ""
+          : `${dragState.draggedNodes.length} items`;
       document.body.appendChild(preview);
       dragPreviewRef.current = preview;
     }
@@ -96,7 +134,7 @@ export function useFileTreeDnd({
         dragPreviewRef.current = null;
       }
     };
-  }, [dragState.isDragging, dragState.draggedNode]);
+  }, [dragState.isDragging, dragState.draggedNodes]);
 
   // Update preview position
   useEffect(() => {
@@ -158,6 +196,7 @@ export function useFileTreeDnd({
       const fileTreeContainer = elementUnder?.closest("[data-file-tree-root]");
 
       if (promptEditor) {
+        clearHoverExpansion();
         setDragState((prev: DragState) => ({
           ...prev,
           dropTargetPath: null,
@@ -168,11 +207,19 @@ export function useFileTreeDnd({
         const path = fileTreeItem.getAttribute("data-file-path");
         const isDir = fileTreeItem.getAttribute("data-is-dir") === "true";
 
-        if (path && path !== dragState.draggedNode?.path) {
-          // Prevent dropping into self or descendants
-          const isDropIntoSelf =
-            dragState.draggedNode?.isDir &&
-            path.startsWith(`${dragState.draggedNode.path}/`);
+        if (path) {
+          // Prevent dropping onto any dragged item or into any dragged folder.
+          const isDropIntoSelf = dragState.draggedNodes.some(
+            (node) =>
+              path === node.path ||
+              (node.isDir && path.startsWith(`${node.path}/`)),
+          );
+
+          if (isDir && !isDropIntoSelf) {
+            scheduleHoverExpansion(path);
+          } else {
+            clearHoverExpansion();
+          }
 
           setDragState((prev: DragState) => ({
             ...prev,
@@ -181,6 +228,7 @@ export function useFileTreeDnd({
             isOverPromptEditor: false,
           }));
         } else {
+          clearHoverExpansion();
           setDragState((prev: DragState) => ({
             ...prev,
             dropTargetPath: null,
@@ -189,6 +237,7 @@ export function useFileTreeDnd({
           }));
         }
       } else if (fileTreeContainer) {
+        clearHoverExpansion();
         // Dropped on empty area -> root
         setDragState((prev: DragState) => ({
           ...prev,
@@ -197,6 +246,7 @@ export function useFileTreeDnd({
           isOverPromptEditor: false,
         }));
       } else {
+        clearHoverExpansion();
         setDragState((prev: DragState) => ({
           ...prev,
           dropTargetPath: null,
@@ -207,9 +257,10 @@ export function useFileTreeDnd({
     };
 
     const handleMouseUp = async (e: MouseEvent) => {
+      clearHoverExpansion();
       if (
         dragState.isOverPromptEditor &&
-        dragState.draggedNode &&
+        dragState.draggedNodes.length > 0 &&
         onDropToPromptEditor
       ) {
         const elementUnder = document.elementFromPoint(e.clientX, e.clientY);
@@ -219,7 +270,7 @@ export function useFileTreeDnd({
         if (promptEditor) {
           try {
             onDropToPromptEditor({
-              node: dragState.draggedNode,
+              nodes: dragState.draggedNodes,
               clientX: e.clientX,
               clientY: e.clientY,
               target: promptEditor,
@@ -236,8 +287,7 @@ export function useFileTreeDnd({
         return;
       }
 
-      if (dragState.dropTargetPath && dragState.draggedNode) {
-        const { path: sourcePath, name: sourceName } = dragState.draggedNode;
+      if (dragState.dropTargetPath && dragState.draggedNodes.length > 0) {
         let targetParentPath = dragState.dropTargetPath;
 
         // Handle root drop
@@ -252,16 +302,17 @@ export function useFileTreeDnd({
           targetParentPath = pathParts.join("/") || "/";
         }
 
-        // Compute new path
-        const newPath =
-          targetParentPath === "/" || targetParentPath === ""
-            ? `/${sourceName}`
-            : `${targetParentPath}/${sourceName}`;
+        const movingPaths = dragState.draggedNodes.flatMap((node) => {
+          const newPath =
+            targetParentPath === "/" || targetParentPath === ""
+              ? `/${node.name}`
+              : `${targetParentPath}/${node.name}`;
+          return newPath === node.path ? [] : [node.path];
+        });
 
-        // Prevent moving to same location
-        if (newPath !== sourcePath) {
+        if (movingPaths.length > 0) {
           try {
-            await onMove(sourcePath, targetParentPath);
+            await onMove(movingPaths, targetParentPath);
           } catch (error) {
             console.error("[use-file-tree-dnd] Move failed:", error);
           }
@@ -282,7 +333,14 @@ export function useFileTreeDnd({
       document.removeEventListener("mouseup", handleMouseUp);
       document.removeEventListener("mouseleave", handleMouseUp);
     };
-  }, [dragState, onMove, onDropToPromptEditor, rootPath]);
+  }, [
+    clearHoverExpansion,
+    dragState,
+    onMove,
+    onDropToPromptEditor,
+    rootPath,
+    scheduleHoverExpansion,
+  ]);
 
   // Track mouse down for drag initiation
   useEffect(() => {
@@ -296,14 +354,14 @@ export function useFileTreeDnd({
       const distance = Math.hypot(dx, dy);
 
       if (distance > DRAG_THRESHOLD_PX) {
-        const node = mouseDownRef.current.node;
+        const nodes = mouseDownRef.current.nodes;
         setDragState({
           isDragging: true,
-          draggedNode: {
+          draggedNodes: nodes.map((node) => ({
             path: node.path,
             name: node.name,
             isDir: node.type === FileNodeType.Directory,
-          },
+          })),
           dropTargetPath: null,
           dropTargetIsDir: false,
           isOverPromptEditor: false,
@@ -333,13 +391,19 @@ export function useFileTreeDnd({
       // Prevent text selection during drag
       e.preventDefault();
 
+      const selectionIncludesNode = selectedNodes.some(
+        (selected) => selected.path === node.path,
+      );
       mouseDownRef.current = {
         x: e.clientX,
         y: e.clientY,
-        node,
+        nodes:
+          selectionIncludesNode && selectedNodes.length > 0
+            ? selectedNodes
+            : [node],
       };
     },
-    [],
+    [selectedNodes],
   );
 
   return {

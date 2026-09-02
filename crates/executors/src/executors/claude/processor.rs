@@ -1124,7 +1124,7 @@ impl ClaudeLogProcessor {
 
 /// Formats a raw model ID into a human-readable display name.
 /// Examples:
-///   "claude-fable-5" -> "Fable 5"
+///   "claude-fable-5-1" -> "Fable 5.1"
 ///   "claude-opus-4-8" -> "Opus 4.8"
 ///   "claude-sonnet-5" -> "Sonnet 5"
 ///   "claude-3-5-sonnet-20241022" -> "Sonnet 3.5"
@@ -1709,6 +1709,7 @@ mod tests {
 
     #[test]
     fn test_format_model_display_name() {
+        assert_eq!(format_model_display_name("claude-fable-5-1"), "Fable 5.1");
         assert_eq!(format_model_display_name("claude-fable-5"), "Fable 5");
         assert_eq!(format_model_display_name("claude-opus-5"), "Opus 5");
         assert_eq!(format_model_display_name("claude-sonnet-5"), "Sonnet 5");

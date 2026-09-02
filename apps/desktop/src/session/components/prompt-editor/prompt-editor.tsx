@@ -69,8 +69,9 @@ export function PromptEditor({
         }
       }
 
-      // 3. Return: submit. Shift/Alt+Return falls through to the default
-      //    newline, as does the Return that confirms an IME conversion.
+      // 3. Cmd/Ctrl+Return: submit. Every other Return — bare, Shift/Alt, or
+      //    the one confirming an IME conversion — falls through to the
+      //    default newline.
       if (
         shouldSubmitPrompt({
           key: e.key,

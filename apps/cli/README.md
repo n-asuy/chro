@@ -155,7 +155,38 @@ sync.
 
 | Variable | Description |
 |----------|-------------|
+| `CHRO_API_URL` | Base URL of the server the `task` commands talk to. Set it to drive a server on another machine; the CLI then skips the local port file instead of expecting a server here |
+| `CHRO_API_TOKEN` | Bearer token sent with every request when `CHRO_API_URL` is set |
 | `CHRO_REPO_ROOT` | Override repo root detection |
 | `CHRO_SERVER_READY_TIMEOUT_SECS` | Server startup timeout (default: 120) |
 | `CHRO_LOCAL` | Set to `1` to use locally built binaries in `npx-cli/dist/` |
 | `CHRO_DEBUG` | Enable debug output in the npm wrapper |
+
+### Talking to a server on another machine
+
+```bash
+export CHRO_API_URL=https://your-host.example
+chro --project /path/on/that/host task list
+```
+
+The `task` subcommands then run against that server, and nothing is started
+locally. Pass `--project` with a path **on that machine**: the project is
+resolved from a git repository the server can see, not from your working
+directory.
+
+### Instances managed by a control plane
+
+Built only with `--features cloud`, so it is absent from released binaries.
+A control plane creates the machine and hands back its address; the ordinary
+`task` commands then target it without `CHRO_API_URL` being set by hand.
+
+```bash
+CHRO_CLOUD_TOKEN=… chro cloud login https://control-plane.example
+chro cloud up            # create on first use, wake afterwards
+chro task list           # runs against the instance
+chro cloud down          # stop, keeping the disk
+```
+
+`chro cloud status` shows the instance, `chro cloud destroy` removes it.
+Which control plane to use is entirely yours to choose — no address is built
+into the binary.

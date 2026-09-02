@@ -1,6 +1,6 @@
+import type { TranslationKey } from "@/i18n";
 import { Button } from "@chro/ui/button";
 import { AlertCircle, Loader2, X } from "lucide-react";
-import type { TranslationKey } from "@/i18n";
 import type { ImageUploadItem } from "../hooks/use-image-uploads";
 
 interface ImageUploadPreviewListProps {

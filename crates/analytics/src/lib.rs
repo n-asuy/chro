@@ -4,13 +4,34 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
+pub mod dev;
 pub mod flags;
 
 const POSTHOG_HOST: &str = "https://eu.i.posthog.com";
 const POSTHOG_API_KEY: &str = "phc_ciDHQIDUgIxsl1Z5oqbhfHq6Hj2ktS4hdImRC649dZ9";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Events allowed to leave the machine.
+///
+/// Every captured event is mirrored into the local [`dev`] sink, which records
+/// far more than a user ever consented to share. This list -- not the call
+/// site -- decides what reaches PostHog, so a new instrumentation point is
+/// local-only until it is deliberately added here.
+const EGRESS_ALLOWLIST: &[&str] = &[
+    "execution_started",
+    "execution_completed",
+    "execution_failed",
+    "app_opened",
+    "error_boundary",
+];
+
+/// Whether an event may be transmitted to PostHog.
+#[must_use]
+pub fn is_egress_allowed(event: &str) -> bool {
+    EGRESS_ALLOWLIST.contains(&event)
+}
 
 /// Keys whose values should be treated as file-system paths and masked.
 const PATH_LIKE_KEYS: &[&str] = &[
@@ -109,13 +130,39 @@ pub fn distinct_id() -> Option<&'static str> {
     INSTANCE.get().map(|a| a.distinct_id.as_str())
 }
 
-/// Capture an analytics event. No-op when disabled or uninitialized.
-/// Path-like properties are automatically masked.
+/// Capture an analytics event.
+///
+/// The event is always mirrored to the local [`dev`] sink when that sink is
+/// active. Transmission to PostHog additionally requires the user opt-in and
+/// membership of [`EGRESS_ALLOWLIST`]; path-like properties are masked on the
+/// way out, never on the way to disk.
 pub async fn capture(event: &str, properties: Value) {
-    if !ENABLED.load(Ordering::SeqCst) {
+    dev::record(dev::DevEvent::backend(event, properties.clone()));
+
+    if !may_transmit(event) {
         return;
     }
 
+    transmit(event, properties).await;
+}
+
+/// Whether this event should be sent over the network right now.
+fn may_transmit(event: &str) -> bool {
+    if !ENABLED.load(Ordering::SeqCst) {
+        return false;
+    }
+    if !is_egress_allowed(event) {
+        warn!(
+            event,
+            "event is not on the analytics egress allowlist; kept local"
+        );
+        return false;
+    }
+    true
+}
+
+/// Send one event to PostHog. Callers must have cleared [`may_transmit`].
+async fn transmit(event: &str, properties: Value) {
     let Some(analytics) = INSTANCE.get() else {
         return;
     };
@@ -152,11 +199,13 @@ pub async fn capture(event: &str, properties: Value) {
 
 /// Fire-and-forget variant that spawns a background task.
 pub fn capture_nonblocking(event: &'static str, properties: Value) {
-    if !ENABLED.load(Ordering::SeqCst) {
+    dev::record(dev::DevEvent::backend(event, properties.clone()));
+
+    if !may_transmit(event) {
         return;
     }
     tokio::spawn(async move {
-        capture(event, properties).await;
+        transmit(event, properties).await;
     });
 }
 
@@ -222,6 +271,28 @@ mod tests {
         rt.block_on(async {
             capture("test_event", json!({"key": "value"})).await;
         });
+    }
+
+    #[test]
+    fn egress_allowlist_covers_the_product_events_that_exist() {
+        for event in [
+            "execution_started",
+            "execution_completed",
+            "execution_failed",
+            "app_opened",
+            "error_boundary",
+        ] {
+            assert!(is_egress_allowed(event), "{event} should be transmittable");
+        }
+    }
+
+    #[test]
+    fn dev_instrumentation_never_reaches_the_allowlist() {
+        // The local firehose uses these names; they must stay local even when
+        // the user has telemetry switched on.
+        for event in ["rpc", "ui.click", "ui.key", "ui.route", "ui.visibility"] {
+            assert!(!is_egress_allowed(event), "{event} must stay local");
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use ignore::WalkBuilder;
 
 use crate::error::CbaseError;
-use crate::frontmatter::extract_properties;
+use document::frontmatter::extract_properties;
 use crate::glob::DatasetMatcher;
 use crate::types::{CbaseDataset, CbaseRow};
 
@@ -31,7 +31,7 @@ pub fn index_rows(files: &[FileInput], dataset: &CbaseDataset) -> Vec<CbaseRow> 
         .filter(|file| matcher.matches(&file.relative_path))
         .map(|file| CbaseRow {
             file_path: file.relative_path.clone(),
-            display_name: display_name(&file.relative_path),
+            display_name: document::name::display_name(&file.relative_path),
             modified_at: file.modified_at.clone(),
             values: extract_properties(&file.content),
         })
@@ -76,7 +76,7 @@ pub fn index_project(root: &Path, dataset: &CbaseDataset) -> Result<Vec<CbaseRow
             continue;
         }
         // Only the leading frontmatter block is needed; never read the body.
-        let Ok(values) = crate::frontmatter::read_file_properties(path) else {
+        let Ok(values) = document::frontmatter::read_file_properties(path) else {
             continue;
         };
         let modified_at = path
@@ -87,7 +87,7 @@ pub fn index_project(root: &Path, dataset: &CbaseDataset) -> Result<Vec<CbaseRow
 
         rows.push(CbaseRow {
             file_path: relative_path.clone(),
-            display_name: display_name(&relative_path),
+            display_name: document::name::display_name(&relative_path),
             modified_at,
             values,
         });
@@ -97,14 +97,7 @@ pub fn index_project(root: &Path, dataset: &CbaseDataset) -> Result<Vec<CbaseRow
     Ok(rows)
 }
 
-/// The display name is the filename with its final extension removed.
-fn display_name(relative_path: &str) -> String {
-    let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
-    match file_name.rfind('.') {
-        Some(index) if index > 0 => file_name[..index].to_string(),
-        _ => file_name.to_string(),
-    }
-}
+
 
 fn to_relative_string(relative: &Path) -> String {
     relative

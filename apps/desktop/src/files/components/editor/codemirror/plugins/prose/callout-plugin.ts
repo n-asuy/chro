@@ -6,7 +6,7 @@
  * Types: note, abstract, info, todo, tip, success, question, warning, failure, danger, bug, example, quote
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import {
   StateField,
@@ -235,7 +235,7 @@ export const calloutPlugin = StateField.define<DecorationSet>({
     return RangeSet.of(buildCalloutDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildCalloutDecorations(tr.state), true);
     }
     return value.map(tr.changes);

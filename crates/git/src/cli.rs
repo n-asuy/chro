@@ -169,6 +169,42 @@ fn run_command_capped(
 pub struct WorktreeInfo {
     pub path: PathBuf,
     pub branch: Option<String>,
+    /// Git still has the registration but the checkout behind it is gone or
+    /// broken (`git worktree prune` would drop it). Such an entry keeps
+    /// reporting its branch, so anything that resolves "where is this branch
+    /// checked out" has to skip it or it hands out a path that cannot be
+    /// opened as a repository.
+    pub prunable: bool,
+}
+
+/// Parse `git worktree list --porcelain`. Entries are newline-separated blocks
+/// introduced by a `worktree <path>` line; `branch`, `locked` and `prunable`
+/// are optional attributes of the block that precedes them.
+fn parse_worktree_porcelain(stdout: &str) -> Vec<WorktreeInfo> {
+    let mut result: Vec<WorktreeInfo> = Vec::new();
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            result.push(WorktreeInfo {
+                path: PathBuf::from(rest.trim()),
+                branch: None,
+                prunable: false,
+            });
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            if let Some(current) = result.last_mut() {
+                current.branch = Some(
+                    rest.trim()
+                        .trim_start_matches("refs/heads/")
+                        .trim_start_matches("refs/remotes/origin/")
+                        .to_string(),
+                );
+            }
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            if let Some(current) = result.last_mut() {
+                current.prunable = true;
+            }
+        }
+    }
+    result
 }
 
 /// The remote-tracking ref a branch should reconcile with: the branch's
@@ -284,35 +320,26 @@ impl GitCli {
 
     pub fn list_worktrees(&self, repo_path: &Path) -> Result<Vec<WorktreeInfo>, GitCliError> {
         let (stdout, _) = self.run(repo_path, &["worktree", "list", "--porcelain"])?;
-        let mut result = Vec::new();
-        let mut current_path: Option<PathBuf> = None;
-        let mut current_branch: Option<String> = None;
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix("worktree ") {
-                if let Some(path) = current_path.take() {
-                    result.push(WorktreeInfo {
-                        path,
-                        branch: current_branch.take(),
-                    });
-                }
-                current_path = Some(PathBuf::from(rest.trim()));
-                current_branch = None;
-            } else if let Some(rest) = line.strip_prefix("branch ") {
-                let branch = rest
-                    .trim()
-                    .trim_start_matches("refs/heads/")
-                    .trim_start_matches("refs/remotes/origin/")
-                    .to_string();
-                current_branch = Some(branch);
-            }
-        }
-        if let Some(path) = current_path.take() {
-            result.push(WorktreeInfo {
-                path,
-                branch: current_branch.take(),
-            });
-        }
-        Ok(result)
+        Ok(parse_worktree_porcelain(&stdout))
+    }
+
+    /// Every worktree git still lists and can actually open. Callers that are
+    /// about to *use* a checkout want this rather than the raw listing: a
+    /// prunable entry keeps reporting its branch long after the checkout it
+    /// names stopped being a repository.
+    pub fn list_live_worktrees(&self, repo_path: &Path) -> Result<Vec<WorktreeInfo>, GitCliError> {
+        Ok(self
+            .list_worktrees(repo_path)?
+            .into_iter()
+            .filter(|wt| !wt.prunable)
+            .collect())
+    }
+
+    /// Drop registrations whose checkout is gone, so the branches they hold
+    /// hostage can be checked out again.
+    pub fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitCliError> {
+        self.run(repo_path, &["worktree", "prune"])?;
+        Ok(())
     }
 
     pub fn has_staged_changes(&self, repo_path: &Path) -> Result<bool, GitCliError> {
@@ -980,6 +1007,80 @@ mod tests {
             message.to_lowercase().contains("nothing to commit"),
             "failure message lost git's explanation: {message}"
         );
+    }
+
+    #[test]
+    fn worktree_porcelain_marks_prunable_entries() {
+        let listing = "\
+worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /tmp/gone
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/ch/76fe-vela
+prunable gitdir file points to non-existent location
+
+worktree /tmp/locked-but-live
+HEAD 3333333333333333333333333333333333333333
+branch refs/heads/ch/live
+locked
+";
+        let parsed = parse_worktree_porcelain(listing);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].branch.as_deref(), Some("main"));
+        assert!(!parsed[0].prunable);
+        assert_eq!(parsed[1].branch.as_deref(), Some("ch/76fe-vela"));
+        assert!(parsed[1].prunable, "prunable attribute belongs to its block");
+        assert_eq!(parsed[2].branch.as_deref(), Some("ch/live"));
+        assert!(
+            !parsed[2].prunable,
+            "a locked worktree is still usable and must not be dropped"
+        );
+    }
+
+    /// A worktree whose checkout was deleted (or half-deleted, losing its
+    /// `.git` file) stays registered and keeps advertising its branch. Callers
+    /// that ask "where is this branch checked out" would otherwise be handed a
+    /// path that cannot be opened.
+    #[test]
+    fn live_worktrees_exclude_a_deleted_checkout() {
+        let (tmp, _remote, work) = remote_and_clone();
+        let cli = GitCli::new();
+
+        let wt = tmp.path().join("wt");
+        git(&work, &["worktree", "add", "-b", "ch/76fe-vela", wt.to_str().unwrap()]);
+        assert!(cli
+            .list_live_worktrees(&work)
+            .unwrap()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("ch/76fe-vela")));
+
+        // Exactly the observed damage: the directory survives, its `.git` file
+        // does not.
+        fs::remove_file(wt.join(".git")).unwrap();
+
+        let all = cli.list_worktrees(&work).unwrap();
+        assert!(
+            all.iter()
+                .any(|w| w.branch.as_deref() == Some("ch/76fe-vela") && w.prunable),
+            "git still lists the dead worktree: {all:?}"
+        );
+        assert!(
+            !cli.list_live_worktrees(&work)
+                .unwrap()
+                .iter()
+                .any(|w| w.branch.as_deref() == Some("ch/76fe-vela")),
+            "a dead checkout must not count as where the branch lives"
+        );
+
+        // Pruning clears the registration so the branch can be checked out again.
+        cli.prune_worktrees(&work).unwrap();
+        assert!(!cli
+            .list_worktrees(&work)
+            .unwrap()
+            .iter()
+            .any(|w| w.branch.as_deref() == Some("ch/76fe-vela")));
     }
 
     #[test]

@@ -1,20 +1,59 @@
 import { create } from "zustand";
-import { type FlagView, fetchFlagRegistry } from "./flags-client";
+import { fetchFlagRegistry } from "./flags-client";
 import { FLAG_DEFAULTS, type FlagKey } from "./flags.generated";
 
 /**
- * Local, per-machine developer overrides. These never reach the backend or
- * PostHog: they exist so a developer can exercise both sides of a flag without
- * a rollout. Stored in `localStorage` rather than the backend ui-state so they
- * are readable synchronously on the first render, like the compiled-in
- * defaults they sit on top of.
+ * Beta features the user has switched off on this machine. Stored in
+ * `localStorage` rather than the backend ui-state so it is readable
+ * synchronously on the first render, like the compiled-in defaults it sits on
+ * top of.
+ *
+ * Opt-*outs* only: whether a feature is offered at all is resolved by the
+ * backend, and a user-facing "force on" that outranked it would let a machine
+ * keep a feature after it had been killed for everyone, which is the one
+ * property the kill switch has to have.
  */
-export const FLAG_OVERRIDES_STORAGE_KEY = "chro:feature-flag-overrides";
+export const BETA_OPT_OUTS_STORAGE_KEY = "chro:beta-features-off";
 
-export function readPersistedOverrides(): Record<string, boolean> {
+/**
+ * Developer-forced values, dev builds only. Release builds never read this
+ * key and expose no way to write it, so the kill-switch property above still
+ * holds for every shipped binary. Set from the devtools console via
+ * `window.chroFlags` (see `flags-dev-console.ts`).
+ */
+export const DEV_FLAG_OVERRIDES_STORAGE_KEY = "chro:dev-flag-overrides";
+
+export function readPersistedOptOuts(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(BETA_OPT_OUTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((key): key is string => typeof key === "string");
+  } catch {
+    // Unparsable, or localStorage unavailable in a restricted webview.
+    return [];
+  }
+}
+
+function persistOptOuts(keys: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      BETA_OPT_OUTS_STORAGE_KEY,
+      JSON.stringify(keys),
+    );
+  } catch {
+    // localStorage can be unavailable in restricted webviews.
+  }
+}
+
+export function readPersistedDevOverrides(): Record<string, boolean> {
+  if (!import.meta.env.DEV) return {};
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(FLAG_OVERRIDES_STORAGE_KEY);
+    const raw = window.localStorage.getItem(DEV_FLAG_OVERRIDES_STORAGE_KEY);
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return {};
@@ -24,16 +63,15 @@ export function readPersistedOverrides(): Record<string, boolean> {
     }
     return overrides;
   } catch {
-    // Unparsable, or localStorage unavailable in a restricted webview.
     return {};
   }
 }
 
-function persistOverrides(overrides: Record<string, boolean>): void {
+function persistDevOverrides(overrides: Record<string, boolean>): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(
-      FLAG_OVERRIDES_STORAGE_KEY,
+      DEV_FLAG_OVERRIDES_STORAGE_KEY,
       JSON.stringify(overrides),
     );
   } catch {
@@ -42,28 +80,37 @@ function persistOverrides(overrides: Record<string, boolean>): void {
 }
 
 interface FeatureFlagState {
-  /** Registry metadata, empty until the backend responds. */
-  registry: FlagView[];
   /** Compiled-in defaults, overlaid with the backend's resolved values. */
   resolved: Record<string, boolean>;
-  overrides: Record<string, boolean>;
+  /** Keys the user switched off; only meaningful for a resolved-on flag. */
+  optedOut: string[];
+  /** Developer-forced values; always empty in release builds. */
+  devOverrides: Record<string, boolean>;
   loaded: boolean;
   loading: boolean;
   load: () => Promise<void>;
   /**
-   * Force a flag on or off locally; `null` returns it to the resolved value.
-   * Keyed by `string` rather than `FlagKey`: the caller is the developer panel
-   * walking the registry the server sent, so the keys are runtime data. Gating
-   * a feature is the hand-authored case, and `useFlag` narrows that one.
+   * Switch a beta feature on or off for this machine. Switching *on* only
+   * clears an opt-out, so it can never turn on a feature the backend has not
+   * resolved on.
+   *
+   * Keyed by `string` rather than `FlagKey`: the caller is the settings
+   * section walking its own list of user-facing features. Gating a feature is
+   * the hand-authored case, and `useFlag` narrows that one.
    */
-  setOverride: (key: string, value: boolean | null) => void;
-  clearOverrides: () => void;
+  setBetaEnabled: (key: string, enabled: boolean) => void;
+  /**
+   * Force a flag for development; `null` removes the force. A no-op in
+   * release builds.
+   */
+  setDevOverride: (key: string, value: boolean | null) => void;
+  clearDevOverrides: () => void;
 }
 
 export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
-  registry: [],
   resolved: { ...FLAG_DEFAULTS },
-  overrides: readPersistedOverrides(),
+  optedOut: readPersistedOptOuts(),
+  devOverrides: readPersistedDevOverrides(),
   loaded: false,
   loading: false,
 
@@ -71,12 +118,12 @@ export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
     if (get().loading) return;
     set({ loading: true });
     try {
-      const registry = await fetchFlagRegistry();
+      const flags = await fetchFlagRegistry();
       const resolved: Record<string, boolean> = { ...FLAG_DEFAULTS };
-      for (const flag of registry) {
-        resolved[flag.key] = flag.resolved_value;
+      for (const flag of flags) {
+        resolved[flag.key] = flag.enabled;
       }
-      set({ registry, resolved, loaded: true, loading: false });
+      set({ resolved, loaded: true, loading: false });
     } catch {
       // Keep the compiled-in defaults: the backend resolves to those on any
       // failure, so an unreachable registry must land on the same value.
@@ -84,32 +131,46 @@ export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
     }
   },
 
-  setOverride: (key, value) => {
-    const overrides = { ...get().overrides };
-    if (value === null) {
-      delete overrides[key];
-    } else {
-      overrides[key] = value;
-    }
-    persistOverrides(overrides);
-    set({ overrides });
+  setBetaEnabled: (key, enabled) => {
+    const optedOut = enabled
+      ? get().optedOut.filter((entry) => entry !== key)
+      : [...new Set([...get().optedOut, key])];
+    persistOptOuts(optedOut);
+    set({ optedOut });
   },
 
-  clearOverrides: () => {
-    persistOverrides({});
-    set({ overrides: {} });
+  setDevOverride: (key, value) => {
+    if (!import.meta.env.DEV) return;
+    const devOverrides = { ...get().devOverrides };
+    if (value === null) {
+      delete devOverrides[key];
+    } else {
+      devOverrides[key] = value;
+    }
+    persistDevOverrides(devOverrides);
+    set({ devOverrides });
+  },
+
+  clearDevOverrides: () => {
+    if (!import.meta.env.DEV) return;
+    persistDevOverrides({});
+    set({ devOverrides: {} });
   },
 }));
 
 /**
- * Precedence: local developer override, then the backend-resolved value
- * (itself the compiled-in default overlaid with PostHog rollout state).
+ * Precedence: a developer force (dev builds only) wins outright; otherwise
+ * the backend decides whether the feature is offered at all, and the user can
+ * only switch an offered feature off.
  */
 export function selectFlag(
-  state: Pick<FeatureFlagState, "resolved" | "overrides">,
+  state: Pick<FeatureFlagState, "resolved" | "optedOut" | "devOverrides">,
   key: string,
 ): boolean {
-  return state.overrides[key] ?? state.resolved[key] ?? false;
+  const forced = state.devOverrides[key];
+  if (forced !== undefined) return forced;
+  if (!(state.resolved[key] ?? false)) return false;
+  return !state.optedOut.includes(key);
 }
 
 /** Effective value of a feature flag. Feature code should gate on this hook. */

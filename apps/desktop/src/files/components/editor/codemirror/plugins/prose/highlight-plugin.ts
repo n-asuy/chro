@@ -3,7 +3,7 @@
  * Renders ==highlighted== text with visual styling
  */
 
-import { hasDecorationRefresh } from "../decoration-refresh";
+import { needsDecorationRebuild } from "../decoration-refresh";
 import { syntaxTree } from "@codemirror/language";
 import { RangeSet, StateField } from "@codemirror/state";
 import type { Range as EditorRange, EditorState } from "@codemirror/state";
@@ -91,7 +91,7 @@ export const highlightPlugin = StateField.define<DecorationSet>({
     return RangeSet.of(buildHighlightDecorations(state), true);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection || hasDecorationRefresh(tr)) {
+    if (tr.docChanged || tr.selection || needsDecorationRebuild(tr)) {
       return RangeSet.of(buildHighlightDecorations(tr.state), true);
     }
     return value.map(tr.changes);

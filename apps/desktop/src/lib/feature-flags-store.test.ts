@@ -34,26 +34,18 @@ const storage = (() => {
 vi.stubGlobal("window", { localStorage: storage });
 
 import {
-  FLAG_OVERRIDES_STORAGE_KEY,
-  readPersistedOverrides,
+  BETA_OPT_OUTS_STORAGE_KEY,
+  DEV_FLAG_OVERRIDES_STORAGE_KEY,
+  readPersistedDevOverrides,
+  readPersistedOptOuts,
   selectFlag,
   useFeatureFlagStore,
 } from "./feature-flags-store";
 
-function flagView(key: string, overrides: Partial<FlagView> = {}): FlagView {
-  return {
-    key,
-    owner: "@someone",
-    created: "2026-01-01",
-    retire_by: "2099-01-01",
-    default_enabled: false,
-    rollout: "local",
-    status: "experimental",
-    description: "",
-    resolved_value: false,
-    ...overrides,
-  };
-}
+const flagView = (key: string, enabled: boolean): FlagView => ({
+  key,
+  enabled,
+});
 
 const flag = (key: string) => selectFlag(useFeatureFlagStore.getState(), key);
 
@@ -62,9 +54,9 @@ describe("useFeatureFlagStore", () => {
     mock.fetchFlagRegistry.mockReset();
     storage.clear();
     useFeatureFlagStore.setState({
-      registry: [],
       resolved: { flag_on_by_default: true, flag_off_by_default: false },
-      overrides: {},
+      optedOut: [],
+      devOverrides: {},
       loaded: false,
       loading: false,
     });
@@ -79,8 +71,8 @@ describe("useFeatureFlagStore", () => {
 
   it("overlays server-resolved values onto the defaults", async () => {
     mock.fetchFlagRegistry.mockResolvedValue([
-      flagView("flag_on_by_default", { resolved_value: false }),
-      flagView("flag_off_by_default", { resolved_value: true }),
+      flagView("flag_on_by_default", false),
+      flagView("flag_off_by_default", true),
     ]);
 
     await useFeatureFlagStore.getState().load();
@@ -102,51 +94,62 @@ describe("useFeatureFlagStore", () => {
     expect(useFeatureFlagStore.getState().loading).toBe(false);
   });
 
-  it("lets a local override win over the resolved value", async () => {
+  it("lets the user switch an offered feature off", async () => {
     mock.fetchFlagRegistry.mockResolvedValue([
-      flagView("flag_off_by_default", { resolved_value: false }),
+      flagView("flag_off_by_default", true),
     ]);
     await useFeatureFlagStore.getState().load();
 
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", true);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", false);
 
-    expect(flag("flag_off_by_default")).toBe(true);
+    expect(flag("flag_off_by_default")).toBe(false);
   });
 
-  it("falls back to the resolved value when an override is cleared", async () => {
+  it("restores the resolved value when the user switches it back on", async () => {
     mock.fetchFlagRegistry.mockResolvedValue([
-      flagView("flag_off_by_default", { resolved_value: true }),
+      flagView("flag_off_by_default", true),
     ]);
     await useFeatureFlagStore.getState().load();
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", false);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", false);
     expect(flag("flag_off_by_default")).toBe(false);
 
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", null);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", true);
 
     expect(flag("flag_off_by_default")).toBe(true);
-    expect(useFeatureFlagStore.getState().overrides).toEqual({});
+    expect(useFeatureFlagStore.getState().optedOut).toEqual([]);
   });
 
-  it("keeps overrides across a registry reload", async () => {
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", true);
+  it("cannot switch on a feature the backend resolved off", async () => {
+    // The kill switch has to survive whatever is stored locally: a machine
+    // that already switched the feature on must still lose it at 0%.
     mock.fetchFlagRegistry.mockResolvedValue([
-      flagView("flag_off_by_default", { resolved_value: false }),
+      flagView("flag_on_by_default", false),
+    ]);
+    await useFeatureFlagStore.getState().load();
+
+    useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", true);
+
+    expect(flag("flag_on_by_default")).toBe(false);
+  });
+
+  it("keeps an opt-out across a registry reload", async () => {
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", false);
+    mock.fetchFlagRegistry.mockResolvedValue([
+      flagView("flag_off_by_default", true),
     ]);
 
     await useFeatureFlagStore.getState().load();
 
-    expect(flag("flag_off_by_default")).toBe(true);
+    expect(flag("flag_off_by_default")).toBe(false);
   });
 
-  it("clears every override at once", () => {
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", true);
-    useFeatureFlagStore.getState().setOverride("flag_on_by_default", false);
+  it("does not record the same opt-out twice", () => {
+    useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", false);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", false);
 
-    useFeatureFlagStore.getState().clearOverrides();
-
-    expect(useFeatureFlagStore.getState().overrides).toEqual({});
-    expect(flag("flag_off_by_default")).toBe(false);
-    expect(flag("flag_on_by_default")).toBe(true);
+    expect(useFeatureFlagStore.getState().optedOut).toEqual([
+      "flag_on_by_default",
+    ]);
   });
 
   it("does not re-enter load while one is already in flight", async () => {
@@ -161,38 +164,109 @@ describe("useFeatureFlagStore", () => {
   });
 });
 
-describe("override persistence", () => {
+describe("opt-out persistence", () => {
   beforeEach(() => {
     storage.clear();
-    useFeatureFlagStore.setState({ overrides: {} });
+    useFeatureFlagStore.setState({ optedOut: [] });
   });
 
-  it("persists an override so a forced value survives a restart", () => {
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", true);
+  it("persists an opt-out so it survives a restart", () => {
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", false);
 
-    expect(readPersistedOverrides()).toEqual({ flag_off_by_default: true });
+    expect(readPersistedOptOuts()).toEqual(["flag_off_by_default"]);
   });
 
-  it("drops the persisted entry when an override is cleared", () => {
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", true);
+  it("drops the persisted entry when the feature is switched back on", () => {
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", false);
 
-    useFeatureFlagStore.getState().setOverride("flag_off_by_default", null);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_off_by_default", true);
 
-    expect(readPersistedOverrides()).toEqual({});
+    expect(readPersistedOptOuts()).toEqual([]);
   });
 
-  it("ignores unparsable persisted overrides", () => {
-    storage.setItem(FLAG_OVERRIDES_STORAGE_KEY, "{not json");
+  it("ignores unparsable persisted opt-outs", () => {
+    storage.setItem(BETA_OPT_OUTS_STORAGE_KEY, "{not json");
 
-    expect(readPersistedOverrides()).toEqual({});
+    expect(readPersistedOptOuts()).toEqual([]);
+  });
+
+  it("ignores persisted entries that are not strings", () => {
+    storage.setItem(
+      BETA_OPT_OUTS_STORAGE_KEY,
+      JSON.stringify(["good", 3, null, { key: "bad" }]),
+    );
+
+    expect(readPersistedOptOuts()).toEqual(["good"]);
+  });
+
+  it("ignores a persisted value that is not a list", () => {
+    // The previous format was an object of forced values; it must not be read
+    // back as opt-outs, which would silently invert what the user chose.
+    storage.setItem(
+      BETA_OPT_OUTS_STORAGE_KEY,
+      JSON.stringify({ flag_off_by_default: true }),
+    );
+
+    expect(readPersistedOptOuts()).toEqual([]);
+  });
+});
+
+// Vitest runs with `import.meta.env.DEV` true, which is exactly the build
+// this layer exists in; release builds compile it to a no-op.
+describe("dev overrides (dev builds only)", () => {
+  beforeEach(() => {
+    storage.clear();
+    useFeatureFlagStore.setState({
+      resolved: { flag_on_by_default: true, flag_off_by_default: false },
+      optedOut: [],
+      devOverrides: {},
+    });
+  });
+
+  it("forces on a flag the backend resolved off", () => {
+    useFeatureFlagStore.getState().setDevOverride("flag_off_by_default", true);
+
+    expect(flag("flag_off_by_default")).toBe(true);
+  });
+
+  it("outranks a user opt-out", () => {
+    useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", false);
+    useFeatureFlagStore.getState().setDevOverride("flag_on_by_default", true);
+
+    expect(flag("flag_on_by_default")).toBe(true);
+  });
+
+  it("returns to normal precedence when unforced", () => {
+    useFeatureFlagStore.getState().setDevOverride("flag_off_by_default", true);
+
+    useFeatureFlagStore.getState().setDevOverride("flag_off_by_default", null);
+
+    expect(flag("flag_off_by_default")).toBe(false);
+  });
+
+  it("clears every force at once", () => {
+    useFeatureFlagStore.getState().setDevOverride("flag_off_by_default", true);
+    useFeatureFlagStore.getState().setDevOverride("flag_on_by_default", false);
+
+    useFeatureFlagStore.getState().clearDevOverrides();
+
+    expect(useFeatureFlagStore.getState().devOverrides).toEqual({});
+    expect(flag("flag_off_by_default")).toBe(false);
+    expect(flag("flag_on_by_default")).toBe(true);
+  });
+
+  it("persists forces so they survive a reload", () => {
+    useFeatureFlagStore.getState().setDevOverride("flag_off_by_default", true);
+
+    expect(readPersistedDevOverrides()).toEqual({ flag_off_by_default: true });
   });
 
   it("ignores persisted entries that are not booleans", () => {
     storage.setItem(
-      FLAG_OVERRIDES_STORAGE_KEY,
-      JSON.stringify({ good: true, bad: "yes", worse: null }),
+      DEV_FLAG_OVERRIDES_STORAGE_KEY,
+      JSON.stringify({ good: false, bad: "yes" }),
     );
 
-    expect(readPersistedOverrides()).toEqual({ good: true });
+    expect(readPersistedDevOverrides()).toEqual({ good: false });
   });
 });

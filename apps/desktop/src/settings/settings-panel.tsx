@@ -50,7 +50,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import { FeatureFlagsSection } from "./components/feature-flags-section";
+import { BetaFeaturesSection } from "./components/beta-features-section";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
@@ -494,6 +494,8 @@ export function SettingsPanel({
           }
         />
       </SettingsSection>
+
+      <BetaFeaturesSection />
 
       {preferencesLoadingIndicator}
     </section>
@@ -1161,8 +1163,6 @@ export function SettingsPanel({
           {t("developerTabDescription")}
         </p>
       </div>
-
-      <FeatureFlagsSection />
 
       <SettingsSection
         heading={t("developerWorktreeTitle")}

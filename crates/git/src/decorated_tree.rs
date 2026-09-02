@@ -89,7 +89,7 @@ pub struct GitDecorations {
 /// Build decoration maps from a flat list of `(path, status)` entries. Each
 /// file maps to its status; the status also rolls up to every ancestor folder,
 /// with the dominant status winning on collisions.
-pub fn build_decorations_from_entries(
+pub(crate) fn build_decorations_from_entries(
     entries: impl IntoIterator<Item = (String, DecorationStatus)>,
 ) -> GitDecorations {
     let mut decorations = GitDecorations::default();
@@ -254,23 +254,6 @@ pub fn build_changed_files_tree(paths: &[String]) -> Vec<ChangedFileNode> {
     root.into_nodes("")
 }
 
-/// Collect the `path` of every directory node — used to expand-all on load.
-pub fn collect_directory_paths(nodes: &[ChangedFileNode]) -> Vec<String> {
-    let mut paths = Vec::new();
-    fn walk(nodes: &[ChangedFileNode], out: &mut Vec<String>) {
-        for node in nodes {
-            if node.node_type == NodeKind::Directory {
-                out.push(node.path.clone());
-                if let Some(children) = &node.children {
-                    walk(children, out);
-                }
-            }
-        }
-    }
-    walk(nodes, &mut paths);
-    paths
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,13 +381,5 @@ mod tests {
     fn does_not_duplicate_a_path_that_appears_twice() {
         let tree = build_changed_files_tree(&["a.ts".into(), "a.ts".into()]);
         assert_eq!(tree.len(), 1);
-    }
-
-    #[test]
-    fn collects_every_directory_path_for_expand_all() {
-        let tree = build_changed_files_tree(&["apps/desktop/src/app.ts".into()]);
-        let mut paths = collect_directory_paths(&tree);
-        paths.sort();
-        assert_eq!(paths, ["/apps", "/apps/desktop", "/apps/desktop/src"]);
     }
 }
