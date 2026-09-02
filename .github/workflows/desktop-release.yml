@@ -38,25 +38,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get tag annotation
-        id: tag_message
+      # Release notes are the tag's section of CHANGELOG.md. The tag itself
+      # carries no annotation here: the OSS sync recreates it as a lightweight
+      # tag on the exported commit, so reading `%(contents)` would only yield
+      # the commit message.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
         run: |
-          TAG_MESSAGE=$(git tag -l --format='%(contents)' ${{ github.ref_name }} | head -c 10000)
-          if [ -n "$TAG_MESSAGE" ]; then
-            echo "has_message=true" >> $GITHUB_OUTPUT
-            echo "message<<EOF" >> $GITHUB_OUTPUT
-            echo "$TAG_MESSAGE" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v heading="## ${VERSION}" '
+            $0 == heading { in_section = 1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > release-notes.md
+          if grep -q '^- ' release-notes.md; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_message=false" >> $GITHUB_OUTPUT
+            echo "::warning::CHANGELOG.md has no entry for ${VERSION}; generating notes from commits"
+            echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ steps.tag_message.outputs.has_message }}" = "true" ]; then
-            gh release create ${{ github.ref_name }} --repo ${{ env.RELEASE_REPO }} --title "Chro ${{ github.ref_name }}" --notes "${{ steps.tag_message.outputs.message }}"
+          if [ "${{ steps.notes.outputs.found }}" = "true" ]; then
+            gh release create ${{ github.ref_name }} --repo ${{ env.RELEASE_REPO }} --title "Chro ${{ github.ref_name }}" --notes-file release-notes.md
           else
             gh release create ${{ github.ref_name }} --repo ${{ env.RELEASE_REPO }} --title "Chro ${{ github.ref_name }}" --generate-notes
           fi
