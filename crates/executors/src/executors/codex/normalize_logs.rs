@@ -16,18 +16,14 @@ use codex_app_server_protocol::{
     PatchApplyStatus as AppPatchApplyStatus, PatchChangeKind as AppPatchChangeKind,
     ServerNotification, ThreadItem as AppThreadItem,
 };
-use codex_protocol::{
-    openai_models::ReasoningEffort,
-    protocol::{
-        AgentMessageDeltaEvent, AgentMessageEvent, AgentReasoningDeltaEvent, AgentReasoningEvent,
-        AgentReasoningRawContentDeltaEvent, AgentReasoningRawContentEvent,
-        AgentReasoningSectionBreakEvent, BackgroundEventEvent, ErrorEvent, EventMsg,
-        ExecCommandBeginEvent, ExecCommandEndEvent, ExecCommandOutputDeltaEvent, ExecOutputStream,
-        FileChange as CoreFileChange, McpInvocation, McpToolCallBeginEvent, McpToolCallEndEvent,
-        PatchApplyBeginEvent, PatchApplyEndEvent, PatchApplyStatus as CorePatchApplyStatus,
-        PatchApplyUpdatedEvent, StreamErrorEvent, WarningEvent, WebSearchBeginEvent,
-        WebSearchEndEvent,
-    },
+use codex_protocol::protocol::{
+    AgentMessageDeltaEvent, AgentMessageEvent, AgentReasoningDeltaEvent, AgentReasoningEvent,
+    AgentReasoningRawContentDeltaEvent, AgentReasoningRawContentEvent,
+    AgentReasoningSectionBreakEvent, BackgroundEventEvent, ErrorEvent, EventMsg,
+    ExecCommandBeginEvent, ExecCommandEndEvent, ExecCommandOutputDeltaEvent, ExecOutputStream,
+    FileChange as CoreFileChange, McpInvocation, McpToolCallBeginEvent, McpToolCallEndEvent,
+    PatchApplyBeginEvent, PatchApplyEndEvent, PatchApplyStatus as CorePatchApplyStatus,
+    PatchApplyUpdatedEvent, StreamErrorEvent, WarningEvent, WebSearchBeginEvent, WebSearchEndEvent,
 };
 use events::MsgStore;
 use futures::StreamExt;
@@ -967,7 +963,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, _worktree_path: &Path) {
                     msg_store.push_session_id(payload.session_id.to_string());
                     handle_model_params(
                         payload.model,
-                        payload.reasoning_effort,
+                        payload.reasoning_effort.map(|effort| effort.to_string()),
                         &msg_store,
                         &entry_index,
                     );
@@ -1948,7 +1944,7 @@ fn app_mcp_result_to_tool_result(
 
 fn handle_model_params(
     model: String,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<String>,
     msg_store: &Arc<MsgStore>,
     entry_index: &EntryIndexProvider,
 ) {

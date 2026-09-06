@@ -17,8 +17,7 @@ use std::{
 
 use async_trait::async_trait;
 use codex_app_server_protocol::{
-    AskForApproval as CodexAskForApproval, SandboxMode as CodexSandboxMode, ThreadForkParams,
-    ThreadStartParams,
+    AskForApproval as CodexAskForApproval, SandboxMode as CodexSandboxMode,
 };
 use command_group::AsyncCommandGroup;
 use derivative::Derivative;
@@ -32,7 +31,7 @@ use tokio::process::Command;
 use ts_rs::TS;
 
 use self::{
-    client::{AppServerClient, LogWriter},
+    client::{AppServerClient, LogWriter, ThreadForkRequest, ThreadStartRequest},
     jsonrpc::ExitSignalSender,
     normalize_logs::normalize_logs,
 };
@@ -57,23 +56,16 @@ pub fn codex_home() -> Option<PathBuf> {
     cli_manifest::resolve_home(&cli_manifest::CODEX)
 }
 
-fn fork_params_from(thread_id: String, params: ThreadStartParams) -> ThreadForkParams {
-    ThreadForkParams {
+fn fork_params_from(thread_id: String, params: ThreadStartRequest) -> ThreadForkRequest {
+    ThreadForkRequest {
         thread_id,
-        model: params.model,
-        model_provider: params.model_provider,
-        cwd: params.cwd,
-        approval_policy: params.approval_policy,
-        sandbox: params.sandbox,
-        config: params.config,
-        base_instructions: params.base_instructions,
-        developer_instructions: params.developer_instructions,
-        service_tier: params.service_tier,
-        // Chro only needs the forked thread id before starting the next turn.
-        // Omitting history also keeps newly-added ThreadItem variants in a newer
-        // app-server from breaking an older client's response decoder.
+        start: ThreadStartRequest {
+            // A fork inherits the source thread's history, so it does not ask
+            // for extended history to be persisted again.
+            persist_extended_history: false,
+            ..params
+        },
         exclude_turns: true,
-        ..Default::default()
     }
 }
 
@@ -189,7 +181,7 @@ impl Codex {
         apply_overrides(builder, &self.cmd)
     }
 
-    fn build_new_conversation_params(&self, cwd: &Path) -> ThreadStartParams {
+    fn build_new_conversation_params(&self, cwd: &Path) -> ThreadStartRequest {
         let sandbox = match self.sandbox.as_ref() {
             None | Some(SandboxMode::Auto) => Some(CodexSandboxMode::WorkspaceWrite),
             Some(SandboxMode::ReadOnly) => Some(CodexSandboxMode::ReadOnly),
@@ -221,7 +213,7 @@ impl Codex {
             );
         }
 
-        ThreadStartParams {
+        ThreadStartRequest {
             model: self.model.clone(),
             cwd: Some(cwd.to_string_lossy().to_string()),
             approval_policy,
@@ -231,7 +223,6 @@ impl Codex {
             model_provider: self.model_provider.clone(),
             developer_instructions: self.developer_instructions.clone(),
             persist_extended_history: true,
-            ..Default::default()
         }
     }
 
@@ -390,7 +381,7 @@ impl Codex {
 
     #[allow(clippy::too_many_arguments)]
     async fn launch_codex_app_server(
-        conversation_params: ThreadStartParams,
+        conversation_params: ThreadStartRequest,
         resume_session: Option<String>,
         combined_prompt: String,
         child_stdout: tokio::process::ChildStdout,
@@ -517,15 +508,18 @@ mod tests {
 
     #[test]
     fn fork_params_preserve_model_override() {
-        let params = ThreadStartParams {
+        let params = ThreadStartRequest {
             model: Some("gpt-5.6-terra".to_string()),
+            persist_extended_history: true,
             ..Default::default()
         };
 
         let fork = fork_params_from("thread-1".to_string(), params);
 
         assert_eq!(fork.thread_id, "thread-1");
-        assert_eq!(fork.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(fork.start.model.as_deref(), Some("gpt-5.6-terra"));
         assert!(fork.exclude_turns);
+        // A fork inherits the source thread's history rather than re-persisting it.
+        assert!(!fork.start.persist_extended_history);
     }
 }

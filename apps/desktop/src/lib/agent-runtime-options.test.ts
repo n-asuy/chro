@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   getAllModelOptions,
+  getModelLabel,
+  getModelOptions,
   getModelReasoningOptions,
   getModelSpeedOptions,
 } from "./agent-runtime-options";
@@ -36,5 +38,15 @@ describe("agent-runtime-options capability axes", () => {
     expect(getModelReasoningOptions("CLAUDE_CODE", "opus")).toEqual([]);
     expect(getModelReasoningOptions("CLAUDE_CODE", null)).toEqual([]);
     expect(getModelReasoningOptions("PI", null)).toEqual([]);
+  });
+
+  it("offers GPT-6 Astra first among the Codex models", () => {
+    const codex = getModelOptions("CODEX");
+    expect(codex[0]?.value).toBe("gpt-6-astra");
+    expect(getModelLabel("CODEX", "gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(
+      getModelReasoningOptions("CODEX", "gpt-6-astra").map((r) => r.value),
+    ).toEqual(["low", "medium", "high", "x-high"]);
+    expect(getModelSpeedOptions("CODEX", "gpt-6-astra")).toEqual([]);
   });
 });

@@ -82,34 +82,44 @@ const CLAUDE_MODELS: ModelOption[] = [
   },
 ];
 
+// Ordered as the Codex model catalog orders them (most capable first). Astra
+// is a GPT-6 generation model gated on Codex CLI 0.153.0; an older CLI fails
+// the turn with an explicit "requires a newer version of Codex" API error.
 const CODEX_MODELS: ModelOption[] = [
+  {
+    value: "gpt-6-astra",
+    label: "GPT-6 Astra",
+    executor: "CODEX",
+    description: "Most capable model for complex, demanding work.",
+    effortLevels: CODEX_EFFORT_LEVELS,
+  },
   {
     value: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
     executor: "CODEX",
-    description:
-      "Frontier model tuned for detail and polish on complex coding and research.",
+    description: "Reliable agentic workhorse for everyday tasks.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-terra",
     label: "GPT-5.6 Terra",
     executor: "CODEX",
-    description: "Everyday workhorse for general coding.",
+    description: "Balanced agentic coding model for everyday work.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     executor: "CODEX",
-    description: "Fast, efficient model for clear, repeatable work.",
+    description: "Fast and affordable agentic coding model.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.5",
     label: "GPT-5.5",
     executor: "CODEX",
-    description: "Previous-generation frontier model for complex coding.",
+    description:
+      "Proven previous-generation model for coding and general work.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {

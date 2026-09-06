@@ -1,7 +1,7 @@
 //! Codex app server client implementation.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io,
     sync::{Arc, OnceLock},
 };
@@ -10,16 +10,15 @@ use approvals::{APPROVAL_TIMEOUT_SECONDS, ApprovalStatus};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use codex_app_server_protocol::{
-    ApplyPatchApprovalResponse, ClientInfo, ClientNotification, ClientRequest,
+    ApplyPatchApprovalResponse, AskForApproval, ClientInfo, ClientNotification,
     CommandExecutionApprovalDecision, CommandExecutionRequestApprovalResponse,
     ExecCommandApprovalResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAuthStatusParams, GetAuthStatusResponse, InitializeCapabilities, InitializeParams,
     InitializeResponse, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    McpServerElicitationRequestParams, McpServerElicitationRequestResponse, RequestId,
-    ServerRequest, ThreadForkParams, ThreadStartParams, TurnStartParams, TurnStartResponse,
-    UserInput,
+    McpServerElicitationRequestParams, McpServerElicitationRequestResponse, RequestId, SandboxMode,
+    ServerRequest, TurnStartResponse, UserInput,
 };
-use codex_protocol::{openai_models::ReasoningEffort, protocol::ReviewDecision};
+use codex_protocol::protocol::ReviewDecision;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{self, Value};
 use tokio::{
@@ -50,6 +49,70 @@ pub struct AppServerClient {
     cancel: CancellationToken,
 }
 
+/// A JSON-RPC request to the agent server.
+///
+/// The protocol crate models requests as one wide enum whose params structs
+/// carry every field the server version it was generated from understood.
+/// Serializing those emits the fields Chro never sets as explicit nulls, and a
+/// server that has since dropped a field rejects the whole request because the
+/// key is present at all (`permissionProfile` was removed this way). Spelling
+/// out the request here means Chro sends exactly the fields it chose, which is
+/// the mirror image of what [`CompatibleThreadResponse`] does for responses.
+#[derive(Debug, Serialize)]
+struct Request<P> {
+    method: &'static str,
+    #[serde(rename = "id")]
+    request_id: RequestId,
+    params: P,
+}
+
+/// The `thread/start` parameters Chro sets. See [`Request`] for why these are
+/// not the protocol crate's `ThreadStartParams`.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadStartRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<AskForApproval>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<HashMap<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub persist_extended_history: bool,
+}
+
+/// The `thread/fork` parameters Chro sets.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadForkRequest {
+    pub thread_id: String,
+    #[serde(flatten)]
+    pub start: ThreadStartRequest,
+    /// Return thread metadata without `thread.turns`. Chro only needs the
+    /// forked thread id, and skipping history also keeps thread items added by
+    /// a newer app server out of the response decoder.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_turns: bool,
+}
+
+/// The `turn/start` parameters Chro sets.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnStartRequest {
+    thread_id: String,
+    input: Vec<UserInput>,
+}
+
 /// The subset of thread start/fork responses that Chro consumes.
 ///
 /// Deserializing the complete protocol response makes Chro fail when a newer
@@ -62,8 +125,12 @@ pub struct AppServerClient {
 pub struct CompatibleThreadResponse {
     pub thread: ThreadMetadata,
     pub model: String,
+    /// Kept as the raw string the server reported. Chro only ever displays it,
+    /// and the set of levels grows with the model catalog (`max` and `ultra`
+    /// arrived with GPT-6), so decoding it into a fixed enum would fail the
+    /// whole request on a level the pinned protocol crate has not heard of.
     #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,9 +165,12 @@ impl AppServerClient {
     }
 
     pub async fn initialize(&self) -> Result<(), ExecutorError> {
-        let request = ClientRequest::Initialize {
-            request_id: self.next_request_id(),
-            params: InitializeParams {
+        // `initialize` and `getAuthStatus` params describe one narrow request
+        // each rather than the server's whole configuration surface, so reusing
+        // the protocol crate's structs for them is safe.
+        let request = self.request(
+            "initialize",
+            InitializeParams {
                 client_info: ClientInfo {
                     name: "vibe-codex-executor".to_string(),
                     title: None,
@@ -111,33 +181,25 @@ impl AppServerClient {
                     ..Default::default()
                 }),
             },
-        };
+        );
 
-        self.send_request::<InitializeResponse>(request, "initialize")
-            .await?;
+        self.send_request::<InitializeResponse, _>(request).await?;
         self.send_message(&ClientNotification::Initialized).await
     }
 
     pub async fn new_conversation(
         &self,
-        params: ThreadStartParams,
+        params: ThreadStartRequest,
     ) -> Result<CompatibleThreadResponse, ExecutorError> {
-        let request = ClientRequest::ThreadStart {
-            request_id: self.next_request_id(),
-            params,
-        };
-        self.send_request(request, "thread/start").await
+        self.send_request(self.request("thread/start", params))
+            .await
     }
 
     pub async fn fork_conversation(
         &self,
-        params: ThreadForkParams,
+        params: ThreadForkRequest,
     ) -> Result<CompatibleThreadResponse, ExecutorError> {
-        let request = ClientRequest::ThreadFork {
-            request_id: self.next_request_id(),
-            params,
-        };
-        self.send_request(request, "thread/fork").await
+        self.send_request(self.request("thread/fork", params)).await
     }
 
     pub async fn send_user_message(
@@ -145,29 +207,28 @@ impl AppServerClient {
         conversation_id: String,
         message: String,
     ) -> Result<TurnStartResponse, ExecutorError> {
-        let request = ClientRequest::TurnStart {
-            request_id: self.next_request_id(),
-            params: TurnStartParams {
+        let request = self.request(
+            "turn/start",
+            TurnStartRequest {
                 thread_id: conversation_id,
                 input: vec![UserInput::Text {
                     text: message,
                     text_elements: vec![],
                 }],
-                ..Default::default()
             },
-        };
-        self.send_request(request, "turn/start").await
+        );
+        self.send_request(request).await
     }
 
     pub async fn get_auth_status(&self) -> Result<GetAuthStatusResponse, ExecutorError> {
-        let request = ClientRequest::GetAuthStatus {
-            request_id: self.next_request_id(),
-            params: GetAuthStatusParams {
+        let request = self.request(
+            "getAuthStatus",
+            GetAuthStatusParams {
                 include_token: Some(true),
                 refresh_token: Some(false),
             },
-        };
-        self.send_request(request, "getAuthStatus").await
+        );
+        self.send_request(request).await
     }
 
     async fn handle_server_request(
@@ -464,12 +525,22 @@ impl AppServerClient {
         self.rpc().send(message).await
     }
 
-    async fn send_request<R>(&self, request: ClientRequest, label: &str) -> Result<R, ExecutorError>
+    fn request<P>(&self, method: &'static str, params: P) -> Request<P> {
+        Request {
+            method,
+            request_id: self.next_request_id(),
+            params,
+        }
+    }
+
+    async fn send_request<R, P>(&self, request: Request<P>) -> Result<R, ExecutorError>
     where
         R: DeserializeOwned + std::fmt::Debug,
+        P: Serialize + Sync,
     {
-        let request_id = request_id(&request);
-        self.rpc().request(request_id, &request, label).await
+        self.rpc()
+            .request(request.request_id.clone(), &request, request.method)
+            .await
     }
 
     fn next_request_id(&self) -> RequestId {
@@ -541,20 +612,24 @@ impl AppServerClient {
 
     fn spawn_feedback_message(&self, conversation_id: String, feedback: String) {
         let peer = self.rpc().clone();
-        let request = ClientRequest::TurnStart {
+        let request = Request {
+            method: "turn/start",
             request_id: peer.next_request_id(),
-            params: TurnStartParams {
+            params: TurnStartRequest {
                 thread_id: conversation_id,
                 input: vec![UserInput::Text {
                     text: format!("User feedback: {feedback}"),
                     text_elements: vec![],
                 }],
-                ..Default::default()
             },
         };
         tokio::spawn(async move {
             if let Err(err) = peer
-                .request::<TurnStartResponse, _>(request_id(&request), &request, "turn/start")
+                .request::<TurnStartResponse, _>(
+                    request.request_id.clone(),
+                    &request,
+                    request.method,
+                )
                 .await
             {
                 tracing::error!("failed to send feedback follow-up message: {err}");
@@ -566,6 +641,85 @@ impl AppServerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app server rejects a request that carries a field it has retired,
+    /// even when the value is `null`, so an unset field must not reach the wire
+    /// at all.
+    #[test]
+    fn thread_start_request_omits_fields_chro_did_not_set() {
+        let request = Request {
+            method: "thread/start",
+            request_id: RequestId::Integer(7),
+            params: ThreadStartRequest {
+                model: Some("gpt-6-astra".to_string()),
+                cwd: Some("/workspace".to_string()),
+                persist_extended_history: true,
+                ..Default::default()
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(value["method"], "thread/start");
+        assert_eq!(value["id"], 7);
+        let params = value["params"]
+            .as_object()
+            .expect("params should be an object");
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cwd", "model", "persistExtendedHistory"]);
+    }
+
+    #[test]
+    fn thread_fork_request_omits_fields_chro_did_not_set() {
+        let request = ThreadForkRequest {
+            thread_id: "thread-1".to_string(),
+            start: ThreadStartRequest {
+                model: Some("gpt-6-astra".to_string()),
+                ..Default::default()
+            },
+            exclude_turns: true,
+        };
+
+        let value = serde_json::to_value(&request).expect("fork params should serialize");
+
+        let params = value.as_object().expect("params should be an object");
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["excludeTurns", "model", "threadId"]);
+    }
+
+    #[test]
+    fn turn_start_request_omits_fields_chro_did_not_set() {
+        let request = TurnStartRequest {
+            thread_id: "thread-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: vec![],
+            }],
+        };
+
+        let value = serde_json::to_value(&request).expect("turn params should serialize");
+
+        let params = value.as_object().expect("params should be an object");
+        let mut keys: Vec<&str> = params.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["input", "threadId"]);
+    }
+
+    /// GPT-6 added `max` and `ultra`; a level the pinned protocol crate has
+    /// never heard of must not fail the whole thread response.
+    #[test]
+    fn thread_start_response_accepts_unknown_reasoning_effort() {
+        let response = serde_json::from_value::<CompatibleThreadResponse>(serde_json::json!({
+            "thread": { "id": "started-thread", "turns": [] },
+            "model": "gpt-6-astra",
+            "reasoningEffort": "ultra"
+        }))
+        .expect("an unknown reasoning level should not prevent decoding thread metadata");
+
+        assert_eq!(response.reasoning_effort.as_deref(), Some("ultra"));
+    }
 
     #[test]
     fn thread_start_response_ignores_unknown_service_tier() {
@@ -584,7 +738,7 @@ mod tests {
 
         assert_eq!(response.thread.id, "started-thread");
         assert_eq!(response.model, "gpt-5.6");
-        assert_eq!(response.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(response.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]
@@ -608,7 +762,7 @@ mod tests {
 
         assert_eq!(response.thread.id, "forked-thread");
         assert_eq!(response.model, "gpt-5.4");
-        assert_eq!(response.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(response.reasoning_effort.as_deref(), Some("high"));
     }
 
     /// Drives a client over an in-memory pipe pair standing in for the agent
@@ -852,17 +1006,6 @@ where
     };
 
     peer.send(&payload).await
-}
-
-fn request_id(request: &ClientRequest) -> RequestId {
-    match request {
-        ClientRequest::Initialize { request_id, .. }
-        | ClientRequest::ThreadStart { request_id, .. }
-        | ClientRequest::ThreadFork { request_id, .. }
-        | ClientRequest::GetAuthStatus { request_id, .. }
-        | ClientRequest::TurnStart { request_id, .. } => request_id.clone(),
-        _ => unreachable!("request_id called for unsupported request variant"),
-    }
 }
 
 fn file_change_decision(decision: ReviewDecision) -> FileChangeApprovalDecision {

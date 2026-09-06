@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.51
+
+- Fixed Codex sessions failing to start against a current Codex CLI, with the run ending on a request error before the agent had said anything. Chro built its `thread/start`, `thread/fork` and `turn/start` requests from a pinned copy of the Codex protocol, which wrote out every field that copy knew about, including the ones chro never sets, as explicit nulls; a CLI that has since retired one of those fields rejects the request for carrying the key at all. Chro now spells out the fields it actually chooses and sends nothing else, and a reasoning level it has not heard of (`max` and `ultra` arrived with GPT-6) is kept as the server reported it instead of failing the response that carries the new session's id
+- Added GPT-6 Astra to the Codex model picker, listed first as the Codex catalog orders it, with the descriptions of the GPT-5.6 models refreshed to match. It needs Codex CLI 0.153.0 or newer
+
 ## 0.1.50
 
 - Fixed Windows releases failing to build, which left 0.1.49 with no Windows installer at all. The build-time signing added in 0.1.49 pointed Tauri at the signing script by a path relative to the desktop package, but Tauri runs the hook from its own `src-tauri` directory, so the script was never found and the build stopped with only "failed to run pwsh" to show for it. The path is corrected, and the hook now keeps a log that the build prints when signing fails, so the next problem is readable instead of silent. This is the first release whose Windows installer and every binary inside it carry a signature
