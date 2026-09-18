@@ -41,6 +41,12 @@ last_executor: string | null,
  */
 last_summary: string | null, 
 /**
+ * True once a person chose the title (rename). An unpinned title is the
+ * first line of the prompt and is replaced by the agent's own session
+ * title when one becomes available; see `adopt_session_title`.
+ */
+title_pinned: boolean, 
+/**
  * Title of the session this one was forked from, snapshotted at fork time.
  *
  * Read from the fork edge rather than stored on the row, but carried here

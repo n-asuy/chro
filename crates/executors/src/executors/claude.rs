@@ -5,6 +5,7 @@
 //! unattended and parallel runs without an interactive terminal dependency.
 
 mod processor;
+mod session_title;
 pub mod types;
 
 pub use processor::{ClaudeLogProcessor, HistoryStrategy};
@@ -30,7 +31,8 @@ use crate::{
     command::{CmdOverrides, CommandBuildError, CommandBuilder},
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, SessionTitle, SpawnedChild,
+        StandardCodingAgentExecutor,
     },
     spawn::Invocation,
 };
@@ -79,6 +81,11 @@ impl ClaudeCode {
             "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
+            // Attaches the browser extension bridge, which the CLI exposes as
+            // an MCP server of page-control tools. It is compatible with
+            // `--print`: when the extension is absent the server simply fails
+            // to connect and the run proceeds without those tools.
+            "--chrome",
         ]);
 
         if let Some(model) = &self.model {
@@ -262,6 +269,10 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         dirs::home_dir().map(|home| home.join(".claude.json"))
     }
 
+    fn session_title(&self, cwd: &Path, session_id: &str) -> Option<SessionTitle> {
+        session_title::session_title(cwd, session_id)
+    }
+
     async fn get_availability_info(&self) -> AvailabilityInfo {
         let config_path = dirs::home_dir().map(|home| home.join(".claude.json"));
         let config_exists = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
@@ -289,22 +300,6 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     }
 }
 
-/// Parent environment minus Claude Code's own nesting markers.
-///
-/// When chro itself runs inside a Claude session, the inherited
-/// `CLAUDECODE`/`CLAUDE_CODE_*` variables make the spawned CLI reject nesting.
-/// The project-dir name Claude Code derives from a working directory: the
-/// canonical path with every non-alphanumeric character replaced by `-`.
-/// Verified empirically (`/tmp/ab_c.d` → `-private-tmp-ab-c-d`).
-fn claude_project_dir_name(cwd: &Path) -> String {
-    let canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    canonical
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
 /// Copy `session_id`'s transcript into `cwd`'s project dir if it lives
 /// elsewhere, so a subsequent `--resume` from `cwd` can find it.
 ///
@@ -314,45 +309,41 @@ fn claude_project_dir_name(cwd: &Path) -> String {
 /// The copy keeps the original session id, so the source file stays untouched
 /// and `--fork-session` still allocates a fresh id for the branch.
 fn make_session_visible_from(cwd: &Path, session_id: &str) {
-    let Some(projects_dir) = dirs::home_dir().map(|home| home.join(".claude").join("projects"))
+    let Some(source) = session_title::transcript_path(cwd, session_id) else {
+        return;
+    };
+    let Some(target_dir) =
+        session_title::projects_dir().map(|dir| dir.join(session_title::project_dir_name(cwd)))
     else {
         return;
     };
-    let file_name = format!("{session_id}.jsonl");
-    let target_dir = projects_dir.join(claude_project_dir_name(cwd));
-    if target_dir.join(&file_name).exists() {
+    if source.parent() == Some(target_dir.as_path()) {
         return;
     }
-
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let candidate = entry.path().join(&file_name);
-        if !candidate.is_file() {
-            continue;
-        }
-        if let Err(err) = std::fs::create_dir_all(&target_dir)
-            .and_then(|_| std::fs::copy(&candidate, target_dir.join(&file_name)).map(|_| ()))
-        {
-            tracing::warn!(
-                session_id,
-                source = %candidate.display(),
-                target = %target_dir.display(),
-                error = %err,
-                "failed to copy session transcript for fork; resume may not resolve"
-            );
-        } else {
-            tracing::info!(
-                session_id,
-                target = %target_dir.display(),
-                "copied session transcript so the fork can resume it here"
-            );
-        }
-        return;
+    let target = target_dir.join(format!("{session_id}.jsonl"));
+    if let Err(err) = std::fs::create_dir_all(&target_dir)
+        .and_then(|_| std::fs::copy(&source, &target).map(|_| ()))
+    {
+        tracing::warn!(
+            session_id,
+            source = %source.display(),
+            target = %target_dir.display(),
+            error = %err,
+            "failed to copy session transcript for fork; resume may not resolve"
+        );
+    } else {
+        tracing::info!(
+            session_id,
+            target = %target_dir.display(),
+            "copied session transcript so the fork can resume it here"
+        );
     }
 }
 
+/// Parent environment minus Claude Code's own nesting markers.
+///
+/// When chro itself runs inside a Claude session, the inherited
+/// `CLAUDECODE`/`CLAUDE_CODE_*` variables make the spawned CLI reject nesting.
 fn claude_environment() -> impl Iterator<Item = (String, String)> {
     std::env::vars().filter(|(key, _)| key != "CLAUDECODE" && !key.starts_with("CLAUDE_CODE_"))
 }
@@ -488,6 +479,19 @@ mod tests {
         assert!(params.contains(&"stream-json".to_string()));
         assert!(params.contains(&"--verbose".to_string()));
         assert!(params.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn command_builder_enables_browser_extension_bridge() {
+        let params = ClaudeCode::default()
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(
+            params.contains(&"--chrome".to_string()),
+            "browser extension bridge must be enabled: {params:?}"
+        );
     }
 
     #[test]

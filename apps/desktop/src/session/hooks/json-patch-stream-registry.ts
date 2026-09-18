@@ -33,7 +33,9 @@ export type LogEntryMessage =
   | { type: "user_prompt"; payload: string }
   /** Repo-events notification; shape owned and narrowed by lib/repo-events. */
   | { type: "repo_event"; payload: unknown }
-  | { type: "finished" };
+  | { type: "finished" }
+  /** Terminal server-side failure for this stream (e.g. the run's worktree is gone). */
+  | { error: string };
 
 export interface UseJsonPatchWsStreamOptions<T = unknown> {
   /** Called with each non-patch message (stdout, stderr, session_id, etc.) */
@@ -231,7 +233,16 @@ function flush(entry: StreamEntry): void {
   entry.flushTimer = null;
   const patches = dedupeJsonPatchOperations(entry.pendingOps);
   entry.pendingOps = [];
-  if (!patches.length) return;
+  if (!patches.length) {
+    // An empty patch is still a snapshot: the server closes an initial
+    // snapshot that has no entries with one, so consumers can tell "loaded,
+    // empty" from "nothing arrived yet". Expose the document once for it;
+    // later no-op patches change nothing and publish nothing.
+    if (entry.exposed !== undefined) return;
+    entry.exposed = entry.document;
+    publish(entry);
+    return;
+  }
   const next = structuredClone(entry.document);
   applyPatchWithUpsert(next, patches);
   entry.document = next;
@@ -298,7 +309,23 @@ function openSocket(entry: StreamEntry): void {
       return;
     }
 
+    if ("error" in msg) {
+      // The server reports a terminal failure and then closes normally, so
+      // no reconnect follows; surface it instead of leaving `data` undefined
+      // (which consumers read as "still loading").
+      entry.error = msg.error;
+      publish(entry);
+      for (const sub of entry.subscribers)
+        sub.getOptions()?.onError?.(msg.error);
+      return;
+    }
+
     if (msg.type === "json_patch") {
+      if (entry.error !== null) {
+        // Data is flowing again after a reported failure.
+        entry.error = null;
+        publish(entry);
+      }
       entry.pendingOps.push(...msg.payload);
       if (entry.flushTimer === null) {
         // Batch via setTimeout(0): fires even when the window is backgrounded

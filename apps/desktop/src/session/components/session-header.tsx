@@ -36,12 +36,16 @@ export function SessionHeader({
   containerClassName,
 }: SessionHeaderProps) {
   const [isEditing, setIsEditing] = useState(false);
-  const [editValue, setEditValue] = useState(taskTitle ?? "");
+  const [editValue, setEditValue] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  // The draft is seeded when editing starts, not synced from the title: the
+  // title can change underneath an open editor (the agent's session title is
+  // adopted when a run completes) and must not wipe what is being typed.
+  const startEditing = useCallback(() => {
     setEditValue(taskTitle ?? "");
+    setIsEditing(true);
   }, [taskTitle]);
 
   useEffect(() => {
@@ -55,7 +59,6 @@ export function SessionHeader({
     const trimmed = editValue.trim();
     if (!trimmed || trimmed === taskTitle) {
       setIsEditing(false);
-      setEditValue(taskTitle ?? "");
       return;
     }
 
@@ -81,10 +84,9 @@ export function SessionHeader({
         void handleSave();
       } else if (e.key === "Escape") {
         setIsEditing(false);
-        setEditValue(taskTitle ?? "");
       }
     },
-    [handleSave, taskTitle],
+    [handleSave],
   );
 
   return (
@@ -132,7 +134,7 @@ export function SessionHeader({
               <div className="group flex min-w-0 items-start gap-1.5">
                 <button
                   type="button"
-                  onClick={() => onTitleChange && setIsEditing(true)}
+                  onClick={() => onTitleChange && startEditing()}
                   title={taskTitle ?? undefined}
                   className={cn(
                     "min-w-0 flex-1 whitespace-pre-line break-words text-[12px] leading-[1.35] text-left line-clamp-2",
@@ -145,7 +147,7 @@ export function SessionHeader({
                 {onTitleChange && (
                   <button
                     type="button"
-                    onClick={() => setIsEditing(true)}
+                    onClick={startEditing}
                     className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity p-0.5 rounded hover:bg-muted/50"
                     aria-label="Edit title"
                   >

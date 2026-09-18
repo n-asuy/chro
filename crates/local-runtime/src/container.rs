@@ -511,9 +511,10 @@ impl LocalContainerService {
             "[complete_task_execution] conditionally settled task_records"
         );
 
-        // Best-effort outcome summary, in the background: reading the run's
-        // logs must never delay the completion path (the sidebar spinner
-        // resolves off the task_records update above).
+        // Best-effort outcome summary and session title, in the background:
+        // reading the run's logs and transcript must never delay the
+        // completion path (the sidebar spinner resolves off the task_records
+        // update above).
         if run_status == RunStatus::Completed {
             let this = self.clone();
             let task_id = run.task_id;
@@ -528,9 +529,55 @@ impl LocalContainerService {
                         "[complete_task_execution] failed to record run outcome summary"
                     );
                 }
+                if let Err(err) = this.adopt_session_title(run_id, task_id).await {
+                    tracing::warn!(
+                        %run_id,
+                        error = %err,
+                        "[complete_task_execution] failed to adopt session title"
+                    );
+                }
             });
         }
 
+        Ok(())
+    }
+
+    /// Retitle the task with the name the agent gave the session it just ran,
+    /// when the agent keeps one and nobody has renamed the task. Until then
+    /// the task carries the first line of its prompt.
+    async fn adopt_session_title(&self, run_id: Uuid, task_id: Uuid) -> Result<(), ContainerError> {
+        let Some(session_id) =
+            db::models::TaskSession::external_session_id_by_run_id(self.db.pool(), run_id).await?
+        else {
+            return Ok(());
+        };
+        let Some(workspace) = TaskRun::find_by_id(self.db.pool(), run_id)
+            .await?
+            .and_then(|run| run.workspace_path)
+        else {
+            return Ok(());
+        };
+        let (agent, _) = self.create_agent_for_run(run_id).await?;
+
+        // Transcript files can be large; keep the read off the async workers.
+        let title = tokio::task::spawn_blocking(move || {
+            agent.session_title(&PathBuf::from(workspace), &session_id)
+        })
+        .await
+        .map_err(|err| anyhow!("session title read failed to join: {err}"))?;
+        let Some(title) = title else {
+            return Ok(());
+        };
+
+        let changed =
+            TaskRecord::adopt_session_title(self.db.pool(), task_id, &title.title).await?;
+        tracing::debug!(
+            %run_id,
+            %task_id,
+            source = ?title.source,
+            changed,
+            "[adopt_session_title] resolved agent session title"
+        );
         Ok(())
     }
 
@@ -1612,13 +1659,16 @@ impl LocalContainerService {
         .await??;
 
         let cumulative = Arc::new(AtomicUsize::new(0));
-        let entries = diffs
+        let mut entries = diffs
             .into_iter()
             .map(|mut diff| {
                 diff_stream::apply_stream_omit_policy(&mut diff, &cumulative, stats_only);
                 diff_to_entry(diff)
             })
             .collect::<Vec<_>>();
+        // Same snapshot contract as the live worktree stream: a first message
+        // is sent even when the merged diff is empty.
+        entries.push(diff_stream::snapshot_complete());
 
         let stream = stream::iter(entries.into_iter().map(Ok::<_, std::io::Error>))
             .chain(stream::once(async {
@@ -1947,6 +1997,82 @@ mod tests {
             Some(None),
             "housekeeping ran before the completion was persisted"
         );
+    }
+
+    /// Point the CLI's config-dir override at a private dir under `temp` and
+    /// write a Claude transcript there for `session_id` started from
+    /// `workspace`, so the lookup never touches the developer's real sessions.
+    fn seed_claude_transcript(
+        temp: &std::path::Path,
+        workspace: &std::path::Path,
+        session_id: &str,
+        title: &str,
+    ) {
+        let config_dir = temp.join("claude-config");
+        let project_dir_name: String = std::fs::canonicalize(workspace)
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let project_dir = config_dir.join("projects").join(project_dir_name);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{session_id}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"prompt\"}}}}\n\
+                 {{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session_id}\"}}\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+
+    /// A finished run retitles its task with the name Claude Code gave the
+    /// session; a rename pins the task against later titles.
+    #[tokio::test]
+    async fn adopt_session_title_retitles_until_a_person_renames() {
+        let (service, temp) = build_service().await;
+        let pool = service.db.pool();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        seed_claude_transcript(
+            temp.path(),
+            &workspace,
+            "sess-1",
+            "Stuck task investigation",
+        );
+
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Completed).await;
+        sqlx::query(
+            "UPDATE task_runs SET workspace_path = ?, executor_label = '{\"executor\":\"CLAUDE_CODE\"}' WHERE id = ?",
+        )
+        .bind(workspace.to_string_lossy().to_string())
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE task_sessions SET external_session_id = 'sess-1' WHERE task_run_id = ?",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        service.adopt_session_title(run_id, task_id).await.unwrap();
+        let task = TaskRecord::get(pool, task_id).await.unwrap();
+        assert_eq!(task.title, "Stuck task investigation");
+        assert!(!task.title_pinned);
+
+        TaskRecord::update_title(pool, task_id, "Chosen by hand".to_string(), None)
+            .await
+            .unwrap();
+        seed_claude_transcript(temp.path(), &workspace, "sess-1", "Retitled by the agent");
+        service.adopt_session_title(run_id, task_id).await.unwrap();
+        let pinned = TaskRecord::get(pool, task_id).await.unwrap();
+        assert_eq!(pinned.title, "Chosen by hand");
+        assert!(pinned.title_pinned);
     }
 
     /// Seed a project + task + run with the given statuses and NO session row,

@@ -227,6 +227,75 @@ describe("json-patch-stream-registry", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
+  it("treats an empty snapshot patch as loaded data, not as silence", () => {
+    const endpoint = uniqueEndpoint();
+    const subscriber = makeSubscriber();
+    acquireStream(endpoint, initialData, subscriber, true);
+    const ws = FakeWebSocket.last();
+    ws.driveOpen();
+    expect(getStreamSnapshot(endpoint).data).toBeUndefined();
+
+    // A snapshot with no entries: the server still sends a first (empty) patch.
+    ws.driveMessage({ type: "json_patch", payload: [] });
+    vi.advanceTimersByTime(0);
+    const loaded = getStreamSnapshot(endpoint);
+    expect(loaded.data).toEqual({ tasks: {} });
+    expect(loaded.error).toBeNull();
+    const notifiedAfterLoad = subscriber.notifyCount;
+
+    // The watchdog must not fire: the first message was seen.
+    vi.advanceTimersByTime(FIRST_MESSAGE_TIMEOUT_MS + 1);
+    expect(getStreamSnapshot(endpoint).error).toBeNull();
+    expect(ws.closed).toBe(false);
+
+    // Later no-op patches change nothing and publish nothing.
+    ws.driveMessage({ type: "json_patch", payload: [] });
+    vi.advanceTimersByTime(0);
+    expect(getStreamSnapshot(endpoint).data).toBe(loaded.data);
+    expect(subscriber.notifyCount).toBe(notifiedAfterLoad);
+  });
+
+  it("surfaces a server error envelope and does not reconnect after the normal close that follows it", () => {
+    const endpoint = uniqueEndpoint();
+    const errors: string[] = [];
+    const subscriber = makeSubscriber();
+    subscriber.getOptions = () => ({ onError: (e: string) => errors.push(e) });
+    acquireStream(endpoint, initialData, subscriber, true);
+    const ws = FakeWebSocket.last();
+    ws.driveOpen();
+
+    ws.driveMessage({ error: "workspace path missing" });
+    expect(getStreamSnapshot(endpoint).error).toBe("workspace path missing");
+    expect(errors).toEqual(["workspace path missing"]);
+
+    const socketsBefore = FakeWebSocket.instances.length;
+    ws.driveServerClose(1000, true);
+    vi.advanceTimersByTime(MAX_RECONNECT_DELAY_MS * 4);
+    expect(FakeWebSocket.instances.length).toBe(socketsBefore);
+    expect(getStreamSnapshot(endpoint).error).toBe("workspace path missing");
+  });
+
+  it("clears a reported error once patches flow again", () => {
+    const endpoint = uniqueEndpoint();
+    const subscriber = makeSubscriber();
+    acquireStream(endpoint, initialData, subscriber, true);
+    const ws = FakeWebSocket.last();
+    ws.driveOpen();
+    ws.driveMessage({ error: "transient recompute failure" });
+    expect(getStreamSnapshot(endpoint).error).toBe(
+      "transient recompute failure",
+    );
+
+    ws.driveMessage({
+      type: "json_patch",
+      payload: [{ op: "add", path: "/tasks/a", value: { id: "a" } }],
+    });
+    vi.advanceTimersByTime(0);
+    const snapshot = getStreamSnapshot(endpoint);
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.data).toEqual({ tasks: { a: { id: "a" } } });
+  });
+
   it("surfaces an error when the first message never arrives (watchdog)", () => {
     const endpoint = uniqueEndpoint();
     acquireStream(endpoint, initialData, makeSubscriber());

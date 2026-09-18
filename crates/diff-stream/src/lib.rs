@@ -40,6 +40,23 @@ pub enum DiffStreamError {
     Join(#[from] tokio::task::JoinError),
 }
 
+/// Closes a diff stream's initial snapshot: an empty JSON Patch.
+///
+/// Snapshot contract: a snapshot stream always sends a first message, even
+/// when the snapshot has no entries, so a client can tell "loaded, no
+/// changes" from "nothing has arrived yet" (which it must otherwise treat as a
+/// stalled connection and reconnect forever). An empty patch is a no-op for
+/// any RFC 6902 consumer, so it is also sent after a non-empty snapshot to
+/// mark the initial set as complete.
+pub fn snapshot_complete() -> LogEntry {
+    LogEntry::JsonPatch(serde_json::json!([]))
+}
+
+/// Whether `entry` is the [`snapshot_complete`] marker.
+pub fn is_snapshot_complete(entry: &LogEntry) -> bool {
+    matches!(entry, LogEntry::JsonPatch(value) if value.as_array().is_some_and(Vec::is_empty))
+}
+
 /// Where a diff stream's base commit comes from. The base is resolved on every
 /// recompute (not frozen at stream creation) so that history rewrites in the
 /// worktree — most importantly a rebase onto a moved target — re-anchor the
@@ -309,6 +326,7 @@ pub async fn create(
         }
         entries.push(diff_to_entry(diff));
     }
+    entries.push(snapshot_complete());
 
     let (tx, rx) = mpsc::channel::<Result<LogEntry, io::Error>>(DIFF_STREAM_CHANNEL_CAPACITY);
     if !send_messages(&tx, entries).await {
@@ -880,6 +898,94 @@ mod tests {
         assert!(
             settled.contains("gated.txt"),
             "settle poller must deliver the post-rebase diff, got {settled:?}"
+        );
+    }
+
+    /// Drain every message that arrives within a short idle window.
+    async fn collect_messages(handle: &mut DiffStreamHandle) -> Vec<LogEntry> {
+        let mut out = Vec::new();
+        while let Ok(Some(Ok(entry))) =
+            tokio::time::timeout(Duration::from_millis(400), handle.next()).await
+        {
+            out.push(entry);
+        }
+        out
+    }
+
+    /// The snapshot contract: a worktree with no changes still produces a first
+    /// message. Without it a client waiting for the initial snapshot cannot
+    /// distinguish "no changes" from a stalled socket, and reconnects forever.
+    #[tokio::test]
+    async fn empty_initial_diff_still_sends_snapshot_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        init_project(&dir);
+
+        let (_tx, rx) = broadcast::channel::<WorktreeEventBatch>(64);
+        let mut handle = create(
+            GitService::new(),
+            dir.clone(),
+            BaseSource::MergeBase {
+                repo_path: dir.clone(),
+                branch: "feature".to_string(),
+                target: "main".to_string(),
+            },
+            false,
+            rx,
+        )
+        .await
+        .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(5), handle.next())
+            .await
+            .expect("a first message must arrive even for an empty diff")
+            .expect("stream must stay open")
+            .unwrap();
+        assert!(is_snapshot_complete(&first), "got {first:?}");
+        assert!(collect_diff_set(&mut handle).await.is_empty());
+    }
+
+    /// With changes present, the snapshot-complete marker follows the initial
+    /// entries, so a consumer can treat everything before it as the full
+    /// initial set.
+    #[tokio::test]
+    async fn snapshot_complete_follows_initial_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        init_project(&dir);
+        write(&dir, "feature.txt", "feature work\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "feature work"]);
+
+        let (_tx, rx) = broadcast::channel::<WorktreeEventBatch>(64);
+        let mut handle = create(
+            GitService::new(),
+            dir.clone(),
+            BaseSource::MergeBase {
+                repo_path: dir.clone(),
+                branch: "feature".to_string(),
+                target: "main".to_string(),
+            },
+            false,
+            rx,
+        )
+        .await
+        .unwrap();
+
+        let messages = collect_messages(&mut handle).await;
+        let marker_index = messages
+            .iter()
+            .position(is_snapshot_complete)
+            .expect("snapshot-complete marker must be sent");
+        let keys_before_marker = diff_keys(&messages[..marker_index]);
+        assert_eq!(
+            keys_before_marker,
+            vec![("add".to_string(), "feature.txt".to_string())]
+        );
+        assert_eq!(
+            marker_index,
+            messages.len() - 1,
+            "marker closes the snapshot"
         );
     }
 }

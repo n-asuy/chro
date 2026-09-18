@@ -7,8 +7,7 @@
  */
 export type ProjectRecord = { id: string, slug: string | null, name: string, git_repo_path: string, setup_script: string | null, dev_script: string | null, cleanup_script: string | null, copy_files: string | null, 
 /**
- * Identity color rendered as a small dot on cross-project surfaces.
- * Normalized "#rrggbb"; `None` means the client auto-assigns from the
- * project id.
+ * Identity color rendered as a small dot next to the project name.
+ * A preset palette name or normalized "#rrggbb"; `None` means no color.
  */
 badge_color: string | null, created_at: string, updated_at: string, };

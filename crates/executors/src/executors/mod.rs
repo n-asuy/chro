@@ -152,6 +152,21 @@ impl AvailabilityInfo {
     }
 }
 
+/// A title the agent assigned to one of its sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTitle {
+    pub title: String,
+    pub source: SessionTitleSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTitleSource {
+    /// Produced by the agent from the conversation.
+    Generated,
+    /// Set by a person through the agent's own rename command.
+    Custom,
+}
+
 /// Result communicated through the exit signal
 #[derive(Debug, Clone, Copy)]
 pub enum ExecutorExitResult {
@@ -245,6 +260,14 @@ pub trait StandardCodingAgentExecutor {
     fn replay_log_entries(&self, entries: &[LogEntry], worktree_path: &Path) -> Vec<LogEntry>;
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
+
+    /// The title the agent itself keeps for `session_id` in its own session
+    /// history, resolved from `cwd`. Agents that generate one (Claude Code
+    /// writes it to the transcript after the first turn) override this so the
+    /// task can adopt it; the default covers agents with no such record.
+    fn session_title(&self, _cwd: &Path, _session_id: &str) -> Option<SessionTitle> {
+        None
+    }
 
     async fn get_availability_info(&self) -> AvailabilityInfo {
         let config_files_found = self

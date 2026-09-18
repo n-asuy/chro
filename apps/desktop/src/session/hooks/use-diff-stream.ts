@@ -30,6 +30,12 @@ interface UseDiffStreamParams {
 export interface UseDiffStreamResult {
   diffs: Record<string, DiffContent>;
   error: string | null;
+  /**
+   * True until the initial snapshot has arrived. The server always sends one
+   * (an empty patch when there are no changes), so this resolves for every
+   * run; a terminal server error resolves it too, via `error`.
+   */
+  isLoading: boolean;
   isConnected: boolean;
 }
 
@@ -55,11 +61,13 @@ export function useDiffStream({
     [],
   );
 
+  const active = enabled && !!taskRunId;
   const { data, error, isConnected } = useJsonPatchWsStream<DiffStreamState>(
     endpoint,
-    enabled && !!taskRunId,
+    active,
     initialData,
   );
+  const isLoading = active && data === undefined && error === null;
 
   const diffs = useMemo(() => {
     const entries = data?.diffs ?? {};
@@ -81,5 +89,5 @@ export function useDiffStream({
     return output;
   }, [data?.diffs]);
 
-  return { diffs, error, isConnected };
+  return { diffs, error, isLoading, isConnected };
 }

@@ -49,6 +49,10 @@ pub struct TaskRecord {
     /// `last_executor` so list surfaces can show "what this session did"
     /// without a transcript lookup. `None` until a run completes.
     pub last_summary: Option<String>,
+    /// True once a person chose the title (rename). An unpinned title is the
+    /// first line of the prompt and is replaced by the agent's own session
+    /// title when one becomes available; see `adopt_session_title`.
+    pub title_pinned: bool,
     /// Title of the session this one was forked from, snapshotted at fork time.
     ///
     /// Read from the fork edge rather than stored on the row, but carried here
@@ -111,6 +115,7 @@ impl TaskRecord {
             sort_order: 0,
             last_executor: None,
             last_summary: None,
+            title_pinned: false,
             forked_from_title: None,
             delegated_from_title: None,
         }
@@ -139,8 +144,8 @@ impl TaskRecord {
     /// Persist the task record.
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor, last_summary)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor, last_summary, title_pinned)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.id)
         .bind(&self.slug)
@@ -160,6 +165,7 @@ impl TaskRecord {
         .bind(self.sort_order)
         .bind(&self.last_executor)
         .bind(&self.last_summary)
+        .bind(self.title_pinned)
         .execute(pool)
         .await?;
         Ok(())
@@ -427,7 +433,8 @@ impl TaskRecord {
         Ok(())
     }
 
-    /// Update the title of a task record.
+    /// Rename a task. A rename is a person's choice, so it pins the title
+    /// against later session-title adoption.
     pub async fn update_title(
         pool: &Pool<Sqlite>,
         task_id: Uuid,
@@ -436,7 +443,7 @@ impl TaskRecord {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE task_records
-             SET title = ?, prompt = COALESCE(?, prompt), updated_at = datetime('now')
+             SET title = ?, title_pinned = 1, prompt = COALESCE(?, prompt), updated_at = datetime('now')
              WHERE id = ?",
         )
         .bind(title)
@@ -445,6 +452,27 @@ impl TaskRecord {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Replace an unpinned title with the title the agent gave the session.
+    /// Returns whether the title changed; a pinned or already-matching title
+    /// is left alone.
+    pub async fn adopt_session_title(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        title: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE task_records
+             SET title = ?, updated_at = datetime('now')
+             WHERE id = ? AND title_pinned = 0 AND title != ?",
+        )
+        .bind(title)
+        .bind(task_id)
+        .bind(title)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Batch-update sort_order for a list of task IDs.
@@ -940,6 +968,148 @@ mod tests {
             Some("<context>\n<file path=\"src/main.ts\" />\n</context>\nfix the bug".to_string()),
         );
         assert!(!task.prompt_matches_legacy());
+    }
+
+    async fn migrated_pool() -> Pool<Sqlite> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn inserted_task(pool: &Pool<Sqlite>, title: &str, prompt: Option<&str>) -> TaskRecord {
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let task = TaskRecord::new_with_prompt(project.id, title, None, prompt.map(str::to_string));
+        task.insert(pool).await.unwrap();
+        task
+    }
+
+    #[tokio::test]
+    async fn session_title_replaces_an_unpinned_title_once() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "fix the bug", Some("fix the bug")).await;
+        assert!(!task.title_pinned);
+
+        assert!(
+            TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+                .await
+                .unwrap(),
+            "re-adopting the same title is a no-op"
+        );
+        let stored = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(stored.title, "Login bug fix");
+        assert!(!stored.title_pinned, "adoption is not a person's choice");
+    }
+
+    #[tokio::test]
+    async fn a_task_inserted_pinned_keeps_its_title() {
+        let pool = migrated_pool().await;
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(&pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let mut task = TaskRecord::new_with_prompt(project.id, "source (2)", None, None);
+        task.title_pinned = true;
+        task.insert(&pool).await.unwrap();
+
+        assert!(
+            !TaskRecord::adopt_session_title(&pool, task.id, "Inherited from source")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            TaskRecord::get(&pool, task.id).await.unwrap().title,
+            "source (2)"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_pins_the_title_against_session_titles() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "fix the bug", Some("fix the bug")).await;
+
+        TaskRecord::update_title(&pool, task.id, "My name".to_string(), None)
+            .await
+            .unwrap();
+        assert!(
+            !TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+                .await
+                .unwrap()
+        );
+        let stored = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(stored.title, "My name");
+        assert!(stored.title_pinned);
+    }
+
+    #[tokio::test]
+    async fn title_pinned_backfill_pins_only_titles_a_person_typed() {
+        const PINNED_MIGRATION: i64 = 20260917000001;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < PINNED_MIGRATION)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(&pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let rows = [
+            (
+                "inferred",
+                "fix the bug",
+                Some("<context/>\nfix the bug\nmore"),
+            ),
+            ("renamed", "Auth work", Some("fix the bug")),
+            ("explicit", "Task 1234", None),
+            ("fallback", "Session 2026-09-17 10:00", Some("<context/>")),
+        ];
+        for (_, title, prompt) in rows {
+            sqlx::query(
+                "INSERT INTO task_records (id, project_id, title, prompt, status, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))",
+            )
+            .bind(Uuid::new_v4())
+            .bind(project.id)
+            .bind(title)
+            .bind(prompt)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let pinned: Vec<(String, bool)> =
+            sqlx::query_as("SELECT title, title_pinned FROM task_records ORDER BY title")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            pinned,
+            vec![
+                ("Auth work".to_string(), true),
+                ("Session 2026-09-17 10:00".to_string(), false),
+                ("Task 1234".to_string(), true),
+                ("fix the bug".to_string(), false),
+            ]
+        );
     }
 
     #[test]

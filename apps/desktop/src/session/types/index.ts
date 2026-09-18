@@ -27,6 +27,9 @@ export type StoredTask = {
   /** One-line outcome of the latest completed run, derived from the final
    * assistant message. Undefined until a run completes. */
   last_summary?: string | null;
+  /** True once a person renamed the task. An unpinned title is replaced by
+   * the agent's own session title when a run completes. */
+  title_pinned?: boolean;
   /** Title of the session this one was forked from, snapshotted at fork time.
    * Shown as provenance in the session list. Undefined for sessions that were
    * not forked. */

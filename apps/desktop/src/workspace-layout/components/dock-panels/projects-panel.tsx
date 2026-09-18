@@ -134,11 +134,43 @@ const SORT_OPTIONS: readonly {
 const isSortMode = (value: unknown): value is SortMode =>
   value === "name-asc" || value === "name-desc" || value === "recent";
 
+/** The three fixed top-level bands, each independently collapsible. */
+export type SectionId = "pinned" | "projects" | "chats";
+
+const SECTION_IDS: readonly SectionId[] = ["pinned", "projects", "chats"];
+
+const COLLAPSED_SECTIONS_STORAGE_KEY =
+  "workspace-layout:projects-collapsed-sections:v1";
+
+/** Stable empty fallback: `usePersistedChoice` keeps it in a hook dependency. */
+const NO_COLLAPSED_SECTIONS: readonly SectionId[] = [];
+
+/**
+ * Guards the persisted collapse list. Unknown entries (a band renamed or
+ * dropped by a later version) invalidate the whole value, which falls back to
+ * "everything expanded" rather than silently keeping a band folded away.
+ */
+export const isSectionIdList = (
+  value: unknown,
+): value is readonly SectionId[] =>
+  Array.isArray(value) &&
+  value.every((entry) => SECTION_IDS.includes(entry as SectionId));
+
+/** Adds or removes `id`, returning a new list (never mutating the input). */
+export function toggleSectionId(
+  collapsed: readonly SectionId[],
+  id: SectionId,
+): SectionId[] {
+  return collapsed.includes(id)
+    ? collapsed.filter((entry) => entry !== id)
+    : [...collapsed, id];
+}
+
 function usePersistedChoice<T>(
   storageKey: string,
   fallback: T,
   guard: (value: unknown) => value is T,
-): [T, (next: T) => void] {
+): [T, (next: T | ((prev: T) => T)) => void] {
   const read = useCallback((): T => {
     const value = getUiValue<unknown>(storageKey);
     return guard(value) ? value : fallback;
@@ -146,14 +178,31 @@ function usePersistedChoice<T>(
 
   const [choice, setChoice] = useState<T>(read);
   const [userChose, setUserChose] = useState(false);
+  // The committed value, readable synchronously. An updater passed to `set`
+  // resolves against this rather than against a rendered closure, so two
+  // updates in one tick (two section headers toggled before React re-renders)
+  // compose instead of the second overwriting the first.
+  const latest = useRef(choice);
 
-  const set = useCallback(
-    (next: T) => {
+  const commit = useCallback(
+    (value: T) => {
+      latest.current = value;
       setUserChose(true);
-      setChoice(next);
-      setUiValue(storageKey, next);
+      setChoice(value);
+      setUiValue(storageKey, value);
     },
     [storageKey],
+  );
+
+  const set = useCallback(
+    (next: T | ((prev: T) => T)) => {
+      commit(
+        typeof next === "function"
+          ? (next as (prev: T) => T)(latest.current)
+          : next,
+      );
+    },
+    [commit],
   );
 
   // Hydrate from persisted UI state once it is ready, unless the user already
@@ -161,7 +210,11 @@ function usePersistedChoice<T>(
   useEffect(() => {
     const hydrate = () => {
       if (!isUiStateReady()) return false;
-      if (!userChose) setChoice(read());
+      if (!userChose) {
+        const value = read();
+        latest.current = value;
+        setChoice(value);
+      }
       return true;
     };
     if (hydrate()) return;
@@ -200,6 +253,11 @@ function sortTasks(tasks: StoredTask[], mode: SortMode): StoredTask[] {
  *
  * A single cross-project stream feeds all three; membership is decided by the
  * owning project (scratch -> Chats, otherwise -> Projects) and by the pin set.
+ *
+ * Each of the three bands collapses from its own heading, and that choice is
+ * persisted: a user who works out of Pinned can fold Projects and Chats away
+ * for good. A collapsed band, like a collapsed project, is left alone by the
+ * active-session reveal effects, so nothing re-expands behind the user's back.
  */
 export function ProjectsDockPanel() {
   const { t } = useLanguage();
@@ -212,6 +270,19 @@ export function ProjectsDockPanel() {
   );
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
     () => new Set(),
+  );
+  // Top-level band collapse survives restarts (unlike per-project collapse,
+  // which is session-scoped): it is a layout preference, not a browsing state.
+  const [collapsedSections, setCollapsedSections] = usePersistedChoice(
+    COLLAPSED_SECTIONS_STORAGE_KEY,
+    NO_COLLAPSED_SECTIONS,
+    isSectionIdList,
+  );
+  const toggleSection = useCallback(
+    (id: SectionId) => {
+      setCollapsedSections((prev) => toggleSectionId(prev, id));
+    },
+    [setCollapsedSections],
   );
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // The session-search palette is mounted globally (see SessionSearchPalette);
@@ -603,8 +674,16 @@ export function ProjectsDockPanel() {
               <>
                 {pinnedTasks.length > 0 ? (
                   <div className="mb-1">
-                    <SectionLabel>{t("pinnedSection")}</SectionLabel>
-                    <div className="flex flex-col gap-0.5">
+                    <SectionHeader
+                      label={t("pinnedSection")}
+                      count={pinnedTasks.length}
+                      collapsed={collapsedSections.includes("pinned")}
+                      onToggle={() => toggleSection("pinned")}
+                    />
+                    <SectionBody
+                      collapsed={collapsedSections.includes("pinned")}
+                      className="flex flex-col gap-0.5"
+                    >
                       {pinnedTasks.map((task) => (
                         <SessionRowContainer
                           key={task.id}
@@ -629,57 +708,74 @@ export function ProjectsDockPanel() {
                           t={t}
                         />
                       ))}
-                    </div>
+                    </SectionBody>
                   </div>
                 ) : null}
 
                 <div className="mb-1">
-                  <SectionLabel>{t("projects")}</SectionLabel>
-                  {projectGroups.length === 0 ? (
-                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-                      {t("noProjectsYet")}
-                    </div>
-                  ) : (
-                    projectGroups.map((group) => (
-                      <SessionGroupSection
-                        key={group.key}
-                        group={group}
-                        collapsed={collapsed.has(group.key)}
-                        onToggle={() => toggleCollapsed(group.key)}
-                        project={
-                          group.projectId
-                            ? openProjectsById[group.projectId] ?? null
-                            : null
-                        }
-                        projectRecord={
-                          group.projectId
-                            ? projectsById[group.projectId] ?? null
-                            : null
-                        }
-                        onSetBadgeColor={setProjectBadgeColor}
-                        archived={
-                          group.projectId
-                            ? archivedByProject[group.projectId] ??
-                              EMPTY_ARCHIVED
-                            : EMPTY_ARCHIVED
-                        }
-                        isPinned={isPinned}
-                        onTogglePin={togglePin}
-                        t={t}
-                      />
-                    ))
-                  )}
+                  <SectionHeader
+                    label={t("projects")}
+                    count={projectGroups.length}
+                    collapsed={collapsedSections.includes("projects")}
+                    onToggle={() => toggleSection("projects")}
+                  />
+                  <SectionBody
+                    collapsed={collapsedSections.includes("projects")}
+                  >
+                    {projectGroups.length === 0 ? (
+                      <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                        {t("noProjectsYet")}
+                      </div>
+                    ) : (
+                      projectGroups.map((group) => (
+                        <SessionGroupSection
+                          key={group.key}
+                          group={group}
+                          collapsed={collapsed.has(group.key)}
+                          onToggle={() => toggleCollapsed(group.key)}
+                          project={
+                            group.projectId
+                              ? openProjectsById[group.projectId] ?? null
+                              : null
+                          }
+                          projectRecord={
+                            group.projectId
+                              ? projectsById[group.projectId] ?? null
+                              : null
+                          }
+                          onSetBadgeColor={setProjectBadgeColor}
+                          archived={
+                            group.projectId
+                              ? archivedByProject[group.projectId] ??
+                                EMPTY_ARCHIVED
+                              : EMPTY_ARCHIVED
+                          }
+                          isPinned={isPinned}
+                          onTogglePin={togglePin}
+                          t={t}
+                        />
+                      ))
+                    )}
+                  </SectionBody>
                 </div>
 
                 <div className="mb-1">
-                  <SectionLabel>{t("chatsSection")}</SectionLabel>
-                  {chatTasks.length === 0 ? (
-                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-                      {t("noChats")}
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-0.5">
-                      {chatTasks.map((task) => (
+                  <SectionHeader
+                    label={t("chatsSection")}
+                    count={chatTasks.length}
+                    collapsed={collapsedSections.includes("chats")}
+                    onToggle={() => toggleSection("chats")}
+                  />
+                  <SectionBody
+                    collapsed={collapsedSections.includes("chats")}
+                    className="flex flex-col gap-0.5"
+                  >
+                    {chatTasks.length === 0 ? (
+                      <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                        {t("noChats")}
+                      </div>
+                    ) : (
+                      chatTasks.map((task) => (
                         <SessionRowContainer
                           key={task.id}
                           task={task}
@@ -702,9 +798,9 @@ export function ProjectsDockPanel() {
                           }
                           t={t}
                         />
-                      ))}
-                    </div>
-                  )}
+                      ))
+                    )}
+                  </SectionBody>
                 </div>
               </>
             )}
@@ -783,12 +879,72 @@ function ChoiceDropdown<T extends string>({
   );
 }
 
-/** Muted top-level section heading (Pinned / Projects / Chats). */
-function SectionLabel({ children }: { children: ReactNode }) {
+/**
+ * Muted top-level section heading (Pinned / Projects / Chats), doubling as the
+ * band's collapse control. Deliberately a different typographic register from
+ * the project rows beneath it (small uppercase caption versus sentence-case
+ * body text), so the two chevron columns read as a header band and its tree,
+ * not as two sibling tree levels.
+ */
+function SectionHeader({
+  label,
+  count,
+  collapsed,
+  onToggle,
+}: {
+  label: string;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <div className="select-none px-2.5 pt-3 pb-1 text-xs font-medium text-custom-sidebar-text-400">
-      {children}
-    </div>
+    <button
+      type="button"
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+      className="group/section mt-2 flex h-6 w-full select-none items-center gap-1 rounded-md px-1.5 text-left transition-colors hover:bg-foreground/5"
+    >
+      <ChevronRight
+        aria-hidden
+        className={cn(
+          "h-3 w-3 shrink-0 text-custom-sidebar-text-400 transition-transform",
+          !collapsed && "rotate-90",
+        )}
+      />
+      <span className="min-w-0 flex-1 truncate text-[11px] font-medium uppercase tracking-wide text-custom-sidebar-text-400">
+        {label}
+      </span>
+      {count > 0 ? (
+        // The count answers "what am I hiding?" while collapsed, and stays out
+        // of the way otherwise.
+        <span
+          className={cn(
+            "shrink-0 text-[11px] tabular-nums text-custom-sidebar-text-400 transition-opacity",
+            collapsed
+              ? "opacity-100"
+              : "opacity-0 group-hover/section:opacity-100",
+          )}
+        >
+          {count}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+/** Collapsible body of a top-level section, sharing the tree reveal motion. */
+function SectionBody({
+  collapsed,
+  className,
+  children,
+}: {
+  collapsed: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  if (collapsed) return null;
+  return (
+    <div className={cn("tree-group-reveal mt-0.5", className)}>{children}</div>
   );
 }
 

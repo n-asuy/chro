@@ -77,6 +77,21 @@ impl TaskSession {
         Ok(())
     }
 
+    /// The agent-side session id of the session that executed a run, once the
+    /// executor has reported one.
+    pub async fn external_session_id_by_run_id(
+        pool: &Pool<Sqlite>,
+        task_run_id: Uuid,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let session_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT external_session_id FROM task_sessions WHERE task_run_id = ? ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(task_run_id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(session_id.flatten())
+    }
+
     /// Return the most recent run id mapped to an external session, if any.
     pub async fn latest_run_id_by_external_session(
         pool: &Pool<Sqlite>,

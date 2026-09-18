@@ -1,4 +1,5 @@
 apps/browser-extension/
+apps/lp/
 docs/
 .agents/
 .claude/

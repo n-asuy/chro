@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { redistCrtImports } from "./pe-imports";
+import { macArchSuffix, releaseAssetName } from "./release-asset-name";
 
 // Tauri replacement for the old electron-builder-driven deployer, running
 // `tauri build` and staging chro-server as a Tauri sidecar.
@@ -817,7 +818,7 @@ function createUnsignedMacDmg(
   const stageDir = path.join(dmgDir, "unsigned-stage");
   const dmgPath = path.join(
     dmgDir,
-    `${packageInfo.productName}_${packageInfo.version}_${macDmgArchSuffix(
+    `${packageInfo.productName}_${packageInfo.version}_${macArchSuffix(
       context.triple,
     )}.dmg`,
   );
@@ -851,16 +852,6 @@ function createUnsignedMacDmg(
   } finally {
     rmSync(stageDir, { recursive: true, force: true });
   }
-}
-
-function macDmgArchSuffix(triple: string): string {
-  if (triple === "aarch64-apple-darwin") {
-    return "aarch64";
-  }
-  if (triple === "x86_64-apple-darwin") {
-    return "x64";
-  }
-  return triple;
 }
 
 function collectBundleArtifacts(context: TauriBuildContext): string[] {
@@ -919,7 +910,10 @@ function packageDesktop(
     }
     for (const artifact of artifacts) {
       const base = path.basename(artifact);
-      const target = path.join(releaseDir, archScopedName(ctx, base));
+      const target = path.join(
+        releaseDir,
+        releaseAssetName(base, packageInfo.version, ctx.triple),
+      );
       copyOrMoveArtifact(artifact, target);
     }
   }
@@ -933,19 +927,6 @@ function copyOrMoveArtifact(source: string, target: string) {
     rmSync(target, { force: true });
   }
   copyFileSync(source, target);
-}
-
-function archScopedName(ctx: TauriBuildContext, base: string): string {
-  // Tauri names the macOS updater bundle "<Product>.app.tar.gz" with no arch,
-  // so the arm64 and x64 runners produce the same filename and clobber each
-  // other on the shared release. Give each arch a distinct name so both
-  // survive and the manifest can reference them by URL.
-  const macUpdater = base.match(/^(.*)\.app\.tar\.gz(\.sig)?$/i);
-  if (macUpdater && ctx.triple.includes("apple-darwin")) {
-    const suffix = macDmgArchSuffix(ctx.triple);
-    return `${macUpdater[1]}_${suffix}.app.tar.gz${macUpdater[2] ?? ""}`;
-  }
-  return base;
 }
 
 function packageProject(

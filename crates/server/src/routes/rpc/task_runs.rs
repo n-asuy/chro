@@ -4,7 +4,7 @@ use std::{path::PathBuf, time::Instant};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
     http::{HeaderMap, StatusCode},
@@ -972,31 +972,44 @@ async fn handle_task_run_diff_ws(
 ) {
     let (mut sender, mut ws_receiver) = socket.split();
 
-    tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
+    // Nothing is expected inbound; drain so the client's close frame is read.
+    let drain = tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
 
-    let stream_result = state.runtime().stream_diff(task_run_id, stats_only).await;
-    let mut stream = match stream_result {
-        Ok(s) => s,
+    match state.runtime().stream_diff(task_run_id, stats_only).await {
+        Ok(mut stream) => {
+            while let Some(result) = stream.next().await {
+                let msg = match result {
+                    Ok(entry) => entry.to_ws_message_unchecked(),
+                    Err(err) => {
+                        let error_json = serde_json::json!({"error": err.to_string()}).to_string();
+                        Message::Text(error_json.into())
+                    }
+                };
+                if sender.send(msg).await.is_err() {
+                    drain.abort();
+                    return;
+                }
+            }
+        }
         Err(err) => {
             tracing::warn!(%task_run_id, error = %err, "[handle_task_run_diff_ws] failed to create diff stream");
             let error_json = serde_json::json!({"error": err.to_string()}).to_string();
             let _ = sender.send(Message::Text(error_json.into())).await;
-            return;
-        }
-    };
-
-    while let Some(result) = stream.next().await {
-        let msg = match result {
-            Ok(entry) => entry.to_ws_message_unchecked(),
-            Err(err) => {
-                let error_json = serde_json::json!({"error": err.to_string()}).to_string();
-                Message::Text(error_json.into())
-            }
-        };
-        if sender.send(msg).await.is_err() {
-            break;
         }
     }
+
+    // The stream is over: it finished (merged run) or could not be created at
+    // all (e.g. the worktree is gone). Close with a normal-closure frame so the
+    // client treats the outcome as terminal instead of reconnecting into it.
+    // Returning without this left the socket half-open behind the drain task,
+    // and the client waited on it forever.
+    let _ = sender
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::NORMAL,
+            reason: "diff stream ended".into(),
+        })))
+        .await;
+    drain.abort();
 }
 
 async fn mark_worktree_deleted(

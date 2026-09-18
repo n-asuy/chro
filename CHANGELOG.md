@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.52
+
+- Changed the installer file names to drop the version: `Chro_aarch64.dmg`, `Chro_x64.dmg` and `Chro_x64-setup.exe` from this release on. A GitHub "latest" download link only works for a fixed file name, so the versioned names meant the website could send people no closer than the release page. Its download buttons now fetch the installer directly, and the same links can be pasted anywhere without going stale
+- Added taking a task's title from the agent: once a Claude Code run completes, the task adopts the title the CLI gave the session (it names sessions after their first exchange and revises the name as the conversation grows), so the sidebar stops reading as a list of prompt first lines. A title typed by hand is kept, before or after, and forked tasks keep the "source (n)" title that records where they came from
+- Fixed opening an older session leaving the Changes panel loading, or reconnecting, forever when the run had no changes. The diff stream sent nothing at all for an empty diff, which the panel could not tell apart from a stalled connection; it now always announces the initial set, closes cleanly when the run is merged or its worktree is gone, and the panel shows a spinner, "No changes" or the actual error instead of the same empty state for all three
+- Added collapsing the Pinned, Projects and Chats bands of the left panel from their headings. The choice survives restarts, the collapsed count shows what is folded away, and a collapsed band is left alone when a session becomes active, so nothing re-expands behind your back
+- Added the browser extension bridge to Claude Code runs: with the Claude in Chrome extension installed, an agent can drive that browser (open pages, read them, click, fill forms) from inside a chro task. Without the extension the run proceeds exactly as before
+
 ## 0.1.51
 
 - Fixed Codex sessions failing to start against a current Codex CLI, with the run ending on a request error before the agent had said anything. Chro built its `thread/start`, `thread/fork` and `turn/start` requests from a pinned copy of the Codex protocol, which wrote out every field that copy knew about, including the ones chro never sets, as explicit nulls; a CLI that has since retired one of those fields rejects the request for carrying the key at all. Chro now spells out the fields it actually chooses and sends nothing else, and a reasoning level it has not heard of (`max` and `ultra` arrived with GPT-6) is kept as the server reported it instead of failing the response that carries the new session's id

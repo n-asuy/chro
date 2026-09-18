@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '**'
+      - '!apps/lp/**'
   workflow_dispatch:
 jobs:
   check:

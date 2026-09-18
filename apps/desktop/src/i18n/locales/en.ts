@@ -161,6 +161,7 @@ const en = {
   queueSendNowAria: "Send now",
   queueRemoveAria: "Remove",
   diffViewerEmpty: "No file changes yet.",
+  diffViewerLoading: "Loading changes…",
   closeDiffViewer: "Close Diff",
   diffMergeErrorMessage: "Failed to merge changes.",
   gitPushRejectedDescription: "Remote has new changes. Pull before pushing.",

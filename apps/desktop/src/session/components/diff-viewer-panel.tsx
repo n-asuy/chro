@@ -18,6 +18,7 @@ import {
   ChevronUp,
   FileText,
   Image as ImageIcon,
+  Loader2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -38,6 +39,10 @@ type DiffViewerPanelProps = {
   onClose: () => void;
   diffs: { path: string; diff: DiffContent }[];
   taskRunId?: string | null;
+  /** The initial snapshot has not arrived yet; distinct from "no changes". */
+  isLoading?: boolean;
+  /** Terminal source error (e.g. the run's worktree is gone). */
+  error?: string | null;
 };
 
 const LANGUAGE_MAP: Record<string, string> = {
@@ -260,6 +265,8 @@ export function DiffViewerPanel({
   onClose,
   diffs,
   taskRunId,
+  isLoading = false,
+  error = null,
 }: DiffViewerPanelProps) {
   const { t } = useLanguage();
   // Diff bodies are opt-in. Mounting every body on the first frame caused the
@@ -481,7 +488,16 @@ export function DiffViewerPanel({
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {keyedItems.length === 0 ? (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground h-full">
-              {t("diffViewerEmpty")}
+              {error ? (
+                <span>{error}</span>
+              ) : isLoading ? (
+                <Loader2
+                  className="h-5 w-5 animate-spin"
+                  aria-label={t("diffViewerLoading")}
+                />
+              ) : (
+                t("diffViewerEmpty")
+              )}
             </div>
           ) : (
             <div

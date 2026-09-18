@@ -160,6 +160,7 @@ const ja = {
   queueSendNowAria: "今すぐ送信",
   queueRemoveAria: "キューから削除",
   diffViewerEmpty: "変更されたファイルはまだありません。",
+  diffViewerLoading: "変更を読み込み中…",
   closeDiffViewer: "Diffを閉じる",
   diffMergeErrorMessage: "マージに失敗しました。",
   gitPushRejectedDescription:

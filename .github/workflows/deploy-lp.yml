@@ -1,0 +1,66 @@
+name: Deploy LP
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/lp/**'
+      - '.github/workflows/deploy-lp.yml'
+  pull_request:
+    paths:
+      - 'apps/lp/**'
+      - '.github/workflows/deploy-lp.yml'
+  workflow_dispatch:
+
+# One deploy at a time: Cloudflare Pages serves whichever upload finishes last,
+# so overlapping runs can publish an older build.
+concurrency:
+  group: deploy-lp
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: apps/lp
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # apps/lp is deliberately outside the root workspace and resolves its own
+      # dependency closure, so it installs from its own lockfile.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      # Pull requests stop here: the build is the check. Only main publishes.
+      - name: Verify deploy credentials
+        if: github.event_name != 'pull_request'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "Missing required repository secrets:$missing" >&2
+            exit 1
+          fi
+
+      # The Pages project name and output directory come from wrangler.toml so
+      # that a local `wrangler pages deploy` and this job cannot disagree.
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name != 'pull_request'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler pages deploy --branch=main

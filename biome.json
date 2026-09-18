@@ -9,6 +9,7 @@
       ".next",
       "ref",
       ".claude",
+      "apps/lp",
       "apps/*/convex/_generated",
       "apps/*/convex/_generated/**",
       "**/*.generated.ts",

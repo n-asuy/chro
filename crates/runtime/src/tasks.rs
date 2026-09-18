@@ -406,7 +406,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let mode = self.resolve_fork_mode(&anchor_run).await;
         let title = fork_title(&source_task.title);
-        let task = TaskRecord::new_with_prompt(source_task.project_id, title, None, None);
+        let mut task = TaskRecord::new_with_prompt(source_task.project_id, title, None, None);
+        // A fork's title is provenance ("source (n)"), and the agent titles
+        // the forked conversation after its inherited first message, so the
+        // session title it produces is the source's, not the fork's. Keep the
+        // provenance title instead of adopting it.
+        task.title_pinned = true;
         task.insert(self.pool()).await?;
 
         // "Same" keeps working in the source's live worktree only while it

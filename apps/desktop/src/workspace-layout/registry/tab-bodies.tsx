@@ -125,7 +125,7 @@ function DiffTabContent({
   tabId: string;
 }) {
   const closeTab = useLayoutStore((s) => s.closeTab);
-  const { diffs } = useDiffStream({ taskRunId: runId });
+  const { diffs, error, isLoading } = useDiffStream({ taskRunId: runId });
 
   const diffEntries = useMemo(
     () => Object.entries(diffs).map(([path, diff]) => ({ path, diff })),
@@ -138,6 +138,8 @@ function DiffTabContent({
         onClose={() => closeTab(tabId)}
         diffs={diffEntries}
         taskRunId={runId}
+        isLoading={isLoading}
+        error={error}
       />
     </div>
   );
@@ -156,11 +158,16 @@ function ProjectDiffTabContent({
   tabId: string;
 }) {
   const closeTab = useLayoutStore((s) => s.closeTab);
-  const { diffs } = useWorkingDiffs({ projectId });
+  const { diffs, error, isLoading } = useWorkingDiffs({ projectId });
 
   return (
     <div className="h-full w-full">
-      <DiffViewerPanel onClose={() => closeTab(tabId)} diffs={diffs} />
+      <DiffViewerPanel
+        onClose={() => closeTab(tabId)}
+        diffs={diffs}
+        isLoading={isLoading}
+        error={error}
+      />
     </div>
   );
 }

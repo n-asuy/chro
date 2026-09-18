@@ -57,6 +57,9 @@ tailwind.css
 .dev.vars
 .wrangler
 
+# Astro generated types
+apps/lp/.astro/
+
 # Trigger
 .trigger
 

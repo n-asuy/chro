@@ -102,7 +102,7 @@ export function subscribeRepoEvents(
   };
 
   const onMessage = (message: LogEntryMessage) => {
-    if (message.type !== "repo_event") return;
+    if (!("type" in message) || message.type !== "repo_event") return;
     const payload = parsePayload(message.payload);
     if (payload && repoEventMatches(payload, getConfig())) schedule();
   };

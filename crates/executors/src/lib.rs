@@ -15,8 +15,8 @@ pub mod stdout_dup;
 
 pub use executors::{
     AppendPrompt, AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, CodingAgent,
-    CodingAgentKind, ExecutorError, ExecutorExitResult, ExecutorExitSignal, SpawnedChild,
-    StandardCodingAgentExecutor,
+    CodingAgentKind, ExecutorError, ExecutorExitResult, ExecutorExitSignal, SessionTitle,
+    SessionTitleSource, SpawnedChild, StandardCodingAgentExecutor,
 };
 
 pub use command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides};

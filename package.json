@@ -2,7 +2,7 @@
   "name": "chro",
   "private": true,
   "license": "Apache-2.0",
-  "workspaces": ["packages/*", "apps/*", "tooling/*"],
+  "workspaces": ["packages/*", "apps/api", "apps/cli", "apps/desktop", "tooling/*"],
   "scripts": {
     "build": "turbo build",
     "clean": "git clean -xdf node_modules",
