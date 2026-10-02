@@ -6,6 +6,14 @@ import { useCallback } from "react";
 import { resolveProjectLandingPath } from "../lib/project-landing";
 import { useLayoutStore } from "../state/layout-store";
 import type { OpenProjectTab } from "../state/open-projects-store";
+import type { TabKind } from "../types";
+
+declare module "@tanstack/react-router" {
+  interface HistoryState {
+    /** Tab payload carried across an asynchronous project switch. */
+    projectTab?: { projectId: string; kind: TabKind };
+  }
+}
 
 export interface ProjectNavigation {
   /**
@@ -19,8 +27,14 @@ export interface ProjectNavigation {
     task: StoredTask,
     runId?: string,
   ) => void;
-  /** Start a fresh chat in a project. */
-  newSession: (project: OpenProjectTab) => void;
+  /**
+   * Start a fresh chat in a project. `homeDir` addresses the session to a
+   * directory of the project (repo-relative, `""` for the root) before its
+   * first prompt creates the task.
+   */
+  newSession: (project: OpenProjectTab, homeDir?: string) => void;
+  /** Open a repo-relative file in its owning project's checkout. */
+  openProjectFile: (project: OpenProjectTab, path: string) => void;
 }
 
 /**
@@ -68,16 +82,49 @@ export function useProjectNavigation(): ProjectNavigation {
   );
 
   const newSession = useCallback(
-    (project: OpenProjectTab) => {
+    (project: OpenProjectTab, homeDir?: string) => {
       const projectId = project.slug ?? project.id;
       const boundProjectId = useLayoutStore.getState().projectId;
       if (boundProjectId === project.id) {
-        openTab({ type: "session" }, { activate: true });
+        openTab(
+          homeDir === undefined
+            ? { type: "session" }
+            : { type: "session", homeDir },
+          { activate: true },
+        );
+        return;
       }
-      navigate({ to: "/projects/$projectId/session", params: { projectId } });
+      navigate({
+        to: "/projects/$projectId/session",
+        params: { projectId },
+        state: {
+          projectTab: {
+            projectId: project.id,
+            kind: { type: "session", homeDir },
+          },
+        },
+      });
     },
     [navigate, openTab],
   );
 
-  return { activateProject, openSession, newSession };
+  const openProjectFile = useCallback(
+    (project: OpenProjectTab, path: string) => {
+      // Keep the repository-relative spelling even before the Files tree has
+      // loaded this node: both reads and writes then resolve inside the repo.
+      const kind: TabKind = { type: "file", path };
+      if (useLayoutStore.getState().projectId === project.id) {
+        openTab(kind, { activate: true, returnFocusOnClose: true });
+        return;
+      }
+      navigate({
+        to: "/projects/$projectId/files",
+        params: { projectId: project.slug ?? project.id },
+        state: { projectTab: { projectId: project.id, kind } },
+      });
+    },
+    [navigate, openTab],
+  );
+
+  return { activateProject, openSession, newSession, openProjectFile };
 }

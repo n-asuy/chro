@@ -1,10 +1,16 @@
 import { cn } from "@/lib/cn";
 import { type ProviderUsage, fetchAgentUsage } from "@/lib/agent-usage-client";
 import {
+  CHRO_CLI_NPM_INSTALL_COMMAND,
+  cliInstallNeedsAttention,
+} from "@/lib/cli-install-client";
+import {
   type CliStatus,
   type CliStatusResponse,
   fetchCliStatus,
 } from "@/lib/cli-status-client";
+import { ChroCliInstallControl } from "@/settings/components/chro-cli-install-control";
+import { useCliInstall } from "@/settings/hooks/use-cli-install";
 import type { BaseCodingAgent } from "@/lib/executor-client";
 import { EXECUTOR_INSTALL_GUIDE_URLS } from "@/lib/executor-install";
 import {
@@ -33,13 +39,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-/**
- * chro's own CLI ships on npm as `@chro-ai/cli` (bin `chro`). Installing it
- * globally fetches the `latest` dist-tag — the update path for the version
- * drift this menu surfaces. (It installs into npm's global prefix; if a stale
- * `chro` sits earlier on PATH, that entry must be removed separately.)
- */
-const CHRO_CLI_INSTALL_COMMAND = "npm install -g @chro-ai/cli";
 /** Human-facing releases page (backend polls the same repo's latest tag). */
 const CHRO_RELEASES_URL = "https://github.com/n-asuy/chro/releases";
 
@@ -66,13 +65,15 @@ function agentMeta(name: string): { label: string; homepage: string | null } {
 
 /**
  * Title-bar CLI status menu (right of the traffic-light region, near Settings).
- * Surfaces the resolved path + reported version of each agent CLI and of chro's
- * own CLI, plus the latest published chro release. The chro-CLI-vs-latest drift
- * warning is the point: a stale binary shadowing the intended one on PATH
- * silently breaks CLI-resolved features, so it is made visible here.
+ * Surfaces the resolved path + reported version of each agent CLI, the latest
+ * published chro release, and whether chro's own shell command is registered.
+ * The command is a link to this app's bundled CLI, so "registered" already
+ * implies "same version as the app"; the badge flags a missing, stale, or
+ * unreachable registration and a server behind the latest release.
  */
 export function CliStatusMenu() {
   const [status, setStatus] = useState<CliStatusResponse | null>(null);
+  const cli = useCliInstall();
   const [usageByProvider, setUsageByProvider] = useState<
     Record<string, ProviderUsage>
   >({});
@@ -112,7 +113,9 @@ export function CliStatusMenu() {
     }
   }, [open, status, loading, load, loadUsage]);
 
-  const driftWarning = status?.update_available ?? false;
+  const driftWarning =
+    (status?.update_available ?? false) ||
+    (cli.status !== null && cliInstallNeedsAttention(cli.status));
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -172,7 +175,7 @@ export function CliStatusMenu() {
           </div>
         ) : (
           <>
-            <ChroRow status={status} />
+            <ChroRow status={status} cli={cli} />
             <DropdownMenuSeparator />
             {status.agents.map((agent) => {
               const meta = agentMeta(agent.name);
@@ -193,11 +196,14 @@ export function CliStatusMenu() {
   );
 }
 
-function ChroRow({ status }: { status: CliStatusResponse }) {
-  const { chro_cli, server_version, latest_release, update_available } = status;
-  // Surface the install command whenever it is actionable: to update a drifted
-  // CLI, or to install one that is missing from PATH entirely.
-  const showInstall = update_available || !chro_cli.found;
+function ChroRow({
+  status,
+  cli,
+}: {
+  status: CliStatusResponse;
+  cli: ReturnType<typeof useCliInstall>;
+}) {
+  const { server_version, latest_release, update_available } = status;
   return (
     <div className="px-2 py-1.5">
       <div className="flex items-center gap-1.5">
@@ -212,23 +218,16 @@ function ChroRow({ status }: { status: CliStatusResponse }) {
           server {server_version}
         </span>
       </div>
-      <div className="mt-1 space-y-0.5 pl-5 text-[11px] text-muted-foreground">
-        <MetaLine
-          label="CLI"
-          value={
-            chro_cli.found
-              ? (chro_cli.version ?? chro_cli.path ?? "found")
-              : "not found on PATH"
-          }
-        />
-        {chro_cli.path ? <MetaLine label="path" value={chro_cli.path} /> : null}
+      <div className="mt-1 space-y-1 pl-5 text-[11px] text-muted-foreground">
         <MetaLine label="latest" value={latest_release ?? "unknown"} />
-        {!update_available && !chro_cli.found ? (
-          <p>Install the chro CLI to drive tasks from your terminal:</p>
-        ) : null}
-        {showInstall ? (
-          <CommandSnippet command={CHRO_CLI_INSTALL_COMMAND} />
-        ) : null}
+        {cli.available ? (
+          <ChroCliInstallControl cli={cli} compact />
+        ) : (
+          <>
+            <p>Install the chro CLI to drive tasks from your terminal:</p>
+            <CommandSnippet command={CHRO_CLI_NPM_INSTALL_COMMAND} />
+          </>
+        )}
       </div>
     </div>
   );

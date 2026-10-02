@@ -355,6 +355,12 @@ impl FileSearchCache {
         }
     }
 
+    /// Notify consumers after a rebuilt index is available. Subscribe before
+    /// reading the index, then compare its Arc to ignore other roots' builds.
+    pub fn subscribe_updates(&self) -> watch::Receiver<u64> {
+        self.built.subscribe()
+    }
+
     /// Search files by name/path in a repository.
     ///
     /// This is a pure name/path search: it never falls back to scanning file
@@ -1779,7 +1785,7 @@ mod tests {
         assert_eq!(served, Some("docs/note.md".to_string()));
 
         // And the rebuild lands.
-        let mut generation = cache.built.subscribe();
+        let mut generation = cache.subscribe_updates();
         generation.borrow_and_update();
         while cache.resolve(dir.path(), "other").await.is_none() {
             generation.changed().await.unwrap();

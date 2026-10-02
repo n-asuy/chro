@@ -25,6 +25,7 @@ function resetStore() {
     activePanel: "projects",
     width: DEFAULT_DOCK_WIDTH,
     collapsed: false,
+    mode: "inbox",
   });
 }
 
@@ -75,6 +76,43 @@ describe("useDockStore", () => {
       activePanel: "projects",
       width: 340,
       collapsed: false,
+      mode: "inbox",
     });
+  });
+
+  it("restores the left panel mode and defaults older payloads to inbox", () => {
+    persistenceMock.loadedDock = {
+      activePanel: "projects",
+      width: 300,
+      collapsed: false,
+      mode: "map",
+    };
+    useDockStore.getState().bindProject("project-a");
+    expect(useDockStore.getState().mode).toBe("map");
+
+    resetStore();
+    persistenceMock.loadedDock = {
+      activePanel: "projects",
+      width: 300,
+      collapsed: false,
+    };
+    useDockStore.getState().bindProject("project-a");
+    expect(useDockStore.getState().mode).toBe("inbox");
+  });
+
+  it("switching mode reopens a collapsed dock and persists the mode", () => {
+    useDockStore.getState().bindProject("project-a");
+    useDockStore.getState().setCollapsed(true);
+    persistenceMock.saveDock.mockClear();
+
+    useDockStore.getState().setMode("map");
+
+    const state = useDockStore.getState();
+    expect(state.mode).toBe("map");
+    expect(state.collapsed).toBe(false);
+    expect(state.activePanel).toBe("projects");
+    expect(persistenceMock.saveDock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "map", collapsed: false }),
+    );
   });
 });

@@ -7,6 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { getVersion } from "@/lib/desktop-bridge";
 import type { BaseCodingAgent } from "@/lib/executor-client";
+import { CHRO_CLI_NPM_INSTALL_COMMAND } from "@/lib/cli-install-client";
 import { setUiValue } from "@/lib/ui-state-client";
 import { Alert, AlertDescription, AlertTitle } from "@chro/ui/alert";
 import { Badge } from "@chro/ui/badge";
@@ -53,7 +54,9 @@ import {
 import { BetaFeaturesSection } from "./components/beta-features-section";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
+import { ChroCliInstallControl } from "./components/chro-cli-install-control";
 import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
+import { useCliInstall } from "./hooks/use-cli-install";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
 import { useMcpSettings } from "./hooks/use-mcp-settings";
 import { useMergeSettings } from "./hooks/use-merge-settings";
@@ -166,6 +169,7 @@ export function SettingsPanel({
     error: agentCliStatusesError,
     reload: reloadAgentCliStatuses,
   } = useAgentCliStatus(activeTab === "agents");
+  const chroCli = useCliInstall(activeTab === "agents");
   const {
     configPath,
     configContent,
@@ -1037,6 +1041,24 @@ export function SettingsPanel({
               );
             })
           : null}
+      </SettingsSection>
+
+      <SettingsSection
+        heading={t("chroCliTitle")}
+        description={t("chroCliDescription")}
+      >
+        <SettingsRow title={t("chroCliCommandLabel")}>
+          {chroCli.available ? (
+            <ChroCliInstallControl cli={chroCli} />
+          ) : (
+            <div className="space-y-1 font-workspace text-[12px] text-muted-foreground">
+              <p>{t("chroCliNpmHint")}</p>
+              <code className="block rounded border border-border/60 bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground/90">
+                {CHRO_CLI_NPM_INSTALL_COMMAND}
+              </code>
+            </div>
+          )}
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection heading={t("agentsPiCredentialsTitle")}>

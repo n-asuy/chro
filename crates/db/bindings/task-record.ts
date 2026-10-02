@@ -60,4 +60,11 @@ forked_from_title: string | null,
  * time. Same denormalization contract as `forked_from_title`, read from
  * the delegate edge.
  */
-delegated_from_title: string | null, };
+delegated_from_title: string | null, 
+/**
+ * Directory this task is addressed to, relative to the project root
+ * (`""` is the root). Set when the session is dispatched from a directory,
+ * otherwise derived after the first auto-commit as the lowest common
+ * ancestor of the paths it touched. `None` until either happens.
+ */
+home_dir: string | null, };

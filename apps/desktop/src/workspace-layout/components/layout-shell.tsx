@@ -2,7 +2,7 @@ import { useProjectContext } from "@/files/context/project-context";
 import { useFilesStore } from "@/files/state/files-store";
 import { ProjectTasksProvider } from "@/session/context/project-tasks-context";
 import { useSessionReadSync } from "@/session/hooks";
-import { useRouterState } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { inferKindFromLocation } from "../domain/route-tab-kind";
 import { useCloseTabShortcut } from "../hooks/use-close-tab-shortcut";
@@ -16,6 +16,7 @@ import { ensurePaneItemsRegistered } from "../registry";
 import { useDockStore } from "../state/dock-store";
 import { useLayoutStore } from "../state/layout-store";
 import { useRightDockStore } from "../state/right-dock-store";
+import { DirectoryAgentDockPanel } from "./dock-panels/directory-agent-panel";
 import { FileTreeDockPanel } from "./dock-panels/file-tree-panel";
 import { ProjectsDockPanel } from "./dock-panels/projects-panel";
 import { SearchDockPanel } from "./dock-panels/search-panel";
@@ -46,7 +47,8 @@ function LayoutShellInner() {
   const bindDock = useDockStore((s) => s.bindProject);
   const bindRightDock = useRightDockStore((s) => s.bindProject);
   const openTab = useLayoutStore((s) => s.openTab);
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const location = useRouterState({ select: (s) => s.location });
+  const navigate = useNavigate();
 
   useEffect(() => {
     ensurePaneItemsRegistered();
@@ -54,10 +56,26 @@ function LayoutShellInner() {
 
   useEffect(() => {
     if (!projectId) return;
-    bindLayout(projectId, { initialTab: inferKindFromLocation(pathname) });
+    const requested = location.state.projectTab;
+    bindLayout(projectId, {
+      freshSession: requested?.projectId === projectId,
+      initialTab:
+        requested?.projectId === projectId
+          ? requested.kind
+          : inferKindFromLocation(location.pathname),
+    });
     bindDock(projectId);
     bindRightDock(projectId);
-  }, [projectId, pathname, bindLayout, bindDock, bindRightDock]);
+    if (requested?.projectId === projectId) {
+      // This is a one-time request. Reload/back must restore the saved layout,
+      // not reopen the original file or create another blank session.
+      void navigate({
+        to: location.href,
+        replace: true,
+        state: (state) => ({ ...state, projectTab: undefined }),
+      });
+    }
+  }, [projectId, location, bindLayout, bindDock, bindRightDock, navigate]);
 
   // Bridge files-store.openFile → layout-store.openTab so file path clicks
   // (file tree, session view, agent output, etc.) open as a Tab in the
@@ -105,6 +123,7 @@ function LayoutShellInner() {
             filetree={FileTreeDockPanel}
             search={SearchDockPanel}
             sourceControl={SourceControlDockPanel}
+            agent={DirectoryAgentDockPanel}
           />
         </div>
       </PaneDndContext>

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { loadRightDock, saveRightDock } from "../lib/persistence";
 import {
   DEFAULT_DOCK_WIDTH,
+  type DirectoryAgentTarget,
   type DockState,
   MAX_DOCK_WIDTH,
   MIN_DOCK_WIDTH,
@@ -23,12 +24,19 @@ interface RightDockActions {
   setCollapsed: (collapsed: boolean) => void;
   toggleCollapsed: () => void;
   focusSearchPanel: () => void;
+  /** Open the agent panel on a directory of a project's main checkout. */
+  showDirectoryAgent: (target: DirectoryAgentTarget) => void;
 }
 
 interface RightDockStateExtra {
   projectId: string | null;
   hydrated: boolean;
   searchFocusToken: number;
+  /**
+   * Subject of the agent panel. Session-scoped, not persisted: a restored
+   * layout lands on the file tree until a directory is picked again.
+   */
+  agentTarget: DirectoryAgentTarget | null;
 }
 
 interface RightDockStateInternal {
@@ -66,6 +74,7 @@ const RIGHT_PANEL_KINDS: ReadonlySet<RightDockPanelKind> = new Set([
   "filetree",
   "search",
   "source-control",
+  "agent",
 ]);
 
 function isRightPanelKind(
@@ -78,6 +87,7 @@ export const useRightDockStore = create<RightDockStore>()((set, get) => ({
   projectId: null,
   hydrated: false,
   searchFocusToken: 0,
+  agentTarget: null,
   ...initialDock,
 
   bindProject: (projectId) => {
@@ -90,9 +100,15 @@ export const useRightDockStore = create<RightDockStore>()((set, get) => ({
     }
 
     const persisted = loadRightDock(projectId);
-    const restoredPanel = isRightPanelKind(persisted?.activePanel ?? null)
-      ? (persisted?.activePanel as RightDockPanelKind)
-      : initialDock.activePanel;
+    const persistedPanel = persisted?.activePanel ?? null;
+    // The agent panel's subject is not persisted, so restoring the panel
+    // alone would show an empty surface; land on the file tree instead.
+    const restoredPanel =
+      isRightPanelKind(persistedPanel) && persistedPanel !== "agent"
+        ? persistedPanel
+        : persistedPanel === "agent"
+          ? "filetree"
+          : initialDock.activePanel;
     const restoredWidth =
       persisted && Number.isFinite(persisted.width)
         ? clampWidth(persisted.width)
@@ -146,6 +162,11 @@ export const useRightDockStore = create<RightDockStore>()((set, get) => ({
       collapsed: false,
       searchFocusToken: prev.searchFocusToken + 1,
     }));
+    persist(get());
+  },
+
+  showDirectoryAgent: (target) => {
+    set({ agentTarget: target, activePanel: "agent", collapsed: false });
     persist(get());
   },
 }));

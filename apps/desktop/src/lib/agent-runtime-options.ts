@@ -50,7 +50,7 @@ const CODEX_EFFORT_LEVELS: ReasoningEffort[] = [
 
 // `value` is passed to the Claude Code CLI via `--model`. The short aliases
 // (`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current model
-// snapshot, so `label` carries the human-facing generation (Opus 5 /
+// snapshot, so `label` carries the human-facing generation (Opus 5.5 /
 // Sonnet 5 / Haiku 4.5) so the selector shows which model the alias points at.
 // Fable has no short alias, so it uses its pinned model id directly.
 const CLAUDE_MODELS: ModelOption[] = [
@@ -62,7 +62,7 @@ const CLAUDE_MODELS: ModelOption[] = [
   },
   {
     value: "opus",
-    label: "Opus 5",
+    label: "Opus 5.5",
     executor: "CLAUDE_CODE",
     description: "Highly capable model for complex agentic coding.",
     // Fast mode is Opus-only; other Claude models have no speed toggle.
@@ -82,51 +82,65 @@ const CLAUDE_MODELS: ModelOption[] = [
   },
 ];
 
-// Ordered as the Codex model catalog orders them (most capable first). Astra
-// is a GPT-6 generation model gated on Codex CLI 0.153.0; an older CLI fails
-// the turn with an explicit "requires a newer version of Codex" API error.
+// Ordered as the Codex model catalog orders them (`priority`). The model
+// catalog gates each model on a minimum Codex CLI version (GPT-6.1 Sol and
+// GPT-6 Astra need 0.153.0, GPT-6 Sol and GPT-6 Luna need 0.155.0); an older
+// CLI rejects the turn with a 400 API error, so the user runs `codex update`.
 const CODEX_MODELS: ModelOption[] = [
+  {
+    value: "gpt-6.1-sol",
+    label: "GPT-6.1 Sol",
+    executor: "CODEX",
+    description: "Latest workhorse model for coding and everyday work.",
+    effortLevels: CODEX_EFFORT_LEVELS,
+  },
   {
     value: "gpt-6-astra",
     label: "GPT-6 Astra",
     executor: "CODEX",
-    description: "Most capable model for complex, demanding work.",
+    description: "Frontier intelligence for the most demanding work.",
+    effortLevels: CODEX_EFFORT_LEVELS,
+  },
+  {
+    value: "gpt-6-sol",
+    label: "GPT-6 Sol",
+    executor: "CODEX",
+    description: "Previous generation workhorse model.",
+    effortLevels: CODEX_EFFORT_LEVELS,
+  },
+  {
+    value: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    executor: "CODEX",
+    description: "Fast and affordable model for easier tasks.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
     executor: "CODEX",
-    description: "Reliable agentic workhorse for everyday tasks.",
+    description: "Older generation workhorse model.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-terra",
     label: "GPT-5.6 Terra",
     executor: "CODEX",
-    description: "Balanced agentic coding model for everyday work.",
+    description: "Older balanced model for straightforward work.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     executor: "CODEX",
-    description: "Fast and affordable agentic coding model.",
+    description: "Older fast and efficient model.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.5",
     label: "GPT-5.5",
     executor: "CODEX",
-    description:
-      "Proven previous-generation model for coding and general work.",
-    effortLevels: CODEX_EFFORT_LEVELS,
-  },
-  {
-    value: "gpt-5.3-codex-spark",
-    label: "GPT-5.3-Codex-Spark",
-    executor: "CODEX",
-    description: "Ultra-fast coding model.",
+    description: "Legacy coding model.",
     effortLevels: CODEX_EFFORT_LEVELS,
   },
 ];

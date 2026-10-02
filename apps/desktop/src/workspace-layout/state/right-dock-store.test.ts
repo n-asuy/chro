@@ -25,6 +25,7 @@ function resetStore() {
     projectId: null,
     hydrated: false,
     searchFocusToken: 0,
+    agentTarget: null,
     activePanel: null,
     width: DEFAULT_DOCK_WIDTH,
     collapsed: true,
@@ -83,5 +84,31 @@ describe("useRightDockStore", () => {
       width: 340,
       collapsed: false,
     });
+  });
+
+  it("showDirectoryAgent opens the agent panel on the target", () => {
+    useRightDockStore.getState().bindProject("project-a");
+    useRightDockStore
+      .getState()
+      .showDirectoryAgent({ projectId: "project-a", path: "apps/desktop" });
+
+    const state = useRightDockStore.getState();
+    expect(state.activePanel).toBe("agent");
+    expect(state.collapsed).toBe(false);
+    expect(state.agentTarget).toEqual({
+      projectId: "project-a",
+      path: "apps/desktop",
+    });
+  });
+
+  it("restores a persisted agent panel as the file tree, since its subject is not persisted", () => {
+    persistenceMock.loadedDock = {
+      activePanel: "agent",
+      width: 320,
+      collapsed: false,
+    };
+    useRightDockStore.getState().bindProject("project-a");
+    expect(useRightDockStore.getState().activePanel).toBe("filetree");
+    expect(useRightDockStore.getState().agentTarget).toBeNull();
   });
 });

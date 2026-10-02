@@ -41,4 +41,8 @@ export type StoredTask = {
    * session turns read-only: its workspace path is gone, so it can no longer be
    * continued, merged or rebased — only its history remains readable. */
   worktree_deleted?: boolean;
+  /** Directory the session is addressed to, relative to the project root
+   * (`""` is the root). Set when dispatched from a directory, otherwise
+   * derived from the first auto-commit. Null until either happens. */
+  home_dir?: string | null;
 };

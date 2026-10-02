@@ -145,8 +145,30 @@ pub(crate) async fn read_binary_resolving<R: Runtime>(
         WorkspacePath::Scoped { root, relative } => {
             service.read_binary_file_in(&root, &relative).await
         }
-        WorkspacePath::External(absolute) => service.read_binary_file_absolute(absolute).await,
+        WorkspacePath::External(absolute) => {
+            match service.read_binary_file_absolute(absolute).await {
+                Err(error) if is_missing(&error) => {
+                    let relative = workspace_virtual_relative(raw);
+                    first_readable_root(candidates, |root| {
+                        service.read_binary_file_in(root, &relative)
+                    })
+                    .await
+                }
+                result => result,
+            }
+        }
     }
+}
+
+/// The workspace-relative reading of a leading-slash path.
+///
+/// The desktop file tree addresses every entry as `/<relative>` (a virtual
+/// root, not the host root). Such a path matches no candidate root and does
+/// not exist on the host, so after the external read comes back missing it is
+/// retried as `<relative>` under the workspace roots. A host-absolute path
+/// that really exists is served before this fallback is reached.
+fn workspace_virtual_relative(raw: &str) -> String {
+    raw.trim().trim_start_matches('/').to_string()
 }
 
 /// Stream a validated binary file instead of first copying the entire payload
@@ -187,7 +209,13 @@ pub(crate) async fn read_text_resolving<R: Runtime>(
             first_readable_root(candidates, |root| service.read_file_in(root, &relative)).await
         }
         WorkspacePath::Scoped { root, relative } => service.read_file_in(&root, &relative).await,
-        WorkspacePath::External(absolute) => service.read_file_absolute(absolute).await,
+        WorkspacePath::External(absolute) => match service.read_file_absolute(absolute).await {
+            Err(error) if is_missing(&error) => {
+                let relative = workspace_virtual_relative(raw);
+                first_readable_root(candidates, |root| service.read_file_in(root, &relative)).await
+            }
+            result => result,
+        },
     }
 }
 
@@ -360,6 +388,14 @@ mod tests {
             resolve_workspace_path("~/workspace/curino/note.md", ["/some/other/root"]),
             &expected.to_string_lossy(),
         );
+    }
+
+    #[test]
+    fn virtual_tree_paths_strip_only_the_leading_slash() {
+        assert_eq!(workspace_virtual_relative("/docs/x.md"), "docs/x.md");
+        assert_eq!(workspace_virtual_relative("//docs/x.md"), "docs/x.md");
+        assert_eq!(workspace_virtual_relative(" /a b/c.md "), "a b/c.md");
+        assert_eq!(workspace_virtual_relative("docs/x.md"), "docs/x.md");
     }
 
     #[test]

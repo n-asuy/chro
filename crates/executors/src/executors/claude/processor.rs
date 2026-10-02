@@ -1711,6 +1711,7 @@ mod tests {
     fn test_format_model_display_name() {
         assert_eq!(format_model_display_name("claude-fable-5-1"), "Fable 5.1");
         assert_eq!(format_model_display_name("claude-fable-5"), "Fable 5");
+        assert_eq!(format_model_display_name("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(format_model_display_name("claude-opus-5"), "Opus 5");
         assert_eq!(format_model_display_name("claude-sonnet-5"), "Sonnet 5");
         assert_eq!(format_model_display_name("claude-opus-4-8"), "Opus 4.8");

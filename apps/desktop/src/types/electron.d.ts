@@ -60,6 +60,7 @@ declare global {
       openExternalUrl?: (url: string) => Promise<void>;
       openPath?: (path: string, app?: string) => Promise<void>;
       openInCmux?: (path: string) => Promise<void>;
+      cli?: import("@/lib/cli-install-client").CliInstallApi;
       update?: {
         check: () => Promise<{
           status: string;

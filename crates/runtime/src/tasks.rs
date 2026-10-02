@@ -123,6 +123,18 @@ pub struct ExecutionSessionStart {
     pub executor_session_id: Uuid,
 }
 
+/// The directory a new task is addressed to: the first `@directory` context
+/// reference on its first prompt, the same way a folder mention scopes a chat
+/// in an IDE. Absent when no directory was mentioned; the address is then
+/// derived from the first auto-commit.
+fn home_dir_from_refs(context_refs: &[TaskContextRefInput]) -> Option<String> {
+    context_refs
+        .iter()
+        .filter(|context_ref| context_ref.kind == "directory")
+        .find_map(|context_ref| context_ref.path.as_deref())
+        .and_then(git::normalize_home_dir)
+}
+
 #[derive(Debug, Clone)]
 pub struct StartExecutionSessionParams {
     pub prompt: Option<String>,
@@ -327,7 +339,8 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .or_else(|| prompt.as_deref().and_then(infer_task_description));
         self.validate_context_refs_for_project(project_id, &context_refs)
             .await?;
-        let task = TaskRecord::new_with_prompt(project_id, title, description, prompt);
+        let mut task = TaskRecord::new_with_prompt(project_id, title, description, prompt);
+        task.home_dir = home_dir_from_refs(&context_refs);
         task.insert(self.pool()).await?;
         if !context_refs.is_empty() {
             TaskContextRef::replace_for_task_scope(self.pool(), task.id, None, None, &context_refs)
@@ -407,11 +420,13 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let mode = self.resolve_fork_mode(&anchor_run).await;
         let title = fork_title(&source_task.title);
         let mut task = TaskRecord::new_with_prompt(source_task.project_id, title, None, None);
-        // A fork's title is provenance ("source (n)"), and the agent titles
-        // the forked conversation after its inherited first message, so the
-        // session title it produces is the source's, not the fork's. Keep the
-        // provenance title instead of adopting it.
+        // The agent titles the forked conversation after its inherited first
+        // message, so the session title it produces is the source's, not the
+        // fork's. Pin against adopting it; the fork is titled by its own first
+        // prompt instead (see `title_fork_from_first_prompt`).
         task.title_pinned = true;
+        // A continuation works where its source worked.
+        task.home_dir = source_task.home_dir.clone();
         task.insert(self.pool()).await?;
 
         // "Same" keeps working in the source's live worktree only while it
@@ -633,6 +648,34 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 Some(digest)
             }
         }
+    }
+
+    /// Retitle a fork that has not run yet after the prompt it is about to
+    /// run: "source (n)" says where it came from, the first prompt says where
+    /// it is going. A fork renamed by hand, or one already started, keeps its
+    /// title.
+    async fn title_fork_from_first_prompt(
+        &self,
+        task: &mut TaskRecord,
+        prompt: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(title) = prompt_title(prompt) else {
+            return Ok(());
+        };
+        let Some(source_title) = TaskContextRef::list_by_task_id(self.pool(), task.id)
+            .await?
+            .into_iter()
+            .find(|r| r.kind == "fork")
+            .and_then(|edge| edge.label)
+        else {
+            return Ok(());
+        };
+        if TaskRecord::retitle_unstarted(self.pool(), task.id, &fork_title(&source_title), &title)
+            .await?
+        {
+            task.title = title;
+        }
+        Ok(())
     }
 
     /// Pick how the fork inherits its conversation.
@@ -1327,7 +1370,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 ));
             }
             (task, existing, true)
-        } else if let Some(task) = requested_task {
+        } else if let Some(mut task) = requested_task {
+            if let Some(prompt) = provided_prompt.as_deref() {
+                self.title_fork_from_first_prompt(&mut task, prompt).await?;
+            }
             let mut run = TaskRun::new_local(task.id, Some("codingagent".into()));
             run.executor_label = Some(executor_label.clone());
             run.insert(self.pool()).await?;
@@ -1336,8 +1382,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             let prompt_text = provided_prompt.clone().unwrap_or_default();
             let title = infer_task_title(&prompt_text);
             let description = infer_task_description(&prompt_text);
-            let task =
+            let mut task =
                 TaskRecord::new_with_prompt(project.id, title, description, Some(prompt_text));
+            task.home_dir = home_dir_from_refs(&context_refs);
             task.insert(self.pool()).await?;
             let mut run = TaskRun::new_local(task.id, Some("codingagent".into()));
             run.executor_label = Some(executor_label.clone());
@@ -2637,18 +2684,16 @@ fn follow_up_executor_label(
 }
 
 fn infer_task_title(prompt: &str) -> String {
+    prompt_title(prompt)
+        .unwrap_or_else(|| format!("Session {}", Utc::now().format("%Y-%m-%d %H:%M")))
+}
+
+/// The first line the user wrote, past attachments and context blocks; None
+/// when the prompt carries no text of its own.
+fn prompt_title(prompt: &str) -> Option<String> {
     let text = extract_task_text(prompt);
-    if text.is_empty() {
-        format!("Session {}", Utc::now().format("%Y-%m-%d %H:%M"))
-    } else {
-        text.lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or(&text)
-            .trim()
-            .chars()
-            .take(80)
-            .collect()
-    }
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    Some(line.trim().chars().take(80).collect())
 }
 
 fn infer_task_description(prompt: &str) -> Option<String> {
@@ -2779,10 +2824,6 @@ fn short_id_from_uuid(id: &Uuid) -> String {
         .to_string()
 }
 
-/// Name a forked session after its source, numbering repeats.
-///
-/// Both reference desktop apps do the same thing rather than inventing a name:
-/// the fork is the same work continued, so the title should read that way.
 /// One delegated result, rendered for the barrier wake packet.
 fn build_handoff_packet(
     child_title: &str,
@@ -2862,6 +2903,9 @@ fn rebase_would_only_discard_anchor(branch_tip: Option<&str>, anchor_commit: Opt
     matches!((branch_tip, anchor_commit), (Some(tip), Some(anchor)) if tip == anchor)
 }
 
+/// Name a forked session after its source, numbering repeats. This is the
+/// provisional name the fork carries until its first prompt says where it
+/// diverges.
 fn fork_title(source_title: &str) -> String {
     let base = source_title.trim();
     let (stem, next) = match base.rsplit_once(" (") {
@@ -2934,6 +2978,24 @@ fn scratch_chat_dir(chats_root: &Path, task_title: &str, task_id: &str) -> PathB
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_comes_from_the_first_directory_reference() {
+        use db::models::TaskContextRefInput;
+        let refs = vec![
+            TaskContextRefInput::file("README.md", true, None),
+            TaskContextRefInput::file("apps/desktop/", false, None),
+            TaskContextRefInput::file("crates", false, None),
+        ];
+        assert_eq!(
+            super::home_dir_from_refs(&refs).as_deref(),
+            Some("apps/desktop")
+        );
+        assert_eq!(super::home_dir_from_refs(&refs[..1]), None);
+        assert_eq!(super::home_dir_from_refs(&[]), None);
+        let escaping = vec![TaskContextRefInput::file("../outside", false, None)];
+        assert_eq!(super::home_dir_from_refs(&escaping), None);
+    }
+
     use super::*;
 
     /// Forking a claude session and running its first turn on codex used to hand
@@ -3098,6 +3160,24 @@ mod tests {
             "retry policy (draft) (2)"
         );
         assert_eq!(fork_title("  spaced  "), "spaced (2)");
+    }
+
+    #[test]
+    fn prompt_title_is_the_first_line_the_user_wrote() {
+        let prompt =
+            "<context>\n<file path=\"src/main.rs\" />\n</context>\n\ntry the cache path\nmore";
+        assert_eq!(prompt_title(prompt).as_deref(), Some("try the cache path"));
+    }
+
+    #[test]
+    fn prompt_title_is_none_without_user_text() {
+        assert_eq!(prompt_title("  "), None);
+        assert_eq!(
+            prompt_title(
+                "![img.png](.chro-context/img.png)\n<context>\n<file path=\"a\" />\n</context>"
+            ),
+            None
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { useLanguage } from "@/i18n";
-import { FolderTree, GitBranch, Search } from "lucide-react";
+import { FolderTree, GitBranch, Search, Waypoints } from "lucide-react";
 import {
   type ComponentType,
   memo,
@@ -21,6 +21,7 @@ interface RightDockProps {
   filetree: ComponentType;
   search: ComponentType;
   sourceControl: ComponentType;
+  agent: ComponentType;
 }
 
 /**
@@ -32,6 +33,7 @@ export const RightDock = memo(function RightDock({
   filetree: FileTreePanel,
   search: SearchPanel,
   sourceControl: SourceControlPanel,
+  agent: AgentPanel,
 }: RightDockProps) {
   const activePanel = useRightDockStore((s) => s.activePanel);
   const collapsed = useRightDockStore((s) => s.collapsed);
@@ -58,6 +60,7 @@ export const RightDock = memo(function RightDock({
     { value: "filetree", icon: FolderTree, label: t("navFiles") },
     { value: "search", icon: Search, label: t("searchFiles") },
     { value: "source-control", icon: GitBranch, label: t("sourceControl") },
+    { value: "agent", icon: Waypoints, label: t("directoryAgent") },
   ];
 
   const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(
@@ -109,6 +112,8 @@ export const RightDock = memo(function RightDock({
         return <SearchPanel />;
       case "source-control":
         return <SourceControlPanel />;
+      case "agent":
+        return <AgentPanel />;
     }
   };
 

@@ -394,6 +394,34 @@ impl GitCli {
         Ok(())
     }
 
+    /// Repo-relative paths a commit touched. `diff-tree` with `--root` also
+    /// answers for the first commit of a repository. NUL delimiters preserve
+    /// Unicode, quotes, whitespace and newlines without Git's path quoting.
+    pub fn commit_changed_paths(
+        &self,
+        repo_path: &Path,
+        commit_sha: &str,
+    ) -> Result<Vec<String>, GitCliError> {
+        let out = self.git(
+            repo_path,
+            [
+                "diff-tree",
+                "--root",
+                "-r",
+                "--name-only",
+                "-z",
+                "--no-commit-id",
+                "--diff-filter=ACDMRT",
+                commit_sha,
+            ],
+        )?;
+        Ok(out
+            .split('\0')
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     /// Create a commit with the given message
     pub fn commit(&self, repo_path: &Path, message: &str) -> Result<(), GitCliError> {
         self.run(repo_path, &["commit", "-m", message])?;
@@ -815,6 +843,41 @@ mod tests {
 
     fn write(root: &Path, name: &str, contents: &str) {
         fs::write(root.join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn commit_paths_preserve_unicode_and_git_quoted_names() {
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.email", "tester@example.com"]);
+        git(repo.path(), &["config", "user.name", "tester"]);
+        git(repo.path(), &["config", "core.quotePath", "true"]);
+        let names = vec!["docs/日本語/メモ.md"];
+        #[cfg(unix)]
+        let names: Vec<_> = names
+            .into_iter()
+            .chain([
+                " space /note .md",
+                "docs/quote\"dir/note.md",
+                "docs/line\nbreak/note.md",
+                "docs/back\\slash/note.md",
+            ])
+            .collect();
+        for name in names {
+            let file = repo.path().join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "new file").unwrap();
+            git(repo.path(), &["add", "--", name]);
+            git(repo.path(), &["commit", "-qm", "add file"]);
+            let paths = GitCli::new()
+                .commit_changed_paths(repo.path(), "HEAD")
+                .unwrap();
+            assert_eq!(paths, vec![name.to_string()]);
+            assert_eq!(
+                crate::common_ancestor_dir(&paths).as_deref(),
+                name.rsplit_once('/').map(|(dir, _)| dir)
+            );
+        }
     }
 
     fn rev_parse(cwd: &Path, rev: &str) -> Option<String> {

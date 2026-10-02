@@ -97,28 +97,6 @@ async fn probe_version(path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Probe a bare command by name via a `PATH` lookup (for CLIs without a
-/// manifest, e.g. chro's own CLI). `install_hint` is left empty.
-pub async fn probe_named(name: &str, command: &str) -> CliStatus {
-    let mut status = CliStatus {
-        name: name.to_string(),
-        found: false,
-        path: None,
-        source: None,
-        version: None,
-        install_hint: String::new(),
-    };
-
-    let Some(path) = crate::shell::which_executable(command).await else {
-        return status;
-    };
-    status.found = true;
-    status.source = Some(command.to_string());
-    status.version = probe_version(&path).await;
-    status.path = Some(path.to_string_lossy().into_owned());
-    status
-}
-
 /// Probe every known agent CLI concurrently.
 pub async fn probe_all_agent_clis() -> Vec<CliStatus> {
     let (codex, claude, pi) = tokio::join!(

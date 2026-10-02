@@ -34,7 +34,7 @@ interface LayoutState {
 interface LayoutActions {
   bindProject: (
     projectId: string,
-    options?: { initialTab?: TabKind | null },
+    options?: { initialTab?: TabKind | null; freshSession?: boolean },
   ) => void;
   unbind: () => void;
 
@@ -141,16 +141,37 @@ function omitCloseFocusTarget(
   return rest;
 }
 
-function focusOrInsertTab(layout: PaneLayout, kind: TabKind): PaneLayout {
+function focusOrInsertTab(
+  layout: PaneLayout,
+  kind: TabKind,
+  freshSession = false,
+): PaneLayout {
   const key = tabKey(kind);
-  const existing = findTabInLayout(layout, (tab) => tabKey(tab.kind) === key);
+  // A new-session request must preserve any draft already open in the
+  // destination project, including its directory address.
+  const duplicable = freshSession && kind.type === "session" && !kind.taskId;
+  const focusedLeaf = findLeaf(layout.root, layout.focusedPaneId);
+  const focusedTab = focusedLeaf?.tabs.find(
+    (tab) => tab.id === focusedLeaf.activeTabId,
+  );
+  const existing = duplicable
+    ? null
+    : focusedLeaf && focusedTab && tabKey(focusedTab.kind) === key
+      ? { leaf: focusedLeaf, tab: focusedTab }
+      : findTabInLayout(layout, (tab) => tabKey(tab.kind) === key);
   if (existing) {
     return {
       root: mapLeaf(layout.root, existing.leaf.id, (leaf) => ({
         ...leaf,
         tabs: leaf.tabs.map((tab) =>
           tab.id === existing.tab.id
-            ? { ...tab, kind, title: defaultTitle(kind) }
+            ? {
+                ...tab,
+                // A bare /session URL restores the saved draft, including
+                // its dispatch directory; only an explicit dispatch is new.
+                kind: kind.type === "session" && !kind.taskId ? tab.kind : kind,
+                title: defaultTitle(kind),
+              }
             : tab,
         ),
         activeTabId: existing.tab.id,
@@ -205,7 +226,7 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     set({
       projectId,
       layout: options.initialTab
-        ? focusOrInsertTab(nextLayout, options.initialTab)
+        ? focusOrInsertTab(nextLayout, options.initialTab, options.freshSession)
         : nextLayout,
       closeFocusTargets: {},
     });

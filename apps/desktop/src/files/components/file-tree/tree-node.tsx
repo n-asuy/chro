@@ -8,7 +8,7 @@ import {
 import { cn } from "@chro/ui/utils";
 import { ChevronRight } from "lucide-react";
 import type React from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useRef } from "react";
 import {
   type DecorationStatus,
@@ -61,6 +61,8 @@ interface TreeNodeExtraProps {
   onMouseDown?: (e: React.MouseEvent) => void;
   /** Git status decoration for this node (file status or folder rollup). */
   gitStatus?: DecorationStatus | null;
+  /** Right-aligned content after the name (e.g. an activity indicator). */
+  trailing?: ReactNode;
 }
 
 export const TreeNode = ({
@@ -77,6 +79,7 @@ export const TreeNode = ({
   isDragging,
   onMouseDown,
   gitStatus,
+  trailing,
 }: TreeNodeProps & TreeNodeExtraProps) => {
   const { t } = useLanguage();
   const {
@@ -307,6 +310,11 @@ export const TreeNode = ({
               {STATUS_LABEL[gitStatus]}
             </span>
           )}
+          {trailing ? (
+            <span className="ml-1.5 inline-flex shrink-0 items-center">
+              {trailing}
+            </span>
+          ) : null}
         </>
       )}
     </div>

@@ -12,12 +12,14 @@ use thiserror::Error;
 
 mod cli;
 pub mod decorated_tree;
+pub mod home_dir;
 
 use cli::{GitCli, GitCliError};
 pub use decorated_tree::{
     build_changed_files_tree, build_git_decorations, ChangedFileNode, DecorationStatus,
     GitDecorations, NodeKind,
 };
+pub use home_dir::{common_ancestor_dir, normalize_home_dir};
 
 #[derive(Debug, Error)]
 pub enum GitServiceError {
@@ -244,6 +246,17 @@ impl GitService {
         let oid = head.target().ok_or(GitServiceError::HeadMissing)?;
 
         Ok(Some(oid.to_string()))
+    }
+
+    /// Repo-relative paths touched by `commit_sha` (added, modified, deleted or
+    /// renamed; the post-rename path for renames). A root commit lists every
+    /// file it introduced.
+    pub fn commit_changed_paths(
+        &self,
+        repo_path: impl AsRef<Path>,
+        commit_sha: &str,
+    ) -> Result<Vec<String>, GitServiceError> {
+        Ok(GitCli::new().commit_changed_paths(repo_path.as_ref(), commit_sha)?)
     }
 
     /// Commit only staged changes if any exist.

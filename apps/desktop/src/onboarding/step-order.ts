@@ -9,12 +9,13 @@
  * not a setup step, so it shows no progress indicator and is never "resumed"
  * into. It is always the entry point and hard-codes its own next hop.
  */
-export type PersistedOnboardingStep = "agent" | "theme" | "workspace";
+export type PersistedOnboardingStep = "agent" | "cli" | "theme" | "workspace";
 
 export type OnboardingStep = "welcome" | PersistedOnboardingStep;
 
 export const ONBOARDING_STEP_ORDER: readonly PersistedOnboardingStep[] = [
   "agent",
+  "cli",
   "theme",
   "workspace",
 ] as const;

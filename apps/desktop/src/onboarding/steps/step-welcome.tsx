@@ -1,4 +1,9 @@
 import { Button } from "@chro/ui/button";
+import { ONBOARDING_STEP_ORDER } from "../step-order";
+
+const STEP_COUNT_WORD =
+  ["One", "Two", "Three", "Four", "Five"][ONBOARDING_STEP_ORDER.length - 1] ??
+  String(ONBOARDING_STEP_ORDER.length);
 
 /**
  * Onboarding welcome. A product intro, not a setup step: it shows no progress
@@ -23,7 +28,7 @@ export function StepWelcome({
       </h1>
       <p className="mt-3 max-w-md text-[15px] leading-relaxed text-muted-foreground">
         Run your coding agents as real teammates — assign a task, watch it work
-        in an isolated worktree, review the diff. Three quick steps.
+        in an isolated worktree, review the diff. {STEP_COUNT_WORD} quick steps.
       </p>
       <div className="mt-8 flex w-64 flex-col gap-3">
         <Button size="lg" onClick={onNext}>

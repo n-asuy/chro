@@ -13,7 +13,6 @@ export interface CliStatus {
 /** Mirrors `CliStatusResponse` in crates/server/src/routes/rpc/cli_status.rs. */
 export interface CliStatusResponse {
   agents: CliStatus[];
-  chro_cli: CliStatus;
   server_version: string;
   latest_release: string | null;
   update_available: boolean;

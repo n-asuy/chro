@@ -1,3 +1,4 @@
+pub mod cli_install;
 pub mod migration;
 pub mod pool;
 pub mod port;

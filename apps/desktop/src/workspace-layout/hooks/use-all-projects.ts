@@ -1,6 +1,35 @@
 import { type ProjectResponse, taskApi } from "@/tasks/task-api";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useMemo } from "react";
+
+export const ALL_PROJECTS_QUERY_KEY = ["all-projects"] as const;
+
+/**
+ * Upsert a project the client just learned about (e.g. one it created) into the
+ * cached list, so views keyed on that list see it immediately instead of after
+ * the next refetch. An unfetched list is left alone: its first fetch covers it.
+ */
+export function rememberProject(
+  queryClient: QueryClient,
+  project: ProjectResponse,
+): void {
+  queryClient.setQueryData<ProjectResponse[]>(
+    ALL_PROJECTS_QUERY_KEY,
+    (projects) => {
+      if (!projects) return projects;
+      const index = projects.findIndex((p) => p.id === project.id);
+      if (index < 0) return [...projects, project];
+      const next = projects.slice();
+      next[index] = project;
+      return next;
+    },
+  );
+}
 
 /**
  * All projects known to the backend, keyed by id. Backs the cross-project
@@ -14,7 +43,7 @@ export function useAllProjects(
   enabled: boolean,
 ): Record<string, ProjectResponse> {
   const { data } = useQuery({
-    queryKey: ["all-projects"],
+    queryKey: ALL_PROJECTS_QUERY_KEY,
     queryFn: () => taskApi.listProjects(),
     enabled,
     staleTime: 60_000,
@@ -46,9 +75,9 @@ export function useSetProjectBadgeColor(): (
       badgeColor: string | null;
     }) => taskApi.setProjectBadgeColor(projectId, badgeColor),
     onMutate: async ({ projectId, badgeColor }) => {
-      await queryClient.cancelQueries({ queryKey: ["all-projects"] });
+      await queryClient.cancelQueries({ queryKey: ALL_PROJECTS_QUERY_KEY });
       queryClient.setQueryData<ProjectResponse[]>(
-        ["all-projects"],
+        ALL_PROJECTS_QUERY_KEY,
         (projects) =>
           projects?.map((project) =>
             project.id === projectId ? { ...project, badgeColor } : project,
@@ -56,7 +85,7 @@ export function useSetProjectBadgeColor(): (
       );
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: ["all-projects"] });
+      void queryClient.invalidateQueries({ queryKey: ALL_PROJECTS_QUERY_KEY });
     },
   });
   return (projectId, badgeColor) => mutation.mutate({ projectId, badgeColor });

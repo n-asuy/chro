@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     panic::AssertUnwindSafe,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -259,7 +259,12 @@ impl LocalContainerService {
 
     /// Auto-commit changes after successful execution.
     /// Commits all changes in the workspace if any exist.
-    async fn try_commit_changes(&self, run_id: Uuid, workspace_path: &PathBuf) {
+    async fn try_commit_changes(
+        &self,
+        run_id: Uuid,
+        task_id: Option<Uuid>,
+        workspace_path: &PathBuf,
+    ) {
         let message = format!("Auto-commit changes from task run {}", run_id);
 
         // commit_all runs a blocking git status scan + commit; offload it so it
@@ -308,6 +313,9 @@ impl LocalContainerService {
                     %oid,
                     "[try_commit_changes] committed changes"
                 );
+                if let Some(task_id) = task_id {
+                    self.settle_home_dir(task_id, workspace_path, &oid).await;
+                }
             }
             Ok(Ok(None)) => {
                 tracing::debug!(
@@ -347,6 +355,50 @@ impl LocalContainerService {
     /// Expressing the sequence here rather than as two adjacent statements at
     /// the call site keeps the ordering in one place and lets a test observe
     /// it: `housekeeping` runs with the completion already persisted.
+    /// Address a task that has none yet: the lowest common ancestor of the
+    /// paths its first auto-commit touched. A task dispatched from a directory
+    /// already carries its address and is left alone, as is a task whose
+    /// commit touched nothing usable.
+    async fn settle_home_dir(&self, task_id: Uuid, workspace_path: &Path, commit_sha: &str) {
+        let task = match TaskRecord::find_by_id(self.db.pool(), task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(%task_id, error = %e, "[settle_home_dir] failed to load task");
+                return;
+            }
+        };
+        if task.home_dir.is_some() {
+            return;
+        }
+        let git = self.git.clone();
+        let workspace = workspace_path.to_path_buf();
+        let sha = commit_sha.to_string();
+        let paths = runtime::perf::spawn_blocking_instrumented("git.commit_changed_paths", move || {
+            git.commit_changed_paths(&workspace, &sha)
+        })
+        .await;
+        let paths = match paths {
+            Ok(Ok(paths)) => paths,
+            Ok(Err(e)) => {
+                tracing::warn!(%task_id, error = %e, "[settle_home_dir] failed to list commit paths");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%task_id, error = %e, "[settle_home_dir] task failed to join");
+                return;
+            }
+        };
+        let Some(home_dir) = git::common_ancestor_dir(&paths) else {
+            return;
+        };
+        if let Err(e) = TaskRecord::set_home_dir(self.db.pool(), task_id, &home_dir).await {
+            tracing::warn!(%task_id, error = %e, "[settle_home_dir] failed to persist home_dir");
+        } else {
+            tracing::info!(%task_id, home_dir, "[settle_home_dir] addressed task");
+        }
+    }
+
     async fn finalize_run<F, Fut>(
         &self,
         run_id: Uuid,
@@ -1135,7 +1187,8 @@ impl LocalContainerService {
         let finalize = self
             .finalize_run(run_id, exit_code, move |status| async move {
                 if status == RunStatus::Completed {
-                    self.try_commit_changes(run_id, &commit_workspace).await;
+                    self.try_commit_changes(run_id, task_id, &commit_workspace)
+                        .await;
                 }
             })
             .await;

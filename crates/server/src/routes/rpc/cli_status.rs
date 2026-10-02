@@ -1,10 +1,11 @@
 //! CLI status: resolved path + version for each agent CLI (claude/codex/pi)
-//! and for chro's own CLI, plus the latest published chro release so the UI can
-//! flag version drift. Powers the right-hand CLI status menu in the title bar.
+//! plus the latest published chro release so the UI can flag a server behind
+//! the current release. Powers the right-hand CLI status menu in the title bar.
 //!
-//! The chro-CLI-vs-latest comparison is the load-bearing check: a stale `chro`
-//! binary shadowing the intended one on PATH silently breaks CLI-resolved
-//! features, so surfacing the drift is the fix.
+//! chro's own shell command is deliberately not probed here: the desktop shell
+//! registers it as a link to the bundled binary (see the `cli_install` module
+//! in apps/desktop/src-tauri), so its state is reported from there, against
+//! the user's login-shell PATH rather than this process's.
 
 use std::time::{Duration, Instant};
 
@@ -28,13 +29,11 @@ pub(super) fn router() -> Router<AppState> {
 struct CliStatusResponse {
     /// Agent CLIs (claude, codex, pi).
     agents: Vec<CliStatus>,
-    /// chro's own CLI on PATH, if resolvable.
-    chro_cli: CliStatus,
     /// Version this server was built at (`CARGO_PKG_VERSION`).
     server_version: String,
     /// Latest published chro release tag (e.g. `v0.1.40`), when reachable.
     latest_release: Option<String>,
-    /// True when a chro version (CLI or server) is behind `latest_release`.
+    /// True when this server is behind `latest_release`.
     update_available: bool,
 }
 
@@ -42,37 +41,20 @@ async fn get_cli_status(
     State(state): State<AppState>,
 ) -> Result<Json<CliStatusResponse>, ApiError> {
     let agents = probe_all_agent_clis().await;
-    let chro_cli = probe_chro_cli().await;
     let server_version = env!("CARGO_PKG_VERSION").to_string();
     let latest_release = state.latest_release_cache().get_or_fetch().await;
 
-    let update_available = match latest_release.as_deref() {
-        Some(latest) => {
-            let latest_norm = normalize_version(latest);
-            let server_behind = normalize_version(&server_version) != latest_norm;
-            let cli_behind = chro_cli
-                .version
-                .as_deref()
-                .map(|v| normalize_version(v) != latest_norm)
-                .unwrap_or(false);
-            server_behind || cli_behind
-        }
-        None => false,
-    };
+    let update_available = latest_release
+        .as_deref()
+        .map(|latest| normalize_version(latest) != normalize_version(&server_version))
+        .unwrap_or(false);
 
     Ok(Json(CliStatusResponse {
         agents,
-        chro_cli,
         server_version,
         latest_release,
         update_available,
     }))
-}
-
-/// Probe the `chro` CLI on PATH. Reuses the same version-probe shape as the
-/// agent CLIs but resolves via `which chro` since chro has no manifest entry.
-async fn probe_chro_cli() -> CliStatus {
-    executors::cli_status::probe_named("chro", "chro").await
 }
 
 /// Strip a leading `v` and keep just the first whitespace-delimited token so

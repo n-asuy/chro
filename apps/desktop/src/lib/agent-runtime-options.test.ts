@@ -40,13 +40,30 @@ describe("agent-runtime-options capability axes", () => {
     expect(getModelReasoningOptions("PI", null)).toEqual([]);
   });
 
-  it("offers GPT-6 Astra first among the Codex models", () => {
-    const codex = getModelOptions("CODEX");
-    expect(codex[0]?.value).toBe("gpt-6-astra");
-    expect(getModelLabel("CODEX", "gpt-6-astra")).toBe("GPT-6 Astra");
+  it("lists Codex models in the Codex catalog order", () => {
+    expect(getModelOptions("CODEX").map((m) => m.value)).toEqual([
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
+    expect(getModelLabel("CODEX", "gpt-6.1-sol")).toBe("GPT-6.1 Sol");
     expect(
-      getModelReasoningOptions("CODEX", "gpt-6-astra").map((r) => r.value),
+      getModelReasoningOptions("CODEX", "gpt-6.1-sol").map((r) => r.value),
     ).toEqual(["low", "medium", "high", "x-high"]);
-    expect(getModelSpeedOptions("CODEX", "gpt-6-astra")).toEqual([]);
+    expect(getModelSpeedOptions("CODEX", "gpt-6.1-sol")).toEqual([]);
+  });
+
+  it("labels each Claude alias with the model it currently resolves to", () => {
+    expect(getModelOptions("CLAUDE_CODE").map((m) => m.label)).toEqual([
+      "Fable 5.1",
+      "Opus 5.5",
+      "Sonnet 5",
+      "Haiku 4.5",
+    ]);
   });
 });

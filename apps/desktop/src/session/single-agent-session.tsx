@@ -141,7 +141,10 @@ import { useConversationFind } from "./hooks/use-conversation-find";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
 import type { PreparedPromptPayload } from "./hooks/use-single-session-controller";
-import { usePromptEditorStore } from "./state/prompt-editor-store";
+import {
+  getPromptEditorScopeState,
+  usePromptEditorStore,
+} from "./state/prompt-editor-store";
 import { useTaskTitleOverridesStore } from "./state/task-title-overrides-store";
 import {
   QUESTIONS_SKIPPED_MESSAGE,
@@ -265,9 +268,13 @@ export function SingleAgentSessionView({
     (isUuidIdentifier(params.projectId) ? params.projectId : null);
   const routeTaskSlug = forceNewSession ? null : resolvedTaskSlug;
   const routeRunSlug = forceNewSession ? null : resolvedRunSlug;
-  // Inside a tab, do not consume mounting URL state if the tab kind doesn't
-  // describe a session; this prevents stale navigations from leaking in.
-  void tabKind;
+  // A new-session tab opened from a directory (see `newSession(project, dir)`)
+  // starts with that directory mentioned, exactly like typing `@dir`: the
+  // mention is the only channel, and the server addresses the task from it.
+  const dispatchHomeDir =
+    tabKind?.type === "session" && !forceNewSession
+      ? tabKind.homeDir ?? null
+      : null;
   const isSessionMountedRef = useRef(true);
   const latestRouteProjectIdRef = useRef<string | null>(routeProjectId);
   const latestRouteTaskSlugRef = useRef<string | null>(routeTaskSlug ?? null);
@@ -302,6 +309,31 @@ export function SingleAgentSessionView({
   // UI state — prompt editor handle (non-reactive, no re-renders on typing)
   const editor = usePromptEditorHandle(promptScopeId);
   usePromptDraftPersistence(editor);
+  // Seed the directory mention once per tab. The root has no mention form
+  // (there is nothing to name), so a root dispatch starts with an empty
+  // composer and the address settles from the first auto-commit instead.
+  const seededDirectoryRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!dispatchHomeDir) return;
+    if (seededDirectoryRef.current === promptScopeId) return;
+    seededDirectoryRef.current = promptScopeId;
+    const store = usePromptEditorStore.getState();
+    if (!getPromptEditorScopeState(store, editor.scopeId).isEmpty) return;
+    // Seed the store rather than the DOM: the editor node may not be mounted
+    // yet, and it renders the store's prompt when it mounts.
+    const displayName = dispatchHomeDir.split("/").pop() ?? dispatchHomeDir;
+    store.setPrompt(editor.scopeId, [
+      {
+        type: "file",
+        content: displayName,
+        path: dispatchHomeDir,
+        isFile: false,
+        start: 0,
+        end: displayName.length,
+      },
+    ]);
+    editor.syncDomFromStore();
+  }, [dispatchHomeDir, promptScopeId, editor]);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const atPopoverRef = useRef<AtPopoverHandle>(null);
   const setPromptPopover = usePromptEditorStore((s) => s.setPopover);

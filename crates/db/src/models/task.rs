@@ -66,6 +66,11 @@ pub struct TaskRecord {
     /// the delegate edge.
     #[sqlx(default)]
     pub delegated_from_title: Option<String>,
+    /// Directory this task is addressed to, relative to the project root
+    /// (`""` is the root). Set when the session is dispatched from a directory,
+    /// otherwise derived after the first auto-commit as the lowest common
+    /// ancestor of the paths it touched. `None` until either happens.
+    pub home_dir: Option<String>,
 }
 
 /// Selects every task column plus the fork and delegate edges' snapshot
@@ -118,6 +123,7 @@ impl TaskRecord {
             title_pinned: false,
             forked_from_title: None,
             delegated_from_title: None,
+            home_dir: None,
         }
     }
 
@@ -144,8 +150,8 @@ impl TaskRecord {
     /// Persist the task record.
     pub async fn insert(&self, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor, last_summary, title_pinned)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_records (id, slug, project_id, parent_task_id, title, description, prompt, status, due_at, branch, worktree_path, worktree_deleted, active_session_id, created_at, updated_at, sort_order, last_executor, last_summary, title_pinned, home_dir)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.id)
         .bind(&self.slug)
@@ -166,6 +172,7 @@ impl TaskRecord {
         .bind(&self.last_executor)
         .bind(&self.last_summary)
         .bind(self.title_pinned)
+        .bind(&self.home_dir)
         .execute(pool)
         .await?;
         Ok(())
@@ -352,6 +359,37 @@ impl TaskRecord {
         Ok(())
     }
 
+    /// Address the task to a directory. Like the other run-derived metadata
+    /// writers this leaves `updated_at` alone: a task settling on its address
+    /// must not re-order the session list. The update hook still streams it.
+    pub async fn set_home_dir(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        home_dir: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET home_dir = ? WHERE id = ?")
+            .bind(home_dir)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Tasks of a project addressed to exactly `home_dir`, most recent first.
+    pub async fn list_by_home_dir(
+        pool: &Pool<Sqlite>,
+        project_id: Uuid,
+        home_dir: &str,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "{SELECT_TASKS_WITH_FORK} WHERE t.project_id = ? AND t.home_dir = ? ORDER BY t.updated_at DESC"
+        ))
+        .bind(project_id)
+        .bind(home_dir)
+        .fetch_all(pool)
+        .await
+    }
+
     /// Toggle the `awaiting_input` flag for a task.
     ///
     /// Set when an AskUserQuestion approval becomes pending and cleared when it
@@ -452,6 +490,29 @@ impl TaskRecord {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Replace the title of a task that has not run yet, provided it still
+    /// reads `expected_title` (a rename in the meantime wins). The pin is left
+    /// as it is.
+    pub async fn retitle_unstarted(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        expected_title: &str,
+        title: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE task_records
+             SET title = ?, updated_at = datetime('now')
+             WHERE id = ? AND title = ?
+               AND NOT EXISTS (SELECT 1 FROM task_runs WHERE task_id = task_records.id)",
+        )
+        .bind(title)
+        .bind(task_id)
+        .bind(expected_title)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Replace an unpinned title with the title the agent gave the session.
@@ -1032,6 +1093,73 @@ mod tests {
         );
     }
 
+    async fn inserted_pinned_task(pool: &Pool<Sqlite>, title: &str) -> TaskRecord {
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let mut task = TaskRecord::new_with_prompt(project.id, title, None, None);
+        task.title_pinned = true;
+        task.insert(pool).await.unwrap();
+        task
+    }
+
+    #[tokio::test]
+    async fn an_unstarted_task_takes_the_title_and_stays_pinned() {
+        let pool = migrated_pool().await;
+        let task = inserted_pinned_task(&pool, "source (2)").await;
+
+        assert!(
+            TaskRecord::retitle_unstarted(&pool, task.id, "source (2)", "try the cache path")
+                .await
+                .unwrap()
+        );
+        let stored = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(stored.title, "try the cache path");
+        assert!(
+            stored.title_pinned,
+            "later session titles must not replace it"
+        );
+    }
+
+    #[tokio::test]
+    async fn retitle_unstarted_leaves_a_renamed_task_alone() {
+        let pool = migrated_pool().await;
+        let task = inserted_pinned_task(&pool, "source (2)").await;
+        TaskRecord::update_title(&pool, task.id, "My name".to_string(), None)
+            .await
+            .unwrap();
+
+        assert!(
+            !TaskRecord::retitle_unstarted(&pool, task.id, "source (2)", "try the cache path")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            TaskRecord::get(&pool, task.id).await.unwrap().title,
+            "My name"
+        );
+    }
+
+    #[tokio::test]
+    async fn retitle_unstarted_leaves_a_task_that_has_run_alone() {
+        let pool = migrated_pool().await;
+        let task = inserted_pinned_task(&pool, "source (2)").await;
+        crate::models::TaskRun::new_local(task.id, Some("desktop".to_string()))
+            .insert(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            !TaskRecord::retitle_unstarted(&pool, task.id, "source (2)", "try the cache path")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            TaskRecord::get(&pool, task.id).await.unwrap().title,
+            "source (2)"
+        );
+    }
+
     #[tokio::test]
     async fn rename_pins_the_title_against_session_titles() {
         let pool = migrated_pool().await;
@@ -1180,6 +1308,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn home_dir_is_settable_and_lists_homed_tasks_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("home.db");
+        let service = crate::DBService::new_with_path(&db_path).await.unwrap();
+
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_records (id, name, git_repo_path, created_at, updated_at)
+             VALUES (?, 'proj', '/tmp', datetime('now'), datetime('now'))",
+        )
+        .bind(project_id)
+        .execute(service.pool())
+        .await
+        .unwrap();
+
+        let desktop = TaskRecord::new(project_id, "desktop work", None);
+        desktop.insert(service.pool()).await.unwrap();
+        let mut root = TaskRecord::new(project_id, "root work", None);
+        root.home_dir = Some(String::new());
+        root.insert(service.pool()).await.unwrap();
+        let unhomed = TaskRecord::new(project_id, "not yet", None);
+        unhomed.insert(service.pool()).await.unwrap();
+
+        let before = TaskRecord::get(service.pool(), desktop.id).await.unwrap();
+        assert_eq!(before.home_dir, None);
+
+        TaskRecord::set_home_dir(service.pool(), desktop.id, "apps/desktop")
+            .await
+            .unwrap();
+        let after = TaskRecord::get(service.pool(), desktop.id).await.unwrap();
+        assert_eq!(after.home_dir.as_deref(), Some("apps/desktop"));
+        assert_eq!(after.updated_at, before.updated_at, "address must not reorder");
+
+        let homed = TaskRecord::list_by_home_dir(service.pool(), project_id, "apps/desktop")
+            .await
+            .unwrap();
+        assert_eq!(homed.iter().map(|t| t.id).collect::<Vec<_>>(), vec![desktop.id]);
+        let at_root = TaskRecord::list_by_home_dir(service.pool(), project_id, "")
+            .await
+            .unwrap();
+        assert_eq!(at_root.iter().map(|t| t.id).collect::<Vec<_>>(), vec![root.id]);
     }
 
     #[tokio::test]

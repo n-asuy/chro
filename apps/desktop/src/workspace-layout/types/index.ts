@@ -1,7 +1,9 @@
 export type {
+  DirectoryAgentTarget,
   DockPanelKind,
   DockState,
   LeftDockPanelKind,
+  LeftPanelMode,
   RightDockPanelKind,
 } from "./dock";
 export {

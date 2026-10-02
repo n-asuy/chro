@@ -4,6 +4,7 @@
 // available to consumers that read it at module scope.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { CliInstallStatus } from "./cli-install-client";
 
 type UpdateStatus =
   | { type: "checking" }
@@ -94,6 +95,12 @@ function installDesktopBridge() {
     openPath: (path: string, app?: string) =>
       invoke<void>("open_path", { path, with: app ?? null }),
     openInCmux: (path: string) => invoke<void>("open_in_cmux", { path }),
+    // Registration of the bundled `chro` shell command (symlink / user PATH).
+    cli: {
+      status: () => invoke<CliInstallStatus>("cli_install_status"),
+      install: () => invoke<CliInstallStatus>("cli_install"),
+      remove: () => invoke<CliInstallStatus>("cli_remove"),
+    },
     update: {
       check: () =>
         invoke<{ status: string; updateInfo?: unknown; error?: string }>(

@@ -79,6 +79,64 @@ describe("useLayoutStore", () => {
     expect(focusedLeaf?.activeTabId).toBe(sessionId);
   });
 
+  it("keeps an existing draft when a directory dispatch opens another project", () => {
+    const store = useLayoutStore.getState();
+    store.bindProject("project-b");
+    store.openTab({ type: "session", homeDir: "existing-draft" });
+    const saved = useLayoutStore.getState().layout;
+    store.bindProject("project-a");
+    persistenceMock.loadedLayout = saved;
+
+    store.bindProject("project-b", {
+      initialTab: { type: "session", homeDir: "docs" },
+      freshSession: true,
+    });
+    const { layout } = useLayoutStore.getState();
+    const leaf = allLeaves(layout.root).find(
+      (entry) => entry.id === layout.focusedPaneId,
+    )!;
+    expect(
+      leaf.tabs
+        .filter((tab) => tab.kind.type === "session")
+        .map((tab) => tab.kind),
+    ).toEqual([
+      { type: "session", homeDir: "existing-draft" },
+      { type: "session", homeDir: "docs" },
+    ]);
+    expect(leaf.tabs.find((tab) => tab.id === leaf.activeTabId)?.kind).toEqual({
+      type: "session",
+      homeDir: "docs",
+    });
+  });
+
+  it("restores a scoped draft from a bare session URL without replacing its address", () => {
+    const store = useLayoutStore.getState();
+    store.bindProject("project-b");
+    store.openTab({ type: "session", homeDir: "older-draft" });
+    const draftId = store.openTab({ type: "session", homeDir: "docs" });
+    const saved = useLayoutStore.getState().layout;
+    store.unbind();
+    persistenceMock.loadedLayout = saved;
+    store.bindProject("project-b", { initialTab: { type: "session" } });
+    const tabs = allLeaves(useLayoutStore.getState().layout.root).flatMap(
+      (leaf) => leaf.tabs,
+    );
+    expect(tabs.filter((tab) => tab.kind.type === "session")).toEqual([
+      expect.objectContaining({
+        kind: { type: "session", homeDir: "older-draft" },
+      }),
+      expect.objectContaining({
+        id: draftId,
+        kind: { type: "session", homeDir: "docs" },
+      }),
+    ]);
+    const { layout } = useLayoutStore.getState();
+    expect(
+      allLeaves(layout.root).find((leaf) => leaf.id === layout.focusedPaneId)
+        ?.activeTabId,
+    ).toBe(draftId);
+  });
+
   it("returns to the previous screen after a transient file tab closes", () => {
     const store = useLayoutStore.getState();
     const sessionId = store.openTab({ type: "session", taskId: "task-1" });

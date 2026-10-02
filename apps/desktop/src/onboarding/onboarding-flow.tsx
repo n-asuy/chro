@@ -3,7 +3,12 @@ import {
   updateExecutorProfile,
 } from "@/lib/executor-client";
 import { getRecentWorkspaces } from "@/lib/workspace-history";
+import {
+  cliInstallPrimaryAction,
+  cliInstallRegistersOnContinue,
+} from "@/lib/cli-install-client";
 import { setUiValue } from "@/lib/ui-state-client";
+import { useCliInstall } from "@/settings/hooks/use-cli-install";
 import { Button } from "@chro/ui/button";
 import {
   Dialog,
@@ -21,6 +26,7 @@ import {
   previousOnboardingStep,
 } from "./step-order";
 import { StepAgent } from "./steps/step-agent";
+import { StepCli } from "./steps/step-cli";
 import { StepTheme } from "./steps/step-theme";
 import { StepWelcome } from "./steps/step-welcome";
 import { StepWorkspace } from "./steps/step-workspace";
@@ -36,6 +42,11 @@ const STEP_COPY: Record<
     title: "Pick your coding agent",
     subtitle:
       "Chro detects the CLI agents already on your machine. Choose a default — you can install any that are missing and switch any time.",
+  },
+  cli: {
+    title: "Use Chro from your terminal",
+    subtitle:
+      "Register the `chro` command so you and your agents can create tasks, tail logs, and merge runs from any shell. It links to this app and updates with it.",
   },
   theme: {
     title: "Make it feel like home",
@@ -63,14 +74,24 @@ export function OnboardingFlow() {
   const [selectedExecutor, setSelectedExecutor] =
     useState<BaseCodingAgent | null>(null);
   const [persisting, setPersisting] = useState(false);
+  const cli = useCliInstall(isOpen);
+  const registersCliOnContinue =
+    step === "cli" && cli.status !== null && cliInstallRegistersOnContinue(cli.status);
 
   const canSkipWelcome = useMemo(() => getRecentWorkspaces().length > 0, []);
 
   const progress = onboardingProgress(step);
 
-  // Persist the chosen executor when leaving the agent step, then advance.
+  // Persist the chosen executor when leaving the agent step, register the
+  // shell command when leaving the CLI step (only when that is silent), then
+  // advance. A failed registration keeps the step open with its error so the
+  // user can retry or Skip; it is never swallowed by moving on.
   const advance = useCallback(async () => {
-    if (persisting) return;
+    if (persisting || cli.busy) return;
+    if (registersCliOnContinue) {
+      const result = await cli.install();
+      if (!result || cliInstallPrimaryAction(result) !== null) return;
+    }
     if (step === "agent" && selectedExecutor) {
       setPersisting(true);
       try {
@@ -84,7 +105,7 @@ export function OnboardingFlow() {
     }
     const next = nextOnboardingStep(step);
     if (next) setStep(next);
-  }, [persisting, selectedExecutor, step]);
+  }, [cli, persisting, registersCliOnContinue, selectedExecutor, step]);
 
   const back = useCallback(() => {
     const prev = previousOnboardingStep(step);
@@ -180,6 +201,7 @@ export function OnboardingFlow() {
               onSelect={setSelectedExecutor}
             />
           )}
+          {step === "cli" && <StepCli cli={cli} />}
           {step === "theme" && <StepTheme />}
           {step === "workspace" && <StepWorkspace onOpened={complete} />}
         </div>
@@ -196,8 +218,11 @@ export function OnboardingFlow() {
             ) : null}
           </div>
           {!isFinal ? (
-            <Button disabled={!canContinue || persisting} onClick={() => void advance()}>
-              Continue
+            <Button
+              disabled={!canContinue || persisting || cli.busy}
+              onClick={() => void advance()}
+            >
+              {registersCliOnContinue ? "Install and continue" : "Continue"}
             </Button>
           ) : (
             <span className="pr-2 text-xs text-muted-foreground">

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::cli_install::cli_launcher_path;
 use super::port::{find_available_port, write_port_file};
 
 const SERVER_HOST: &str = "127.0.0.1";
@@ -199,10 +200,17 @@ pub async fn launch_runtime<R: TauriRuntime>(
     // directory holding the CLI is passed explicitly; the server prepends it to
     // the PATH handed to executor processes, letting `chro task ...` resolve by
     // bare name from inside a run instead of failing with "command not found".
-    if let Some(cli_dir) = resolve_cli_dir() {
-        env_vars.insert("CHRO_CLI_DIR".into(), cli_dir.to_string_lossy().into_owned());
+    if let Some(cli_dir) =
+        cli_launcher_path(tauri::is_dev()).and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        env_vars.insert(
+            "CHRO_CLI_DIR".into(),
+            cli_dir.to_string_lossy().into_owned(),
+        );
     } else {
-        warn!("[runtime] bundled `chro` CLI not found; `chro task ...` will be unavailable to agents");
+        warn!(
+            "[runtime] bundled `chro` CLI not found; `chro task ...` will be unavailable to agents"
+        );
     }
 
     let command = resolve_sidecar(&app, &args, &env_vars)?;
@@ -341,50 +349,6 @@ fn sidecar_next_to_current_exe() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-fn cli_binary_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "chro.exe"
-    } else {
-        "chro"
-    }
-}
-
-/// Directory holding the `chro` CLI to expose to spawned agents, or `None` when
-/// no CLI is present. Mirrors the chro-server resolution: a source checkout
-/// prefers a freshly built CLI from its crate target dir, while a packaged build
-/// uses the sidecar staged next to the app executable.
-fn resolve_cli_dir() -> Option<PathBuf> {
-    if tauri::is_dev() {
-        if let Some(dir) = dev_cli_dir() {
-            return Some(dir);
-        }
-    }
-    cli_dir_next_to_current_exe()
-}
-
-fn cli_dir_next_to_current_exe() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    dir.join(cli_binary_name()).exists().then_some(dir)
-}
-
-/// Locate the cargo target dir for the `chro` CLI in a source checkout, anchored
-/// on the repo root so the desktop can launch from any subdirectory. The CLI is
-/// a binary of the server crate, so it lands beside `chro-server`.
-fn dev_cli_dir() -> Option<PathBuf> {
-    let repo_root = repo_root()?;
-    for profile in ["debug", "release"] {
-        let dir = repo_root
-            .join("crates")
-            .join("server")
-            .join("target")
-            .join(profile);
-        if dir.join(cli_binary_name()).exists() {
-            return Some(dir);
-        }
-    }
-    None
-}
-
 /// Locate the cargo target binary for `chro-server`. We anchor on the repo
 /// root so a contributor can launch the desktop from any subdirectory.
 fn dev_binary_path() -> Option<PathBuf> {
@@ -408,7 +372,7 @@ fn dev_binary_path() -> Option<PathBuf> {
     None
 }
 
-fn repo_root() -> Option<PathBuf> {
+pub(super) fn repo_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
         if current

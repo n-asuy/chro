@@ -11,9 +11,31 @@
 
 export type LeftDockPanelKind = "projects";
 
-export type RightDockPanelKind = "filetree" | "search" | "source-control";
+/**
+ * The two axes of the left panel. `inbox` is the cross-project session list
+ * ordered by time; `map` is the directory tree of each open project's main
+ * checkout, with sessions filed under the directory they are addressed to.
+ */
+export type LeftPanelMode = "inbox" | "map";
+
+/**
+ * `agent` is the standing agent of one directory: its brief file, the ledger
+ * of finished sessions addressed to it, and the entry point for a new session
+ * scoped to it. Its subject is {@link DirectoryAgentTarget}.
+ */
+export type RightDockPanelKind =
+  | "filetree"
+  | "search"
+  | "source-control"
+  | "agent";
 
 export type DockPanelKind = LeftDockPanelKind | RightDockPanelKind;
+
+/** A directory of a project's main checkout, repo-relative (`""` is the root). */
+export interface DirectoryAgentTarget {
+  projectId: string;
+  path: string;
+}
 
 export interface DockState {
   /** Active panel; null collapses the dock to icon-only chrome */
@@ -22,6 +44,8 @@ export interface DockState {
   width: number;
   /** True hides everything except the bottom action bar */
   collapsed: boolean;
+  /** Left dock only: which axis the panel shows. Absent in older payloads. */
+  mode?: LeftPanelMode;
 }
 
 export const DEFAULT_DOCK_WIDTH = 280;

@@ -10,7 +10,10 @@ export type TabKind =
   // Project home: a minimal landing surface listing the project's recent
   // sessions. Shown when switching to / opening a project. One per project.
   | { type: "overview" }
-  | { type: "session"; taskId?: string; runId?: string }
+  // `homeDir` scopes a not-yet-created session to a directory of the project
+  // (repo-relative, `""` for the root): the first prompt creates the task
+  // addressed there. Dropped once the tab is upgraded to a concrete task.
+  | { type: "session"; taskId?: string; runId?: string; homeDir?: string }
   | {
       type: "file";
       /**

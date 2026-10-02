@@ -22,6 +22,7 @@ mod config;
 mod context_refs;
 mod dev_events;
 mod developer;
+mod directory_map;
 mod events;
 mod filesystem;
 mod flags;
@@ -58,6 +59,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(config::router())
         .merge(events::router())
         .merge(developer::router())
+        .merge(directory_map::router())
         .merge(cli_status::router())
         .merge(usage::router())
         .merge(flags::router())
