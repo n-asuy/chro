@@ -124,6 +124,7 @@ export function PromptEditor({
           "relative max-h-48 min-h-[24px] w-full resize-none border-none bg-transparent p-0 text-sm leading-relaxed shadow-none outline-none",
           "[&_[data-type=file]]:inline-flex [&_[data-type=file]]:items-center [&_[data-type=file]]:rounded [&_[data-type=file]]:bg-blue-50 [&_[data-type=file]]:px-1 [&_[data-type=file]]:text-blue-600 [&_[data-type=file]]:dark:bg-blue-950 [&_[data-type=file]]:dark:text-blue-400",
           "[&_[data-type=session]]:inline-flex [&_[data-type=session]]:items-center [&_[data-type=session]]:rounded [&_[data-type=session]]:bg-blue-50 [&_[data-type=session]]:px-1 [&_[data-type=session]]:text-blue-600 [&_[data-type=session]]:dark:bg-blue-950 [&_[data-type=session]]:dark:text-blue-400",
+          "[&_[data-type=annotations]]:inline-flex [&_[data-type=annotations]]:items-center [&_[data-type=annotations]]:rounded [&_[data-type=annotations]]:bg-blue-50 [&_[data-type=annotations]]:px-1 [&_[data-type=annotations]]:text-blue-600 [&_[data-type=annotations]]:dark:bg-blue-950 [&_[data-type=annotations]]:dark:text-blue-400",
           "[&_[data-type=skill]]:inline-flex [&_[data-type=skill]]:items-center [&_[data-type=skill]]:rounded [&_[data-type=skill]]:bg-emerald-50 [&_[data-type=skill]]:px-1 [&_[data-type=skill]]:text-emerald-700 [&_[data-type=skill]]:dark:bg-emerald-950 [&_[data-type=skill]]:dark:text-emerald-300",
           "overflow-y-auto whitespace-pre-wrap break-words",
           "transition-shadow",

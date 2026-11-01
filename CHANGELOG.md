@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.54
+
+- Changed the `chro` command from `chro task …` to `chro session …`, and the `task` subcommands are gone. Sessions are started, delegated, sent to, waited on (`session wait --for idle|input|settled`), read, noted, forked, merged and rebased through the server's operator API, approvals are answered with `chro approval`, and `chro schema` prints every command, flag and error code as JSON. The commands work against a running `chro-server` without the desktop app open. `chro skill install` installs the skill that teaches Claude Code and Codex these commands, and onboarding and the title-bar agent menu now offer to install or update it
+- Added a message queue to the composer: a message sent while a turn is running waits in a list above the input, where it can be dragged into a different order, edited, removed, or sent now (which stops the running turn and sends it). Queued messages are stored by the server, so `chro session send` and `chro session unqueue` see the same queue
+- Added annotating an HTML preview: turn on Annotate in the file editor, click an element and write what should change. The notes collect in a tray and go to an open session or a new one as a single card naming each element
+- Changed the Refs popover and the left panel to show how sessions relate: delegated to, delegated from, continued from, continued in, uses and referenced by, with one row per related session. A session that delegated work shows how many of its delegated sessions are still running
+- Changed editing in the file editor to keep unsaved changes: edits survive switching tabs, files in a session's worktree are saved to that worktree, and a tab shows a dot while it has changes not yet written to disk
+- Changed Markdown diffs to open as an editable side-by-side view with change markers, and reworked Markdown editing keys (lists, indentation, formatting shortcuts, callouts) to behave like a dedicated Markdown editor
+- Changed the left panel's file-tree switch from one global Inbox/Files toggle to a button on each project's heading, placed before +. Long session lists under a project collapse after a few rows with "Show more"
+- Added dragging files and folders from the left panel's file tree into the composer to reference them in a session
+- Added playing `.wav` and other audio files in the file editor, with seeking
+- Added pinch zoom and two-finger scrolling on a Mac trackpad to the image viewer, and fixed a zoomed image losing its top and left edges
+- Added a preview popup when hovering an attached image's file name in a conversation
+- Updated the model picker: Sonnet 5.5 and Haiku 5.5 replace Sonnet 5 and Haiku 4.5, GPT-5.5 is gone, and the effort picker offers every level each model accepts, including Max and, for the Codex models that support it, Ultra
+- Fixed sessions sharing one worktree losing it when one of them expired after three days. A cleaned-up workspace now shows a notice and is restored from its branch when you send the next message, instead of blocking the session
+- Fixed sidebar titles not switching to the generated title once a session started, including sessions forked from one whose worktree was gone
+- Fixed ⌘W not returning to the tab you were on before
+- Fixed opening an archived session from a link showing the session that was already open
+- Fixed images an agent wrote into its reply not appearing in the conversation
+- Fixed links to files in the editor reading as one run of label and path
+- Fixed the same text appearing twice in a pi run's step list
+- Fixed the left panel's Files view reporting "Too many files to show" for repositories with large gitignored folders
+- Fixed Excalidraw drawings opened from a session failing to show, and made large drawings open faster
+
 ## 0.1.53
 
 - Updated the model picker to the current lineups. Opus now reads Opus 5.5, which is what the `opus` alias resolves to today. GPT-6.1 Sol, GPT-6 Sol and GPT-6 Luna join the Codex models, listed in the Codex catalog's order with its current descriptions, and GPT-5.3-Codex-Spark is gone because Codex no longer serves it. The new Codex models need a current Codex CLI (they were verified on 0.160.0 and fail on 0.153.4), so run `codex update` if a run ends on "not supported when using Codex with a ChatGPT account" or "requires a newer version of Codex"

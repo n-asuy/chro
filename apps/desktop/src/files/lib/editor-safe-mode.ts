@@ -1,8 +1,13 @@
 /**
  * Safe mode bounds the cost of rendering a file *inside our own process*.
  * Prose decorations, syntax highlighting and line wrapping all scale with
- * document size, as do the viewers that parse the whole file up front
- * (spreadsheet, canvas, base).
+ * document size, as do the tabular viewers that parse the whole file up front
+ * (spreadsheet, base).
+ *
+ * Byte size is only a proxy for that cost. A drawing scene's bytes are mostly
+ * embedded base64 images, which the canvas decodes as images rather than text,
+ * so its render cost follows the element count and the threshold does not
+ * apply to it.
  *
  * It must never gate a view that hands the file to another renderer: the HTML
  * preview points an iframe at the asset URL, so the bytes are fetched and laid
@@ -17,6 +22,14 @@ export type HtmlViewMode = "preview" | "raw";
 export const isLargeTextSafeMode = (
   sizeInBytes: number | null | undefined,
 ): boolean => (sizeInBytes ?? 0) > LARGE_TEXT_SAFE_MODE_BYTES;
+
+/** Viewers that replace the text editor with a parsed view of the file. */
+export type StructuredViewer = "scene" | "base" | "spreadsheet";
+
+export const opensInStructuredViewer = (
+  viewer: StructuredViewer,
+  sizeInBytes: number | null | undefined,
+): boolean => viewer === "scene" || !isLargeTextSafeMode(sizeInBytes);
 
 export type CodeViewInput = {
   fileSizeBytes: number | null | undefined;

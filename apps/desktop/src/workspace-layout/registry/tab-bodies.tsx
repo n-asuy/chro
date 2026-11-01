@@ -1,4 +1,5 @@
 import { FilesEditor } from "@/files/components/editor/files-editor";
+import { useProjectId } from "@/files/context/project-context";
 import { useFileTreeStore } from "@/files/state/file-tree-store";
 import { useFilesStore } from "@/files/state/files-store";
 import { useWorkingDiffs } from "@/files/state/working-diffs-store";
@@ -125,6 +126,7 @@ function DiffTabContent({
   tabId: string;
 }) {
   const closeTab = useLayoutStore((s) => s.closeTab);
+  const projectId = useProjectId();
   const { diffs, error, isLoading } = useDiffStream({ taskRunId: runId });
 
   const diffEntries = useMemo(
@@ -137,6 +139,7 @@ function DiffTabContent({
       <DiffViewerPanel
         onClose={() => closeTab(tabId)}
         diffs={diffEntries}
+        projectId={projectId}
         taskRunId={runId}
         isLoading={isLoading}
         error={error}
@@ -165,6 +168,7 @@ function ProjectDiffTabContent({
       <DiffViewerPanel
         onClose={() => closeTab(tabId)}
         diffs={diffs}
+        projectId={projectId}
         isLoading={isLoading}
         error={error}
       />

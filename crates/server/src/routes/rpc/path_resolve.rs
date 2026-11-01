@@ -18,14 +18,16 @@ use std::path::{Path, PathBuf};
 
 use axum::{
     body::Body,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
 };
 use filesystem::{FilesystemError, WorkspaceBinaryFile, WorkspaceFile};
 use runtime::{ProjectFileService, Runtime, RuntimeError};
 use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
+use super::byte_range::ByteRange;
 use crate::ApiError;
 
 /// The outcome of resolving a raw path against a set of workspace candidate
@@ -174,11 +176,14 @@ fn workspace_virtual_relative(raw: &str) -> String {
 /// Stream a validated binary file instead of first copying the entire payload
 /// into a `Vec<u8>`. This keeps large media/PDF responses bounded by the I/O
 /// buffers and lets backpressure from the webview reach the filesystem read.
+/// A single `Range` request is honoured so media elements can seek (see
+/// [`ByteRange`]).
 pub(crate) async fn stream_binary_response(
     binary_file: WorkspaceBinaryFile,
     cache_control: &'static str,
+    request_headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = File::open(&binary_file.path)
+    let mut file = File::open(&binary_file.path)
         .await
         .map_err(filesystem::FilesystemError::Io)?;
     let size = file
@@ -186,14 +191,33 @@ pub(crate) async fn stream_binary_response(
         .await
         .map_err(filesystem::FilesystemError::Io)?
         .len();
-    let body = Body::from_stream(ReaderStream::new(file));
-
-    Response::builder()
-        .status(StatusCode::OK)
+    let builder = Response::builder()
         .header(header::CONTENT_TYPE, binary_file.mime_type)
-        .header(header::CONTENT_LENGTH, size)
         .header(header::CACHE_CONTROL, cache_control)
-        .body(body)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    let response = match ByteRange::requested(request_headers, size) {
+        ByteRange::Full => builder
+            .status(StatusCode::OK)
+            .header(header::CONTENT_LENGTH, size)
+            .body(Body::from_stream(ReaderStream::new(file))),
+        ByteRange::Partial { start, end } => {
+            file.seek(SeekFrom::Start(start))
+                .await
+                .map_err(filesystem::FilesystemError::Io)?;
+            let length = end - start + 1;
+            builder
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+                .header(header::CONTENT_LENGTH, length)
+                .body(Body::from_stream(ReaderStream::new(file.take(length))))
+        }
+        ByteRange::Unsatisfiable => builder
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+            .body(Body::empty()),
+    };
+    response
         .map_err(|error| ApiError::Internal(format!("failed to build binary response: {error}")))
 }
 
@@ -695,5 +719,73 @@ mod tests {
             result,
             Err(RuntimeError::Filesystem(FilesystemError::NotFound))
         ));
+    }
+
+    /// Serve `bytes` as `clip.wav` under the given request headers.
+    async fn serve(bytes: &[u8], headers: &[(header::HeaderName, &'static str)]) -> Response {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("clip.wav");
+        std::fs::write(&path, bytes).expect("write file");
+        let mut request_headers = HeaderMap::new();
+        for (name, value) in headers {
+            request_headers.insert(name.clone(), header::HeaderValue::from_static(value));
+        }
+        let file = WorkspaceBinaryFile {
+            relative_path: "clip.wav".to_string(),
+            path,
+            size: bytes.len() as u64,
+            mime_type: "audio/wav".to_string(),
+            modified: None,
+        };
+        stream_binary_response(file, "no-cache", &request_headers)
+            .await
+            .expect("response")
+    }
+
+    fn header_str(response: &Response, name: header::HeaderName) -> Option<&str> {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("ascii"))
+    }
+
+    async fn body_bytes(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("collect body")
+            .to_vec()
+    }
+
+    /// Media elements only seek when the server advertises byte ranges.
+    #[tokio::test]
+    async fn binary_without_range_is_served_whole_and_advertises_ranges() {
+        let response = serve(b"0123456789", &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header_str(&response, header::ACCEPT_RANGES), Some("bytes"));
+        assert_eq!(header_str(&response, header::CONTENT_LENGTH), Some("10"));
+        assert_eq!(body_bytes(response).await, b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn binary_range_is_served_as_partial_content() {
+        let response = serve(b"0123456789", &[(header::RANGE, "bytes=3-6")]).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_str(&response, header::CONTENT_RANGE),
+            Some("bytes 3-6/10")
+        );
+        assert_eq!(header_str(&response, header::CONTENT_LENGTH), Some("4"));
+        assert_eq!(body_bytes(response).await, b"3456");
+    }
+
+    #[tokio::test]
+    async fn binary_range_past_the_end_is_not_satisfiable() {
+        let response = serve(b"0123456789", &[(header::RANGE, "bytes=10-")]).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            header_str(&response, header::CONTENT_RANGE),
+            Some("bytes */10")
+        );
+        assert!(body_bytes(response).await.is_empty());
     }
 }

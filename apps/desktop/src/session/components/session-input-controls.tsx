@@ -8,7 +8,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
-import { ArrowUp, Loader2, Square, X } from "lucide-react";
+import { ArrowUp, ListPlus, Loader2, Square } from "lucide-react";
 import { useRef, useState } from "react";
 import type { PromptEditorHandle } from "../state/prompt-editor-store";
 import {
@@ -31,14 +31,6 @@ import {
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
-
-type PromptQueueItem = {
-  id: string;
-  prompt: string;
-  imageIds: string[] | null;
-  selectedSkillIds: string[];
-  createdAt: number;
-};
 
 export function PromptEditorWithPopover({
   editorHandle,
@@ -192,11 +184,62 @@ export function PromptEditorWithPopover({
   );
 }
 
+function ComposerRoundButton({
+  label,
+  tooltip,
+  onClick,
+  disabled,
+  emphasis,
+  children,
+}: {
+  label: string;
+  tooltip: React.ReactNode;
+  onClick: () => void;
+  disabled: boolean;
+  /** "solid" for the action that submits, "soft" for Stop. */
+  emphasis: "solid" | "soft";
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={onClick}
+          disabled={disabled}
+          className={cn(
+            "flex h-8 w-8 items-center justify-center rounded-full transition",
+            emphasis === "soft"
+              ? "bg-primary/10 text-primary"
+              : "bg-primary text-white hover:!bg-primary/90 hover:!text-white",
+            "disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:hover:bg-muted disabled:hover:text-muted-foreground disabled:opacity-100",
+          )}
+          aria-label={label}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end" className="text-[11px]">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Send, or while a turn runs, Stop. Writing during a turn adds a Queue button
+ * beside Stop: the message waits in the session's queue and becomes the next
+ * turn. `onSend` decides between sending and queuing; the submit chord does
+ * the same.
+ */
 export function SendButtonWithState({
   editorHandle,
   isSending,
   isStopping,
   canSend,
+  canQueue,
   isUploading,
   onSend,
   onCancel,
@@ -206,6 +249,7 @@ export function SendButtonWithState({
   isSending: boolean;
   isStopping: boolean;
   canSend: boolean;
+  canQueue: boolean;
   isUploading: boolean;
   onSend: () => void;
   onCancel: () => void;
@@ -214,122 +258,59 @@ export function SendButtonWithState({
   const isEmpty = usePromptEditorStore(
     (s) => getPromptEditorScopeState(s, editorHandle.scopeId).isEmpty,
   );
-  const isDisabled = isSending
-    ? isStopping
-    : !canSend || isEmpty || isUploading;
+  // The submit chord, spelled with the platform's own modifier — hardcoding
+  // ⌘ misnames the key everywhere but macOS.
+  const submitChord = <KeyboardHint keys={["mod", "Enter"]} />;
 
-  return (
-    <TooltipProvider delayDuration={120}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={isSending ? onCancel : onSend}
-            disabled={isDisabled}
-            className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-full transition",
-              isSending
-                ? "bg-primary/10 text-primary"
-                : isDisabled
-                  ? "bg-muted text-muted-foreground"
-                  : "bg-primary text-white hover:!bg-primary/90 hover:!text-white",
-              "disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:hover:bg-muted disabled:hover:text-muted-foreground disabled:opacity-100",
-            )}
-            aria-label={
-              isSending ? t("stopButtonLabel") : t("sendShortcutAria")
-            }
-          >
-            {isStopping ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : isSending ? (
-              <Square className="h-4 w-4" />
-            ) : (
-              <ArrowUp className="h-4 w-4" strokeWidth={3} />
-            )}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="top" align="end" className="text-[11px]">
-          {isSending ? (
-            <span>{t("stopButtonLabel")}</span>
-          ) : (
-            // The submit chord, spelled with the platform's own modifier —
-            // hardcoding ⌘ misnames the key everywhere but macOS.
-            <KeyboardHint keys={["mod", "Enter"]} />
-          )}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
-function PromptQueueIndicator({
-  queue,
-  onRemove,
-  onSendNow,
-  t,
-}: {
-  queue: PromptQueueItem[];
-  onRemove: (itemId: string) => void;
-  onSendNow: (itemId: string) => void;
-  t: TranslationFunction;
-}) {
-  if (queue.length === 0) {
-    return null;
+  if (!isSending) {
+    return (
+      <TooltipProvider delayDuration={120}>
+        <ComposerRoundButton
+          label={t("sendShortcutAria")}
+          tooltip={submitChord}
+          onClick={onSend}
+          disabled={!canSend || isEmpty || isUploading}
+          emphasis="solid"
+        >
+          <ArrowUp className="h-4 w-4" strokeWidth={3} />
+        </ComposerRoundButton>
+      </TooltipProvider>
+    );
   }
 
   return (
-    <div className="rounded-xl border border-border/80 bg-muted/30">
-      <div className="flex h-8 items-center px-3 text-xs text-muted-foreground">
-        {t("queueItemsLabel", { count: queue.length })}
-      </div>
-      <div className="max-h-40 overflow-y-auto border-t border-border/70">
-        {queue.map((item) => (
-          <div
-            key={item.id}
-            className="flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-muted/50"
+    <TooltipProvider delayDuration={120}>
+      <div className="flex items-center gap-1.5">
+        {canQueue && !isEmpty ? (
+          <ComposerRoundButton
+            label={t("queueButtonLabel")}
+            tooltip={
+              <span className="flex items-center gap-1.5">
+                {t("queueButtonLabel")}
+                {submitChord}
+              </span>
+            }
+            onClick={onSend}
+            disabled={isUploading}
+            emphasis="solid"
           >
-            <span className="line-clamp-1 flex-1 text-foreground">
-              {item.prompt}
-            </span>
-            <TooltipProvider delayDuration={120}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => onSendNow(item.id)}
-                    className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                    aria-label={t("queueSendNowAria")}
-                  >
-                    <ArrowUp className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="text-[11px]">
-                  {t("queueSendNowAria")}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            <TooltipProvider delayDuration={120}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => onRemove(item.id)}
-                    className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                    aria-label={t("queueRemoveAria")}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="text-[11px]">
-                  {t("queueRemoveAria")}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
-        ))}
+            <ListPlus className="h-4 w-4" strokeWidth={2.5} />
+          </ComposerRoundButton>
+        ) : null}
+        <ComposerRoundButton
+          label={t("stopButtonLabel")}
+          tooltip={<span>{t("stopButtonLabel")}</span>}
+          onClick={onCancel}
+          disabled={isStopping}
+          emphasis="soft"
+        >
+          {isStopping ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Square className="h-4 w-4" />
+          )}
+        </ComposerRoundButton>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

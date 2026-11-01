@@ -9,6 +9,7 @@
  * ```
  */
 
+import { spacedBlock } from "../../utility/decorations";
 import { memoizeByParsedDoc } from "../decoration-cache";
 import { needsDecorationRebuild } from "../decoration-refresh";
 import { syntaxTree } from "@codemirror/language";
@@ -279,7 +280,7 @@ class MermaidWidget extends WidgetType {
       this.renderDiagram(canvas, container);
     }
 
-    return container;
+    return spacedBlock(container);
   }
 
   private async renderDiagram(

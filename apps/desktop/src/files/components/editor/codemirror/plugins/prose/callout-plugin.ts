@@ -17,6 +17,7 @@ import {
 import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
 import { cursorInNode } from "../../utility/tools";
+import { CALLOUT_ICONS, calloutIcon } from "./callout-icons";
 
 /**
  * Callout type to color class mapping
@@ -64,10 +65,20 @@ class CalloutHeaderWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
+    const colorClass = CALLOUT_COLORS[this.type.toLowerCase()] ?? "callout-note";
     const header = document.createElement("span");
-    header.className = `cm-callout-header ${CALLOUT_COLORS[this.type.toLowerCase()] ?? "callout-note"}`;
-    header.textContent =
+    header.className = `cm-callout-header ${colorClass}`;
+    const icon = document.createElement("span");
+    icon.className = "cm-callout-icon";
+    // Aliases share a color with their kind; some (todo) have their own icon.
+    const type = this.type.toLowerCase();
+    icon.appendChild(
+      calloutIcon(type in CALLOUT_ICONS ? type : colorClass.replace(/^callout-/, "")),
+    );
+    const title = document.createElement("span");
+    title.textContent =
       this.title || this.type.charAt(0).toUpperCase() + this.type.slice(1);
+    header.append(icon, title);
 
     if (this.isFolded) {
       const foldIcon = document.createElement("span");

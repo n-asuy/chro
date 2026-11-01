@@ -11,7 +11,7 @@ use std::{
 };
 
 use db::{
-    models::{TaskDraft, TaskRecord, TaskRun, TaskSession},
+    models::{SessionQueueItem, TaskDraft, TaskRecord, TaskRun, TaskSession},
     DBService,
 };
 use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
@@ -81,6 +81,7 @@ struct EventIndexes {
     session_rowids: Arc<RwLock<HashMap<i64, Uuid>>>,
     draft_projects: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     draft_rowids: Arc<RwLock<HashMap<i64, Uuid>>>,
+    queue_tasks: Arc<RwLock<HashMap<Uuid, Uuid>>>,
 }
 
 impl EventIndexes {
@@ -95,6 +96,7 @@ impl EventIndexes {
             session_rowids: Arc::new(RwLock::new(HashMap::new())),
             draft_projects: Arc::new(RwLock::new(HashMap::new())),
             draft_rowids: Arc::new(RwLock::new(HashMap::new())),
+            queue_tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -141,6 +143,14 @@ impl EventIndexes {
 
     fn track_draft_rowid(&self, rowid: i64, id: Uuid) {
         self.draft_rowids.write().insert(rowid, id);
+    }
+
+    fn record_queued(&self, id: Uuid, task: Uuid) {
+        self.queue_tasks.write().insert(id, task);
+    }
+
+    fn task_for_queued(&self, id: &Uuid) -> Option<Uuid> {
+        self.queue_tasks.read().get(id).copied()
     }
 }
 
@@ -297,6 +307,17 @@ impl EventService {
             }
         }
 
+        let queued = SessionQueueItem::list_all(pool).await?;
+        let mut queue_map = serde_json::Map::new();
+        {
+            let mut guard = self.resources.indexes.queue_tasks.write();
+            guard.clear();
+            for item in &queued {
+                guard.insert(item.id, item.task_id);
+                queue_map.insert(item.id.to_string(), serde_json::to_value(item)?);
+            }
+        }
+
         let patch = Patch(vec![
             PatchOperation::Replace(ReplaceOperation {
                 path: "/tasks".to_string(),
@@ -313,6 +334,10 @@ impl EventService {
             PatchOperation::Replace(ReplaceOperation {
                 path: "/task_drafts".to_string(),
                 value: Value::Object(draft_map),
+            }),
+            PatchOperation::Replace(ReplaceOperation {
+                path: "/session_queue".to_string(),
+                value: Value::Object(queue_map),
             }),
         ]);
         self.resources.msg_store.push_patch(patch);
@@ -469,6 +494,7 @@ fn collection_for_table(table: &str) -> Option<&'static str> {
         "task_runs" => Some("task_runs"),
         "task_sessions" => Some("task_sessions"),
         "task_drafts" => Some("task_drafts"),
+        "session_queue" => Some("session_queue"),
         _ => None,
     }
 }
@@ -682,6 +708,16 @@ async fn read_changed_row(
             },
             None => None,
         },
+        "session_queue" => SessionQueueItem::find_by_rowid(db.pool(), rowid)
+            .await?
+            .map(|item| {
+                indexes.record_queued(item.id, item.task_id);
+                RowSnapshot {
+                    collection: "session_queue",
+                    id: item.id,
+                    value: serde_json::to_value(&item).unwrap_or(Value::Null),
+                }
+            }),
         _ => None,
     };
     Ok(snapshot)
@@ -1030,6 +1066,57 @@ impl EventService {
                         session_task.is_none() || session_task == Some(task_id)
                     } else {
                         session_task == Some(task_id)
+                    }
+                }
+                None => !matches!(entry, LogEntry::JsonPatch(_)),
+            }
+        };
+
+        let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
+        Ok(initial_stream
+            .chain(live_stream_with_resync(rx, filter, make_snapshot))
+            .boxed())
+    }
+
+    /// Stream one session's queue with initial snapshot + live updates.
+    pub async fn stream_session_queue_raw(
+        &self,
+        task_id: Uuid,
+    ) -> Result<futures::stream::BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>
+    {
+        use futures::StreamExt;
+
+        let pool = self.db.pool().clone();
+        let make_snapshot = move || {
+            let pool = pool.clone();
+            async move {
+                let items = SessionQueueItem::list_by_task(&pool, task_id).await?;
+                let mut items_map = serde_json::Map::new();
+                for item in &items {
+                    items_map.insert(item.id.to_string(), serde_json::to_value(item)?);
+                }
+                Ok(LogEntry::from(Patch(vec![PatchOperation::Replace(
+                    ReplaceOperation {
+                        path: "/session_queue".to_string(),
+                        value: Value::Object(items_map),
+                    },
+                )])))
+            }
+        };
+
+        // Subscribe before the snapshot read so nothing falls in between.
+        let rx = self.resources.msg_store.subscribe();
+        let initial_msg = make_snapshot().await?;
+
+        let indexes = self.resources.indexes.clone();
+        let filter = move |entry: &LogEntry| -> bool {
+            match parse_collection_patch(entry, "session_queue") {
+                Some((op, item_id)) => {
+                    let item_task = indexes.task_for_queued(&item_id);
+                    if matches!(op, PatchOperation::Remove(_)) {
+                        item_task.is_none() || item_task == Some(task_id)
+                    } else {
+                        item_task == Some(task_id)
                     }
                 }
                 None => !matches!(entry, LogEntry::JsonPatch(_)),

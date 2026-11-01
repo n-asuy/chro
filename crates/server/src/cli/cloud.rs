@@ -44,7 +44,7 @@ type Result<T> = std::result::Result<T, CloudError>;
 /// Where the control plane is and how to authenticate to it.
 ///
 /// Stored next to the other per-user state so `chro cloud up` in one shell is
-/// visible to `chro task` in another.
+/// visible to `chro session` in another.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
     pub control_plane_url: String,

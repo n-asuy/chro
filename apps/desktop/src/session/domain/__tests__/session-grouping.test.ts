@@ -8,6 +8,7 @@ import {
   groupSessions,
   isInboxSession,
   isSessionGroupMode,
+  previewSessions,
 } from "../session-grouping";
 
 const LABELS: GroupLabels = {
@@ -233,6 +234,54 @@ describe("isInboxSession", () => {
     expect(
       isInboxSession(task({ id: "a", project_id: "removed" }), open, scratch),
     ).toBe(false);
+  });
+});
+
+describe("previewSessions", () => {
+  const many = (count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      task({ id: `t${i}`, status: "completed" }),
+    );
+  const ids = (tasks: StoredTask[]) => tasks.map((t) => t.id);
+  const noneActive = () => false;
+
+  it("shows everything when the list fits the preview", () => {
+    const tasks = many(5);
+    const preview = previewSessions(tasks, noneActive);
+    expect(ids(preview.visible)).toEqual(ids(tasks));
+    expect(preview.hiddenCount).toBe(0);
+  });
+
+  it("never folds a single row behind a control as tall as the row", () => {
+    const preview = previewSessions(many(6), noneActive);
+    expect(preview.visible).toHaveLength(6);
+    expect(preview.hiddenCount).toBe(0);
+  });
+
+  it("keeps the first five rows and counts the rest as hidden", () => {
+    const preview = previewSessions(many(9), noneActive);
+    expect(ids(preview.visible)).toEqual(["t0", "t1", "t2", "t3", "t4"]);
+    expect(preview.hiddenCount).toBe(4);
+  });
+
+  it("keeps the active session visible in its original position", () => {
+    const preview = previewSessions(many(9), (t) => t.id === "t7");
+    expect(ids(preview.visible)).toEqual(["t0", "t1", "t2", "t3", "t4", "t7"]);
+    expect(preview.hiddenCount).toBe(3);
+  });
+
+  it("keeps sessions waiting on the user visible", () => {
+    const tasks = many(9);
+    tasks[8] = task({ id: "t8", awaiting_input: true });
+    const preview = previewSessions(tasks, noneActive);
+    expect(ids(preview.visible)).toEqual(["t0", "t1", "t2", "t3", "t4", "t8"]);
+    expect(preview.hiddenCount).toBe(3);
+  });
+
+  it("shows everything when lifting kept rows leaves only one hidden", () => {
+    const preview = previewSessions(many(7), (t) => t.id === "t6");
+    expect(preview.visible).toHaveLength(7);
+    expect(preview.hiddenCount).toBe(0);
   });
 });
 

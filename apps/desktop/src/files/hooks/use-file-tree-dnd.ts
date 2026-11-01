@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { dropFileReferences } from "@/session/state/prompt-editor-store";
 import type { FileNode } from "../types/file-tree";
 import { FileNodeType } from "../types/file-tree";
 
@@ -32,18 +33,14 @@ const initialDragState: DragState = {
   mousePosition: { x: 0, y: 0 },
 };
 
-interface PromptEditorDropPayload {
-  nodes: DraggedNodeInfo[];
-  clientX: number;
-  clientY: number;
-  target: HTMLElement;
-}
-
 interface UseFileTreeDndOptions {
   rootPath: string | null;
   selectedNodes: FileNode[];
-  onMove: (sourcePaths: string[], targetParentPath: string) => Promise<void>;
-  onDropToPromptEditor?: (payload: PromptEditorDropPayload) => void;
+  /**
+   * Moves dropped rows into a directory. Without it the tree is not a drop
+   * target and rows can only be dropped on a composer as references.
+   */
+  onMove?: (sourcePaths: string[], targetParentPath: string) => Promise<void>;
   onHoverDirectory?: (path: string) => void;
 }
 
@@ -59,7 +56,6 @@ export function useFileTreeDnd({
   rootPath,
   selectedNodes,
   onMove,
-  onDropToPromptEditor,
   onHoverDirectory,
 }: UseFileTreeDndOptions): UseFileTreeDndReturn {
   const [dragState, setDragState] = useState<DragState>(initialDragState);
@@ -192,8 +188,12 @@ export function useFileTreeDnd({
       const promptEditor = elementUnder?.closest(
         PROMPT_EDITOR_DROP_SELECTOR,
       ) as HTMLElement | null;
-      const fileTreeItem = elementUnder?.closest("[data-file-path]");
-      const fileTreeContainer = elementUnder?.closest("[data-file-tree-root]");
+      const fileTreeItem = onMove
+        ? elementUnder?.closest("[data-file-path]")
+        : null;
+      const fileTreeContainer = onMove
+        ? elementUnder?.closest("[data-file-tree-root]")
+        : null;
 
       if (promptEditor) {
         clearHoverExpansion();
@@ -258,36 +258,27 @@ export function useFileTreeDnd({
 
     const handleMouseUp = async (e: MouseEvent) => {
       clearHoverExpansion();
-      if (
-        dragState.isOverPromptEditor &&
-        dragState.draggedNodes.length > 0 &&
-        onDropToPromptEditor
-      ) {
+      if (dragState.isOverPromptEditor && dragState.draggedNodes.length > 0) {
         const elementUnder = document.elementFromPoint(e.clientX, e.clientY);
-        const promptEditor = elementUnder?.closest(
-          PROMPT_EDITOR_DROP_SELECTOR,
-        ) as HTMLElement | null;
+        const promptEditor = elementUnder?.closest(PROMPT_EDITOR_DROP_SELECTOR);
         if (promptEditor) {
-          try {
-            onDropToPromptEditor({
-              nodes: dragState.draggedNodes,
-              clientX: e.clientX,
-              clientY: e.clientY,
-              target: promptEditor,
-            });
-          } catch (error) {
-            console.error(
-              "[use-file-tree-dnd] onDropToPromptEditor failed:",
-              error,
-            );
-          }
+          dropFileReferences(
+            promptEditor,
+            dragState.draggedNodes,
+            e.clientX,
+            e.clientY,
+          );
         }
         setDragState(initialDragState);
         mouseDownRef.current = null;
         return;
       }
 
-      if (dragState.dropTargetPath && dragState.draggedNodes.length > 0) {
+      if (
+        onMove &&
+        dragState.dropTargetPath &&
+        dragState.draggedNodes.length > 0
+      ) {
         let targetParentPath = dragState.dropTargetPath;
 
         // Handle root drop
@@ -337,7 +328,6 @@ export function useFileTreeDnd({
     clearHoverExpansion,
     dragState,
     onMove,
-    onDropToPromptEditor,
     rootPath,
     scheduleHoverExpansion,
   ]);

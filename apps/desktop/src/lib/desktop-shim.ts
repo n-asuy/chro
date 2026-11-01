@@ -4,6 +4,7 @@
 // available to consumers that read it at module scope.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { SkillInstallReport } from "./agent-skill-client";
 import type { CliInstallStatus } from "./cli-install-client";
 
 type UpdateStatus =
@@ -100,6 +101,11 @@ function installDesktopBridge() {
       status: () => invoke<CliInstallStatus>("cli_install_status"),
       install: () => invoke<CliInstallStatus>("cli_install"),
       remove: () => invoke<CliInstallStatus>("cli_remove"),
+    },
+    // The agent skill, installed only from a person's choice.
+    skill: {
+      status: () => invoke<SkillInstallReport>("agent_skill_status"),
+      install: () => invoke<SkillInstallReport>("agent_skill_install"),
     },
     update: {
       check: () =>

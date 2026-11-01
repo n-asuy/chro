@@ -182,6 +182,15 @@ impl Default for TaskMessageMode {
 pub struct SendTaskMessageParams {
     pub task_id: Uuid,
     pub prompt: String,
+    pub options: MessageOptions,
+}
+
+/// How a message is sent, apart from its text. A queued message keeps these
+/// until it becomes a turn, so the default (plain text continuing the
+/// session) serializes to nothing worth storing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MessageOptions {
     pub mode: TaskMessageMode,
     pub executor_profile_id: Option<ExecutorProfileId>,
     pub image_ids: Option<Vec<Uuid>>,
@@ -189,6 +198,17 @@ pub struct SendTaskMessageParams {
     pub target_branch: Option<String>,
     pub selected_skill_ids: Vec<String>,
     pub context_refs: Vec<TaskContextRefInput>,
+}
+
+impl SendTaskMessageParams {
+    /// A plain text message continuing the session the way the app would.
+    pub fn text(task_id: Uuid, prompt: String) -> Self {
+        Self {
+            task_id,
+            prompt,
+            options: MessageOptions::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -420,11 +440,6 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         let mode = self.resolve_fork_mode(&anchor_run).await;
         let title = fork_title(&source_task.title);
         let mut task = TaskRecord::new_with_prompt(source_task.project_id, title, None, None);
-        // The agent titles the forked conversation after its inherited first
-        // message, so the session title it produces is the source's, not the
-        // fork's. Pin against adopting it; the fork is titled by its own first
-        // prompt instead (see `title_fork_from_first_prompt`).
-        task.title_pinned = true;
         // A continuation works where its source worked.
         task.home_dir = source_task.home_dir.clone();
         task.insert(self.pool()).await?;
@@ -859,7 +874,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
     /// marked delivered. Skipped while the delegating session is mid-turn; the
     /// undelivered edges keep the results safe, and the next settlement (or
     /// barrier re-check) delivers them.
-    async fn try_delegation_barrier_wake(&self, parent: &TaskRecord) -> Result<(), RuntimeError> {
+    pub(crate) async fn try_delegation_barrier_wake(
+        &self,
+        parent: &TaskRecord,
+    ) -> Result<(), RuntimeError> {
         // The barrier: every delegate edge pointing at this parent belongs to
         // a child that is no longer running.
         let child_task_ids: Vec<Uuid> =
@@ -870,14 +888,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 .map(|r| r.task_id)
                 .collect();
         for child_task_id in &child_task_ids {
-            let active: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM task_runs \
-                 WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
-            )
-            .bind(child_task_id)
-            .fetch_one(self.pool())
-            .await?;
-            if active > 0 {
+            if self.turn_in_flight(*child_task_id).await? {
                 info!(
                     parent_task_id = %parent.id,
                     waiting_on = %child_task_id,
@@ -902,14 +913,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             return Ok(());
         }
 
-        let busy: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM task_runs \
-             WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
-        )
-        .bind(parent.id)
-        .fetch_one(self.pool())
-        .await?;
-        if busy > 0 {
+        // Cheap early exit; the authoritative check is the turn admission
+        // below, which a concurrent sender cannot slip past.
+        if self.turn_in_flight(parent.id).await? {
             info!(
                 parent_task_id = %parent.id,
                 pending_handoffs = undelivered.len(),
@@ -964,13 +970,25 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         let wake_prompt = build_barrier_wake_prompt(&packets);
-        if let Err(err) = self.follow_up_by_task(parent.id, wake_prompt).await {
-            warn!(
-                parent_task_id = %parent.id,
-                error = %err,
-                "delegation barrier wake failed; handoffs stay undelivered"
-            );
-            return Ok(());
+        match self.follow_up_by_task(parent.id, wake_prompt).await {
+            Ok(_) => {}
+            // Something else started a turn first; the parent's next settled
+            // turn delivers these handoffs.
+            Err(RuntimeError::SessionBusy) => {
+                info!(
+                    parent_task_id = %parent.id,
+                    "delegating session became busy; barrier wake deferred"
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(
+                    parent_task_id = %parent.id,
+                    error = %err,
+                    "delegation barrier wake failed; handoffs stay undelivered"
+                );
+                return Ok(());
+            }
         }
         for (edge, info) in undelivered {
             let delivered = HandoffInfo {
@@ -993,12 +1011,12 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
     /// Early-wake half of the delegation loop: when a delegated child suspends
     /// on an approval, rouse the (sleeping) delegating parent so it can respond
-    /// via `chro approvals`. Without this a gated child never completes, the
+    /// via `chro approval`. Without this a gated child never completes, the
     /// barrier never fires, and an unattended parent deadlocks.
     ///
     /// Best-effort: a run that is not a delegated child settles nothing. A
     /// mid-turn parent is left alone (it can see the pending approval via
-    /// `chro approvals list`); only a sleeping parent is woken. The busy guard
+    /// `chro approval list`); only a sleeping parent is woken. The busy guard
     /// then suppresses repeat wakes once the parent is roused, so N pending
     /// approvals do not produce N turns.
     pub async fn notify_delegation_approval_pending(
@@ -1035,24 +1053,19 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         // Only rouse a sleeping parent. A mid-turn parent needs no wake — it
         // would see the pending approval on its next action anyway, and a
         // follow-up cannot be injected while it is busy.
-        let busy: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM task_runs \
-             WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
-        )
-        .bind(parent.id)
-        .fetch_one(self.pool())
-        .await?;
-        if busy > 0 {
-            info!(
-                parent_task_id = %parent.id,
-                child_task_id = %child.id,
-                "delegating session is mid-turn; approval-pending wake deferred"
-            );
-            return Ok(());
-        }
-
         let prompt = build_approval_pending_wake_prompt(&child.title, &tool_name, &approval_id);
-        self.follow_up_by_task(parent.id, prompt).await?;
+        match self.follow_up_by_task(parent.id, prompt).await {
+            Ok(_) => {}
+            Err(RuntimeError::SessionBusy) => {
+                info!(
+                    parent_task_id = %parent.id,
+                    child_task_id = %child.id,
+                    "delegating session is mid-turn; approval-pending wake deferred"
+                );
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
         info!(
             parent_task_id = %parent.id,
             child_task_id = %child.id,
@@ -1563,6 +1576,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         // prompt is built: a digest handoff has to be inlined into that prompt,
         // and that only works if it is decided here rather than after the prompt
         // is already assembled.
+        let opens_session = resume_session_id.is_none();
         let (resume_session_id, fork_session, fork_context_refs) = match resume_session_id {
             Some(existing) => (Some(existing), false, Vec::new()),
             None => match self.resolve_fork_start(&task, &executor_profile).await {
@@ -1704,6 +1718,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 resume_session_id: resume_session_id.clone(),
                 fork_session,
                 force_new_attempt,
+                session_title_request: session_title_request(opens_session, &executor_user_prompt),
             })
             .await?;
 
@@ -1741,22 +1756,6 @@ impl<'a, R: Runtime> TaskService<'a, R> {
     /// `ClaudeLogProcessor` to break immediately.
     ///
     /// The new TaskRun inherits worktree/branch info from the previous run.
-    pub async fn follow_up_execution(
-        &self,
-        run_id: Uuid,
-        prompt: String,
-        selected_skill_ids: Vec<String>,
-    ) -> Result<ExecutionSessionStart, RuntimeError> {
-        self.follow_up_execution_with_options(
-            run_id,
-            prompt,
-            None,
-            selected_skill_ids,
-            Vec::new(),
-            None,
-        )
-        .await
-    }
 
     pub async fn follow_up_execution_with_context_refs(
         &self,
@@ -1778,14 +1777,16 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
     /// The directory a run may actually be resumed in.
     ///
-    /// A recorded workspace can stop being a worktree while its directory
-    /// survives: an interrupted cleanup takes the `.git` file and leaves the
-    /// files. Resuming there runs the agent, and every later git operation, in
-    /// a directory git does not recognise. When that happens the worktree is
-    /// rebuilt from the run's own branch, which restores everything the run
-    /// committed; only uncommitted leftovers are unrecoverable, and they were
-    /// already lost with the checkout.
-    async fn ensure_run_workspace(
+    /// A recorded workspace can stop being a worktree: housekeeping reclaims
+    /// idle worktrees (clearing the recorded path), and an interrupted cleanup
+    /// takes the `.git` file and leaves the files. Resuming there would run the
+    /// agent, and every later git operation, in a directory git does not
+    /// recognise. Instead the worktree is rebuilt from the run's own branch,
+    /// which restores everything the run committed; only uncommitted leftovers
+    /// are unrecoverable, and they were already lost with the checkout. The
+    /// rebuilt worktree is registered back on the task so housekeeping tracks
+    /// it again.
+    pub async fn ensure_run_workspace(
         &self,
         run: &TaskRun,
         project: &ProjectRecord,
@@ -1794,13 +1795,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .workspace_path
             .clone()
             .or_else(|| run.container_ref.clone())
-            .ok_or(RuntimeError::BadRequest(
-                "workspace path missing on task run",
-            ))?;
-        let recorded = PathBuf::from(recorded);
+            .map(PathBuf::from);
         let git = self.runtime().git();
-        if git.is_repository(&recorded) {
-            return Ok(recorded);
+        if let Some(recorded) = recorded.as_ref().filter(|path| git.is_repository(path)) {
+            return Ok(recorded.clone());
         }
 
         let repo_path = PathBuf::from(&project.git_repo_path);
@@ -1809,17 +1807,19 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             // Nothing to rebuild from (a project that is not a git repository,
             // or a run with no branch): the directory is all there is.
             _ => {
-                return if recorded.exists() {
-                    Ok(recorded)
-                } else {
-                    Err(RuntimeError::BadRequest("workspace path no longer exists"))
+                return match recorded {
+                    Some(recorded) if recorded.exists() => Ok(recorded),
+                    Some(_) => Err(RuntimeError::BadRequest("workspace path no longer exists")),
+                    None => Err(RuntimeError::BadRequest(
+                        "workspace path missing on task run",
+                    )),
                 }
             }
         };
 
         warn!(
             task_run_id = %run.id,
-            workspace = %recorded.display(),
+            workspace = ?recorded,
             branch = %branch,
             "run workspace is no longer a git worktree; rebuilding it from the branch"
         );
@@ -1833,10 +1833,18 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             .worktree()
             .ensure_worktree(&repo_path, options)
             .await?;
+        TaskRecord::update_worktree_state(
+            self.pool(),
+            run.task_id,
+            Some(handle.path.to_string_lossy().into_owned()),
+            false,
+            false,
+        )
+        .await?;
         Ok(handle.path)
     }
 
-    async fn follow_up_execution_with_options(
+    pub(crate) async fn follow_up_execution_with_options(
         &self,
         run_id: Uuid,
         prompt: String,
@@ -2000,6 +2008,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 // A follow-up continues this task's own session; only a forked
                 // task's first turn branches.
                 fork_session: false,
+                session_title_request: None,
             })
             .await?;
 
@@ -2107,20 +2116,25 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         Ok(PathBuf::from(project.git_repo_path))
     }
 
-    pub async fn send_task_message(
+    /// Start a turn without checking the session is idle. Only the turn
+    /// admission in `session_turns` calls this, holding the session's lock.
+    pub(crate) async fn start_turn(
         &self,
         params: SendTaskMessageParams,
     ) -> Result<TaskMessageStart, RuntimeError> {
         let SendTaskMessageParams {
             task_id,
             prompt,
-            mode,
-            executor_profile_id,
-            image_ids,
-            use_worktree,
-            target_branch,
-            selected_skill_ids,
-            context_refs,
+            options:
+                MessageOptions {
+                    mode,
+                    executor_profile_id,
+                    image_ids,
+                    use_worktree,
+                    target_branch,
+                    selected_skill_ids,
+                    context_refs,
+                },
         } = params;
 
         match mode {
@@ -2202,19 +2216,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         task_id: Uuid,
         prompt: String,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
-        self.send_task_message(SendTaskMessageParams {
-            task_id,
-            prompt,
-            mode: TaskMessageMode::Auto,
-            executor_profile_id: None,
-            image_ids: None,
-            use_worktree: None,
-            target_branch: None,
-            selected_skill_ids: Vec::new(),
-            context_refs: Vec::new(),
-        })
-        .await
-        .map(|result| result.execution)
+        self.send_task_message(SendTaskMessageParams::text(task_id, prompt))
+            .await
+            .map(|result| result.execution)
     }
 
     /// Best-effort terminal transition for a run whose provisioning failed
@@ -2313,10 +2317,10 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let short = short_id_from_uuid(&task.id);
         let snapshot_message = format!("chore: finalize task {short}");
-        // commit_all + merge_changes are blocking git operations (the merge runs
-        // a full squash with conflict detection). Offload both to the blocking
-        // pool so the merge never stalls the async runtime's worker threads.
-        let merge_commit = {
+        // Snapshot first: the merge squashes committed work only, and the replay
+        // below refuses a dirty worktree. Then measure against the target. Both
+        // are blocking git operations, so they run on the blocking pool.
+        let (ahead, behind) = {
             let git = self.runtime().git().clone();
             let worktree = worktree_path.clone();
             let repo_path = project.git_repo_path.clone();
@@ -2324,6 +2328,32 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             let target = target_branch.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = git.commit_all(&worktree, &snapshot_message);
+                git.get_branch_status(Path::new(&repo_path), &branch, &target)
+            })
+            .await
+            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git branch status task failed: {e}")))?
+            .map_err(RuntimeError::from)?
+        };
+
+        // Parallel sessions keep moving the target, so a branch that is behind
+        // is the normal case, not an error. Replay it onto the target first; a
+        // conflict stops here with the rebase left in progress for the user to
+        // resolve, exactly as a manual rebase would. A branch with nothing ahead
+        // skips the replay so the merge reports "nothing to merge" instead.
+        if ahead > 0 && behind > 0 {
+            self.rebase_task_run(run_id, target_branch.clone(), Some(target_branch.clone()))
+                .await?;
+        }
+
+        // merge_changes runs a full squash with conflict detection; offload it
+        // so the merge never stalls the async runtime's worker threads.
+        let merge_commit = {
+            let git = self.runtime().git().clone();
+            let worktree = worktree_path.clone();
+            let repo_path = project.git_repo_path.clone();
+            let branch = branch_name.clone();
+            let target = target_branch.clone();
+            tokio::task::spawn_blocking(move || {
                 git.merge_changes(
                     Path::new(&repo_path),
                     &worktree,
@@ -2404,16 +2434,18 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         let old_base = old_base_branch.unwrap_or(default_target_branch.clone());
-        self.runtime()
-            .git()
-            .rebase_branch(
-                &repo_path,
-                &worktree_path,
-                &new_base_branch,
-                &old_base,
-                &branch_name,
-            )
+        // A rebase shells out to git and can take seconds on a large history;
+        // keep it off the async worker threads.
+        {
+            let git = self.runtime().git().clone();
+            let new_base = new_base_branch.clone();
+            tokio::task::spawn_blocking(move || {
+                git.rebase_branch(&repo_path, &worktree_path, &new_base, &old_base, &branch_name)
+            })
+            .await
+            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git rebase task failed: {e}")))?
             .map_err(RuntimeError::from)?;
+        }
 
         sqlx::query(
             "UPDATE task_runs SET target_branch = ?, updated_at = datetime('now') WHERE id = ?",
@@ -2724,6 +2756,13 @@ fn infer_task_description(prompt: &str) -> Option<String> {
     }
 }
 
+/// The text a run that opens a session is titled from: what the person wrote,
+/// before the skills and session digests chro adds for the agent. `None` for a
+/// follow-up, which continues a session that already has its title.
+fn session_title_request(opens_session: bool, user_prompt: &str) -> Option<String> {
+    opens_session.then(|| extract_task_text(user_prompt))
+}
+
 fn extract_task_text(prompt: &str) -> String {
     // Drop image attachments first so a leading image cannot shield the
     // metadata blocks that follow it (otherwise the `<context>` line survives
@@ -2862,8 +2901,8 @@ fn build_approval_pending_wake_prompt(
     format!(
         "A task you delegated (\"{child_title}\") is paused waiting for approval to use {tool_name}. \
 It cannot proceed until someone responds.\n\n\
-Review it with `chro approvals show {approval_id}`, then respond with \
-`chro approvals respond {approval_id} --approve` or `--deny --reason \"...\"`. \
+Review it with `chro approval show {approval_id}`, then respond with \
+`chro approval respond {approval_id} --approve` or `--deny --reason \"...\"`. \
 For an AskUserQuestion prompt, answer with `--answer \"question=option\"`.\n\n\
 If this is outside what you were asked to oversee, leave it for the user instead."
     )
@@ -3071,8 +3110,8 @@ mod tests {
         // exact commands to unblock it — otherwise the wake is not actionable.
         assert!(prompt.contains("indexer rewrite"));
         assert!(prompt.contains("Bash"));
-        assert!(prompt.contains("chro approvals show appr-123"));
-        assert!(prompt.contains("chro approvals respond appr-123 --approve"));
+        assert!(prompt.contains("chro approval show appr-123"));
+        assert!(prompt.contains("chro approval respond appr-123 --approve"));
         assert!(prompt.contains("--deny"));
         assert!(prompt.contains("--answer"));
     }
@@ -3167,6 +3206,16 @@ mod tests {
         let prompt =
             "<context>\n<file path=\"src/main.rs\" />\n</context>\n\ntry the cache path\nmore";
         assert_eq!(prompt_title(prompt).as_deref(), Some("try the cache path"));
+    }
+
+    #[test]
+    fn session_title_request_is_the_person_text_of_a_run_that_opens_a_session() {
+        let prompt = "<context>\nfile: a.rs\n</context>\ntry the cache path\nand measure it";
+        assert_eq!(
+            session_title_request(true, prompt).as_deref(),
+            Some("try the cache path\nand measure it")
+        );
+        assert_eq!(session_title_request(false, prompt), None);
     }
 
     #[test]

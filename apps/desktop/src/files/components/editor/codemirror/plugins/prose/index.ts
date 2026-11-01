@@ -9,15 +9,16 @@ export {
 export { hashtagPlugin } from "./hashtag-plugin";
 export { highlightPlugin } from "./highlight-plugin";
 export { quoteblockPlugin } from "./quoteblock-plugin";
+export { listIndentPlugin } from "./list-indent-plugin";
 export { taskListPlugin, editorLivePreviewField } from "./task-list-plugin";
 export {
   internalLinkPlugin,
   createInternalLinkClickHandler,
 } from "./internal-link-plugin";
 export {
-  externalLinkPlugin,
+  markdownLinkPlugin,
   createExternalLinkClickHandler,
-} from "./external-link-plugin";
+} from "./markdown-link-plugin";
 export { calloutPlugin } from "./callout-plugin";
 export {
   createEmbedPlugin,

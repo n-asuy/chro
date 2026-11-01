@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LARGE_TEXT_SAFE_MODE_BYTES,
   isLargeTextSafeMode,
+  opensInStructuredViewer,
   resolveCodeViewState,
 } from "./editor-safe-mode";
 
@@ -28,6 +29,26 @@ describe("isLargeTextSafeMode", () => {
   it("engages strictly above the threshold", () => {
     expect(isLargeTextSafeMode(LARGE_TEXT_SAFE_MODE_BYTES)).toBe(false);
     expect(isLargeTextSafeMode(LARGE)).toBe(true);
+  });
+});
+
+describe("opensInStructuredViewer", () => {
+  it("opens every structured viewer for an ordinary document", () => {
+    expect(opensInStructuredViewer("scene", SMALL)).toBe(true);
+    expect(opensInStructuredViewer("base", SMALL)).toBe(true);
+    expect(opensInStructuredViewer("spreadsheet", SMALL)).toBe(true);
+  });
+
+  // A scene's bytes are mostly embedded base64 images, which the canvas
+  // decodes as images; two dozen screenshots already pass the threshold.
+  // Falling back to raw JSON left such drawings unviewable.
+  it("still opens a large scene in the canvas", () => {
+    expect(opensInStructuredViewer("scene", LARGE)).toBe(true);
+  });
+
+  it("keeps large tabular documents in the plain-text view", () => {
+    expect(opensInStructuredViewer("base", LARGE)).toBe(false);
+    expect(opensInStructuredViewer("spreadsheet", LARGE)).toBe(false);
   });
 });
 

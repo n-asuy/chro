@@ -8,7 +8,6 @@ import type { Extension } from "@codemirror/state";
 import { syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
-import { closeBrackets } from "@codemirror/autocomplete";
 import type { LanguageSupport } from "@codemirror/language";
 
 import { RichEditPlugin } from "./plugins/rich-text-plugin";
@@ -20,10 +19,11 @@ import {
   hashtagPlugin,
   highlightPlugin,
   quoteblockPlugin,
+  listIndentPlugin,
   taskListPlugin,
   editorLivePreviewField,
   internalLinkPlugin,
-  externalLinkPlugin,
+  markdownLinkPlugin,
   calloutPlugin,
   mermaidPlugin,
   mathPlugin,
@@ -89,6 +89,8 @@ export function createWysiwygPlugin(config?: WysiwygConfig) {
 
   const mergedConfig = {
     ...(lezerRest ?? {}),
+    // List and quote keys come from keymapPlugin.
+    addKeymap: false,
     codeLanguages: codeLanguages,
     extensions: [
       GFM,
@@ -135,17 +137,17 @@ export function createWysiwygPlugin(config?: WysiwygConfig) {
   return ViewPlugin.fromClass(RichEditPlugin, {
     decorations: (v: RichEditPlugin) => v.decorations,
     provide: () => [
-      // Slash command autocomplete and bracket closing
+      // Slash command autocomplete
       createSlashCommandPlugin(),
-      closeBrackets(),
 
       // Prose decoration plugins
       highlightPlugin,
       hashtagPlugin,
       quoteblockPlugin,
+      listIndentPlugin,
       taskListPlugin,
       internalLinkPlugin,
-      externalLinkPlugin,
+      markdownLinkPlugin,
       calloutPlugin,
       mermaidPlugin,
       mathPlugin,

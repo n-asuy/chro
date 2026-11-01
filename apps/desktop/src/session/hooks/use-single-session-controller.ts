@@ -10,7 +10,11 @@ import {
   type AbortControllerRegistry,
   isAbortError,
 } from "../utils/abort-controller-registry";
-import { cancelTaskRun, sendTaskMessage } from "../utils/task-message-api";
+import {
+  cancelTaskRun,
+  queueTaskMessage,
+  sendTaskMessage,
+} from "../utils/task-message-api";
 
 type MutableRef<T> = {
   current: T;
@@ -246,7 +250,53 @@ export function useSingleSessionController({
     ],
   );
 
+  // A message written while the session's turn runs waits in the session's
+  // queue. There is no optimistic row: the queue list above the composer shows
+  // it once the server has it, and the conversation shows it when it becomes
+  // a turn. Mode, executor and attachments travel with it, like a send.
+  const queuePrompt = useCallback(
+    async (payload: PreparedPromptPayload): Promise<boolean> => {
+      if (!activeTaskId) {
+        return false;
+      }
+      try {
+        await queueTaskMessage(activeTaskId, {
+          prompt: payload.prompt,
+          mode: forceNewAttempt ? "new" : "auto",
+          executorProfileId: sessionExecutorSelection ?? executorProfileId,
+          imageIds: payload.imageIds,
+          contextRefs: payload.contextRefs,
+          selectedSkillIds: payload.selectedSkillIds,
+          useWorktree,
+          targetBranch: baseBranch,
+        });
+        return true;
+      } catch (error) {
+        console.error("[queuePrompt] Failed to queue message", error);
+        addErrorMessage(
+          error instanceof Error
+            ? error.message
+            : t("commandFailedError", { message: t("claudeCliHint") }),
+        );
+        editor.restore();
+        return false;
+      }
+    },
+    [
+      activeTaskId,
+      forceNewAttempt,
+      sessionExecutorSelection,
+      executorProfileId,
+      useWorktree,
+      baseBranch,
+      addErrorMessage,
+      t,
+      editor,
+    ],
+  );
+
   return {
     submitPrompt,
+    queuePrompt,
   };
 }

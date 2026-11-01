@@ -358,6 +358,7 @@ mod tests {
     #[tokio::test]
     async fn respond_records_actor_in_transcript_patch() {
         let run_id = Uuid::new_v4();
+        let parent_session = Uuid::new_v4();
         let pusher = Arc::new(CapturingPusher::default());
         let mut stores = HashMap::new();
         stores.insert(run_id, Arc::clone(&pusher));
@@ -379,7 +380,7 @@ mod tests {
                     status: ApprovalStatus::Approved,
                     answers: None,
                     responded_by: ApprovalActor::Agent {
-                        task: "parent-task".to_string(),
+                        session: parent_session,
                     },
                 },
             )
@@ -391,6 +392,6 @@ mod tests {
         let patch = last_patch(&pusher);
         let responded_by = &patch[0]["value"]["responded_by"];
         assert_eq!(responded_by["kind"], "agent");
-        assert_eq!(responded_by["task"], "parent-task");
+        assert_eq!(responded_by["session"], parent_session.to_string());
     }
 }

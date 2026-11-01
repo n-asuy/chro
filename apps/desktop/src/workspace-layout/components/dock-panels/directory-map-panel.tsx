@@ -1,27 +1,25 @@
 import { TreeNode } from "@/files/components/file-tree/tree-node";
+import { useFileTreeDnd } from "@/files/hooks/use-file-tree-dnd";
 import {
   type FileNode,
   FileNodeType,
   getDisplayName,
 } from "@/files/types/file-tree";
 import type { TranslationFunction } from "@/i18n";
-import { cn } from "@/lib/cn";
 import {
   fetchProjectTree,
   subscribeProjectTree,
 } from "@/lib/directory-map-client";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
-import { projectBadgeColor } from "@/session/domain/project-color";
 import type { StoredTask } from "@/session/types";
-import type { ProjectResponse } from "@/tasks/task-api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   type DirectoryMapSortMode,
   type DirectoryTreeNode,
   ancestorDirectories,
   buildDirectoryTree,
+  compactDirectoryChain,
   directoryLastActivity,
   parentDirectory,
 } from "../../domain/directory-tree";
@@ -32,171 +30,133 @@ import {
 } from "../../state/directory-map-store";
 import type { OpenProjectTab } from "../../state/open-projects-store";
 import { useRightDockStore } from "../../state/right-dock-store";
-import { ProjectColorDot } from "../project-color-dot";
 
 /**
- * The Map axis of the left panel: every open project's main checkout as a
- * directory and file tree. Selecting a directory puts its standing agent in
- * the right dock; opening a file does the same for the file's directory.
- * Rows reuse the right-dock file tree's `TreeNode`. Sessions supply activity
- * and sorting metadata but are not rendered as rows in the Map.
+ * A project's main checkout as a directory and file tree, shown in place of
+ * the project's sessions when its header's file toggle is on. Selecting a
+ * directory puts its standing agent in the right dock; opening a file does
+ * the same for the file's directory. Rows reuse the right-dock file tree's
+ * `TreeNode`. Sessions supply activity and sorting metadata but are not
+ * rendered as rows here. Rows drag onto a composer as file references; the
+ * tree itself is not a drop target, so nothing is moved from here.
+ *
+ * Showing the tree keeps the user's place: when the focused session lives in
+ * this project, the tree opens down to the session's directory, that row is
+ * marked and scrolled into view.
  */
 
 // Same indentation as the right-dock file tree (file-tree.tsx).
 const INDENT_BASE_PX = 18;
 const INDENT_STEP_PX = 16;
 
-export interface DirectoryMapListProps {
-  projects: OpenProjectTab[];
-  projectsById: Record<string, ProjectResponse>;
-  sortMode: DirectoryMapSortMode;
-  /** Visible sessions used for activity indicators and recent sorting. */
-  tasks: StoredTask[];
-  t: TranslationFunction;
-}
+const NO_SELECTION: FileNode[] = [];
 
-export function DirectoryMapList({
-  projects,
-  projectsById,
-  sortMode,
-  tasks,
-  t,
-}: DirectoryMapListProps) {
-  const tasksByProject = useMemo(() => {
-    const byProject: Record<string, StoredTask[]> = {};
-    for (const task of tasks) {
-      const list = byProject[task.project_id] ?? [];
-      byProject[task.project_id] = list;
-      list.push(task);
-    }
-    return byProject;
-  }, [tasks]);
-
-  const sortedProjects = useMemo(() => {
-    const latest = new Map<string, number>();
-    for (const task of tasks) {
-      if (task.home_dir == null) continue;
-      const at = Date.parse(task.updated_at);
-      if (Number.isFinite(at)) {
-        latest.set(
-          task.project_id,
-          Math.max(latest.get(task.project_id) ?? 0, at),
-        );
-      }
-    }
-    return [...projects].sort((a, b) => {
-      if (sortMode === "recent") {
-        const diff = (latest.get(b.id) ?? 0) - (latest.get(a.id) ?? 0);
-        if (diff !== 0) return diff;
-      }
-      const cmp = a.name.localeCompare(b.name);
-      return sortMode === "name-desc" ? -cmp : cmp;
-    });
-  }, [projects, tasks, sortMode]);
-
-  if (projects.length === 0) {
-    return (
-      <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-        {t("noProjectsYet")}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-1">
-      {sortedProjects.map((project) => (
-        <MapProject
-          key={project.id}
-          project={project}
-          projectRecord={projectsById[project.id] ?? null}
-          sortMode={sortMode}
-          tasks={tasksByProject[project.id] ?? []}
-          t={t}
-        />
-      ))}
-    </div>
-  );
-}
-
-interface MapProjectProps {
+export interface ProjectDirectoryTreeProps {
   project: OpenProjectTab;
-  projectRecord: ProjectResponse | null;
   sortMode: DirectoryMapSortMode;
-  tasks: StoredTask[];
+  /** The project's visible sessions, for activity indicators and sorting. */
+  tasks: readonly StoredTask[];
+  /** The session open in the centre pane when it belongs to this project. */
+  focusedTask: StoredTask | null;
   t: TranslationFunction;
 }
 
-const MapProject = memo(function MapProject({
+export const ProjectDirectoryTree = memo(function ProjectDirectoryTree({
   project,
-  projectRecord,
   sortMode,
   tasks,
+  focusedTask,
   t,
-}: MapProjectProps) {
-  const { activateProject, openProjectFile } = useProjectNavigation();
+}: ProjectDirectoryTreeProps) {
+  const { openProjectFile } = useProjectNavigation();
   const showDirectoryAgent = useRightDockStore((s) => s.showDirectoryAgent);
   const agentTarget = useRightDockStore((s) => s.agentTarget);
-  const { collapsed, expanded } = useDirectoryMapStore(
-    (s) => s.projects[project.id] ?? EMPTY_MAP_PROJECT,
+  const expanded = useDirectoryMapStore(
+    (s) => (s.projects[project.id] ?? EMPTY_MAP_PROJECT).expanded,
   );
-  const toggleProject = useDirectoryMapStore((s) => s.toggleProject);
   const toggleDirectory = useDirectoryMapStore((s) => s.toggleDirectory);
-  const revealHomedDirectories = useDirectoryMapStore(
-    (s) => s.revealHomedDirectories,
-  );
+  const revealDirectory = useDirectoryMapStore((s) => s.revealDirectory);
   const queryClient = useQueryClient();
+  const treeRef = useRef<HTMLDivElement>(null);
+  const { dragState, handlers: dndHandlers } = useFileTreeDnd({
+    rootPath: null,
+    selectedNodes: NO_SELECTION,
+  });
 
-  // A folded project costs nothing: no tree fetch (which builds the server's
-  // name index on first request) and no change subscription. Both start when
-  // the user opens the project and stop when it is folded again.
+  // The focused session's directory; null when it has none yet (the project
+  // root) or lives elsewhere.
+  const herePath = focusedTask?.home_dir || null;
+
+  // Reveal once per focus change, and once per mount: this tree mounts every
+  // time the files are shown, which is the user's request to see where they
+  // are. Keyed on the session, not its directory, so an address assigned
+  // later (first auto-commit) marks the row without moving the view.
+  const revealKey = focusedTask?.id ?? null;
+  const revealedKeyRef = useRef<string | null>(null);
+  const scrolledKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (collapsed) return;
-    return subscribeProjectTree(project.id, () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["project-tree", project.id],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["directory-agent", project.id],
-      });
-    });
-  }, [collapsed, project.id, queryClient]);
+    if (revealKey === null || revealedKeyRef.current === revealKey) return;
+    revealedKeyRef.current = revealKey;
+    revealDirectory(project.id, herePath);
+  }, [revealKey, herePath, project.id, revealDirectory]);
+
+  // Scroll after the revealed row exists (the tree may still be loading), at
+  // most once per reveal. `nearest` leaves a visible row alone.
+  useEffect(() => {
+    if (revealKey === null || scrolledKeyRef.current === revealKey) return;
+    const target = treeRef.current?.querySelector('[data-focused="true"]');
+    if (!target) return;
+    scrolledKeyRef.current = revealKey;
+    target.scrollIntoView({ block: "nearest" });
+  });
+
+  // The tree is fetched and watched only while it is shown: the fetch builds
+  // the server's name index on first request, so a project left on its
+  // sessions costs nothing.
+  useEffect(
+    () =>
+      subscribeProjectTree(project.id, () => {
+        void queryClient.invalidateQueries({
+          queryKey: ["project-tree", project.id],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["directory-agent", project.id],
+        });
+      }),
+    [project.id, queryClient],
+  );
 
   const { data: tree } = useQuery({
     queryKey: ["project-tree", project.id],
     queryFn: () => fetchProjectTree(project.id),
     staleTime: 30_000,
-    enabled: !collapsed,
   });
-  // Sessions filed by address. A session without one is not on the map yet;
-  // it still shows in the Inbox.
-  const tasksByDir = useMemo(() => {
-    const byDir: Record<string, StoredTask[]> = {};
+  // Sessions filed by address. A session without one has no place in the
+  // tree yet; it still shows in the session list.
+  const homedDirs = useMemo(() => {
+    const dirs = new Set<string>();
     for (const task of tasks) {
-      if (task.home_dir == null) continue;
-      const list = byDir[task.home_dir] ?? [];
-      byDir[task.home_dir] = list;
-      list.push(task);
+      if (task.home_dir != null && task.home_dir !== "")
+        dirs.add(task.home_dir);
     }
-    return byDir;
+    return [...dirs];
   }, [tasks]);
 
   // The tree is main's checkout, but a session may be addressed to a directory
   // its worktree created and main does not have yet. Such addresses are added
-  // as directories so every homed session has a place on the map.
+  // as directories so every homed session has a place in the tree.
   const lastActivity = useMemo(() => directoryLastActivity(tasks), [tasks]);
   const root = useMemo(
     () =>
       buildDirectoryTree(
         [
           ...(tree?.entries ?? []),
-          ...Object.keys(tasksByDir)
-            .filter((dir) => dir !== "")
-            .map((dir) => ({ path: dir, isFile: false })),
+          ...homedDirs.map((dir) => ({ path: dir, isFile: false })),
         ],
         sortMode,
         lastActivity,
       ),
-    [tree?.entries, tasksByDir, sortMode, lastActivity],
+    [tree?.entries, homedDirs, sortMode, lastActivity],
   );
 
   // Directories whose subtree has a running session; each maps to whether the
@@ -215,12 +175,6 @@ const MapProject = memo(function MapProject({
     return activity;
   }, [tasks]);
 
-  // Reveal each newly seen address once. The store remembers addresses across
-  // Inbox/Map switches, so remounts and task-stream patches preserve folding.
-  useEffect(() => {
-    revealHomedDirectories(project.id, Object.keys(tasksByDir));
-  }, [project.id, tasksByDir, revealHomedDirectories]);
-
   const targetPath =
     agentTarget?.projectId === project.id ? agentTarget.path : null;
 
@@ -237,38 +191,52 @@ const MapProject = memo(function MapProject({
     [openProjectFile, project, selectDirectory],
   );
 
-  const headerColor = projectBadgeColor(projectRecord?.badgeColor);
-
   const renderNode = (node: DirectoryTreeNode, depth: number) => {
-    const isExpanded = !node.isFile && expanded.has(node.path);
+    // A directory row may stand for a whole single-folder run; it then acts
+    // on the run's deepest directory. Activity is read at the run's head,
+    // which already rolls up everything below it.
+    const chain = node.isFile
+      ? { tail: node, label: node.name, paths: [node.path] }
+      : compactDirectoryChain(node);
+    const { tail } = chain;
+    const isExpanded = !tail.isFile && expanded.has(tail.path);
     const running = activityByDir.get(node.path);
+    const isHere =
+      !node.isFile && herePath !== null && chain.paths.includes(herePath);
     const fileNode: FileNode = {
-      id: `map:${project.id}:${node.path}`,
-      name: node.name,
+      id: `map:${project.id}:${tail.path}`,
+      name: chain.label,
       displayName: getDisplayName(
-        node.name,
-        node.isFile ? FileNodeType.File : FileNodeType.Directory,
+        chain.label,
+        tail.isFile ? FileNodeType.File : FileNodeType.Directory,
       ),
-      path: `/${node.path}`,
-      type: node.isFile ? FileNodeType.File : FileNodeType.Directory,
-      relativePath: node.path,
-      hasChildren: node.children.length > 0,
+      path: `/${tail.path}`,
+      type: tail.isFile ? FileNodeType.File : FileNodeType.Directory,
+      relativePath: tail.path,
+      hasChildren: tail.children.length > 0,
     };
     return (
       <div key={node.path}>
         <TreeNode
           node={fileNode}
           isExpanded={isExpanded}
-          isSelected={!node.isFile && targetPath === node.path}
-          isFocused={false}
+          isSelected={!tail.isFile && targetPath === tail.path}
+          isFocused={isHere}
           indentPx={INDENT_BASE_PX + depth * INDENT_STEP_PX}
-          onToggle={() => toggleDirectory(project.id, node.path)}
+          onToggle={() => toggleDirectory(project.id, tail.path)}
           onSelect={() =>
             selectDirectory(
-              node.isFile ? parentDirectory(node.path) : node.path,
+              tail.isFile ? parentDirectory(tail.path) : tail.path,
             )
           }
-          onOpen={node.isFile ? () => openFile(node.path) : undefined}
+          onOpen={tail.isFile ? () => openFile(tail.path) : undefined}
+          onMouseDown={(e) => dndHandlers.onMouseDown(e, fileNode)}
+          isDragging={
+            dragState.isDragging &&
+            dragState.draggedNodes.some(
+              (dragged) => dragged.path === fileNode.path,
+            )
+          }
           trailing={
             running !== undefined ? (
               <SessionActivityIndicator awaitingInput={running} t={t} />
@@ -276,69 +244,27 @@ const MapProject = memo(function MapProject({
           }
         />
         {isExpanded
-          ? node.children.map((child) => renderNode(child, depth + 1))
+          ? tail.children.map((child) => renderNode(child, depth + 1))
           : null}
       </div>
     );
   };
 
   return (
-    <div>
-      <div
-        role="treeitem"
-        aria-expanded={!collapsed}
-        data-project-id={project.id}
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: role="treeitem" requires keyboard focus for Enter/Space activation
-        tabIndex={0}
-        onClick={() => activateProject(project)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            activateProject(project);
-          }
-        }}
-        title={project.workspacePath ?? project.name}
-        className={cn(
-          "group flex h-7 cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 transition-colors",
-          "text-custom-sidebar-text-200 hover:bg-foreground/5",
-        )}
-      >
-        <button
-          type="button"
-          aria-label={collapsed ? "Expand" : "Collapse"}
-          onClick={(event) => {
-            event.stopPropagation();
-            toggleProject(project.id);
-          }}
-          className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-custom-sidebar-text-400"
-        >
-          <ChevronRight
-            className={cn(
-              "h-3.5 w-3.5 transition-transform",
-              !collapsed && "rotate-90",
-            )}
-          />
-        </button>
-        {headerColor ? <ProjectColorDot color={headerColor} /> : null}
-        <span className="min-w-0 flex-1 truncate text-sm">{project.name}</span>
-      </div>
-      {collapsed ? null : (
-        <div className="tree-group-reveal mt-0.5">
-          {tree === undefined ? (
-            <div className="py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
-              {t("loadingMessage")}
-            </div>
-          ) : (
-            <>
-              {tree.overflowed ? (
-                <div className="py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
-                  {t("mapTooManyFiles")}
-                </div>
-              ) : null}
-              {root.children.map((child) => renderNode(child, 0))}
-            </>
-          )}
+    <div ref={treeRef} className="tree-group-reveal mt-0.5">
+      {tree === undefined ? (
+        <div className="py-1.5 pl-5 text-xs text-custom-sidebar-text-400">
+          {t("loadingMessage")}
         </div>
+      ) : (
+        <>
+          {tree.overflowed ? (
+            <div className="py-1.5 pl-5 text-xs text-custom-sidebar-text-400">
+              {t("mapTooManyFiles")}
+            </div>
+          ) : null}
+          {root.children.map((child) => renderNode(child, 0))}
+        </>
       )}
     </div>
   );

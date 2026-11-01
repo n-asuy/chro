@@ -6,8 +6,8 @@ import type { StoredTask } from "../types";
  *   closed mid-session and the orphan run was recovered as `failed` on the
  *   next server start).
  * - "completed": the run finished successfully.
- * - "cleaned": housekeeping reclaimed the worktree, so the session is
- *   read-only — it can no longer be continued, merged or rebased.
+ * - "cleaned": housekeeping reclaimed the idle worktree. The branch survives,
+ *   and the next message rebuilds the worktree from it before resuming.
  * `null` means no dot: the task is running (a spinner is shown instead), is
  * not in a terminal state, or the user has already seen its latest result.
  */
@@ -21,10 +21,10 @@ type TaskReadFields = Pick<
 /**
  * Derive the status marker for a task.
  *
- * "cleaned" is a structural fact rather than a notification: once the worktree
- * is reclaimed the session can never be continued again, so it outranks the
- * unread dots and stays visible after the result has been read. Without it the
- * only hint is a failed send, which is what this marker exists to pre-empt.
+ * "cleaned" is a structural fact rather than a notification: the checkout is
+ * gone until the session is continued (anything not committed to the branch
+ * went with it), so it outranks the unread dots and stays visible after the
+ * result has been read.
  *
  * The unread dots below it appear only when a task reached a terminal state
  * (`completed` / `failed`) and the user has not viewed it since its last

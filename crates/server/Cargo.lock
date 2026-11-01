@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.53"
+version = "0.1.54"
 dependencies = [
  "analytics",
  "anyhow",
@@ -615,6 +615,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "server-contract",
  "skills",
  "sqlx",
  "tempfile",
@@ -5083,6 +5084,16 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "server-contract"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

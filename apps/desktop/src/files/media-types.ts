@@ -59,21 +59,40 @@ export const extensionOf = (path?: string | null): string | null => {
   return name.slice(dot + 1).toLowerCase();
 };
 
-export const isImageExtension = (extension?: string | null): boolean => {
-  const ext = normalizeExtension(extension);
-  return ext != null && IMAGE_EXTENSIONS.has(ext);
-};
+/** The dedicated viewer a file opens in instead of the text editor. */
+export type MediaViewer = "image" | "video" | "audio" | "pdf";
 
-export const isVideoExtension = (extension?: string | null): boolean => {
-  const ext = normalizeExtension(extension);
-  return ext != null && VIDEO_EXTENSIONS.has(ext);
-};
+const MEDIA_VIEWERS: ReadonlyArray<[MediaViewer, Set<string>]> = [
+  ["image", IMAGE_EXTENSIONS],
+  ["video", VIDEO_EXTENSIONS],
+  ["audio", AUDIO_EXTENSIONS],
+  ["pdf", PDF_EXTENSIONS],
+];
 
-export const isPdfExtension = (extension?: string | null): boolean => {
+/** The viewer for an extension, or `null` when the file is edited as text. */
+export const mediaViewerFor = (
+  extension?: string | null,
+): MediaViewer | null => {
   const ext = normalizeExtension(extension);
-  return ext != null && PDF_EXTENSIONS.has(ext);
+  if (ext == null) return null;
+  return (
+    MEDIA_VIEWERS.find(([, extensions]) => extensions.has(ext))?.[0] ?? null
+  );
 };
 
 /** Whether a path/filename points at a still image, judged by its extension. */
 export const isImagePath = (path?: string | null): boolean =>
-  isImageExtension(extensionOf(path));
+  mediaViewerFor(extensionOf(path)) === "image";
+
+/** Extensions edited as prose (the live-preview markdown editor). */
+export const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
+
+// Prose is a strict whitelist. Extensionless files (LICENSE, Makefile) and
+// dotfiles (.env, .gitignore) are code.
+export const isProseExtension = (extension?: string | null): boolean => {
+  const ext = normalizeExtension(extension);
+  return ext != null && PROSE_EXTENSIONS.has(ext);
+};
+
+export const isProsePath = (path?: string | null): boolean =>
+  isProseExtension(extensionOf(path));

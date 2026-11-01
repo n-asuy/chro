@@ -204,10 +204,7 @@ export function SearchDockPanel() {
 
   const openResult = useCallback(
     (path: string, line?: number) => {
-      openTab(
-        { type: "file", path },
-        { activate: true, returnFocusOnClose: true },
-      );
+      openTab({ type: "file", path }, { activate: true });
       if (line !== undefined) {
         requestEditorReveal(path, line);
       }

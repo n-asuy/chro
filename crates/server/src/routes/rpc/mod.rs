@@ -16,6 +16,7 @@
 
 mod approvals;
 mod asset_response;
+mod byte_range;
 mod cbase;
 pub(crate) mod cli_status;
 mod config;

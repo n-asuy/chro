@@ -40,7 +40,10 @@ async fn stream_project_file_events(
     Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, events)))
 }
 
-async fn handle_file_events_ws(
+/// Forward workspace file events to a WebSocket client as JSON text frames.
+/// Shared by every root that exposes a `file-events` stream (project checkout,
+/// task-run worktree, additional workspace folder).
+pub(super) async fn handle_file_events_ws(
     socket: WebSocket,
     events: futures::stream::BoxStream<'static, local_runtime::WorkspaceFileEvent>,
 ) {

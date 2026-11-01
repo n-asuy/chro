@@ -32,3 +32,16 @@ export const decorationProseHashtag = Decoration.mark({
   tagName: "span",
 });
 
+
+/**
+ * Wrap a block widget's visible box in a spacer that carries its vertical
+ * gap as padding. The editor measures a block widget by its border box, so
+ * outer margins go uncounted and shift every gutter marker and click target
+ * below the widget.
+ */
+export const spacedBlock = (box: HTMLElement): HTMLElement => {
+  const spacer = document.createElement("div");
+  spacer.className = "cm-block-spacer";
+  spacer.appendChild(box);
+  return spacer;
+};

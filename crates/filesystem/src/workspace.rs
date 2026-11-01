@@ -943,6 +943,7 @@ fn infer_mime_type(path: &Path) -> String {
         "ogg" => "audio/ogg",
         "flac" => "audio/flac",
         "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
         // Video
         "mp4" => "video/mp4",
         "webm" => "video/webm",
@@ -998,6 +999,16 @@ mod tests {
         assert_eq!(entries[1].entry_type, WorkspaceEntryType::File);
         assert_eq!(entries[2].name, "diagram.svg");
         assert_eq!(entries[2].entry_type, WorkspaceEntryType::File);
+    }
+
+    /// Every extension the editor opens in its audio viewer needs a playable
+    /// MIME type; `application/octet-stream` is refused by media elements.
+    #[test]
+    fn audio_extensions_have_audio_mime_types() {
+        for ext in ["mp3", "wav", "ogg", "m4a", "flac", "aac"] {
+            let mime = infer_mime_type(Path::new(&format!("clip.{ext}")));
+            assert!(mime.starts_with("audio/"), "{ext}: {mime}");
+        }
     }
 
     #[test]

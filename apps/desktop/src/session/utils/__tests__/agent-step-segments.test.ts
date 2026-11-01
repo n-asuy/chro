@@ -238,4 +238,25 @@ describe("segment labels", () => {
   it("labels a lone loading run as null for the caller's fallback", () => {
     expect(labelsOf([loading()])).toEqual([null]);
   });
+
+  it("does not repeat the reasoning on the loading run that trails a streaming answer", () => {
+    expect(
+      labelsOf([
+        thinking("Summarizing the findings"),
+        assistant("Here is what I"),
+        loading(),
+      ]),
+    ).toEqual(["Summarizing the findings", null]);
+  });
+
+  it("still carries the reasoning into a live tool run", () => {
+    expect(
+      labelsOf([
+        thinking("Verifying the dev server"),
+        assistant("Let me check."),
+        toolUse(),
+        loading(),
+      ]),
+    ).toEqual(["Verifying the dev server", "Verifying the dev server"]);
+  });
 });

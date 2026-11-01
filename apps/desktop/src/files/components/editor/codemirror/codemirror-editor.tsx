@@ -62,8 +62,10 @@ import {
   type BubbleMenuPlacement,
   bubbleMenuExtension,
 } from "./plugins/bubble-menu";
+import { changeMarkers, setChangeBase } from "../merge-diff/change-markers";
 import { refreshDecorationsEffect } from "./plugins/decoration-refresh";
 import type { EmbedPluginConfig } from "./plugins/prose";
+import { minimalChange } from "./utility/minimal-change";
 import { type WysiwygConfig, createWysiwygPlugin } from "./wysiwyg";
 
 export interface CodeMirrorEditorHandle {
@@ -124,6 +126,12 @@ interface CodeMirrorEditorProps {
    * render its own find UI instead of CodeMirror's default panel.
    */
   onFindRequest?: () => void;
+  /**
+   * The text this document is compared against (the version before its
+   * uncommitted or session changes). Changed lines get a gutter marker;
+   * null shows none.
+   */
+  changeBase?: string | null;
 }
 
 /**
@@ -171,7 +179,7 @@ async function loadLanguage(info: string): Promise<LanguageSupport> {
   return markdown();
 }
 
-const DEFAULT_EDITOR_FONT_FAMILY =
+export const DEFAULT_EDITOR_FONT_FAMILY =
   'var(--font-inter), "Inter", system-ui, -apple-system, sans-serif';
 const DEFAULT_EDITOR_LINE_WRAPPING = true;
 const DEFAULT_EDITOR_TAB_SIZE = 4;
@@ -198,6 +206,7 @@ export const CodeMirrorEditor = forwardRef<
     embedConfig,
     onEmbedClick,
     onFindRequest,
+    changeBase = null,
   },
   ref,
 ) {
@@ -243,15 +252,10 @@ export const CodeMirrorEditor = forwardRef<
       return viewRef.current?.state.doc.toString() ?? "";
     },
     setContent: (content: string) => {
-      if (viewRef.current) {
-        viewRef.current.dispatch({
-          changes: {
-            from: 0,
-            to: viewRef.current.state.doc.length,
-            insert: content,
-          },
-        });
-      }
+      const view = viewRef.current;
+      if (!view) return;
+      const change = minimalChange(view.state.doc.toString(), content);
+      if (change) view.dispatch({ changes: change });
     },
     focus: () => {
       viewRef.current?.focus();
@@ -350,8 +354,10 @@ export const CodeMirrorEditor = forwardRef<
         }),
       ),
       EditorState.tabSize.of(DEFAULT_EDITOR_TAB_SIZE),
+      // Notes indent with tabs (nested lists are tab-indented); code follows
+      // the spaces default.
       indentUnit.of(
-        DEFAULT_EDITOR_INDENT_WITH_SPACES
+        isCodeMode && DEFAULT_EDITOR_INDENT_WITH_SPACES
           ? " ".repeat(DEFAULT_EDITOR_TAB_SIZE)
           : "\t",
       ),
@@ -392,6 +398,8 @@ export const CodeMirrorEditor = forwardRef<
 
       // Change listener
       createUpdateListener(),
+
+      changeMarkers(),
     ];
 
     if (isCodeMode) {
@@ -476,6 +484,10 @@ export const CodeMirrorEditor = forwardRef<
       setView(null);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    view?.dispatch({ effects: setChangeBase.of(changeBase) });
+  }, [view, changeBase]);
 
   // Update editable state when disabled changes
   useEffect(() => {

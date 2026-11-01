@@ -1,150 +1,134 @@
 /**
- * Keymap plugin for markdown formatting shortcuts
- * Cmd/Ctrl+B for bold, Cmd/Ctrl+I for italic, etc.
+ * Markdown editing keys: list and quote continuation, indentation, inline
+ * formatting, and auto-paired markup.
  */
 
-import { EditorView, keymap } from "@codemirror/view";
-import { EditorSelection, type SelectionRange } from "@codemirror/state";
-import { completionKeymap } from "@codemirror/autocomplete";
+import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import {
+  cursorLineBoundaryBackward,
+  selectLineBoundaryBackward,
+} from "@codemirror/commands";
+import {
+  EditorSelection,
+  EditorState,
+  type Extension,
+  Prec,
+} from "@codemirror/state";
+import { EditorView, type KeyBinding, keymap } from "@codemirror/view";
+import {
+  deleteParagraph,
+  insertMarkdownLink,
+  toggleBold,
+  toggleChecklist,
+  toggleComment,
+  toggleHighlight,
+  toggleItalic,
+  toggleStrikethrough,
+} from "./markdown-formatting";
+import {
+  continueMarkup,
+  continueMarkupSoft,
+  indentListLess,
+  indentListMore,
+  lineStartAfterMarkup,
+} from "./markdown-lists";
 
-type MarkdownKeymapCommand = (view: EditorView) => boolean;
-
-/**
- * Creates a command that toggles markdown formatting marks around selected text or word at cursor
- */
-const toggleMarkdownFormatting = (mark: string): MarkdownKeymapCommand => {
-  return (view: EditorView): boolean => {
-    const { state, dispatch } = view;
-    const { selection } = state;
-
-    if (selection.ranges.length === 0) {
-      return false;
+/** Home stops after list and quote markup before reaching the line start. */
+const lineStart =
+  (extend: boolean) =>
+  (view: EditorView): boolean => {
+    const { state } = view;
+    const targets = state.selection.ranges.map((range) =>
+      lineStartAfterMarkup(state, range.head),
+    );
+    if (targets.every((target) => target === null)) {
+      return extend
+        ? selectLineBoundaryBackward(view)
+        : cursorLineBoundaryBackward(view);
     }
-
-    const transactions = selection.ranges.map((range: SelectionRange) => {
-      if (range.empty) {
-        const { from } = range;
-        // Case 1: Cursor is on a word
-        const word = state.wordAt(from);
-        if (word) {
-          const wordText = state.doc.sliceString(word.from, word.to);
-
-          // Check if the word is already wrapped and unwrap if it is
-          const textBeforeWord = state.doc.sliceString(
-            word.from - mark.length,
-            word.from,
-          );
-          const textAfterWord = state.doc.sliceString(
-            word.to,
-            word.to + mark.length,
-          );
-          if (textBeforeWord === mark && textAfterWord === mark) {
-            return state.update({
-              changes: [
-                { from: word.from - mark.length, to: word.from, insert: "" },
-                { from: word.to, to: word.to + mark.length, insert: "" },
-              ],
-              selection: {
-                anchor: word.from - mark.length,
-                head: word.to - mark.length,
-              },
-            });
-          }
-
-          // Otherwise, wrap it
-          return state.update({
-            changes: {
-              from: word.from,
-              to: word.to,
-              insert: `${mark}${wordText}${mark}`,
-            },
-            selection: EditorSelection.range(
-              word.from + mark.length,
-              word.to + mark.length,
-            ),
-          });
-        }
-
-        // Case 2: Fallback, just insert the marks
-        return state.update({
-          changes: { from: from, insert: `${mark}${mark}` },
-          selection: { anchor: from + mark.length },
-        });
-      }
-      // Case 3: Text is selected
-      const selectedText = state.doc.sliceString(range.from, range.to);
-      const textBefore = state.doc.sliceString(
-        range.from - mark.length,
-        range.from,
-      );
-      const textAfter = state.doc.sliceString(range.to, range.to + mark.length);
-
-      if (textBefore === mark && textAfter === mark) {
-        // Unwrap
-        return state.update({
-          changes: [
-            { from: range.from - mark.length, to: range.from },
-            { from: range.to, to: range.to + mark.length },
-          ],
-          selection: {
-            anchor: range.from - mark.length,
-            head: range.to - mark.length,
-          },
-        });
-      }
-      // Wrap
-      return state.update({
-        changes: {
-          from: range.from,
-          to: range.to,
-          insert: `${mark}${selectedText}${mark}`,
-        },
-        selection: {
-          anchor: range.from + mark.length,
-          head: range.to + mark.length,
-        },
-      });
+    view.dispatch({
+      selection: EditorSelection.create(
+        state.selection.ranges.map((range, i) => {
+          const target = targets[i] ?? state.doc.lineAt(range.head).from;
+          return extend
+            ? EditorSelection.range(range.anchor, target)
+            : EditorSelection.cursor(target);
+        }),
+        state.selection.mainIndex,
+      ),
+      scrollIntoView: true,
+      userEvent: "select",
     });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const transaction = transactions.reduce((acc: any, tr) => {
-      if (!tr) return acc;
-      const changes = acc.changes.compose(tr.changes);
-      return {
-        changes: changes,
-        selection: tr.selection ? tr.selection : acc.selection?.map(changes),
-        effects: acc.effects.concat(tr.effects),
-      };
-    }, state.update({}));
-
-    if (transaction.changes.empty) {
-      return false;
-    }
-
-    dispatch(state.update(transaction));
     return true;
   };
-};
+
+const markdownKeys: KeyBinding[] = [
+  { key: "Enter", run: continueMarkup, shift: continueMarkupSoft },
+  { key: "Tab", run: indentListMore, shift: indentListLess },
+  { key: "Mod-]", run: indentListMore },
+  { key: "Mod-[", run: indentListLess },
+  { key: "Home", run: lineStart(false), shift: lineStart(true) },
+  { mac: "Mod-ArrowLeft", run: lineStart(false), shift: lineStart(true) },
+  { key: "Mod-b", run: toggleBold },
+  { key: "Mod-i", run: toggleItalic },
+  { key: "Mod-Shift-x", run: toggleStrikethrough },
+  { key: "Mod-Shift-h", run: toggleHighlight },
+  { key: "Mod-/", run: toggleComment },
+  { key: "Mod-k", run: insertMarkdownLink },
+  { key: "Mod-l", run: toggleChecklist },
+  { key: "Mod-d", run: deleteParagraph },
+  { key: "Mod-Shift-k", run: deleteParagraph },
+];
 
 /**
- * Keymap plugin with markdown formatting shortcuts
+ * Characters that pair when typed before whitespace (or wrap a selection):
+ * brackets, quotes, and emphasis and code marks.
  */
-export const keymapPlugin = keymap.of([
-  {
-    key: "Mod-b",
-    run: toggleMarkdownFormatting("**"),
-  },
-  {
-    key: "Mod-i",
-    run: toggleMarkdownFormatting("*"),
-  },
-  {
-    key: "Mod-Shift-x",
-    run: toggleMarkdownFormatting("~~"),
-  },
-  {
-    key: "Mod-Shift-h",
-    run: toggleMarkdownFormatting("=="),
-  },
-  ...completionKeymap,
-]);
+const PAIRED = ["(", "[", "{", "'", '"', "`", "*", "_"];
+
+/** Marks that only wrap a selection; typed alone they stay single. */
+const WRAP_ONLY = new Set(["=", "~"]);
+
+const wrapSelection = EditorView.inputHandler.of((view, _from, _to, text) => {
+  const { state } = view;
+  if (!WRAP_ONLY.has(text) || state.selection.ranges.some((r) => r.empty)) {
+    return false;
+  }
+  view.dispatch(
+    state.changeByRange((range) => ({
+      changes: [
+        { from: range.from, insert: text },
+        { from: range.to, insert: text },
+      ],
+      range: EditorSelection.range(range.anchor + 1, range.head + 1),
+    })),
+    { scrollIntoView: true, userEvent: "input.type" },
+  );
+  return true;
+});
+
+/** The third backtick at the start of a line opens a fenced code block. */
+const completeCodeFence = EditorView.inputHandler.of((view, from, to, text) => {
+  const { state } = view;
+  if (text !== "`" || from !== to || state.selection.ranges.length > 1) {
+    return false;
+  }
+  const line = state.doc.lineAt(from);
+  const before = state.sliceDoc(line.from, from);
+  const prefix = /^((?:[ \t]*>[ \t]?)*[ \t]*)``$/.exec(before)?.[1];
+  if (prefix === undefined || from !== line.to) return false;
+  view.dispatch({
+    changes: { from, insert: `\`\n${prefix}\`\`\`` },
+    selection: EditorSelection.cursor(from + 1),
+    scrollIntoView: true,
+    userEvent: "input.type",
+  });
+  return true;
+});
+
+export const keymapPlugin: Extension = [
+  Prec.high(keymap.of([...closeBracketsKeymap, ...markdownKeys])),
+  Prec.high([completeCodeFence, wrapSelection]),
+  closeBrackets(),
+  EditorState.languageData.of(() => [{ closeBrackets: { brackets: PAIRED } }]),
+];

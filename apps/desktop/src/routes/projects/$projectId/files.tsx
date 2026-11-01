@@ -31,10 +31,7 @@ function FilesPage() {
 
   useEffect(() => {
     if (search.path) {
-      openTab(
-        { type: "file", path: search.path },
-        { activate: true, returnFocusOnClose: true },
-      );
+      openTab({ type: "file", path: search.path }, { activate: true });
     }
   }, [search.path, openTab]);
 

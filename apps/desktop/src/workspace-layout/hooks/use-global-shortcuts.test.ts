@@ -9,7 +9,8 @@ type Combo = {
   shiftKey?: boolean;
 };
 
-const event = (combo: Combo) => ({
+const event = (combo: Combo & { defaultPrevented?: boolean }) => ({
+  defaultPrevented: false,
   metaKey: false,
   ctrlKey: false,
   altKey: false,
@@ -25,6 +26,14 @@ describe("matchGlobalShortcut", () => {
     expect(matchGlobalShortcut(event({ key: "p", metaKey: true }))).toBe(
       "palette",
     );
+  });
+
+  it("leaves keys a focused editor already handled (⌘K inserts a link)", () => {
+    expect(
+      matchGlobalShortcut(
+        event({ key: "k", metaKey: true, defaultPrevented: true }),
+      ),
+    ).toBeNull();
   });
 
   it("maps ⌘N to new chat", () => {

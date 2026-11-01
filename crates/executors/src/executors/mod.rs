@@ -152,21 +152,6 @@ impl AvailabilityInfo {
     }
 }
 
-/// A title the agent assigned to one of its sessions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionTitle {
-    pub title: String,
-    pub source: SessionTitleSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionTitleSource {
-    /// Produced by the agent from the conversation.
-    Generated,
-    /// Set by a person through the agent's own rename command.
-    Custom,
-}
-
 /// Result communicated through the exit signal
 #[derive(Debug, Clone, Copy)]
 pub enum ExecutorExitResult {
@@ -261,12 +246,16 @@ pub trait StandardCodingAgentExecutor {
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
 
-    /// The title the agent itself keeps for `session_id` in its own session
-    /// history, resolved from `cwd`. Agents that generate one (Claude Code
-    /// writes it to the transcript after the first turn) override this so the
-    /// task can adopt it; the default covers agents with no such record.
-    fn session_title(&self, _cwd: &Path, _session_id: &str) -> Option<SessionTitle> {
-        None
+    /// A title for the session that `request` opens, written by a small
+    /// model this agent's CLI can reach in a one-shot call that is separate
+    /// from the run (see [`crate::session_title`]). `Ok(None)` when the agent
+    /// has no such call or the model returned nothing usable.
+    async fn generate_session_title(
+        &self,
+        _request: &str,
+        _env: &ExecutionEnv,
+    ) -> Result<Option<String>, ExecutorError> {
+        Ok(None)
     }
 
     async fn get_availability_info(&self) -> AvailabilityInfo {

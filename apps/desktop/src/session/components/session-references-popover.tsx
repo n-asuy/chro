@@ -1,42 +1,25 @@
-import { AgentLogo, hasAgentLogo } from "@/components/agent-logo";
+import {
+  type TranslationFunction,
+  type TranslationKey,
+  useLanguage,
+} from "@/i18n";
 import { desktopFetch } from "@/lib/backend-client";
 import { slugOrId } from "@/lib/slug";
+import { useTaskStatusDot } from "@/session/hooks";
+import {
+  type SessionRelation,
+  type SessionRelationKind,
+  type TaskContextRef,
+  sessionRelations,
+} from "@/session/lib/session-relations";
 import type { StoredTask } from "@/session/types";
 import { Button } from "@chro/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
 import { useQuery } from "@tanstack/react-query";
-import {
-  ArrowDownLeft,
-  ArrowUpRight,
-  ExternalLink,
-  FileText,
-  Folder,
-  Link2,
-  Loader2,
-  MessageSquare,
-} from "lucide-react";
+import { FileText, Folder, Link2, Loader2, MessageSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-
-const cn = (...classes: Array<string | false | null | undefined>) =>
-  classes.filter(Boolean).join(" ");
-
-type TaskContextRef = {
-  id: string;
-  task_id: string;
-  task_session_id?: string | null;
-  task_run_id?: string | null;
-  kind: string;
-  target_task_id?: string | null;
-  target_session_id?: string | null;
-  path?: string | null;
-  branch?: string | null;
-  mode: string;
-  label?: string | null;
-  metadata_json?: string | null;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
-};
+import { SessionActivityIndicator } from "./session-activity-indicator";
+import { SessionLeadingMarker } from "./session-leading-marker";
 
 type TaskContextRefsResponse = {
   refs: TaskContextRef[];
@@ -58,13 +41,16 @@ type SessionReferencesPopoverProps = {
   align?: "start" | "center" | "end";
 };
 
-type ReferenceDirection = "outgoing" | "incoming";
-
-const shortId = (id?: string | null, length = 8): string => {
-  if (!id) return "";
-  const compact = id.replace(/-/g, "");
-  return (compact || id).slice(0, length).toLowerCase();
+const RELATION_LABEL: Record<SessionRelationKind, TranslationKey> = {
+  delegated_to: "relationDelegatedTo",
+  delegated_from: "relationDelegatedFrom",
+  continued_from: "relationContinuedFrom",
+  continued_in: "relationContinuedIn",
+  uses: "relationUses",
+  referenced_by: "relationReferencedBy",
 };
+
+const shortId = (id: string): string => id.replace(/-/g, "").slice(0, 4);
 
 const fetchTaskContextRefs = async (
   taskId: string,
@@ -82,33 +68,12 @@ const fetchTaskContextRefs = async (
   };
 };
 
-const taskTitle = (task: StoredTask | undefined, id?: string | null): string =>
-  task?.title?.trim() || (id ? shortId(id) : "Unknown task");
-
-const pathBasename = (path: string): string =>
-  path.split("/").filter(Boolean).pop() || path;
-
-const labelForKind = (kind: string): string => {
-  switch (kind) {
-    case "session":
-      return "session";
-    case "directory":
-      return "dir";
-    case "file":
-      return "file";
-    case "task":
-      return "task";
-    default:
-      return kind;
-  }
-};
-
-const iconForRef = (ref: TaskContextRef) => {
-  if (ref.kind === "file") return FileText;
-  if (ref.kind === "directory") return Folder;
-  return MessageSquare;
-};
-
+/**
+ * Every session and file this session is related to, one row per
+ * counterpart: the relation (delegated to / from, continued from / in, uses,
+ * referenced by) is written on the row instead of splitting the list into
+ * sections, the way issue trackers list linked items.
+ */
 export function SessionReferencesPopover({
   taskId,
   tasksById,
@@ -117,6 +82,7 @@ export function SessionReferencesPopover({
   side = "bottom",
   align = "end",
 }: SessionReferencesPopoverProps) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const refsQuery = useQuery({
     queryKey: ["task-context-refs", taskId],
@@ -133,21 +99,27 @@ export function SessionReferencesPopover({
   }, [open, refetch, taskId]);
 
   const refs = refsQuery.data;
-  const totalCount =
-    (refs?.outgoing.length ?? 0) + (refs?.incoming.length ?? 0);
+  const relations = useMemo(
+    () =>
+      refs && taskId
+        ? sessionRelations(taskId, refs.outgoing, refs.incoming, tasksById)
+        : [],
+    [refs, taskId, tasksById],
+  );
   const isLoading = refsQuery.isLoading || refsQuery.isFetching;
-  const openTask = onOpenTask
-    ? (taskIdOrSlug: string) => {
-        setOpen(false);
-        onOpenTask(taskIdOrSlug);
-      }
-    : undefined;
-  const openFile = onOpenFile
-    ? (path: string) => {
-        setOpen(false);
-        onOpenFile(path);
-      }
-    : undefined;
+
+  const openRelation = (relation: SessionRelation) => {
+    if (relation.path && onOpenFile) {
+      setOpen(false);
+      onOpenFile(relation.path);
+      return;
+    }
+    if (relation.taskId && onOpenTask) {
+      setOpen(false);
+      const task = tasksById[relation.taskId];
+      onOpenTask(task ? slugOrId(task) : relation.taskId);
+    }
+  };
 
   if (!taskId) return null;
 
@@ -158,16 +130,16 @@ export function SessionReferencesPopover({
           type="button"
           size="sm"
           variant="ghost"
-          aria-label="Open task references"
+          aria-label={t("referencesOpen")}
           className="inline-flex h-9 items-center gap-1.5 rounded-[4px] px-2 text-xs font-medium text-muted-foreground transition hover:!bg-muted/40 hover:!text-primary"
         >
           <Link2 className="h-4 w-4" />
           <span>Refs</span>
           <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
-            {isLoading ? (
+            {isLoading && !refs ? (
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : (
-              totalCount
+              relations.length
             )}
           </span>
         </Button>
@@ -181,47 +153,39 @@ export function SessionReferencesPopover({
         <div className="flex items-center justify-between border-b border-border px-3 py-2">
           <div className="flex items-center gap-2 text-[12px] font-medium text-foreground">
             <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-            <span>References</span>
+            <span>{t("references")}</span>
           </div>
           <span className="text-[11px] text-muted-foreground">
-            {totalCount} total
+            {relations.length}
           </span>
         </div>
-        <div className="max-h-[360px] overflow-y-auto p-2">
+        <div className="max-h-[360px] overflow-y-auto p-1.5">
           {refsQuery.isError ? (
             <div className="px-2 py-3 text-center text-[12px] text-destructive">
-              Failed to load references.
+              {t("referencesLoadFailed")}
             </div>
           ) : isLoading && !refs ? (
-            <div className="flex items-center justify-center gap-2 px-2 py-3 text-[12px] text-muted-foreground">
+            <div className="flex items-center justify-center px-2 py-3 text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>Loading references</span>
             </div>
-          ) : totalCount === 0 ? (
+          ) : relations.length === 0 ? (
             <div className="px-2 py-2 text-center text-[12px] text-muted-foreground">
-              No saved references yet.
+              {t("referencesEmpty")}
             </div>
           ) : (
-            <>
-              {refs && refs.outgoing.length > 0 ? (
-                <ReferenceSection
-                  direction="outgoing"
-                  refs={refs.outgoing}
-                  tasksById={tasksById}
-                  onOpenTask={openTask}
-                  onOpenFile={openFile}
-                />
-              ) : null}
-              {refs && refs.incoming.length > 0 ? (
-                <ReferenceSection
-                  direction="incoming"
-                  refs={refs.incoming}
-                  tasksById={tasksById}
-                  onOpenTask={openTask}
-                  onOpenFile={openFile}
-                />
-              ) : null}
-            </>
+            relations.map((relation) => (
+              <RelationRow
+                key={relation.key}
+                relation={relation}
+                task={relation.taskId ? tasksById[relation.taskId] : undefined}
+                canOpen={Boolean(
+                  (relation.path && onOpenFile) ||
+                    (relation.taskId && onOpenTask),
+                )}
+                onOpen={() => openRelation(relation)}
+                t={t}
+              />
+            ))
           )}
         </div>
       </PopoverContent>
@@ -229,137 +193,76 @@ export function SessionReferencesPopover({
   );
 }
 
-function ReferenceSection({
-  direction,
-  refs,
-  tasksById,
-  onOpenTask,
-  onOpenFile,
+function RelationRow({
+  relation,
+  task,
+  canOpen,
+  onOpen,
+  t,
 }: {
-  direction: ReferenceDirection;
-  refs: TaskContextRef[];
-  tasksById: Record<string, StoredTask>;
-  onOpenTask?: (taskIdOrSlug: string) => void;
-  onOpenFile?: (path: string) => void;
+  relation: SessionRelation;
+  task: StoredTask | undefined;
+  canOpen: boolean;
+  onOpen: () => void;
+  t: TranslationFunction;
 }) {
-  const title = direction === "outgoing" ? "Uses" : "Referenced by";
-  const Icon = direction === "outgoing" ? ArrowUpRight : ArrowDownLeft;
-
   return (
-    <section className="mb-2 last:mb-0">
-      <div className="mb-1 flex items-center gap-1.5 px-1.5 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-        <Icon className="h-3 w-3" />
-        <span>{title}</span>
-      </div>
-      <div className="space-y-1">
-        {refs.map((ref) => (
-          <ReferenceRow
-            key={ref.id}
-            direction={direction}
-            refItem={ref}
-            tasksById={tasksById}
-            onOpenTask={onOpenTask}
-            onOpenFile={onOpenFile}
+    <button
+      type="button"
+      disabled={!canOpen}
+      onClick={onOpen}
+      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left enabled:cursor-pointer enabled:hover:bg-muted disabled:cursor-default"
+    >
+      <span className="flex w-4 shrink-0 items-center justify-center text-muted-foreground">
+        {task ? (
+          <TaskMarker task={task} t={t} />
+        ) : relation.path ? (
+          relation.isDirectory ? (
+            <Folder className="h-3.5 w-3.5" />
+          ) : (
+            <FileText className="h-3.5 w-3.5" />
+          )
+        ) : (
+          <MessageSquare className="h-3.5 w-3.5" />
+        )}
+      </span>
+      {relation.taskId ? (
+        <span className="w-8 shrink-0 font-mono text-[11px] text-muted-foreground">
+          {shortId(relation.taskId)}
+        </span>
+      ) : null}
+      <span
+        className="min-w-0 flex-1 truncate text-[13px] text-foreground"
+        title={relation.path ?? undefined}
+      >
+        {relation.title}
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+        <span>{t(RELATION_LABEL[relation.relation])}</span>
+        {relation.state === "running" ? (
+          <SessionActivityIndicator
+            awaitingInput={Boolean(task?.awaiting_input)}
+            t={t}
+            className="h-3 w-3"
           />
-        ))}
-      </div>
-    </section>
+        ) : relation.state ? (
+          <span>
+            ·{" "}
+            {t(
+              relation.state === "failed"
+                ? "delegationFailed"
+                : "delegationDone",
+            )}
+          </span>
+        ) : null}
+      </span>
+    </button>
   );
 }
 
-function ReferenceRow({
-  direction,
-  refItem,
-  tasksById,
-  onOpenTask,
-  onOpenFile,
-}: {
-  direction: ReferenceDirection;
-  refItem: TaskContextRef;
-  tasksById: Record<string, StoredTask>;
-  onOpenTask?: (taskIdOrSlug: string) => void;
-  onOpenFile?: (path: string) => void;
-}) {
-  const Icon = iconForRef(refItem);
-  const taskId =
-    direction === "incoming" ? refItem.task_id : refItem.target_task_id;
-  const fallbackId = taskId ?? refItem.target_session_id;
-  const task = taskId ? tasksById[taskId] : undefined;
-  const path = refItem.path?.trim() || null;
-  const isPathRef = refItem.kind === "file" || refItem.kind === "directory";
-  // Session/task rows show the logo of the agent that actually ran the
-  // referenced session, so the reference is identifiable by executor rather
-  // than a generic chat glyph. Falls back to the chat bubble when the
-  // referenced session has not run (no recognized executor) yet.
-  const executor = !isPathRef ? task?.last_executor : null;
-  const showAgentLogo = hasAgentLogo(executor);
-
-  const title = useMemo(() => {
-    if (refItem.label?.trim()) return refItem.label.trim();
-    if (isPathRef && path) return pathBasename(path);
-    return taskTitle(task, fallbackId);
-  }, [fallbackId, isPathRef, path, refItem.label, task]);
-
-  const detail = useMemo(() => {
-    if (isPathRef && path) return path;
-    const id = fallbackId ? shortId(fallbackId) : "missing";
-    if (refItem.branch) return `${id} · ${refItem.branch}`;
-    return id;
-  }, [fallbackId, isPathRef, path, refItem.branch]);
-
-  const openTarget = () => {
-    if (isPathRef && path && onOpenFile) {
-      onOpenFile(path);
-      return;
-    }
-    if (taskId && onOpenTask) {
-      onOpenTask(task ? slugOrId(task) : taskId);
-    }
-  };
-
-  const canOpen = Boolean(
-    (isPathRef && path && onOpenFile) || (taskId && onOpenTask),
-  );
-
-  const rowClassName = cn(
-    "group/ref flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left",
-    canOpen ? "cursor-pointer hover:bg-muted" : "cursor-default opacity-80",
-  );
-  const content = (
-    <>
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground">
-        {showAgentLogo ? (
-          <AgentLogo agent={executor} className="h-4 w-4" />
-        ) : (
-          <Icon className="h-4 w-4" />
-        )}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5">
-          <span className="truncate text-[12px] font-medium text-foreground">
-            {title}
-          </span>
-          <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] leading-none text-muted-foreground">
-            {labelForKind(refItem.kind)}
-          </span>
-        </span>
-        <span className="block truncate text-[11px] text-muted-foreground">
-          {detail}
-        </span>
-      </span>
-      {canOpen ? (
-        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition group-hover/ref:opacity-100" />
-      ) : null}
-    </>
-  );
-
-  if (canOpen) {
-    return (
-      <button type="button" onClick={openTarget} className={rowClassName}>
-        {content}
-      </button>
-    );
-  }
-
-  return <div className={rowClassName}>{content}</div>;
+/** The session-list status marker, so a related session reads the same here
+ * as in the left panel. A hook, hence its own component. */
+function TaskMarker({ task, t }: { task: StoredTask; t: TranslationFunction }) {
+  const dotKind = useTaskStatusDot(task);
+  return <SessionLeadingMarker kind={dotKind} t={t} />;
 }

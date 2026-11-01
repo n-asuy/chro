@@ -586,23 +586,6 @@ fn walk_index(repo_path: &Path) -> IndexWalk {
 fn walk_index_with_limit(repo_path: &Path, limit: usize) -> IndexWalk {
     let mut indexed_files = Vec::new();
 
-    let mut builder = WalkBuilder::new(repo_path);
-    builder
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .hidden(false)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            name != ".git"
-                && name != "node_modules"
-                && name != "target"
-                && name != "dist"
-                && name != "build"
-        });
-
-    let walker = builder.build();
-
     let ignore_walker = WalkBuilder::new(repo_path)
         .git_ignore(true)
         .git_global(true)
@@ -626,6 +609,34 @@ fn walk_index_with_limit(repo_path: &Path, limit: usize) -> IndexWalk {
             };
         }
     }
+
+    // Ignored entries are kept for config lookups (`.env`), but an ignored
+    // directory is listed without its contents: a virtualenv or dataset can
+    // hold hundreds of thousands of files that nothing resolves against, and
+    // counting them toward `limit` would discard the whole project's index.
+    let non_ignored_paths = Arc::new(non_ignored_paths);
+    let visible = non_ignored_paths.clone();
+    let root = repo_path.to_path_buf();
+    let walker = WalkBuilder::new(repo_path)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .hidden(false)
+        .filter_entry(move |entry| {
+            let name = entry.file_name().to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".git" | "node_modules" | "target" | "dist" | "build"
+            ) {
+                return false;
+            }
+            entry
+                .path()
+                .parent()
+                .and_then(|parent| parent.strip_prefix(&root).ok())
+                .is_none_or(|parent| visible.contains(parent))
+        })
+        .build();
 
     for entry in walker.flatten() {
         let path = entry.path();
@@ -1728,6 +1739,33 @@ mod tests {
             "a partial index must not resolve anything"
         );
         assert_eq!(resolve_name_in_index(&index, "0.md"), None);
+    }
+
+    #[test]
+    fn ignored_directories_are_listed_but_not_descended() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        write(&dir, ".gitignore", "venv/\n.env\n");
+        write(&dir, ".env", "KEY=1");
+        write(&dir, "src/main.py", "x");
+        for n in 0..8 {
+            write(&dir, &format!("venv/lib/{n}.py"), "x");
+        }
+
+        // The ignored venv would exceed the cap on its own; it must not cost
+        // the project its index.
+        let walk = walk_index_with_limit(dir.path(), 6);
+        assert!(!walk.overflowed);
+        let entry = |path: &str| walk.files.iter().find(|file| file.path == path);
+        assert!(entry("src/main.py").is_some_and(|file| !file.is_ignored));
+        assert!(entry(".env").is_some_and(|file| file.is_ignored));
+        assert!(entry("venv").is_some_and(|file| file.is_ignored && !file.is_file));
+        assert!(
+            walk.files
+                .iter()
+                .all(|file| !file.path.starts_with("venv/")),
+            "contents of an ignored directory are not indexed"
+        );
     }
 
     #[test]

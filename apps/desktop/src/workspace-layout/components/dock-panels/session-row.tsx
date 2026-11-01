@@ -6,6 +6,7 @@ import { SessionLeadingMarker } from "@/session/components/session-leading-marke
 import { useSessionPreviewTrigger } from "@/session/components/session-preview";
 import { useMarkViewedWhenActive, useTaskStatusDot } from "@/session/hooks";
 import { formatRelativeTime } from "@/session/lib/relative-time";
+import { sessionSubline } from "@/session/lib/session-subline";
 import type { StoredTask } from "@/session/types";
 import {
   SESSION_DRAG_DATA_TYPE,
@@ -21,13 +22,9 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@chro/ui/context-menu";
-import { Archive, GitBranch, Pin, PinOff } from "lucide-react";
+import { Archive, GitBranch, Hourglass, Pin, PinOff } from "lucide-react";
 
-/**
- * One session in the left panel. Shared by the Inbox list and the Map, where
- * a session sits under the directory it is addressed to, so a row reads the
- * same on both axes.
- */
+/** One session in the left panel (Pinned, a project section, or Chats). */
 
 export interface SessionRowContainerProps {
   task: StoredTask;
@@ -36,6 +33,8 @@ export interface SessionRowContainerProps {
   projectName: string | null;
   isPinned: boolean;
   onTogglePin: () => void;
+  /** How many sessions this one delegated are running right now. */
+  runningDelegations: number;
   isActive: boolean;
   onOpen: () => void;
   onArchive: () => void;
@@ -70,6 +69,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
             isActive={props.isActive}
             isPinned={props.isPinned}
             onTogglePin={props.onTogglePin}
+            runningDelegations={props.runningDelegations}
             onOpen={props.onOpen}
             onArchive={props.onArchive}
             t={props.t}
@@ -144,6 +144,7 @@ interface SessionRowProps {
   isActive: boolean;
   isPinned: boolean;
   onTogglePin: () => void;
+  runningDelegations: number;
   onOpen: () => void;
   onArchive: () => void;
   t: TranslationFunction;
@@ -157,11 +158,13 @@ function SessionRow({
   isActive,
   isPinned,
   onTogglePin,
+  runningDelegations,
   onOpen,
   onArchive,
   t,
 }: SessionRowProps) {
   const isRunning = Boolean(task.active_session_id);
+  const subline = sessionSubline(task, { isRunning, showProject, projectName });
   const isAwaitingInput = Boolean(task.awaiting_input);
   const dotKind = useTaskStatusDot(task);
   useMarkViewedWhenActive(task, isActive);
@@ -210,35 +213,36 @@ function SessionRow({
           <SessionLeadingMarker kind={dotKind} t={t} />
         </span>
         <span className="flex min-w-0 flex-1 flex-col">
-          {task.title ? (
-            <span className="truncate text-sm text-custom-sidebar-text-100">
-              {task.title}
-            </span>
-          ) : (
-            <span className="truncate text-sm text-custom-sidebar-text-400">
-              {t("sessionUnresolved")}
-            </span>
-          )}
-          {/* One sub-line, one fact. The run outcome wins: it says what the
-              session actually did, which no other row element carries.
-              Provenance is next (a forked row is only legible if you can see
-              what it continues; also the only signal before the first run),
-              then the project name for pinned rows. */}
-          {task.last_summary ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            {task.title ? (
+              <span className="truncate text-sm text-custom-sidebar-text-100">
+                {task.title}
+              </span>
+            ) : (
+              <span className="truncate text-sm text-custom-sidebar-text-400">
+                {t("sessionUnresolved")}
+              </span>
+            )}
+            {runningDelegations > 0 ? (
+              <span
+                title={t("runningDelegations", { count: runningDelegations })}
+                aria-label={t("runningDelegations", {
+                  count: runningDelegations,
+                })}
+                className="inline-flex shrink-0 items-center gap-0.5 text-xs text-custom-sidebar-text-400"
+              >
+                <Hourglass className="h-3 w-3" aria-hidden="true" />
+                {runningDelegations}
+              </span>
+            ) : null}
+          </span>
+          {subline ? (
             <span className="truncate text-xs text-custom-sidebar-text-400">
-              {task.last_summary}
-            </span>
-          ) : task.forked_from_title ? (
-            <span className="truncate text-xs text-custom-sidebar-text-400">
-              {t("forkedFrom", { title: task.forked_from_title })}
-            </span>
-          ) : task.delegated_from_title ? (
-            <span className="truncate text-xs text-custom-sidebar-text-400">
-              {t("delegatedFrom", { title: task.delegated_from_title })}
-            </span>
-          ) : showProject && projectName ? (
-            <span className="truncate text-xs text-custom-sidebar-text-400">
-              {projectName}
+              {subline.kind === "forked"
+                ? t("forkedFrom", { title: subline.text })
+                : subline.kind === "delegated"
+                  ? t("delegatedFrom", { title: subline.text })
+                  : subline.text}
             </span>
           ) : null}
         </span>

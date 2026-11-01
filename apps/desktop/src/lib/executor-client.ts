@@ -4,7 +4,13 @@ import { desktopFetch } from "./backend-client";
 export type BaseCodingAgent = "CLAUDE_CODE" | "CODEX" | "PI";
 
 // Reasoning effort (matches ReasoningEffort enum in Rust, kebab-case)
-export type ReasoningEffort = "low" | "medium" | "high" | "x-high";
+export type ReasoningEffort =
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
 
 // Output speed (matches SpeedMode enum in Rust). `fast` maps to Claude Code's
 // fast mode (`speed: "fast"`), currently Opus-only; `standard` is the default.

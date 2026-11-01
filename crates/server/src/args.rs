@@ -2,16 +2,18 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// `chro-server`: the server the app runs as a sidecar, which also answers
+/// every `chro` command so the npm package can ship a single binary.
 #[derive(Parser, Debug)]
-#[command(name = "chro", version, about = "Chro — AI-powered productivity tool")]
+#[command(name = "chro-server", version, about = "Chro server and command line")]
 pub struct Cli {
     #[command(flatten)]
     pub server: ServerArgs,
 
-    /// Git repository path (for task commands; default: CWD's git root)
-    #[arg(short = 'w', long)]
-    pub project: Option<PathBuf>,
+    #[command(flatten)]
+    pub global: GlobalArgs,
 
+    /// Without a command, run the server.
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -32,32 +34,68 @@ pub struct ServerArgs {
     pub no_open: bool,
 }
 
-/// Command line of the standalone `chro` binary: the same commands as
-/// `chro-server`, without the server the app runs as a sidecar. Agents launched
-/// by chro get this binary on their PATH, so `chro task ...` resolves by bare
-/// name from inside a run.
+/// `chro`: drive a running chro app or server from a terminal or from an
+/// agent running inside a chro session.
+///
+/// The desktop app ships this next to itself and puts its directory on the
+/// PATH of every agent it starts, so an agent can call `chro` by bare name.
 #[derive(Parser, Debug)]
-#[command(name = "chro", version, about = "Chro — task and approval commands")]
+#[command(
+    name = "chro",
+    version,
+    about = "Drive chro sessions from a terminal or from inside a session",
+    after_help = "Inside a chro session, `self` names the session and `parent` the one that delegated it.\nOutput is JSON when stdout is not a terminal; `chro schema` lists every command and error code."
+)]
 pub struct TerminalCli {
-    /// Git repository path (default: CWD's git root)
-    #[arg(short = 'w', long)]
-    pub project: Option<PathBuf>,
+    #[command(flatten)]
+    pub global: GlobalArgs,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+/// Flags every command accepts.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct GlobalArgs {
+    /// Print the JSON envelope even on a terminal
+    #[arg(long, global = true, conflicts_with = "human")]
+    pub json: bool,
+    /// Print for people even when stdout is not a terminal
+    #[arg(long, global = true)]
+    pub human: bool,
+    /// Reuse the request id of an earlier attempt whose answer was lost, so a
+    /// retried command does not act twice
+    #[arg(long, global = true, value_name = "ID")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Task management
-    Task {
+    /// Show which chro server this command talks to and who it acts as
+    Status,
+    /// Start the desktop app and wait until it accepts commands
+    Open,
+    /// Print every command, flag, selector, error code and exit code as JSON
+    Schema,
+    /// Repositories and folders sessions run in
+    Project {
         #[command(subcommand)]
-        command: crate::cli::TaskCommand,
+        command: crate::cli::ProjectCommand,
     },
-    /// Approval workflow: list, inspect, and respond to pending approvals
-    Approvals {
+    /// Create, inspect, message, delegate and land sessions
+    Session {
+        #[command(subcommand)]
+        command: crate::cli::SessionCommand,
+    },
+    /// Answer tool calls and questions that sessions are waiting on
+    Approval {
         #[command(subcommand)]
         command: crate::cli::ApprovalCommand,
+    },
+    /// Install the chro skill that teaches agents this command line
+    Skill {
+        #[command(subcommand)]
+        command: crate::cli::SkillCommand,
     },
     /// Run chro on a machine managed by a control plane
     #[cfg(feature = "cloud")]

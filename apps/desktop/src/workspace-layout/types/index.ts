@@ -3,7 +3,6 @@ export type {
   DockPanelKind,
   DockState,
   LeftDockPanelKind,
-  LeftPanelMode,
   RightDockPanelKind,
 } from "./dock";
 export {

@@ -2,31 +2,36 @@ import { create } from "zustand";
 import { ancestorDirectories } from "../domain/directory-tree";
 
 interface MapProjectState {
-  collapsed: boolean;
+  /** The project's section lists its directory tree instead of its sessions. */
+  showsFiles: boolean;
   expanded: ReadonlySet<string>;
   revealed: ReadonlySet<string>;
 }
 
 /**
- * Projects start folded. Opening one is what loads its tree, so the cost of
- * the panel scales with the projects the user is browsing, not with every
- * project the workspace has.
+ * Projects start on their sessions. Switching one to files is what loads its
+ * tree, so the cost of the panel scales with the projects the user is
+ * browsing, not with every project the workspace has.
  */
 export const EMPTY_MAP_PROJECT: MapProjectState = {
-  collapsed: true,
+  showsFiles: false,
   expanded: new Set(),
   revealed: new Set(),
 };
 
 interface DirectoryMapStore {
   projects: Record<string, MapProjectState>;
-  toggleProject: (projectId: string) => void;
+  toggleFiles: (projectId: string) => void;
   toggleDirectory: (projectId: string, path: string) => void;
-  collapseAll: (projectIds: readonly string[]) => void;
   revealHomedDirectories: (projectId: string, paths: readonly string[]) => void;
+  /**
+   * Open the tree down to `path` (null: nothing to open), adding to what is
+   * already open. Used to show where the focused session lives.
+   */
+  revealDirectory: (projectId: string, path: string | null) => void;
 }
 
-/** Browsing state survives Inbox/Map switches, like Inbox's project folding. */
+/** Browsing state survives switching a project between sessions and files. */
 export const useDirectoryMapStore = create<DirectoryMapStore>()((set) => {
   const update = (
     projectId: string,
@@ -42,8 +47,11 @@ export const useDirectoryMapStore = create<DirectoryMapStore>()((set) => {
 
   return {
     projects: {},
-    toggleProject: (id) =>
-      update(id, (project) => ({ ...project, collapsed: !project.collapsed })),
+    toggleFiles: (id) =>
+      update(id, (project) => ({
+        ...project,
+        showsFiles: !project.showsFiles,
+      })),
     toggleDirectory: (id, path) =>
       update(id, (project) => {
         const expanded = new Set(project.expanded);
@@ -51,24 +59,26 @@ export const useDirectoryMapStore = create<DirectoryMapStore>()((set) => {
         else expanded.add(path);
         return { ...project, expanded };
       }),
-    collapseAll: (ids) =>
-      set((state) => {
-        const projects = { ...state.projects };
-        for (const id of ids) {
-          projects[id] = {
-            ...(projects[id] ?? EMPTY_MAP_PROJECT),
-            collapsed: true,
-            expanded: new Set(),
-          };
-        }
-        return { projects };
+    revealDirectory: (id, path) =>
+      update(id, (project) => {
+        const missing =
+          path === null
+            ? []
+            : ancestorDirectories(path).filter(
+                (dir) => !project.expanded.has(dir),
+              );
+        if (missing.length === 0) return project;
+        return {
+          ...project,
+          expanded: new Set([...project.expanded, ...missing]),
+        };
       }),
     revealHomedDirectories: (id, paths) =>
       update(id, (project) => {
         const fresh = paths.filter((path) => !project.revealed.has(path));
         if (fresh.length === 0) return project;
         const expanded = new Set(project.expanded);
-        if (!project.collapsed) {
+        if (project.showsFiles) {
           for (const path of fresh) {
             for (const dir of ancestorDirectories(path)) expanded.add(dir);
           }

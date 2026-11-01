@@ -39,6 +39,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/tasks", get(stream_tasks))
         .route("/tasks/:task_id/runs", get(stream_task_runs))
         .route("/tasks/:task_id/sessions", get(stream_task_sessions))
+        .route("/tasks/:task_id/queue", get(stream_session_queue))
         .route("/task-runs/:id/logs", get(stream_task_run_logs))
         .route("/task-drafts", get(stream_task_drafts))
 }
@@ -223,6 +224,31 @@ async fn handle_stream_task_sessions_ws(socket: WebSocket, state: AppState, task
                 .runtime()
                 .events()
                 .stream_task_sessions_raw(task_id)
+                .await
+        },
+    )
+    .await;
+}
+
+async fn stream_session_queue(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let task_id = identifiers::resolve_task_id(state.pool(), &task_id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_stream_session_queue_ws(socket, state, task_id)))
+}
+
+async fn handle_stream_session_queue_ws(socket: WebSocket, state: AppState, task_id: Uuid) {
+    run_shared_stream(
+        socket,
+        "session_queue",
+        json!({ "task_id": task_id }),
+        async move {
+            state
+                .runtime()
+                .events()
+                .stream_session_queue_raw(task_id)
                 .await
         },
     )

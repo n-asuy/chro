@@ -8,6 +8,7 @@ import {
   cliInstallRegistersOnContinue,
 } from "@/lib/cli-install-client";
 import { setUiValue } from "@/lib/ui-state-client";
+import { useAgentSkill } from "@/settings/hooks/use-agent-skill";
 import { useCliInstall } from "@/settings/hooks/use-cli-install";
 import { Button } from "@chro/ui/button";
 import {
@@ -26,7 +27,8 @@ import {
   previousOnboardingStep,
 } from "./step-order";
 import { StepAgent } from "./steps/step-agent";
-import { StepCli } from "./steps/step-cli";
+import { type CapabilitySelection, capabilityActions } from "./capability-setup";
+import { StepCapabilities } from "./steps/step-capabilities";
 import { StepTheme } from "./steps/step-theme";
 import { StepWelcome } from "./steps/step-welcome";
 import { StepWorkspace } from "./steps/step-workspace";
@@ -43,10 +45,10 @@ const STEP_COPY: Record<
     subtitle:
       "Chro detects the CLI agents already on your machine. Choose a default — you can install any that are missing and switch any time.",
   },
-  cli: {
-    title: "Use Chro from your terminal",
+  capabilities: {
+    title: "Set up your agents",
     subtitle:
-      "Register the `chro` command so you and your agents can create tasks, tail logs, and merge runs from any shell. It links to this app and updates with it.",
+      "Choose what to set up so agents can hand work to each other through Chro, and so you can drive Chro from your own terminal.",
   },
   theme: {
     title: "Make it feel like home",
@@ -75,22 +77,38 @@ export function OnboardingFlow() {
     useState<BaseCodingAgent | null>(null);
   const [persisting, setPersisting] = useState(false);
   const cli = useCliInstall(isOpen);
-  const registersCliOnContinue =
-    step === "cli" && cli.status !== null && cliInstallRegistersOnContinue(cli.status);
+  const skill = useAgentSkill(isOpen);
+  const [capabilities, setCapabilities] = useState<CapabilitySelection>({
+    command: true,
+    skill: true,
+  });
+  const commandRegistersOnContinue =
+    cli.status !== null && cliInstallRegistersOnContinue(cli.status);
+  const setupOnContinue =
+    step === "capabilities"
+      ? capabilityActions(capabilities, {
+          commandRegistersOnContinue,
+          skillState: skill.state,
+        })
+      : [];
 
   const canSkipWelcome = useMemo(() => getRecentWorkspaces().length > 0, []);
 
   const progress = onboardingProgress(step);
 
-  // Persist the chosen executor when leaving the agent step, register the
-  // shell command when leaving the CLI step (only when that is silent), then
-  // advance. A failed registration keeps the step open with its error so the
-  // user can retry or Skip; it is never swallowed by moving on.
+  // Persist the chosen executor when leaving the agent step, apply what is
+  // switched on when leaving the capabilities step, then advance. A failure
+  // keeps the step open with its error so the user can retry or Skip; it is
+  // never swallowed by moving on.
   const advance = useCallback(async () => {
-    if (persisting || cli.busy) return;
-    if (registersCliOnContinue) {
-      const result = await cli.install();
-      if (!result || cliInstallPrimaryAction(result) !== null) return;
+    if (persisting || cli.busy || skill.busy) return;
+    for (const action of setupOnContinue) {
+      if (action === "register_command") {
+        const result = await cli.install();
+        if (!result || cliInstallPrimaryAction(result) !== null) return;
+      } else if ((await skill.install()) !== "installed") {
+        return;
+      }
     }
     if (step === "agent" && selectedExecutor) {
       setPersisting(true);
@@ -105,7 +123,7 @@ export function OnboardingFlow() {
     }
     const next = nextOnboardingStep(step);
     if (next) setStep(next);
-  }, [cli, persisting, registersCliOnContinue, selectedExecutor, step]);
+  }, [cli, persisting, selectedExecutor, setupOnContinue, skill, step]);
 
   const back = useCallback(() => {
     const prev = previousOnboardingStep(step);
@@ -201,7 +219,15 @@ export function OnboardingFlow() {
               onSelect={setSelectedExecutor}
             />
           )}
-          {step === "cli" && <StepCli cli={cli} />}
+          {step === "capabilities" && (
+            <StepCapabilities
+              cli={cli}
+              skill={skill}
+              selection={capabilities}
+              onSelectionChange={setCapabilities}
+              commandRegistersOnContinue={commandRegistersOnContinue}
+            />
+          )}
           {step === "theme" && <StepTheme />}
           {step === "workspace" && <StepWorkspace onOpened={complete} />}
         </div>
@@ -219,10 +245,10 @@ export function OnboardingFlow() {
           </div>
           {!isFinal ? (
             <Button
-              disabled={!canContinue || persisting || cli.busy}
+              disabled={!canContinue || persisting || cli.busy || skill.busy}
               onClick={() => void advance()}
             >
-              {registersCliOnContinue ? "Install and continue" : "Continue"}
+              {setupOnContinue.length > 0 ? "Set up and continue" : "Continue"}
             </Button>
           ) : (
             <span className="pr-2 text-xs text-muted-foreground">

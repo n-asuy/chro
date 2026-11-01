@@ -1038,9 +1038,18 @@ body {
   background: transparent;
 }
 
-/* Line numbers (hidden by default for WYSIWYG feel, shown in code mode) */
-.cm-editor-container .cm-gutters {
-  display: none;
+/* Prose shows no line numbers or fold arrows, only change markers, which
+   sit in the left margin so the text stays aligned with the title. */
+.cm-editor-container:not(.cm-code-mode) .cm-editor {
+  margin-left: -8px;
+}
+.cm-editor-container:not(.cm-code-mode) .cm-gutters {
+  background: transparent;
+  border: none;
+}
+.cm-editor-container:not(.cm-code-mode) .cm-gutter:not(.cm-change-gutter) {
+  /* Gutters are display: flex !important in the editor's base theme. */
+  display: none !important;
 }
 .cm-editor-container.cm-code-mode .cm-gutters {
   display: flex;
@@ -1173,32 +1182,32 @@ body {
    Blockquotes
    ============================================ */
 
+/* A quote is a left accent rule; its ">" markers only show while the
+   cursor is in the quote. Callouts draw their own box. */
 .cm-editor-container .cm-quoteblock {
-  background-color: rgba(0, 0, 0, 0.02);
-  padding-left: 12px;
-  margin-left: 8px;
+  position: relative;
+  padding-left: 14px;
 }
 
-.cm-editor-container .cm-quoteblock-single {
-  border-radius: 4px;
-  padding-top: 8px;
-  padding-bottom: 8px;
+.cm-editor-container .cm-quoteblock:not(.cm-callout)::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 6px;
+  border-left: 2px solid hsl(var(--primary));
+  pointer-events: none;
 }
 
-.cm-editor-container .cm-quoteblock-start {
-  border-top-left-radius: 4px;
-  border-top-right-radius: 4px;
-  padding-top: 8px;
+.cm-editor-container .cm-quoteblock .cm-formatting-quote,
+.cm-editor-container .cm-quoteblock .cm-formatting-quote * {
+  /* Beats the !important syntax color on .cm-meta. */
+  color: transparent !important;
 }
 
-.cm-editor-container .cm-quoteblock-end {
-  border-bottom-left-radius: 4px;
-  border-bottom-right-radius: 4px;
-  padding-bottom: 8px;
-}
-
-.cm-editor-container .cm-formatting-quote {
-  color: #9ca3af;
+.cm-editor-container .cm-quoteblock .cm-formatting-quote-active,
+.cm-editor-container .cm-quoteblock .cm-formatting-quote-active * {
+  color: #9ca3af !important;
 }
 
 /* ============================================
@@ -1207,6 +1216,27 @@ body {
 
 .cm-editor-container .cm-obsidian-bullet {
   color: #6b7280;
+}
+
+/* Each indentation level of a list item is a fixed step with a guide. */
+.cm-editor-container .cm-list-line {
+  position: relative;
+  tab-size: 2.25em;
+}
+
+.cm-editor-container .cm-list-line .cm-indent {
+  display: inline-block;
+  min-width: 2.25em;
+}
+
+.cm-editor-container .cm-list-line .cm-indent::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  margin-left: 0.3em;
+  border-left: 1px solid rgb(var(--color-border-200));
+  pointer-events: none;
 }
 
 /* ============================================
@@ -1278,7 +1308,7 @@ body {
 
 .cm-editor-container .cm-line-codeblock-begin {
   padding-top: 8px;
-  margin-top: 4px;
+  border-top: 4px solid transparent;
 }
 
 .cm-editor-container .cm-line-codeblock-begin::before {
@@ -1289,7 +1319,7 @@ body {
 
 .cm-editor-container .cm-line-codeblock-end {
   padding-bottom: 8px;
-  margin-bottom: 4px;
+  border-bottom: 4px solid transparent;
 }
 
 .cm-editor-container .cm-line-codeblock-end::before {
@@ -1300,7 +1330,8 @@ body {
 
 .cm-editor-container .cm-line-codeblock-single {
   padding: 8px 12px;
-  margin: 4px 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
 }
 
 .cm-editor-container .cm-line-codeblock-single::before {
@@ -1481,13 +1512,6 @@ body {
   display: none;
 }
 
-.cm-editor-container .cm-internal-link-icon {
-  font-size: 0.75em;
-  margin-left: 2px;
-  opacity: 0.6;
-  vertical-align: super;
-}
-
 /* ============================================
    External Links [text](url)
    ============================================ */
@@ -1551,7 +1575,7 @@ body {
 
 .cm-editor-container .cm-markdown-image {
   display: block;
-  margin: 8px 0;
+  padding: 8px 0;
   cursor: pointer;
 }
 
@@ -1587,18 +1611,24 @@ body {
   border-radius: 0;
 }
 
+/* Line spacing is a transparent border, not a margin: the editor measures
+   lines by their border box, so margins would shift gutter markers and click
+   targets below. */
 .cm-editor-container .cm-callout-first {
-  border-top-left-radius: 4px;
-  border-top-right-radius: 4px;
+  /* Vertical radius includes the 4px spacer border: 4px visible corners. */
+  border-top-left-radius: 4px 8px;
+  border-top-right-radius: 4px 8px;
   padding-top: 12px;
-  margin-top: 4px;
+  border-top: 4px solid transparent;
+  background-clip: padding-box;
 }
 
 .cm-editor-container .cm-callout-last {
-  border-bottom-left-radius: 4px;
-  border-bottom-right-radius: 4px;
+  border-bottom-left-radius: 4px 8px;
+  border-bottom-right-radius: 4px 8px;
   padding-bottom: 12px;
-  margin-bottom: 4px;
+  border-bottom: 4px solid transparent;
+  background-clip: padding-box;
 }
 
 .cm-editor-container .cm-callout-editing {
@@ -1610,13 +1640,28 @@ body {
   display: none;
 }
 
-/* Callout header widget - label style with subtle background */
+/* Callout title: the kind's icon and a bold title in the kind's color. */
+/* span. outranks the kind's box tint, which shares the color class. */
+.cm-editor-container span.cm-callout-header {
+  background-color: transparent;
+}
+
 .cm-editor-container .cm-callout-header {
-  display: inline;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 4px;
-  margin-right: 4px;
+}
+
+.cm-editor-container .cm-callout-icon {
+  display: inline-flex;
+  width: 1em;
+  height: 1em;
+}
+
+.cm-editor-container .cm-callout-icon svg {
+  width: 100%;
+  height: 100%;
 }
 
 .cm-editor-container .cm-callout-fold {
@@ -1631,7 +1676,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-note {
   color: rgb(59, 130, 246);
-  background-color: rgba(59, 130, 246, 0.15);
 }
 
 .cm-editor-container .callout-abstract {
@@ -1640,7 +1684,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-abstract {
   color: rgb(6, 182, 212);
-  background-color: rgba(6, 182, 212, 0.15);
 }
 
 .cm-editor-container .callout-info {
@@ -1649,7 +1692,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-info {
   color: rgb(14, 165, 233);
-  background-color: rgba(14, 165, 233, 0.15);
 }
 
 .cm-editor-container .callout-tip {
@@ -1658,7 +1700,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-tip {
   color: rgb(16, 185, 129);
-  background-color: rgba(16, 185, 129, 0.15);
 }
 
 .cm-editor-container .callout-success {
@@ -1667,7 +1708,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-success {
   color: rgb(34, 197, 94);
-  background-color: rgba(34, 197, 94, 0.15);
 }
 
 .cm-editor-container .callout-question {
@@ -1676,7 +1716,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-question {
   color: rgb(202, 138, 4);
-  background-color: rgba(234, 179, 8, 0.15);
 }
 
 .cm-editor-container .callout-warning {
@@ -1685,7 +1724,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-warning {
   color: rgb(249, 115, 22);
-  background-color: rgba(249, 115, 22, 0.15);
 }
 
 .cm-editor-container .callout-failure {
@@ -1694,7 +1732,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-failure {
   color: rgb(239, 68, 68);
-  background-color: rgba(239, 68, 68, 0.15);
 }
 
 .cm-editor-container .callout-danger {
@@ -1703,7 +1740,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-danger {
   color: rgb(239, 68, 68);
-  background-color: rgba(239, 68, 68, 0.15);
 }
 
 .cm-editor-container .callout-bug {
@@ -1712,7 +1748,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-bug {
   color: rgb(168, 85, 247);
-  background-color: rgba(168, 85, 247, 0.15);
 }
 
 .cm-editor-container .callout-example {
@@ -1721,7 +1756,6 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-example {
   color: rgb(139, 92, 246);
-  background-color: rgba(139, 92, 246, 0.15);
 }
 
 .cm-editor-container .callout-quote {
@@ -1730,16 +1764,21 @@ body {
 
 .cm-editor-container .cm-callout-header.callout-quote {
   color: rgb(107, 114, 128);
-  background-color: rgba(107, 114, 128, 0.15);
 }
 
 /* ============================================
    Embeds (![[file]])
    ============================================ */
 
+/* The line carries the gap (a measured padding) so the embed's margin cannot
+   collapse out of the line box. */
+.cm-editor-container .cm-line:has(> .cm-embed:not(.cm-embed-in-callout)) {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
 .cm-editor-container .cm-embed {
   display: block;
-  margin: 12px 0;
   border-radius: 8px;
   overflow: hidden;
 }
@@ -1958,7 +1997,6 @@ body {
 
 /* ===== Mermaid Diagram Styles ===== */
 .cm-editor-container .cm-mermaid-container {
-  margin: 16px 0;
   position: relative;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -2335,9 +2373,11 @@ body {
    =================================================================== */
 
 /* HTML Block Container */
+/* Spacing is padding and children's margins stay inside (flow-root): the
+   editor measures block widgets without their outer margins. */
 .cm-editor-container .cm-html-block-container {
-  margin: 8px 0;
-  padding: 0;
+  display: flow-root;
+  padding: 8px 0;
 }
 
 /* Allow native styling for rendered HTML elements.
@@ -2600,7 +2640,6 @@ body {
 /* Block math styling */
 .cm-editor-container .cm-math.cm-math-block {
   display: block;
-  margin: 16px 0;
   padding: 16px 24px;
   background: #fafbfc;
   border: 1px solid #e1e4e8;
@@ -2655,8 +2694,13 @@ body {
    Table Styles — inline-editable tables
    =================================================================== */
 
+.cm-editor-container .cm-block-spacer {
+  display: flow-root;
+  padding: 16px 0;
+}
+
 .cm-editor-container .cm-table-container {
-  margin: 16px 0;
+  padding: 16px 0;
   overflow-x: auto;
 }
 
@@ -2780,7 +2824,7 @@ body {
 .cm-editor-container .cm-table-container.cm-table-inline-edit {
   position: relative;
   padding-right: 32px;
-  margin-bottom: 28px;
+  padding-bottom: 28px;
   overflow: visible;
   z-index: 1;
 }
@@ -2818,14 +2862,14 @@ body {
 
 .cm-editor-container .cm-table-add-col-btn {
   right: 0;
-  top: 0;
-  bottom: 0;
+  top: 16px;
+  bottom: 28px;
   width: 24px;
   border-radius: 0 4px 4px 0;
 }
 
 .cm-editor-container .cm-table-add-row-btn {
-  bottom: -24px;
+  bottom: 4px;
   left: 0;
   right: 32px;
   height: 20px;

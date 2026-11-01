@@ -1,303 +1,204 @@
-use std::env;
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! The operator API client: one typed call per [`Route`].
 
-use serde::Deserialize;
+use std::time::Duration;
 
-fn port_file_path() -> PathBuf {
-    env::temp_dir().join("chro").join("chro.port")
-}
+use serde::{de::DeserializeOwned, Serialize};
+use server_contract::{
+    routes::{Route, HEADER_CONTRACT_REV, HEADER_REQUEST_ID},
+    Envelope, ErrorBody, ErrorCode, Meta, CONTRACT_REV,
+};
+use uuid::Uuid;
 
-/// Base URL of a server to talk to instead of a locally running one.
-///
-/// When set, the CLI never reads the port file and never expects a server on
-/// this machine, so the same commands drive a server reachable over the
-/// network.
-fn remote_base_url() -> Option<String> {
-    if let Some(explicit) = parse_base_url(env::var("CHRO_API_URL").ok().as_deref()) {
-        return Some(explicit);
-    }
+use super::{
+    discovery::{self, Target},
+    output::Failure,
+};
 
-    // Fall back to the instance a control plane is holding for this user, so
-    // `chro cloud up` is enough to make the ordinary commands target it. An
-    // explicit CHRO_API_URL still wins, and users with no instance are
-    // unaffected.
-    #[cfg(feature = "cloud")]
-    {
-        return parse_base_url(super::cloud::endpoint_for_tasks().as_deref());
-    }
-    #[cfg(not(feature = "cloud"))]
-    None
-}
+/// Set by chro for every turn it starts; identifies the calling agent.
+const SESSION_TOKEN_ENV: &str = "CHRO_SESSION_TOKEN";
+/// Longest a call that starts a turn may take: creating a worktree and
+/// spawning an agent can be slow on a cold machine.
+const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Grace on top of a wait's own timeout before the client gives up.
+const WAIT_GRACE: Duration = Duration::from_secs(60);
 
-/// Bearer token sent with every request when talking to a remote server.
-fn remote_api_token() -> Option<String> {
-    parse_token(env::var("CHRO_API_TOKEN").ok().as_deref())
-}
-
-/// Normalize a configured base URL: blank means "not configured", and a
-/// trailing slash is dropped so request paths (which start with one) join
-/// cleanly.
-fn parse_base_url(raw: Option<&str>) -> Option<String> {
-    let trimmed = raw?.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-fn parse_token(raw: Option<&str>) -> Option<String> {
-    let trimmed = raw?.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-#[derive(Debug)]
-pub enum ClientError {
-    ServerNotRunning,
-    NoGitRepo,
-    Http(String),
-    Api {
-        status: u16,
-        body: String,
-    },
-    /// The command was invoked in a way that cannot be resolved (bad or
-    /// missing arguments); the message is shown to the user verbatim.
-    Usage(String),
-}
-
-impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ServerNotRunning => write!(
-                f,
-                "Chro server is not running. Start the desktop app or run `chro-server`."
-            ),
-            Self::NoGitRepo => write!(
-                f,
-                "Not inside a git repository. Use --project to specify one."
-            ),
-            Self::Http(msg) => write!(f, "HTTP error: {msg}"),
-            Self::Api { status, body } => write!(f, "Server responded {status}: {body}"),
-            Self::Usage(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-pub struct ServerClient {
-    base_url: String,
+pub(crate) struct Client {
+    target: Target,
+    token: String,
     agent: ureq::Agent,
-    auth_token: Option<String>,
+    /// Id of the next mutating call; fixed for the life of one command so a
+    /// retried command can reuse it.
+    request_id: String,
 }
 
-impl ServerClient {
-    pub fn connect() -> Result<Self, ClientError> {
-        let agent = ureq::Agent::new();
+/// A result together with the meta of the server that produced it.
+pub(crate) struct Answer<T> {
+    pub result: T,
+    pub meta: Meta,
+}
 
-        let (base_url, auth_token, remote) = match remote_base_url() {
-            Some(url) => (url, remote_api_token(), true),
-            None => {
-                let port = read_port_file()?;
-                (format!("http://127.0.0.1:{port}"), None, false)
-            }
-        };
-
-        let client = Self {
-            base_url,
+impl Client {
+    pub fn connect(request_id: Option<String>) -> Result<Self, ErrorBody> {
+        let target = discovery::locate()?;
+        // An agent always acts as itself, even though it could read the
+        // owner token from disk: attribution depends on it.
+        let token = std::env::var(SESSION_TOKEN_ENV)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| target.owner_token().map(str::to_string))
+            .ok_or_else(|| {
+                ErrorBody::new(
+                    ErrorCode::Unauthorized,
+                    "no token for this server; set CHRO_API_TOKEN",
+                )
+            })?;
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .build();
+        Ok(Self {
+            target,
+            token,
             agent,
-            auth_token,
-        };
+            request_id: request_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        })
+    }
 
-        // A remote server is reached over the network, so a failed health check
-        // means something different than a missing local server: report the
-        // address so a typo is distinguishable from an unreachable host.
-        match client.request("GET", "/health").call() {
-            Ok(_) => {}
-            Err(err) => {
-                return Err(if remote {
-                    match err {
-                        ureq::Error::Status(status, resp) => ClientError::Api {
-                            status,
-                            body: resp.into_string().unwrap_or_default(),
-                        },
-                        ureq::Error::Transport(t) => ClientError::Http(format!(
-                            "cannot reach Chro server at {}: {t}",
-                            client.base_url
-                        )),
-                    }
-                } else {
-                    ClientError::ServerNotRunning
-                });
+    pub fn call<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        route: &Route<Req, Res>,
+        params: &[&str],
+        query: &[(&str, String)],
+        body: Option<&Req>,
+    ) -> Result<Answer<Res>, Failure> {
+        self.call_with_timeout(route, params, query, body, CALL_TIMEOUT)
+    }
+
+    /// For long waits: the server answers within `wait`, so allow that plus a
+    /// grace period before treating the server as unreachable.
+    pub fn call_waiting<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        route: &Route<Req, Res>,
+        params: &[&str],
+        query: &[(&str, String)],
+        wait: Duration,
+    ) -> Result<Answer<Res>, Failure> {
+        self.call_with_timeout(route, params, query, None, wait + WAIT_GRACE)
+    }
+
+    fn call_with_timeout<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        route: &Route<Req, Res>,
+        params: &[&str],
+        query: &[(&str, String)],
+        body: Option<&Req>,
+        timeout: Duration,
+    ) -> Result<Answer<Res>, Failure> {
+        let url = format!("{}{}", self.target.base_url(), route.path(params));
+        let mut request = self
+            .agent
+            .request(route.method.as_str(), &url)
+            .timeout(timeout)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set(HEADER_CONTRACT_REV, CONTRACT_REV);
+        for (key, value) in query {
+            request = request.query(key, value);
+        }
+        if route.is_mutating() {
+            request = request.set(HEADER_REQUEST_ID, &self.request_id);
+        }
+
+        let response = match body {
+            Some(body) => request.send_json(body),
+            None if route.is_mutating() => request.send_json(serde_json::json!({})),
+            None => request.call(),
+        };
+        let text = match response {
+            Ok(response) => response.into_string(),
+            Err(ureq::Error::Status(_, response)) => response.into_string(),
+            Err(ureq::Error::Transport(err)) => {
+                return Err(self.unreachable(route.is_mutating(), err.to_string()).into())
             }
         }
+        .map_err(|err| Failure::from(self.unreachable(route.is_mutating(), err.to_string())))?;
 
-        Ok(client)
-    }
-
-    fn request(&self, method: &str, path: &str) -> ureq::Request {
-        let url = format!("{}{path}", self.base_url);
-        let req = self.agent.request(method, &url);
-        match &self.auth_token {
-            Some(token) => req.set("Authorization", &format!("Bearer {token}")),
-            None => req,
+        let envelope: Envelope<Res> = Envelope::parse(&text).map_err(|_| {
+            Failure::from(ErrorBody::new(
+                ErrorCode::ContractMismatch,
+                format!(
+                    "{} did not answer with the operator API; it may be an older chro",
+                    self.target.base_url()
+                ),
+            ))
+        })?;
+        let meta = envelope.meta.clone();
+        let result = envelope.into_result().map_err(|error| Failure {
+            error,
+            meta: meta.clone(),
+        })?;
+        if meta.contract_rev != CONTRACT_REV {
+            return Err(ErrorBody::new(
+                ErrorCode::ContractMismatch,
+                format!(
+                    "server speaks contract {} but this CLI speaks {CONTRACT_REV}",
+                    meta.contract_rev
+                ),
+            )
+            .into());
         }
+        Ok(Answer { result, meta })
     }
 
-    pub fn get(&self, path: &str) -> Result<serde_json::Value, ClientError> {
-        let resp = self.request("GET", path).call().map_err(map_ureq_error)?;
-        let body: serde_json::Value = resp
-            .into_json()
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        Ok(body)
-    }
-
-    pub fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
-        let resp = self
-            .request("POST", path)
-            .send_json(body.clone())
-            .map_err(map_ureq_error)?;
-        let response_body: serde_json::Value = resp
-            .into_json()
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        Ok(response_body)
-    }
-
-    pub fn patch(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value, ClientError> {
-        let resp = self
-            .request("PATCH", path)
-            .send_json(body.clone())
-            .map_err(map_ureq_error)?;
-        let response_body: serde_json::Value = resp
-            .into_json()
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        Ok(response_body)
-    }
-
-    pub fn post_no_content(&self, path: &str, body: &serde_json::Value) -> Result<(), ClientError> {
-        let _resp = self
-            .request("POST", path)
-            .send_json(body.clone())
-            .map_err(map_ureq_error)?;
-        Ok(())
-    }
-}
-
-fn map_ureq_error(err: ureq::Error) -> ClientError {
-    match err {
-        ureq::Error::Status(status, resp) => {
-            let body = resp.into_string().unwrap_or_default();
-            ClientError::Api { status, body }
+    fn unreachable(&self, mutating: bool, detail: String) -> ErrorBody {
+        let mut error = ErrorBody::new(
+            ErrorCode::Unreachable,
+            format!("no answer from {}: {detail}", self.target.base_url()),
+        );
+        if mutating {
+            // The call may have taken effect. Retrying with the same id
+            // returns its answer instead of acting a second time.
+            error = error.with_next(retry_command(&self.request_id));
         }
-        ureq::Error::Transport(t) => ClientError::Http(t.to_string()),
+        error
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ProjectEnvelope {
-    pub project: Project,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Project {
-    pub id: String,
-    #[allow(dead_code)]
-    pub slug: Option<String>,
-    pub git_repo_path: Option<String>,
-}
-
-pub fn resolve_project(
-    client: &ServerClient,
-    project_override: Option<&Path>,
-) -> Result<Project, ClientError> {
-    let git_root = match project_override {
-        Some(path) => path.to_path_buf(),
-        None => detect_git_root()?,
-    };
-
-    let git_root_str = git_root.to_string_lossy();
-    let body = serde_json::json!({ "git_repo_path": git_root_str });
-    let resp = client.post("/rpc/projects/ensure", &body)?;
-    let envelope: ProjectEnvelope =
-        serde_json::from_value(resp).map_err(|e| ClientError::Http(e.to_string()))?;
-    Ok(envelope.project)
-}
-
-fn read_port_file() -> Result<u16, ClientError> {
-    let content =
-        fs::read_to_string(port_file_path()).map_err(|_| ClientError::ServerNotRunning)?;
-    content
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| ClientError::ServerNotRunning)
-}
-
-fn detect_git_root() -> Result<PathBuf, ClientError> {
-    let cwd = env::current_dir().map_err(|_| ClientError::NoGitRepo)?;
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|_| ClientError::NoGitRepo)?;
-
-    if !output.status.success() {
-        return Err(ClientError::NoGitRepo);
+/// The current command line with `--request-id` pinned to `id`.
+fn retry_command(id: &str) -> String {
+    let mut args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|arg| arg == "--request-id") {
+        args.drain(pos..(pos + 2).min(args.len()));
     }
+    args.retain(|arg| !arg.starts_with("--request-id="));
+    args.insert(1.min(args.len()), format!("--request-id={id}"));
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
-    let path_str = String::from_utf8_lossy(&output.stdout);
-    Ok(PathBuf::from(path_str.trim()))
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))
+    {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_base_url, parse_token};
+    use super::*;
 
     #[test]
-    fn base_url_is_none_when_unset_or_blank() {
-        assert_eq!(parse_base_url(None), None);
-        assert_eq!(parse_base_url(Some("")), None);
-        assert_eq!(parse_base_url(Some("   ")), None);
-    }
-
-    #[test]
-    fn base_url_drops_trailing_slash_so_paths_join_cleanly() {
-        assert_eq!(
-            parse_base_url(Some("https://example.dev/")),
-            Some("https://example.dev".to_string())
-        );
-        assert_eq!(
-            parse_base_url(Some("  https://example.dev  ")),
-            Some("https://example.dev".to_string())
-        );
-    }
-
-    #[test]
-    fn base_url_keeps_port_and_path_prefix() {
-        assert_eq!(
-            parse_base_url(Some("http://127.0.0.1:4455")),
-            Some("http://127.0.0.1:4455".to_string())
-        );
-        assert_eq!(
-            parse_base_url(Some("https://example.dev/chro/")),
-            Some("https://example.dev/chro".to_string())
-        );
-    }
-
-    #[test]
-    fn token_is_none_when_unset_or_blank() {
-        assert_eq!(parse_token(None), None);
-        assert_eq!(parse_token(Some("  ")), None);
-        assert_eq!(parse_token(Some(" abc ")), Some("abc".to_string()));
+    fn quoting_leaves_plain_words_alone_and_wraps_the_rest() {
+        assert_eq!(shell_quote("session"), "session");
+        assert_eq!(shell_quote("--request-id=ab-1"), "--request-id=ab-1");
+        assert_eq!(shell_quote("fix the bug"), "'fix the bug'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

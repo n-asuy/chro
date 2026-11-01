@@ -144,3 +144,48 @@ describe("parseFromDOM", () => {
     expect((result[0] as { content: string }).content).toBe("hello\nworld");
   });
 });
+
+describe("parseFromDOM annotations pill", () => {
+  const notes = [
+    {
+      selector: "main > button",
+      element: 'button "Buy"',
+      text: "Buy",
+      rect: { x: 1, y: 2, width: 3, height: 4 },
+      comment: "Bigger",
+    },
+  ];
+
+  function makeAnnotationsPill(notesJson: string): string {
+    const pill = document.createElement("span");
+    pill.dataset.type = "annotations";
+    pill.dataset.path = "site/index.html";
+    pill.dataset.viewport = "1280x800";
+    pill.dataset.notes = notesJson;
+    pill.contentEditable = "false";
+    pill.textContent = "index.html · 1 note";
+    return pill.outerHTML;
+  }
+
+  it("restores the notes carried by the pill", () => {
+    const el = makeEditor(`${makeAnnotationsPill(JSON.stringify(notes))} fix`);
+    const [pill, rest] = parseFromDOM(el);
+    expect(pill).toEqual({
+      type: "annotations",
+      content: "index.html · 1 note",
+      start: 0,
+      end: 19,
+      path: "site/index.html",
+      viewport: { width: 1280, height: 800 },
+      notes,
+    });
+    expect(rest).toMatchObject({ type: "text", content: " fix" });
+  });
+
+  it("falls back to plain text when the pill payload is malformed", () => {
+    const el = makeEditor(makeAnnotationsPill("{not json"));
+    expect(parseFromDOM(el)).toEqual([
+      { type: "text", content: "index.html · 1 note", start: 0, end: 19 },
+    ]);
+  });
+});

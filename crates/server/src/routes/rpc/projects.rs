@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Multipart, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Response,
     routing::{get, post},
     Json, Router,
@@ -451,6 +451,7 @@ async fn read_project_asset(
     State(state): State<AppState>,
     Path((project_id, relative_path)): Path<(String, String)>,
     Query(asset_query): Query<AssetQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -461,13 +462,14 @@ async fn read_project_asset(
     let binary_file =
         read_binary_resolving(&service, &relative_path, &[project_root.as_str()]).await?;
 
-    stream_asset_response(binary_file, &asset_query).await
+    stream_asset_response(binary_file, &asset_query, &headers).await
 }
 
 async fn read_project_binary_file(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Query(query): Query<ProjectFileQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if query.relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest(
@@ -480,7 +482,7 @@ async fn read_project_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &[project_root.as_str()]).await?;
 
-    stream_binary_response(binary_file, "private, max-age=3600").await
+    stream_binary_response(binary_file, "private, max-age=3600", &headers).await
 }
 
 #[derive(Debug, Serialize)]

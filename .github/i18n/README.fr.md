@@ -28,6 +28,8 @@ Lancez des agents en parallèle dans des worktrees isolés, suivez les diffs en 
 
 ## Qu'est-ce que Chro ?
 
+Chro is a serial experiment. Chaque version met à l'épreuve une hypothèse sur la façon dont les gens dirigent des agents. Nous gardons ce qui tient, retirons ce qui ne tient pas, et consignons les deux dans le [journal des modifications](../../CHANGELOG.md). Vos fichiers et votre historique ne font jamais partie de l'expérience.
+
 Chro est un espace de travail conçu pour exécuter des agents de code en parallèle et décider de la valeur de ce qu'ils produisent. Vous décrivez le résultat que vous voulez, les agents s'exécutent dans des worktrees Git isolés, et leurs modifications remontent sous forme de diffs en direct. Rien n'atteint votre branche tant que vous ne l'avez pas approuvé.
 
 Il fonctionne avec les abonnements d'agents que vous possédez déjà (**Claude Code**, **Codex**) et garde tout sur votre machine : vos notes, vos dépôts, votre historique.

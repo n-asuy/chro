@@ -8,6 +8,7 @@ pub mod container;
 pub mod execution;
 pub mod perf;
 pub mod session_context;
+pub mod session_turns;
 pub mod tasks;
 pub mod workspace;
 
@@ -33,11 +34,12 @@ use worktree::WorktreeManager;
 pub use container::{ContainerError, ContainerService};
 pub use execution::{ExecutionEvent, ExecutionStartParams};
 pub use tasks::{
-    ExecutionSessionStart, ForkOutcome, ForkWorkspace, MergeOutcome, RebaseOutcome,
+    ExecutionSessionStart, ForkOutcome, ForkWorkspace, MergeOutcome, MessageOptions, RebaseOutcome,
     SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
     TaskMessageMode, TaskMessageStart, TaskRunBranchStatus, TaskRunTaskProject, TaskRunWithTask,
     TaskService,
 };
+pub use session_turns::SendOutcome;
 pub use workspace::{canonicalize_path, ProjectFileService};
 
 pub type ExecutionEventStream = BroadcastStream<ExecutionEvent>;
@@ -89,6 +91,13 @@ pub enum RuntimeError {
     NotFound(&'static str),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
+    /// A turn is already in flight and the caller refused to queue behind it.
+    #[error("session is busy: a turn is already in flight")]
+    SessionBusy,
+    /// A change to the session's queue was based on a queue that has since
+    /// changed (a message started, arrived or was withdrawn).
+    #[error("the session's queue changed; reload it and try again")]
+    QueueChanged,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

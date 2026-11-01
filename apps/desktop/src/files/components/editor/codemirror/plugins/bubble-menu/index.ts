@@ -22,18 +22,4 @@ export {
   type BubbleMenuPlacement,
 } from "./BubbleMenu";
 
-export {
-  toggleBold,
-  toggleItalic,
-  toggleStrikethrough,
-  toggleCode,
-  toggleHighlight,
-  insertLink,
-  isBold,
-  isItalic,
-  isStrikethrough,
-  isCode,
-  isHighlight,
-} from "./formatting-commands";
-
 export { FormattingMenu } from "./FormattingMenu";

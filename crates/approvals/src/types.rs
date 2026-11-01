@@ -55,21 +55,16 @@ impl ApprovalStatus {
     }
 }
 
-/// Who answered an approval. Client-asserted (localhost RPC has no auth), so
-/// this is an attribution record, not a security boundary. It always resolves
-/// to a concrete actor: an omitted `responded_by` defaults to [`ApprovalActor::User`]
-/// (the UI never sends one), and the CLI stamps [`ApprovalActor::Agent`] from
-/// `CHRO_TASK_ID` whenever it runs inside a chro session.
+/// Who answered an approval. Always concrete: an omitted `responded_by`
+/// reads as [`ApprovalActor::User`]. Only the server sets
+/// [`ApprovalActor::Agent`], from the session token an agent's call carried;
+/// a client cannot claim it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalActor {
     User,
-    /// An agent responding via the CLI. `task` is the delegating session's
-    /// id or slug; the server resolves it to a canonical task id when it
-    /// enforces the self-approval ban.
-    Agent {
-        task: String,
-    },
+    /// An agent answering from a chro session.
+    Agent { session: Uuid },
 }
 
 impl Default for ApprovalActor {

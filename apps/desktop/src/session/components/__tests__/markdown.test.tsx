@@ -118,3 +118,19 @@ describe("Markdown local path links", () => {
     );
   });
 });
+
+describe("Markdown images", () => {
+  it("renders a web image written by the agent", () => {
+    const markup = render("![before and after](https://example.com/shot.png)");
+
+    expect(markup).toContain('src="https://example.com/shot.png"');
+    expect(markup).toContain('alt="before and after"');
+  });
+
+  it("keeps an unresolved local image as its label until the file is found", () => {
+    const markup = render("![before and after](/tmp/shots/kp2.png)");
+
+    expect(markup).not.toContain("<img");
+    expect(markup).toContain("before and after");
+  });
+});

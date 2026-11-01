@@ -438,7 +438,10 @@ impl WorktreeManager {
         Ok(registered.iter().any(|entry| entry == &canonical))
     }
 
-    fn is_within_base_dir(&self, path: &Path) -> bool {
+    /// Whether `path` lives under the directory chro creates worktrees in.
+    /// Sessions that run in a project root or a chat folder record that
+    /// directory too, and only paths chro created are its to remove.
+    pub fn is_within_base_dir(&self, path: &Path) -> bool {
         let base_dir = canonicalize_if_exists(self.base_dir.as_ref())
             .unwrap_or_else(|| self.base_dir.as_ref().to_path_buf());
         let candidate = canonicalize_if_exists(path).unwrap_or_else(|| path.to_path_buf());

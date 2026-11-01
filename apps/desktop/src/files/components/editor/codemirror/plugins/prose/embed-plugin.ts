@@ -25,12 +25,7 @@ import {
 } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
-import {
-  AUDIO_EXTENSIONS,
-  IMAGE_EXTENSIONS,
-  PDF_EXTENSIONS,
-  VIDEO_EXTENSIONS,
-} from "@/files/media-types";
+import { type MediaViewer, mediaViewerFor } from "@/files/media-types";
 import { cursorInNode } from "../../utility/tools";
 
 /**
@@ -65,16 +60,10 @@ function isInsideCallout(
 // Store view reference for click handling
 let embedCurrentView: EditorView | null = null;
 
-type EmbedType = "image" | "audio" | "video" | "pdf" | "note";
+type EmbedType = MediaViewer | "note";
 
 function getEmbedType(path: string): EmbedType {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
-  if (AUDIO_EXTENSIONS.has(ext)) return "audio";
-  if (VIDEO_EXTENSIONS.has(ext)) return "video";
-  if (PDF_EXTENSIONS.has(ext)) return "pdf";
-  return "note";
+  return mediaViewerFor(path.split(".").pop()) ?? "note";
 }
 
 interface EmbedInfo {

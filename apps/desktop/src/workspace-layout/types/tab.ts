@@ -61,8 +61,6 @@ export interface Tab {
   iconName?: string;
   /** True if user has pinned the tab (closes via explicit action only) */
   pinned?: boolean;
-  /** True if the underlying content has unsaved changes */
-  dirty?: boolean;
 }
 
 /**

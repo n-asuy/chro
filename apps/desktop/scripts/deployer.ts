@@ -95,7 +95,7 @@ const rustServerBinaryBaseName = "chro-server";
 const rustServerManifestPath = path.join(rustServerCrateDir, "Cargo.toml");
 
 // The terminal CLI is staged as a second Tauri sidecar so agents launched by the
-// bundled server can call `chro task ...` by bare name (the server prepends the
+// bundled server can call `chro session ...` by bare name (the server prepends the
 // sidecar dir to PATH via CHRO_CLI_DIR). It is a second binary of the server
 // crate: same commands, without the server runtime that would otherwise be
 // shipped and updated twice.

@@ -89,6 +89,32 @@ export function buildDirectoryTree(
   return root;
 }
 
+export interface DirectoryChain {
+  /** Deepest directory of the run; its children are what the row expands to. */
+  tail: DirectoryTreeNode;
+  /** Row text: the run's names joined with `/`. */
+  label: string;
+  /** Every directory folded into the row, outermost first. */
+  paths: string[];
+}
+
+/**
+ * Fold a run of directories that each contain nothing but one subdirectory
+ * into a single row (`crates/server/src`), as file explorers commonly do. The
+ * run stops at a directory holding files or several entries.
+ */
+export function compactDirectoryChain(node: DirectoryTreeNode): DirectoryChain {
+  let tail = node;
+  const names = [node.name];
+  const paths = [node.path];
+  while (tail.children.length === 1 && !tail.children[0].isFile) {
+    tail = tail.children[0];
+    names.push(tail.name);
+    paths.push(tail.path);
+  }
+  return { tail, label: names.join("/"), paths };
+}
+
 function sortChildren(
   node: DirectoryTreeNode,
   mode: DirectoryMapSortMode,

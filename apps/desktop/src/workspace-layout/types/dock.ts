@@ -12,13 +12,6 @@
 export type LeftDockPanelKind = "projects";
 
 /**
- * The two axes of the left panel. `inbox` is the cross-project session list
- * ordered by time; `map` is the directory tree of each open project's main
- * checkout, with sessions filed under the directory they are addressed to.
- */
-export type LeftPanelMode = "inbox" | "map";
-
-/**
  * `agent` is the standing agent of one directory: its brief file, the ledger
  * of finished sessions addressed to it, and the entry point for a new session
  * scoped to it. Its subject is {@link DirectoryAgentTarget}.
@@ -44,8 +37,6 @@ export interface DockState {
   width: number;
   /** True hides everything except the bottom action bar */
   collapsed: boolean;
-  /** Left dock only: which axis the panel shows. Absent in older payloads. */
-  mode?: LeftPanelMode;
 }
 
 export const DEFAULT_DOCK_WIDTH = 280;

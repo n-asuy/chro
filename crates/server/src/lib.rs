@@ -22,9 +22,10 @@ mod errors;
 mod helpers;
 pub(crate) mod identifiers;
 mod parent_watch;
+mod operator;
 mod perf;
-mod port_file;
 mod routes;
+mod runtime_identity;
 mod shutdown;
 
 pub(crate) use app_state::AppState;
@@ -58,8 +59,8 @@ fn raise_fd_limit() {}
 /// Prepend the directory holding the bundled `chro` CLI (provided by the desktop
 /// shell via `CHRO_CLI_DIR`) to this process's `PATH`. Executors derive the
 /// environment they hand to spawned agents from this `PATH`, so the prepend lets
-/// an agent invoke `chro task ...` by bare name instead of hitting "command not
-/// found". No-op when the variable is unset (standalone or dev launches) or the
+/// an agent invoke `chro session ...` by bare name instead of hitting "command
+/// not found". No-op when the variable is unset (standalone or dev launches) or the
 /// directory is already first on `PATH`.
 fn expose_cli_on_path() {
     let Some(cli_dir) = std::env::var_os("CHRO_CLI_DIR") else {
@@ -154,6 +155,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     // per-database advisory lock in addition to binding first.
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
     let actual_port = listener.local_addr()?.port();
+    let listen_url = format!("http://{}:{}", args.host, actual_port);
 
     if let Some(parent) = log_db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -175,6 +177,13 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         )
     })?;
 
+    // Who this server is to its clients. Agents inherit the runtime file's
+    // path, so `chro` inside a session reaches this server even when another
+    // one runs on the machine. Set before the runtime can start any agent.
+    let identity = runtime_identity::RuntimeIdentity::new(&log_db_path, listen_url.clone());
+    std::env::set_var(runtime_identity::RUNTIME_FILE_ENV, &identity.file);
+    operator::set_identity(&identity);
+
     let runtime = LocalRuntime::bootstrap(RuntimeOptions {
         user_id: "desktop".to_string(),
         db_path: args.db_path.clone(),
@@ -185,7 +194,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         .cleanup_orphan_executions()
         .await
         .context("failed to cleanup executions")?;
-    let state = AppState::new(runtime.clone());
+    let state = AppState::new(runtime.clone(), identity.clone());
     let state_browser_handle = state.browser().clone();
 
     let allowed_origins = cors::AllowedOrigins::load(actual_port)?;
@@ -194,6 +203,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     let api_routes = Router::new()
         .merge(routes::health_router())
         .merge(routes::sessions_router())
+        .merge(operator::router(state.clone()))
         .nest("/rpc", routes::rpc_router())
         .nest("/streams", routes::streams_router())
         .with_state(state)
@@ -220,12 +230,10 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         app = app.layer(middleware::from_fn(perf::latency_recorder));
     }
 
-    if let Err(e) = port_file::write_port_file(actual_port).await {
-        tracing::warn!("Failed to write port file: {}", e);
-    }
-
-    let listen_url = format!("http://{}:{}", args.host, actual_port);
-    info!(port = actual_port, "listening on {}", listen_url);
+    identity
+        .publish()
+        .with_context(|| format!("failed to write runtime file {}", identity.file.display()))?;
+    info!(port = actual_port, runtime_file = %identity.file.display(), "listening on {}", listen_url);
 
     if !args.no_open {
         let url = listen_url.clone();
@@ -253,9 +261,11 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
         }
         browser_for_shutdown.shutdown_all().await;
     };
-    axum::serve(listener, app.into_make_service())
+    let served = axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
+    identity.retire();
+    served?;
 
     Ok(())
 }

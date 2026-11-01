@@ -15,6 +15,10 @@ pub struct ExecutionStartParams {
     /// Branch `resume_session_id` instead of continuing it, so the session this
     /// run came from stays untouched. Set on a forked task's first turn.
     pub fork_session: bool,
+    /// What the person wrote, when this run opens a session (a new task's or a
+    /// fork's first turn): the text the session's title is generated from.
+    /// `None` on a follow-up, which continues a session that has its title.
+    pub session_title_request: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

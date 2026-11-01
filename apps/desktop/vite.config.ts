@@ -184,15 +184,57 @@ type PreferencesResponse = {
   };
 };
 
-function readBackendPort(): number {
-  const portFilePath = path.join(os.tmpdir(), "chro", "chro.port");
-  try {
-    const content = fs.readFileSync(portFilePath, "utf-8").trim();
-    const port = parseInt(content, 10);
-    return Number.isFinite(port) ? port : DEFAULT_BACKEND_PORT;
-  } catch {
-    return DEFAULT_BACKEND_PORT;
+/** Runtime files a chro server may have written, in the order the `chro` CLI
+ * looks for them: the explicit override, the desktop app's data directory,
+ * then the standalone server's. */
+function runtimeFileCandidates(): string[] {
+  const home = os.homedir();
+  const candidates: string[] = [];
+  const add = (file: string | undefined) => {
+    if (file && !candidates.includes(file)) candidates.push(file);
+  };
+  add(process.env.CHRO_RUNTIME_FILE?.trim() || undefined);
+  const userData = process.env.CHRO_USER_DATA_DIR?.trim();
+  if (userData) add(path.join(userData, "runtime.json"));
+  if (process.platform === "darwin") {
+    add(path.join(home, "Library", "Application Support", "chro", "runtime.json"));
+  } else if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(home, "AppData", "Roaming");
+    add(path.join(appData, "chro", "runtime.json"));
+  } else {
+    const config = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config");
+    const data = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
+    add(path.join(config, "chro", "runtime.json"));
+    add(path.join(data, "chro", "runtime.json"));
   }
+  return candidates;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Port of the first live server named by a runtime file. */
+function readBackendPort(): number {
+  for (const file of runtimeFileCandidates()) {
+    try {
+      const runtime = JSON.parse(fs.readFileSync(file, "utf-8")) as {
+        pid?: number;
+        url?: string;
+      };
+      if (!runtime.url || !runtime.pid || !processAlive(runtime.pid)) continue;
+      const port = Number.parseInt(new URL(runtime.url).port, 10);
+      if (Number.isFinite(port)) return port;
+    } catch {
+      // Missing or half-written file: try the next one.
+    }
+  }
+  return DEFAULT_BACKEND_PORT;
 }
 
 function backendProxy(opts?: { ws?: boolean }): ProxyOptions {

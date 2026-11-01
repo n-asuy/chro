@@ -5,7 +5,11 @@ import type { PluginAPI } from "tailwindcss/types/config";
 import tailwindcssAnimate from "tailwindcss-animate";
 import baseUiConfig from "@chro/ui/tailwind.config";
 
-const convertToRGB = (variableName: string) => `rgb(var(${variableName}))`;
+// The variables hold bare `r, g, b` triples. `<alpha-value>` lets Tailwind
+// apply opacity modifiers (`bg-custom-primary-100/10`); a plain `rgb(var())`
+// string cannot carry alpha, so such classes silently generated no CSS.
+const convertToRGB = (variableName: string) =>
+  `rgba(var(${variableName}), <alpha-value>)`;
 const convertToRGBA = (variableName: string, alpha: number) =>
   `rgba(var(${variableName}), ${alpha})`;
 

@@ -4,7 +4,7 @@
  */
 
 import { needsDecorationRebuild } from "../decoration-refresh";
-import { Decoration, EditorView, WidgetType } from "@codemirror/view";
+import { Decoration, EditorView } from "@codemirror/view";
 import {
   StateField,
   RangeSet,
@@ -14,27 +14,6 @@ import {
 import { syntaxTree } from "@codemirror/language";
 import type { DecorationSet } from "@codemirror/view";
 import { cursorInNode } from "../../utility/tools";
-
-/**
- * Widget to display external link icon for internal links
- */
-class InternalLinkIconWidget extends WidgetType {
-  constructor() {
-    super();
-  }
-
-  toDOM(): HTMLElement {
-    const span = document.createElement("span");
-    span.className = "cm-internal-link-icon";
-    span.textContent = "↗";
-    span.setAttribute("aria-hidden", "true");
-    return span;
-  }
-
-  eq(): boolean {
-    return true;
-  }
-}
 
 /**
  * Extract link path from an InternalLink node
@@ -148,13 +127,6 @@ function buildInternalLinkDecorations(
             },
           });
 
-          // Add icon widget after the link
-          decorations.push(
-            Decoration.widget({
-              widget: new InternalLinkIconWidget(),
-              side: 1,
-            }).range(node.to),
-          );
         }
       }
     },

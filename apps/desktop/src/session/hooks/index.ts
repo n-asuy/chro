@@ -62,8 +62,7 @@ export type { PreparedPromptPayload } from "./use-single-session-controller";
 export { useSessionRunController } from "./use-session-run-controller";
 export type { UseSessionRunControllerResult } from "./use-session-run-controller";
 
-export { usePromptQueueController } from "./use-prompt-queue-controller";
-export type { QueuedPromptItem } from "./use-prompt-queue-controller";
+export { useSessionQueueStream } from "./use-session-queue-stream";
 
 export { useSessionExecutionOptions } from "./use-session-execution-options";
 export { useSessionSidebarState } from "./use-session-sidebar-state";

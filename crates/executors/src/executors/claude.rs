@@ -5,7 +5,7 @@
 //! unattended and parallel runs without an interactive terminal dependency.
 
 mod processor;
-mod session_title;
+mod session_transcript;
 pub mod types;
 
 pub use processor::{ClaudeLogProcessor, HistoryStrategy};
@@ -31,9 +31,10 @@ use crate::{
     command::{CmdOverrides, CommandBuildError, CommandBuilder},
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, SessionTitle, SpawnedChild,
-        StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        codex::ReasoningEffort,
     },
+    session_title,
     spawn::Invocation,
 };
 
@@ -57,6 +58,10 @@ pub struct ClaudeCode {
     /// Model to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Reasoning effort (`--effort`); unset keeps the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 
     /// Output speed. `Fast` opts into fast mode; unset / `Standard` is default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +95,10 @@ impl ClaudeCode {
 
         if let Some(model) = &self.model {
             builder = builder.extend_params(["--model", model]);
+        }
+
+        if let Some(effort) = &self.effort {
+            builder = builder.extend_params(["--effort", effort.as_ref()]);
         }
 
         // Fast mode has no dedicated flag; the CLI reads it from settings
@@ -143,21 +152,8 @@ impl ClaudeCode {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .current_dir(current_dir)
-            .args(&args)
-            .env_clear();
-        for (key, value) in claude_environment() {
-            process.env(key, value);
-        }
-        // Applied before profile variables so an explicit user override wins.
-        for (key, value) in headless_harness_env() {
-            process.env(key, value);
-        }
-        for (key, value) in &env.vars {
-            process.env(key, value);
-        }
-        if let Some(path) = build_claude_path_env() {
-            process.env("PATH", path);
-        }
+            .args(&args);
+        apply_environment(&mut process, env);
 
         let mut child = process.group_spawn()?;
 
@@ -269,8 +265,23 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         dirs::home_dir().map(|home| home.join(".claude.json"))
     }
 
-    fn session_title(&self, cwd: &Path, session_id: &str) -> Option<SessionTitle> {
-        session_title::session_title(cwd, session_id)
+    async fn generate_session_title(
+        &self,
+        request: &str,
+        env: &ExecutionEnv,
+    ) -> Result<Option<String>, ExecutorError> {
+        let Invocation { program, args } = CommandBuilder::for_manifest(&cli_manifest::CLAUDE)
+            .extend_params(TITLE_PARAMS)
+            .build_initial()?
+            .into_resolved()
+            .await?;
+
+        let mut process = tokio::process::Command::new(program);
+        // A directory that belongs to no project, so the call reads nothing
+        // of the workspace.
+        process.current_dir(std::env::temp_dir()).args(&args);
+        apply_environment(&mut process, &env.clone().with_profile(&self.cmd));
+        session_title::generate(process, request).await
     }
 
     async fn get_availability_info(&self) -> AvailabilityInfo {
@@ -309,11 +320,11 @@ impl StandardCodingAgentExecutor for ClaudeCode {
 /// The copy keeps the original session id, so the source file stays untouched
 /// and `--fork-session` still allocates a fresh id for the branch.
 fn make_session_visible_from(cwd: &Path, session_id: &str) {
-    let Some(source) = session_title::transcript_path(cwd, session_id) else {
+    let Some(source) = session_transcript::transcript_path(cwd, session_id) else {
         return;
     };
-    let Some(target_dir) =
-        session_title::projects_dir().map(|dir| dir.join(session_title::project_dir_name(cwd)))
+    let Some(target_dir) = session_transcript::projects_dir()
+        .map(|dir| dir.join(session_transcript::project_dir_name(cwd)))
     else {
         return;
     };
@@ -337,6 +348,40 @@ fn make_session_visible_from(cwd: &Path, session_id: &str) {
             target = %target_dir.display(),
             "copied session transcript so the fork can resume it here"
         );
+    }
+}
+
+/// Flags of the one-shot call that titles a session: the small model, plain
+/// text out, nothing of the person's setup loaded (so no hooks run), no saved
+/// session and no tools. Every flag is free of shell metacharacters because a
+/// Windows batch shim forwards them through the command interpreter.
+const TITLE_PARAMS: [&str; 8] = [
+    "--print",
+    "--output-format",
+    "text",
+    "--model",
+    "haiku",
+    "--safe-mode",
+    "--no-session-persistence",
+    "--tools=",
+];
+
+/// The environment every Claude process chro starts runs in: the parent's
+/// minus the nesting markers, the headless settings, then the run's own
+/// variables so an explicit profile override wins.
+fn apply_environment(process: &mut tokio::process::Command, env: &ExecutionEnv) {
+    process.env_clear();
+    for (key, value) in claude_environment() {
+        process.env(key, value);
+    }
+    for (key, value) in headless_harness_env() {
+        process.env(key, value);
+    }
+    for (key, value) in &env.vars {
+        process.env(key, value);
+    }
+    if let Some(path) = build_claude_path_env() {
+        process.env("PATH", path);
     }
 }
 
@@ -482,6 +527,29 @@ mod tests {
     }
 
     #[test]
+    fn title_call_is_a_tool_less_one_shot_that_leaves_no_session() {
+        for flag in [
+            "--print",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--tools=",
+        ] {
+            assert!(TITLE_PARAMS.contains(&flag), "missing {flag}");
+        }
+        assert!(TITLE_PARAMS.windows(2).any(|w| w == ["--model", "haiku"]));
+        // The run's own flags must not leak in: the call may not act.
+        assert!(!TITLE_PARAMS.contains(&"--dangerously-skip-permissions"));
+        // A Windows batch shim rejects any of these characters in argv.
+        for param in TITLE_PARAMS {
+            assert!(
+                !param.contains(['&', '|', '<', '>', '^', '"', '%', '!', '\r', '\n']),
+                "unsafe for the command interpreter: {param}"
+            );
+            assert!(!param.is_empty());
+        }
+    }
+
+    #[test]
     fn command_builder_enables_browser_extension_bridge() {
         let params = ClaudeCode::default()
             .build_command_builder()
@@ -527,6 +595,36 @@ mod tests {
                 .windows(2)
                 .any(|w| w == ["--settings", r#"{"fastMode":true}"#]),
             "fast speed must enable fast mode via settings: {params:?}"
+        );
+    }
+
+    #[test]
+    fn effort_is_passed_to_the_cli() {
+        let claude = ClaudeCode {
+            effort: Some(ReasoningEffort::Xhigh),
+            ..Default::default()
+        };
+        let params = claude
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(
+            params.windows(2).any(|w| w == ["--effort", "xhigh"]),
+            "effort override must be passed: {params:?}"
+        );
+    }
+
+    #[test]
+    fn unset_effort_leaves_the_cli_default() {
+        let params = ClaudeCode::default()
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        assert!(
+            !params.iter().any(|p| p == "--effort"),
+            "unset effort must not pass --effort: {params:?}"
         );
     }
 

@@ -9,7 +9,7 @@ import {
 describe("onboarding step order", () => {
   it("welcome is not part of the persisted sequence", () => {
     expect(ONBOARDING_STEP_ORDER).not.toContain("welcome");
-    expect(ONBOARDING_STEP_ORDER).toEqual(["agent", "cli", "theme", "workspace"]);
+    expect(ONBOARDING_STEP_ORDER).toEqual(["agent", "capabilities", "theme", "workspace"]);
   });
 
   describe("nextOnboardingStep", () => {
@@ -18,8 +18,8 @@ describe("onboarding step order", () => {
     });
 
     it("walks the persisted sequence in order", () => {
-      expect(nextOnboardingStep("agent")).toBe("cli");
-      expect(nextOnboardingStep("cli")).toBe("theme");
+      expect(nextOnboardingStep("agent")).toBe("capabilities");
+      expect(nextOnboardingStep("capabilities")).toBe("theme");
       expect(nextOnboardingStep("theme")).toBe("workspace");
     });
 
@@ -38,8 +38,8 @@ describe("onboarding step order", () => {
     });
 
     it("walks the persisted sequence backwards", () => {
-      expect(previousOnboardingStep("cli")).toBe("agent");
-      expect(previousOnboardingStep("theme")).toBe("cli");
+      expect(previousOnboardingStep("capabilities")).toBe("agent");
+      expect(previousOnboardingStep("theme")).toBe("capabilities");
       expect(previousOnboardingStep("workspace")).toBe("theme");
     });
   });
@@ -51,7 +51,7 @@ describe("onboarding step order", () => {
 
     it("reports 0-based index against the persisted total", () => {
       expect(onboardingProgress("agent")).toEqual({ index: 0, total: 4 });
-      expect(onboardingProgress("cli")).toEqual({ index: 1, total: 4 });
+      expect(onboardingProgress("capabilities")).toEqual({ index: 1, total: 4 });
       expect(onboardingProgress("theme")).toEqual({ index: 2, total: 4 });
       expect(onboardingProgress("workspace")).toEqual({ index: 3, total: 4 });
     });

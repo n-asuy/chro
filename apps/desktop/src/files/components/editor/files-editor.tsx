@@ -1,8 +1,5 @@
-import {
-  isImageExtension as isImageFile,
-  isPdfExtension as isPdfFile,
-  isVideoExtension as isVideoFile,
-} from "@/files/media-types";
+import { isProseExtension, mediaViewerFor } from "@/files/media-types";
+import { useLanguage } from "@/i18n";
 import { openExternalUrl } from "@/lib/open-external-url";
 import {
   getProjectAssetUrl,
@@ -11,15 +8,20 @@ import {
   getTaskRunBinaryFileUrl,
   getWorkspaceAssetUrl,
   getWorkspaceBinaryFileUrl,
-  readProjectFile,
-  readTaskRunFile,
-  readWorkspaceFileAtPath,
   resolveProjectFile,
 } from "@/lib/project-client";
 import type { DesktopWorkspaceFile } from "@/types/desktop";
 import { Button } from "@chro/ui/button";
 import { cn } from "@chro/ui/utils";
-import { Code, Eye, Maximize2, Minimize2, RefreshCw } from "lucide-react";
+import {
+  Code,
+  Eye,
+  GitCompareArrows,
+  Maximize2,
+  Minimize2,
+  MousePointerClick,
+  RefreshCw,
+} from "lucide-react";
 import {
   type ChangeEvent,
   type KeyboardEvent,
@@ -34,11 +36,18 @@ import { createPortal } from "react-dom";
 import TextareaAutosize from "react-textarea-autosize";
 import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
-import { useAutoSave } from "../../hooks/use-auto-save";
+import { useChangeBase } from "../../hooks/use-change-base";
+import { usePreviewAnnotations } from "../../hooks/use-preview-annotations";
+import { changeBaseText } from "../../lib/change-base";
+import {
+  type TextFileRoot,
+  useTextFileDocument,
+} from "../../hooks/use-text-file-document";
 import { delimiterForExtension } from "../../lib/csv";
 import {
   type HtmlViewMode,
   isLargeTextSafeMode,
+  opensInStructuredViewer,
   resolveCodeViewState,
 } from "../../lib/editor-safe-mode";
 import { resolveEmbedPath } from "../../lib/embed-path";
@@ -49,13 +58,15 @@ import {
   parseFrontmatter,
 } from "../../lib/frontmatter";
 import {
-  PREVIEW_LINK_BRIDGE_PARAM,
+  PREVIEW_BRIDGE_PARAM,
   parsePreviewLinkMessage,
   resolvePreviewLinkTarget,
 } from "../../lib/preview-link";
 import { useFileTreeStore } from "../../state/file-tree-store";
 import { type WorkspaceRoot, useFilesStore } from "../../state/files-store";
+import { textFileKey } from "../../state/text-file-documents";
 import type { FileNode } from "../../types/file-tree";
+import { AnnotationTray } from "./annotation-tray";
 import { CodeMirrorEditor, type CodeMirrorEditorHandle } from "./codemirror";
 import { FormattingMenu } from "./codemirror/plugins/bubble-menu";
 import type { EmbedPluginConfig } from "./codemirror/plugins/prose";
@@ -66,7 +77,9 @@ import {
   FrontmatterEditor,
   type FrontmatterViewMode,
 } from "./frontmatter-editor";
+import { AudioViewer } from "./audio-viewer";
 import { ImageViewer } from "./image-viewer";
+import { MergeDiffPane } from "./merge-diff/merge-diff-pane";
 import { PdfViewer } from "./pdf-viewer";
 import { VideoViewer } from "./video-viewer";
 
@@ -77,9 +90,6 @@ const BASE_EXTENSIONS = new Set(["cbase"]);
 const HTML_EXTENSIONS = new Set(["html", "htm"]);
 
 const CSV_EXTENSIONS = new Set(["csv", "tsv"]);
-
-/** Extensions rendered as prose (WYSIWYG markdown editor) */
-const PROSE_EXTENSIONS = new Set(["md", "mdx", "txt"]);
 
 const setIframeKeydownListener = (
   frameWindow: Window | null,
@@ -103,13 +113,6 @@ const formatFileSize = (bytes?: number | null): string => {
   if (!bytes || bytes < 1024) return `${bytes ?? 0} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-};
-
-const isProseFile = (extension?: string | null): boolean => {
-  // Prose view is a strict whitelist. Extensionless files (LICENSE, Makefile)
-  // and dotfiles (.env, .gitignore) fall through to the code editor.
-  if (!extension) return false;
-  return PROSE_EXTENSIONS.has(extension.toLowerCase());
 };
 
 const isExcalidrawFile = (extension?: string | null): boolean => {
@@ -189,10 +192,8 @@ const relativePathForFile = (
 type FilesEditorProps = {
   path?: string;
   /**
-   * If set, file content is read from this task run's worktree
+   * If set, file content is read from and saved to this task run's worktree
    * (container_ref / workspace_path) instead of the project main checkout.
-   * Editing/saving falls back to project paths and is disabled until a
-   * worktree write endpoint exists; for now treat task-run files as read-only.
    */
   taskRunId?: string;
   /** Close the transient file tab after Escape leaves fullscreen preview. */
@@ -204,6 +205,7 @@ export const FilesEditor = ({
   taskRunId,
   onHtmlFullscreenEscape,
 }: FilesEditorProps) => {
+  const { t } = useLanguage();
   const projectId = useProjectId();
   const {
     currentFilePath,
@@ -364,83 +366,135 @@ export const FilesEditor = ({
   );
   const workspaceRootPath = workspaceRoot?.path ?? null;
   const fileExtension = currentNode?.metadata?.extension ?? fallbackExtension;
-  const isImage = isImageFile(fileExtension);
-  const isVideo = isVideoFile(fileExtension);
-  const isPdf = isPdfFile(fileExtension);
+  // Media files open in a dedicated viewer that streams the bytes itself.
+  const mediaViewer = mediaViewerFor(fileExtension);
+  const isMedia = mediaViewer !== null;
   const isExcalidraw = isExcalidrawFile(fileExtension);
   const isBase = isBaseFile(fileExtension);
   const isHtml = isHtmlFile(fileExtension);
   const isCsv = isCsvFile(fileExtension);
-  const isProse = isProseFile(fileExtension);
+  const isProse = isProseExtension(fileExtension);
   // Until the open file's content has loaded the editor still holds the
   // previous file's bytes, so its size says nothing about what is on screen.
   const loadedFileSize =
     loadedFilePath === editorFilePath ? workspaceFile?.size ?? 0 : 0;
   const useLargeTextSafeMode = isLargeTextSafeMode(loadedFileSize);
+  const opensScene =
+    isExcalidraw && opensInStructuredViewer("scene", loadedFileSize);
+  const opensBase = isBase && opensInStructuredViewer("base", loadedFileSize);
+  const opensSpreadsheet =
+    isCsv && opensInStructuredViewer("spreadsheet", loadedFileSize);
   const headerPathLabel = currentNode
     ? relativePath ?? currentNode.path.replace(/^\/+/, "")
     : taskRunId
       ? relativePath ?? ""
       : "";
 
-  // Auto-save hook (Obsidian-style: silent, no status UI)
-  // Disabled for image/video/pdf/excalidraw files since they have their own save handling.
-  // Also disabled when scoped to a task-run worktree — writing back is not yet
-  // wired through, and writing to the project main checkout would be wrong.
-  const { saveNow, isDirty } = useAutoSave({
+  const textRoot = useMemo<TextFileRoot | null>(() => {
+    if (taskRunId) return { kind: "task-run", taskRunId };
+    if (workspaceRootPath) {
+      return { kind: "workspace", rootPath: workspaceRootPath };
+    }
+    if (projectId) return { kind: "project", projectId };
+    return null;
+  }, [taskRunId, workspaceRootPath, projectId]);
+  const docKey = editorFilePath
+    ? textFileKey({ projectId, taskRunId, path: editorFilePath })
+    : null;
+
+  // Text pushed from disk (an agent or another tool edited the open file),
+  // already merged with any unsaved edits. Updates the editor in place so the
+  // cursor and scroll position stay where the user left them.
+  const showExternalText = useCallback(
+    (text: string) => {
+      setContent(text);
+      if (!isProse || isExcalidraw || isBase) {
+        setFrontmatter({});
+        setEditorBody(text);
+        editorRef.current?.setContent(text);
+        return;
+      }
+      const parsed = parseFrontmatter(text);
+      setFrontmatter(parsed.frontmatter);
+      setEditorBody(parsed.body);
+      editorRef.current?.setContent(
+        frontmatterViewMode === "source" ? text : parsed.body,
+      );
+    },
+    [isProse, isExcalidraw, isBase, frontmatterViewMode],
+  );
+
+  // Edits save automatically and survive closing the tab. Binary viewers and
+  // the structured scene/base viewers persist through their own paths.
+  const textDocument = useTextFileDocument({
+    docKey,
+    root: textRoot,
     relativePath,
-    content,
     enabled:
-      !isImage &&
-      !isVideo &&
-      !isPdf &&
-      (!isExcalidraw || useLargeTextSafeMode) &&
-      (!isBase || useLargeTextSafeMode) &&
-      !workspaceFile?.truncated &&
-      !taskRunId &&
-      !workspaceRootPath,
-    debounceMs: 2000,
+      !isMedia && !opensScene && !opensBase && !workspaceFile?.truncated,
+    onExternalText: showExternalText,
   });
+  const {
+    load: loadTextDocument,
+    edit: editTextDocument,
+    save: saveTextDocument,
+  } = textDocument;
 
-  // Save on blur (when editor loses focus)
+  // The version this file is compared against: the same base its scope's
+  // diff tab shows. Drives the change markers and the Changes view.
+  const changeBase = useChangeBase({
+    projectId,
+    taskRunId: taskRunId ?? null,
+    relativePath,
+    enabled:
+      !workspaceRootPath &&
+      !isMedia &&
+      !opensScene &&
+      !opensBase &&
+      !opensSpreadsheet,
+  });
+  const loadedDiskText =
+    loadedFilePath === editorFilePath ? workspaceFile?.content ?? null : null;
+  const baseText = changeBaseText(changeBase, loadedDiskText);
+  const hasChanges = baseText !== null && baseText !== content;
+  // "changes" swaps the editor for a diff of this file against its base.
+  const [fileView, setFileView] = useState<"edit" | "changes">("edit");
+  const fileViewRef = useRef(fileView);
+  fileViewRef.current = fileView;
   useEffect(() => {
-    const container = editorContainerRef.current;
-    if (!container) return;
+    setFileView("edit");
+  }, [editorFilePath]);
+  // The prose editor shows the body without frontmatter; compare like with like.
+  const editorChangeBase = useMemo(() => {
+    if (baseText === null) return null;
+    if (!isProse || frontmatterViewMode === "source") return baseText;
+    return parseFrontmatter(baseText).body;
+  }, [baseText, isProse, frontmatterViewMode]);
 
-    const handleBlur = (event: FocusEvent) => {
-      // Check if focus is moving outside the editor container
-      const relatedTarget = event.relatedTarget as Node | null;
-      if (relatedTarget && container.contains(relatedTarget)) return;
+  // Every edit path (editor, frontmatter, spreadsheet, Changes view) goes
+  // through here. The document gets the text in the same tick, like an editor
+  // that reads its own text when the save fires; a keystroke just before the
+  // autosave must not miss it. Only once the content belongs to the open file.
+  const editContent = (text: string) => {
+    setContent(text);
+    if (loadedFilePath === editorFilePath) editTextDocument(text);
+  };
 
-      if (isDirty) {
-        void saveNow();
-      }
-    };
-
-    container.addEventListener("focusout", handleBlur);
-    return () => container.removeEventListener("focusout", handleBlur);
-  }, [isDirty, saveNow]);
-
-  // Save before window/tab close
+  // Editor keyboard shortcuts (undo/redo, save, find)
   useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (isDirty) {
-        void saveNow();
-      }
-    };
-
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [isDirty, saveNow]);
-
-  // Handle Ctrl+Z/Ctrl+Y keyboard shortcuts for undo/redo
-  useEffect(() => {
-    const container = editorContainerRef.current;
-    if (!container) return;
-
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
-      // Check if the event target is within the editor container
-      if (!container.contains(e.target as Node)) return;
+      // The Changes view is its own editor (undo, find); only save is shared.
+      const changesView = fileViewRef.current === "changes";
+      // Resolve the container per event: it does not exist yet while the
+      // file is loading, which is when this effect first runs.
+      const container = editorContainerRef.current;
+      if (!container?.contains(e.target as Node)) return;
+      const isSave =
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "s" || e.key === "S");
+      if (changesView && !isSave) return;
 
       // Handle undo: Ctrl+Z or Cmd+Z
       if (
@@ -478,6 +532,14 @@ export const FilesEditor = ({
         return;
       }
 
+      // Handle save: Ctrl+S or Cmd+S writes the pending edit right away.
+      if (isSave) {
+        e.preventDefault();
+        e.stopPropagation();
+        void saveTextDocument();
+        return;
+      }
+
       // Handle find: Ctrl+F or Cmd+F. Intercept here too (in addition to the
       // CodeMirror keymap) so the bar opens even when focus is in the title
       // input or frontmatter, and so the browser's native find never fires.
@@ -497,7 +559,7 @@ export const FilesEditor = ({
     // Use capture phase to intercept before other handlers
     document.addEventListener("keydown", handleKeyDown, true);
     return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, []);
+  }, [saveTextDocument]);
 
   useEffect(() => {
     if (currentNode) {
@@ -510,8 +572,8 @@ export const FilesEditor = ({
   }, [currentNode, fallbackDisplayName]);
 
   useEffect(() => {
-    // Skip text file loading for image/video/pdf files - they use dedicated viewers (binary)
-    if (isImage || isVideo || isPdf) {
+    // Media files are binary and load through their own viewer.
+    if (isMedia) {
       setWorkspaceFile(null);
       setWorkspaceError(null);
       setWorkspaceLoading(false);
@@ -535,27 +597,21 @@ export const FilesEditor = ({
     }
     setWorkspaceError(null);
 
-    const readPromise = taskRunId
-      ? readTaskRunFile(taskRunId, relativePath)
-      : workspaceRootPath
-        ? readWorkspaceFileAtPath(workspaceRootPath, relativePath)
-        : readProjectFile(projectId!, relativePath);
-
-    readPromise
-      .then((file) => {
+    loadTextDocument()
+      .then(({ file, text }) => {
         if (!active) return;
         // Skip frontmatter parsing for non-prose files
         if (isExcalidraw || isBase || !isProse) {
           setWorkspaceFile(file);
-          setContent(file.content);
+          setContent(text);
           setFrontmatter({});
-          setEditorBody(file.content);
+          setEditorBody(text);
           setLoadedFilePath(editorFilePath);
           return;
         }
-        const parsed = parseFrontmatter(file.content);
+        const parsed = parseFrontmatter(text);
         setWorkspaceFile(file);
-        setContent(file.content);
+        setContent(text);
         setFrontmatter(parsed.frontmatter);
         setEditorBody(parsed.body);
         setLoadedFilePath(editorFilePath);
@@ -588,9 +644,7 @@ export const FilesEditor = ({
     };
   }, [
     editorFilePath,
-    isImage,
-    isVideo,
-    isPdf,
+    isMedia,
     isExcalidraw,
     isBase,
     isProse,
@@ -599,6 +653,7 @@ export const FilesEditor = ({
     taskRunId,
     workspaceRootPath,
     fileContentVersion,
+    loadTextDocument,
   ]);
 
   /**
@@ -739,9 +794,20 @@ export const FilesEditor = ({
     if (!base) return "";
     const url = new URL(base);
     url.searchParams.set("_r", String(htmlPreviewKey));
-    url.searchParams.set(PREVIEW_LINK_BRIDGE_PARAM, "1");
+    url.searchParams.set(PREVIEW_BRIDGE_PARAM, "1");
     return url.toString();
   }, [relativePath, getAssetUrl, htmlPreviewKey]);
+
+  const htmlPreviewOrigin = useMemo(
+    () => (htmlPreviewSrc ? new URL(htmlPreviewSrc).origin : null),
+    [htmlPreviewSrc],
+  );
+  const annotations = usePreviewAnnotations({
+    frameRef: htmlPreviewFrameRef,
+    frameOrigin: htmlPreviewOrigin,
+    documentPath: relativePath,
+    enabled: isHtml && htmlViewMode === "preview",
+  });
 
   /**
    * Links clicked inside the preview act on the app instead of navigating the
@@ -782,40 +848,28 @@ export const FilesEditor = ({
     );
   }
 
-  // Handle image files with ImageViewer
-  if (isImage && relativePath) {
-    return (
-      <ImageViewer
-        relativePath={relativePath}
-        fileName={currentNode?.name ?? fallbackFileName}
-        contentVersion={fileContentVersion}
-        sourceUrl={getBinaryFileUrl(relativePath)}
-      />
-    );
-  }
-
-  // Handle video files with VideoViewer
-  if (isVideo && relativePath) {
-    return (
-      <VideoViewer
-        relativePath={relativePath}
-        fileName={currentNode?.name ?? fallbackFileName}
-        contentVersion={fileContentVersion}
-        sourceUrl={getBinaryFileUrl(relativePath)}
-      />
-    );
-  }
-
-  // Handle PDF files with PdfViewer
-  if (isPdf && relativePath) {
-    return (
-      <PdfViewer
-        relativePath={relativePath}
-        fileName={currentNode?.name ?? fallbackFileName}
-        contentVersion={fileContentVersion}
-        sourceUrl={getBinaryFileUrl(relativePath)}
-      />
-    );
+  if (mediaViewer && relativePath) {
+    const viewerProps = {
+      relativePath,
+      fileName: currentNode?.name ?? fallbackFileName,
+      sourceUrl: getBinaryFileUrl(relativePath),
+    };
+    switch (mediaViewer) {
+      case "image":
+        return (
+          <ImageViewer {...viewerProps} contentVersion={fileContentVersion} />
+        );
+      case "video":
+        return (
+          <VideoViewer {...viewerProps} contentVersion={fileContentVersion} />
+        );
+      case "audio":
+        return <AudioViewer {...viewerProps} />;
+      case "pdf":
+        return (
+          <PdfViewer {...viewerProps} contentVersion={fileContentVersion} />
+        );
+    }
   }
 
   // Oversized text files are returned as a bounded prefix by the backend.
@@ -849,24 +903,21 @@ export const FilesEditor = ({
   }
 
   // Handle Excalidraw files with ExcalidrawEditor
-  if (
-    isExcalidraw &&
-    !useLargeTextSafeMode &&
-    relativePath &&
-    loadedFilePath === editorFilePath
-  ) {
+  if (opensScene && relativePath && loadedFilePath === editorFilePath) {
     return (
       <ExcalidrawEditor
+        key={editorFilePath}
+        docKey={docKey ?? ""}
         relativePath={relativePath}
-        fileName={currentNode?.name ?? fallbackFileName}
         initialContent={content}
         workspaceRootPath={workspaceRootPath ?? undefined}
+        readOnly={Boolean(taskRunId) || Boolean(workspaceRootPath)}
       />
     );
   }
 
   // Handle .cbase files with BaseViewer
-  if (isBase && !useLargeTextSafeMode && loadedFilePath === editorFilePath) {
+  if (opensBase && loadedFilePath === editorFilePath) {
     return (
       <BaseViewer
         content={content}
@@ -877,18 +928,15 @@ export const FilesEditor = ({
   }
 
   // Handle .csv / .tsv files with the spreadsheet editor. Edits flow back
-  // through `setContent`, which the shared auto-save hook persists. Task-run
-  // and non-primary workspace roots have no write-back path, so the grid is
-  // read-only there (matching how those files are treated elsewhere).
-  if (isCsv && !useLargeTextSafeMode && loadedFilePath === editorFilePath) {
+  // through `setContent`, which the text document saves.
+  if (opensSpreadsheet && loadedFilePath === editorFilePath) {
     return (
       <CsvEditor
         content={content}
         delimiter={delimiterForExtension(fileExtension)}
         fileName={currentNode?.name ?? fallbackFileName}
         pathLabel={headerPathLabel}
-        onChange={setContent}
-        readOnly={Boolean(taskRunId) || Boolean(workspaceRootPath)}
+        onChange={editContent}
       />
     );
   }
@@ -919,20 +967,20 @@ export const FilesEditor = ({
       const parsed = parseFrontmatter(value);
       setFrontmatter(parsed.frontmatter);
       setEditorBody(parsed.body);
-      setContent(value);
+      editContent(value);
     } else {
       // In UI mode, editor only receives the body (without frontmatter)
       // Reconstruct full content with current frontmatter
       setEditorBody(value);
       const fullContent = combineFrontmatterAndBody(frontmatter, value);
-      setContent(fullContent);
+      editContent(fullContent);
     }
   };
 
   const handleFrontmatterChange = (newFrontmatter: Frontmatter) => {
     setFrontmatter(newFrontmatter);
     const fullContent = combineFrontmatterAndBody(newFrontmatter, editorBody);
-    setContent(fullContent);
+    editContent(fullContent);
   };
 
   const handleViewModeChange = (mode: FrontmatterViewMode) => {
@@ -943,6 +991,52 @@ export const FilesEditor = ({
 
   // Content to show in the editor depends on view mode
   const editorContent = frontmatterViewMode === "source" ? content : editorBody;
+
+  // Edits in the Changes view are whole-file text, like a disk change.
+  const handleChangesEdit = (text: string) => {
+    editContent(text);
+    if (!isProse) {
+      setEditorBody(text);
+      return;
+    }
+    const parsed = parseFrontmatter(text);
+    setFrontmatter(parsed.frontmatter);
+    setEditorBody(parsed.body);
+  };
+
+  const showChangesToggle = hasChanges || fileView === "changes";
+  const changesToggle = showChangesToggle ? (
+    <Button
+      type="button"
+      variant={fileView === "changes" ? "secondary" : "ghost"}
+      size="sm"
+      className="h-6 gap-1 px-2 text-[11px]"
+      onClick={() =>
+        setFileView((view) => (view === "changes" ? "edit" : "changes"))
+      }
+      aria-pressed={fileView === "changes"}
+      title={
+        fileView === "changes"
+          ? "Back to the editor"
+          : "Show changes against the base version"
+      }
+    >
+      <GitCompareArrows className="size-3.5" />
+      Changes
+    </Button>
+  ) : null;
+
+  const changesView =
+    fileView === "changes" && baseText !== null ? (
+      <MergeDiffPane
+        original={baseText}
+        text={content}
+        layout="split"
+        editable
+        onEdit={handleChangesEdit}
+        onSave={() => void saveTextDocument()}
+      />
+    ) : null;
   const commitTitleChange = async () => {
     if (!currentNode) return;
     const trimmed = titleDraft.trim();
@@ -1027,10 +1121,30 @@ export const FilesEditor = ({
                     <Button
                       type="button"
                       variant="ghost"
+                      size="sm"
+                      className={cn(
+                        "h-6 gap-1 px-2 text-[11px]",
+                        annotations.active &&
+                          "bg-blue-600 text-white hover:bg-blue-600/90 hover:text-white dark:bg-blue-500 dark:hover:bg-blue-500/90",
+                      )}
+                      aria-pressed={annotations.active}
+                      onClick={() => annotations.setActive(!annotations.active)}
+                      title={
+                        annotations.active
+                          ? t("annotateExitTitle")
+                          : t("annotateToggleTitle")
+                      }
+                    >
+                      <MousePointerClick className="size-3.5" />
+                      {t("annotateToggle")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
                       size="icon"
                       className="size-6"
                       onClick={async () => {
-                        if (isDirty) await saveNow();
+                        await saveTextDocument();
                         setHtmlPreviewKey((k) => k + 1);
                       }}
                       title="Refresh preview"
@@ -1065,7 +1179,7 @@ export const FilesEditor = ({
                   onClick={async () => {
                     // Switching to preview: flush any pending edits first so the
                     // iframe loads the latest on-disk content.
-                    if (isDirty) await saveNow();
+                    await saveTextDocument();
                     setHtmlPreviewKey((k) => k + 1);
                     setHtmlViewMode("preview");
                   }}
@@ -1090,6 +1204,11 @@ export const FilesEditor = ({
                 </Button>
               </div>
             )}
+            {changesToggle && (
+              <div className={cn(!codeView.showHtmlToolbar && "ml-auto")}>
+                {changesToggle}
+              </div>
+            )}
           </header>
           {codeView.showSafeModeNotice && (
             <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-custom-text-200">
@@ -1102,15 +1221,20 @@ export const FilesEditor = ({
           )}
           <div className="flex flex-1 flex-col overflow-hidden">
             {showHtmlPreview && htmlPreviewSrc ? (
-              <iframe
-                ref={htmlPreviewFrameRef}
-                key={`${loadedFilePath ?? ""}-${htmlPreviewKey}`}
-                title={currentNode?.name ?? fallbackFileName}
-                src={htmlPreviewSrc}
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                className="h-full w-full flex-1 border-0 bg-white"
-                onLoad={handleHtmlPreviewLoad}
-              />
+              <div className="flex min-h-0 flex-1">
+                <iframe
+                  ref={htmlPreviewFrameRef}
+                  key={`${loadedFilePath ?? ""}-${htmlPreviewKey}`}
+                  title={currentNode?.name ?? fallbackFileName}
+                  src={htmlPreviewSrc}
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  className="h-full min-w-0 flex-1 border-0 bg-white"
+                  onLoad={handleHtmlPreviewLoad}
+                />
+                {(annotations.active || annotations.notes.length > 0) && (
+                  <AnnotationTray annotations={annotations} />
+                )}
+              </div>
             ) : (
               <div className="show-scrollbar flex flex-1 flex-col overflow-y-auto">
                 <div className="chro-find-bar-mount px-3 pt-2">
@@ -1122,6 +1246,7 @@ export const FilesEditor = ({
                     editorRef={editorRef}
                   />
                 </div>
+                {changesView ?? (
                 <CodeMirrorEditor
                   key={
                     codeView.largeTextSafeMode
@@ -1131,7 +1256,7 @@ export const FilesEditor = ({
                   ref={editorRef}
                   contentKey={loadedFilePath ?? ""}
                   initialContent={content}
-                  onChange={(value) => setContent(value)}
+                  onChange={editContent}
                   className="min-h-0 h-full w-full flex-1"
                   mode="code"
                   lineWrapping={codeView.lineWrapping}
@@ -1141,7 +1266,9 @@ export const FilesEditor = ({
                       : undefined
                   }
                   onFindRequest={openFindBar}
+                  changeBase={editorChangeBase}
                 />
+                )}
               </div>
             )}
           </div>
@@ -1155,12 +1282,38 @@ export const FilesEditor = ({
       : codeLayout;
   }
 
+  if (changesView) {
+    return (
+      <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]">
+        <div
+          ref={editorContainerRef}
+          className="flex flex-1 flex-col overflow-hidden bg-custom-background-100"
+        >
+          <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted px-4 text-[12px] text-muted-foreground">
+            <span className="font-medium text-custom-text-100">
+              {currentNode?.name ?? fallbackFileName}
+            </span>
+            <span className="text-muted-foreground">{headerPathLabel}</span>
+            <div className="ml-auto">{changesToggle}</div>
+          </header>
+          <div className="show-scrollbar flex-1 overflow-y-auto">
+            {changesView}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]">
       <div
         ref={editorContainerRef}
-        className="flex flex-1 flex-col overflow-hidden bg-custom-background-100"
+        className="relative flex flex-1 flex-col overflow-hidden bg-custom-background-100"
       >
+        {changesToggle && (
+          // Floats over the page so appearing never shifts the text.
+          <div className="absolute right-4 top-2 z-10">{changesToggle}</div>
+        )}
         <div className="flex flex-1 flex-col overflow-hidden">
           <div
             className="show-scrollbar flex flex-1 flex-col overflow-y-auto py-8"
@@ -1219,6 +1372,7 @@ export const FilesEditor = ({
                   embedConfig={embedConfig}
                   onEmbedClick={handleEmbedClick}
                   onFindRequest={openFindBar}
+                  changeBase={editorChangeBase}
                 />
               </div>
             </div>

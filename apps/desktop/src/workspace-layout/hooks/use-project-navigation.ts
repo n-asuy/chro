@@ -114,7 +114,7 @@ export function useProjectNavigation(): ProjectNavigation {
       // loaded this node: both reads and writes then resolve inside the repo.
       const kind: TabKind = { type: "file", path };
       if (useLayoutStore.getState().projectId === project.id) {
-        openTab(kind, { activate: true, returnFocusOnClose: true });
+        openTab(kind, { activate: true });
         return;
       }
       navigate({

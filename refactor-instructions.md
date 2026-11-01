@@ -61,7 +61,7 @@ crates/ (19)       Cargo ワークスペースなし。各クレート独立
 ### データフロー
 - フロント → `desktopFetch()` (`apps/desktop/src/lib/backend-client.ts:19-33`) → 11個の `*-client.ts` → `/rpc/*`
 - ライブ更新: `/streams/*` WebSocket → RFC 6902 JSON Patch → `use-json-patch-ws-stream.ts` ほか複数フック
-- バックエンドポートは動的。`/tmp/chro/chro.port` 経由で解決
+- バックエンドポートは動的。サーバーが DB の隣に書く `runtime.json` 経由で解決
 - Rust↔TS のワイヤ型は手動同期(codegen なし)
 
 ---

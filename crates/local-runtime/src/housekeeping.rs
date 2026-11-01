@@ -33,11 +33,6 @@ pub fn spawn_housekeeping_tasks(runtime: LocalRuntime) {
 }
 
 async fn run_cycle(runtime: &LocalRuntime) -> Result<()> {
-    let (runs_marked, tasks_marked) = reconcile_db_flags(runtime.db()).await?;
-    if runs_marked > 0 || tasks_marked > 0 {
-        info!(runs_marked, tasks_marked, "reconciled worktree metadata");
-    }
-
     if !worktree_cleanup_disabled() {
         let removed = cleanup_expired_worktrees(runtime).await?;
         if removed > 0 {
@@ -47,6 +42,13 @@ async fn run_cycle(runtime: &LocalRuntime) -> Result<()> {
         }
     } else {
         debug!("worktree cleanup disabled via env");
+    }
+
+    // After cleanup, so every session sharing a reclaimed worktree is flagged
+    // in the same cycle, not just the one the expiry happened to name.
+    let (runs_marked, tasks_marked) = reconcile_db_flags(runtime.db()).await?;
+    if runs_marked > 0 || tasks_marked > 0 {
+        info!(runs_marked, tasks_marked, "reconciled worktree metadata");
     }
 
     match runtime.image().delete_orphaned_images().await {
@@ -114,14 +116,17 @@ async fn mark_missing_task_records(db: &DBService) -> Result<u64> {
     Ok(updated)
 }
 
-/// Cleanup worktrees that have been inactive for 72+ hours.
-/// Uses the expiry query from TaskRecord to find candidates.
+/// Remove worktrees no session has used for 72+ hours. Flagging the sessions
+/// that worked in them is left to the reconcile pass.
 async fn cleanup_expired_worktrees(runtime: &LocalRuntime) -> Result<usize> {
-    let expired = TaskRecord::find_expired_for_cleanup(runtime.db().pool()).await?;
+    let expired = TaskRecord::find_expired_worktrees(runtime.db().pool()).await?;
 
     let mut removed = 0usize;
-    for (task_id, worktree_path, git_repo_path) in expired {
+    for (worktree_path, git_repo_path) in expired {
         let path = PathBuf::from(&worktree_path);
+        if !runtime.worktree().is_within_base_dir(&path) {
+            continue;
+        }
         let repo_path = PathBuf::from(&git_repo_path);
 
         match runtime
@@ -130,12 +135,11 @@ async fn cleanup_expired_worktrees(runtime: &LocalRuntime) -> Result<usize> {
             .await
         {
             Ok(_) => {
-                TaskRecord::mark_worktree_deleted(runtime.db().pool(), task_id, false).await?;
                 removed += 1;
-                info!(task_id = %task_id, path = %path.display(), "cleaned up expired worktree");
+                info!(path = %path.display(), "cleaned up expired worktree");
             }
             Err(err) => {
-                warn!(task_id = %task_id, path = %path.display(), error = %err, "failed to cleanup expired worktree");
+                warn!(path = %path.display(), error = %err, "failed to cleanup expired worktree");
             }
         }
     }

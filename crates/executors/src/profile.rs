@@ -103,7 +103,7 @@ pub struct ExecutorProfileId {
     /// Optional per-request model override applied on top of the resolved variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Optional reasoning effort override (Codex only).
+    /// Optional reasoning effort override (Codex and Claude Code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Optional output-speed override (Claude Code fast mode only).
@@ -133,13 +133,16 @@ impl ExecutorProfileId {
         }
     }
 
-    /// Apply the optional model / reasoning overrides onto a resolved agent.
-    /// Reasoning effort only applies to Codex; Claude Code has no such concept.
+    /// Apply the optional model / reasoning / speed overrides onto a resolved
+    /// agent. pi takes only the model; its thinking level is its own setting.
     fn apply_overrides(&self, agent: &mut CodingAgent) {
         match agent {
             CodingAgent::ClaudeCode(claude) => {
                 if let Some(model) = &self.model {
                     claude.model = Some(model.clone());
+                }
+                if let Some(effort) = &self.reasoning_effort {
+                    claude.effort = Some(effort.clone());
                 }
                 if let Some(speed) = &self.speed {
                     claude.speed = Some(*speed);
@@ -718,8 +721,24 @@ pub async fn get_install_status_all() -> ExecutorInstallStatusResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutorProfileId, SpeedMode, extract_detected_version};
+    use super::{ExecutorProfileId, ReasoningEffort, SpeedMode, extract_detected_version};
     use crate::executors::{BaseCodingAgent, CodingAgent};
+
+    #[test]
+    fn reasoning_effort_override_applies_to_claude_code() {
+        let profile = ExecutorProfileId {
+            reasoning_effort: Some(ReasoningEffort::Max),
+            ..ExecutorProfileId::new(BaseCodingAgent::ClaudeCode)
+        };
+        let mut agent = CodingAgent::ClaudeCode(Default::default());
+        profile.apply_overrides(&mut agent);
+        match agent {
+            CodingAgent::ClaudeCode(claude) => {
+                assert_eq!(claude.effort, Some(ReasoningEffort::Max));
+            }
+            _ => panic!("expected Claude Code agent"),
+        }
+    }
 
     #[test]
     fn speed_override_applies_to_claude_code() {

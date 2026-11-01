@@ -9,7 +9,9 @@ use sqlx::{Pool, Sqlite};
 use tokio::sync::Semaphore;
 
 use crate::browser_session::BrowserService;
+use crate::operator::IdempotencyLedger;
 use crate::perf;
+use crate::runtime_identity::RuntimeIdentity;
 use crate::routes::rpc::cli_status::LatestReleaseCache;
 use crate::routes::rpc::usage::UsageCache;
 
@@ -42,10 +44,14 @@ pub(crate) struct AppState {
     /// Bounds filesystem walks and materialization work across all cbase tabs.
     pub(crate) cbase_query_semaphore: Arc<Semaphore>,
     pub(crate) prewarm: Arc<PrewarmRegistry>,
+    /// Runtime id and owner token of this server process.
+    pub(crate) identity: Arc<RuntimeIdentity>,
+    /// Request ids of recent mutating operator calls.
+    pub(crate) idempotency: Arc<IdempotencyLedger>,
 }
 
 impl AppState {
-    pub(crate) fn new(runtime: LocalRuntime) -> Self {
+    pub(crate) fn new(runtime: LocalRuntime, identity: RuntimeIdentity) -> Self {
         Self {
             runtime,
             browser: Arc::new(BrowserService::new()),
@@ -54,7 +60,17 @@ impl AppState {
             cbase_index: cbase::CbaseIndexCache::new(),
             cbase_query_semaphore: Arc::new(Semaphore::new(2)),
             prewarm: Arc::new(PrewarmRegistry::default()),
+            identity: Arc::new(identity),
+            idempotency: Arc::new(IdempotencyLedger::default()),
         }
+    }
+
+    pub(crate) fn identity(&self) -> &RuntimeIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn idempotency(&self) -> &IdempotencyLedger {
+        &self.idempotency
     }
 
     /// Warm the lazy indexes for a project the user just opened, in the

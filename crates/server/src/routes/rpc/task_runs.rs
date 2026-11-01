@@ -9,7 +9,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -22,8 +22,9 @@ use filesystem::WorkspaceEntryDetail;
 use futures::{SinkExt, StreamExt};
 use log_types::LogEntry;
 use runtime::{
-    ForkWorkspace, ProjectFileService, Runtime, RuntimeError, SendTaskMessageParams,
-    StartExecutionProcessParams, StartExecutionSessionParams, TaskMessageMode, TaskService,
+    ForkWorkspace, MessageOptions, ProjectFileService, Runtime, RuntimeError, SendOutcome,
+    SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
+    TaskMessageMode, TaskService,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,7 +33,10 @@ use super::asset_response::{stream_asset_response, AssetQuery};
 use super::context_refs::{resolve_context_refs, ContextRefRequest};
 use super::images::{ImageListResponse, ImageResponse};
 use super::path_link::{PathProbeBatchResponse, PathProbeRequest};
-use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
+use super::path_resolve::{
+    read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
+};
+use super::workspace::handle_file_events_ws;
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
     perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES,
@@ -48,12 +52,22 @@ pub(super) fn router() -> Router<AppState> {
         .route("/task-runs/:id/executions", post(start_execution_process))
         .route("/task-runs/:id/status", patch(update_execution_status))
         .route("/task-runs/:id/cancel", post(cancel_execution))
-        .route("/task-runs/:id/follow-up", post(follow_up_execution))
         .route("/task-runs/:id/fork", post(fork_task_run))
         .route("/tasks/:id/fork", post(fork_task_latest))
         .route("/tasks/:id/delegate", post(delegate_task))
         .route("/tasks/:id/messages", post(send_task_message))
-        .route("/tasks/:id/follow-up", post(follow_up_by_task))
+        .route(
+            "/tasks/:id/queue",
+            post(queue_task_message).put(reorder_session_queue),
+        )
+        .route(
+            "/tasks/:id/queue/:item_id",
+            delete(withdraw_queued_message).patch(edit_queued_message),
+        )
+        .route(
+            "/tasks/:id/queue/:item_id/send",
+            post(send_queued_message_now),
+        )
         .route(
             "/task-runs/:id/logs",
             get(get_task_run_logs).post(append_task_run_logs),
@@ -86,7 +100,14 @@ pub(super) fn router() -> Router<AppState> {
             "/task-runs/:id/asset/*relative_path",
             get(read_task_run_asset),
         )
-        .route("/task-runs/:id/file", get(read_task_run_file))
+        .route(
+            "/task-runs/:id/file",
+            get(read_task_run_file).put(write_task_run_file),
+        )
+        .route(
+            "/task-runs/:id/file-events",
+            get(stream_task_run_file_events),
+        )
         .route("/task-runs/:id/resolve-file", get(resolve_task_run_file))
         .route("/task-runs/:id/probe-paths", post(probe_task_run_paths))
         .route(
@@ -603,15 +624,6 @@ async fn cancel_execution(
 }
 
 #[derive(Debug, Deserialize)]
-struct FollowUpRequest {
-    prompt: String,
-    #[serde(default)]
-    selected_skill_ids: Vec<String>,
-    #[serde(default)]
-    context_refs: Vec<ContextRefRequest>,
-}
-
-#[derive(Debug, Deserialize)]
 struct ForkRequest {
     /// Omitted for General chats and non-git projects, where there is nothing to
     /// choose: the fork always shares the source directory.
@@ -694,82 +706,6 @@ async fn delegate_task(
     Ok(Json(DelegateResponse { task }))
 }
 
-async fn follow_up_execution(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Json(payload): Json<FollowUpRequest>,
-) -> Result<Json<StartExecutionSessionResponse>, ApiError> {
-    let id = resolve_task_run_id(state.pool(), &id).await?;
-    let request_started_at = Instant::now();
-    let request_id = perf::request_id_from_headers(&headers);
-
-    perf::record_backend_event(
-        "execution_request_received",
-        serde_json::json!({
-            "request_id": request_id.clone(),
-            "kind": "follow_up",
-            "task_run_id": id,
-            "prompt_chars": payload.prompt.chars().count(),
-            "skill_count": payload.selected_skill_ids.len(),
-            "context_ref_count": payload.context_refs.len(),
-        }),
-    );
-
-    let context_refs =
-        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let runtime = state.runtime().clone();
-    let prompt = payload.prompt.clone();
-    let selected_skill_ids = payload.selected_skill_ids.clone();
-    let result = run_detached(async move {
-        TaskService::new(&runtime)
-            .follow_up_execution_with_context_refs(id, prompt, selected_skill_ids, context_refs)
-            .await
-    })
-    .await;
-
-    let result = match result {
-        Ok(result) => result,
-        Err(err) => {
-            perf::record_backend_event(
-                "execution_request_failed",
-                serde_json::json!({
-                    "request_id": request_id,
-                    "kind": "follow_up",
-                    "task_run_id": id,
-                    "duration_ms": perf::elapsed_ms(request_started_at),
-                    "error": err.to_string(),
-                }),
-            );
-            return Err(err.into());
-        }
-    };
-
-    perf::record_backend_event(
-        "execution_request_completed",
-        serde_json::json!({
-            "request_id": request_id,
-            "kind": "follow_up",
-            "previous_task_run_id": id,
-            "task_id": result.task.id,
-            "task_run_id": result.task_run.id,
-            "project_id": result.project.id,
-            "executor_session_id": result.executor_session_id,
-            "duration_ms": perf::elapsed_ms(request_started_at),
-        }),
-    );
-
-    analytics::capture_nonblocking(
-        "execution_started",
-        serde_json::json!({
-            "is_follow_up": true,
-            "prompt_chars": payload.prompt.chars().count(),
-        }),
-    );
-
-    Ok(Json(start_execution_response(&result)))
-}
-
 async fn send_task_message(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
@@ -799,20 +735,8 @@ async fn send_task_message(
         }),
     );
 
-    let context_refs =
-        resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
+    let params = message_params(&state, task_id, &payload).await?;
     let runtime = state.runtime().clone();
-    let params = SendTaskMessageParams {
-        task_id,
-        prompt: payload.prompt.clone(),
-        mode: requested_mode.into(),
-        executor_profile_id: payload.executor_profile_id.clone(),
-        image_ids: payload.image_ids.clone(),
-        use_worktree: payload.use_worktree,
-        target_branch: payload.target_branch.clone(),
-        selected_skill_ids: payload.selected_skill_ids.clone(),
-        context_refs,
-    };
     let result =
         run_detached(async move { TaskService::new(&runtime).send_task_message(params).await })
             .await;
@@ -865,87 +789,141 @@ async fn send_task_message(
     Ok(Json(start_execution_response(&result.execution)))
 }
 
-async fn follow_up_by_task(
-    State(state): State<AppState>,
-    Path(task_id): Path<String>,
-    headers: HeaderMap,
-    Json(payload): Json<FollowUpRequest>,
-) -> Result<Json<StartExecutionSessionResponse>, ApiError> {
-    let task_id = resolve_task_id(state.pool(), &task_id).await?;
-    let request_started_at = Instant::now();
-    let request_id = perf::request_id_from_headers(&headers);
-
-    perf::record_backend_event(
-        "execution_request_received",
-        serde_json::json!({
-            "request_id": request_id.clone(),
-            "kind": "follow_up",
-            "task_id": task_id,
-            "prompt_chars": payload.prompt.chars().count(),
-            "skill_count": payload.selected_skill_ids.len(),
-            "context_ref_count": payload.context_refs.len(),
-        }),
-    );
-
+async fn message_params(
+    state: &AppState,
+    task_id: Uuid,
+    payload: &SendTaskMessageRequest,
+) -> Result<SendTaskMessageParams, ApiError> {
     let context_refs =
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
-    let runtime = state.runtime().clone();
-    let params = SendTaskMessageParams {
+    Ok(SendTaskMessageParams {
         task_id,
         prompt: payload.prompt.clone(),
-        mode: TaskMessageMode::Auto,
-        executor_profile_id: None,
-        image_ids: None,
-        use_worktree: None,
-        target_branch: None,
-        selected_skill_ids: payload.selected_skill_ids.clone(),
-        context_refs,
-    };
-    let result =
-        run_detached(async move { TaskService::new(&runtime).send_task_message(params).await })
-            .await;
+        options: MessageOptions {
+            mode: payload.mode.into(),
+            executor_profile_id: payload.executor_profile_id.clone(),
+            image_ids: payload.image_ids.clone(),
+            use_worktree: payload.use_worktree,
+            target_branch: payload.target_branch.clone(),
+            selected_skill_ids: payload.selected_skill_ids.clone(),
+            context_refs,
+        },
+    })
+}
 
-    let result = match result {
-        Ok(result) => result,
-        Err(err) => {
-            perf::record_backend_event(
-                "execution_request_failed",
-                serde_json::json!({
-                    "request_id": request_id,
-                    "kind": "follow_up",
-                    "task_id": task_id,
-                    "duration_ms": perf::elapsed_ms(request_started_at),
-                    "error": err.to_string(),
-                }),
-            );
-            return Err(err.into());
-        }
-    };
+#[derive(Debug, Serialize)]
+struct QueueTaskMessageResponse {
+    /// False when the session was idle and the message started a turn at once.
+    queued: bool,
+    /// The message's 1-based place in the queue, when it waits.
+    position: Option<u32>,
+}
 
-    perf::record_backend_event(
-        "execution_request_completed",
-        serde_json::json!({
-            "request_id": request_id,
-            "kind": "follow_up",
-            "task_id": result.execution.task.id,
-            "task_run_id": result.execution.task_run.id,
-            "project_id": result.execution.project.id,
-            "executor_session_id": result.execution.executor_session_id,
-            "continued_existing_run": result.continued_existing_run,
-            "previous_task_run_id": result.previous_task_run_id,
-            "duration_ms": perf::elapsed_ms(request_started_at),
-        }),
-    );
+/// Send a message the composer wrote while a turn runs: it waits in the
+/// session's queue and becomes the next turn, with the images, context and
+/// skills it was written with. If the turn ended in the meantime, it starts
+/// right away instead.
+async fn queue_task_message(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(payload): Json<SendTaskMessageRequest>,
+) -> Result<Json<QueueTaskMessageResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let params = message_params(&state, task_id, &payload).await?;
+    let runtime = state.runtime().clone();
+    let outcome =
+        run_detached(async move { TaskService::new(&runtime).send_or_queue(params, true).await })
+            .await?;
+    Ok(Json(match outcome {
+        SendOutcome::Started(_) => QueueTaskMessageResponse {
+            queued: false,
+            position: None,
+        },
+        SendOutcome::Queued { position } => QueueTaskMessageResponse {
+            queued: true,
+            position: Some(position),
+        },
+    }))
+}
 
-    analytics::capture_nonblocking(
-        "execution_started",
-        serde_json::json!({
-            "is_follow_up": result.continued_existing_run,
-            "prompt_chars": payload.prompt.chars().count(),
-        }),
-    );
+/// Withdraw a message waiting in the session's queue before it becomes a
+/// turn. The app shows queued messages under the composer and lets a person
+/// take one back.
+async fn withdraw_queued_message(
+    State(state): State<AppState>,
+    Path((task_id, item_id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let withdrawn = TaskService::new(state.runtime())
+        .withdraw_queued(task_id, item_id)
+        .await?;
+    Ok(if withdrawn {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    })
+}
 
-    Ok(Json(start_execution_response(&result.execution)))
+#[derive(Debug, Deserialize)]
+struct EditQueuedMessageRequest {
+    prompt: String,
+}
+
+/// Rewrite a waiting message's text. Its place in the queue and the images,
+/// references and skills it carries stay as they were.
+async fn edit_queued_message(
+    State(state): State<AppState>,
+    Path((task_id, item_id)): Path<(String, Uuid)>,
+    Json(payload): Json<EditQueuedMessageRequest>,
+) -> Result<StatusCode, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    TaskService::new(state.runtime())
+        .edit_queued(task_id, item_id, &payload.prompt)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct ReorderSessionQueueRequest {
+    /// Every waiting message, in the order they should become turns.
+    item_ids: Vec<Uuid>,
+}
+
+/// Put the session's queue in a new order. Answers 409 if the queue changed
+/// since the caller read it; nothing moves then.
+async fn reorder_session_queue(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(payload): Json<ReorderSessionQueueRequest>,
+) -> Result<StatusCode, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    TaskService::new(state.runtime())
+        .reorder_queue(task_id, &payload.item_ids)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+struct SendQueuedMessageNowResponse {
+    /// False if the stopped turn was still winding down; the message then
+    /// waits at the front and starts as soon as it ends.
+    started: bool,
+}
+
+/// Send a waiting message now: stop the turn in flight and start this one.
+async fn send_queued_message_now(
+    State(state): State<AppState>,
+    Path((task_id, item_id)): Path<(String, Uuid)>,
+) -> Result<Json<SendQueuedMessageNowResponse>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &task_id).await?;
+    let runtime = state.runtime().clone();
+    let started = run_detached(async move {
+        TaskService::new(&runtime)
+            .send_queued_now(task_id, item_id)
+            .await
+    })
+    .await?;
+    Ok(Json(SendQueuedMessageNowResponse { started }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1415,6 +1393,7 @@ async fn read_task_run_binary_file(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<TaskRunFileQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let id = resolve_task_run_id(state.pool(), &id).await?;
     if query.relative_path.trim().is_empty() {
@@ -1429,7 +1408,7 @@ async fn read_task_run_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &candidate_refs).await?;
 
-    stream_binary_response(binary_file, "no-cache").await
+    stream_binary_response(binary_file, "no-cache", &headers).await
 }
 
 /// Path-based asset endpoint for HTML preview. See `read_project_asset`.
@@ -1437,6 +1416,7 @@ async fn read_task_run_asset(
     State(state): State<AppState>,
     Path((id, relative_path)): Path<(String, String)>,
     Query(asset_query): Query<AssetQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -1448,7 +1428,7 @@ async fn read_task_run_asset(
     let service = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree));
     let binary_file = read_binary_resolving(&service, &relative_path, &candidate_refs).await?;
 
-    stream_asset_response(binary_file, &asset_query).await
+    stream_asset_response(binary_file, &asset_query, &headers).await
 }
 
 #[derive(Debug, Serialize)]
@@ -1491,6 +1471,57 @@ async fn read_task_run_file(
             modified_at: crate::format_system_time(file.modified),
         },
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteTaskRunFileRequest {
+    relative_path: String,
+    content: String,
+}
+
+/// Write a text file inside the run's worktree. Unlike reads, which fall back
+/// to the project checkout and other workspace roots, writes are confined to
+/// the worktree so editing a session's file never touches another checkout.
+async fn write_task_run_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<WriteTaskRunFileRequest>,
+) -> Result<Json<TaskRunFileEnvelope>, ApiError> {
+    if payload.relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest("relative_path is required".into()));
+    }
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, _candidates) = task_run_path_candidates(&state, &run).await?;
+    let resolved = require_internal(&payload.relative_path, &worktree)?;
+    let file = ProjectFileService::new(state.runtime(), PathBuf::from(&worktree))
+        .write_file(&resolved, &payload.content)
+        .await?;
+
+    Ok(Json(TaskRunFileEnvelope {
+        file: TaskRunFileResponse {
+            relative_path: file.relative_path,
+            content: file.content,
+            size: file.size,
+            truncated: file.truncated,
+            modified_at: crate::format_system_time(file.modified),
+        },
+    }))
+}
+
+/// WebSocket stream of file change events inside the run's worktree.
+async fn stream_task_run_file_events(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = resolve_task_run_id(state.pool(), &id).await?;
+    let run = TaskRun::get(state.pool(), id).await?;
+    let (worktree, _candidates) = task_run_path_candidates(&state, &run).await?;
+    let events = state
+        .runtime()
+        .subscribe_workspace_file_events(PathBuf::from(worktree));
+    Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, events)))
 }
 
 /// Resolve a worktree-relative path to its absolute location inside the run's

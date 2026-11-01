@@ -40,45 +40,53 @@ export type SpeedOption = {
 /** Label shown for the current value when no explicit override is selected. */
 export const RUNTIME_DEFAULT_LABEL = "Default";
 
-// Codex exposes four reasoning levels; a Codex model advertises this set.
-const CODEX_EFFORT_LEVELS: ReasoningEffort[] = [
+// Effort levels as each CLI's model catalog advertises them. Every current
+// Claude model accepts `--effort` up to `max`; Codex models go up to `max`, and
+// all but the Luna tier also accept `ultra`.
+const MAX_EFFORT_LEVELS: ReasoningEffort[] = [
   "low",
   "medium",
   "high",
-  "x-high",
+  "xhigh",
+  "max",
 ];
+const ULTRA_EFFORT_LEVELS: ReasoningEffort[] = [...MAX_EFFORT_LEVELS, "ultra"];
 
 // `value` is passed to the Claude Code CLI via `--model`. The short aliases
-// (`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current model
-// snapshot, so `label` carries the human-facing generation (Opus 5.5 /
-// Sonnet 5 / Haiku 4.5) so the selector shows which model the alias points at.
-// Fable has no short alias, so it uses its pinned model id directly.
+// (`fable`/`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current
+// model snapshot, so `label` carries the human-facing generation (Fable 5.1 /
+// Opus 5.5 / Sonnet 5.5 / Haiku 5.5) so the selector shows which model the
+// alias points at.
 const CLAUDE_MODELS: ModelOption[] = [
   {
-    value: "claude-fable-5-1",
+    value: "fable",
     label: "Fable 5.1",
     executor: "CLAUDE_CODE",
     description: "Most capable model for demanding, long-horizon work.",
+    effortLevels: MAX_EFFORT_LEVELS,
   },
   {
     value: "opus",
     label: "Opus 5.5",
     executor: "CLAUDE_CODE",
     description: "Highly capable model for complex agentic coding.",
+    effortLevels: MAX_EFFORT_LEVELS,
     // Fast mode is Opus-only; other Claude models have no speed toggle.
     speedModes: ["standard", "fast"],
   },
   {
     value: "sonnet",
-    label: "Sonnet 5",
+    label: "Sonnet 5.5",
     executor: "CLAUDE_CODE",
     description: "Balanced model for everyday coding.",
+    effortLevels: MAX_EFFORT_LEVELS,
   },
   {
     value: "haiku",
-    label: "Haiku 4.5",
+    label: "Haiku 5.5",
     executor: "CLAUDE_CODE",
     description: "Fastest, most cost-efficient model.",
+    effortLevels: MAX_EFFORT_LEVELS,
   },
 ];
 
@@ -92,56 +100,49 @@ const CODEX_MODELS: ModelOption[] = [
     label: "GPT-6.1 Sol",
     executor: "CODEX",
     description: "Latest workhorse model for coding and everyday work.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
     value: "gpt-6-astra",
     label: "GPT-6 Astra",
     executor: "CODEX",
     description: "Frontier intelligence for the most demanding work.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
     value: "gpt-6-sol",
     label: "GPT-6 Sol",
     executor: "CODEX",
     description: "Previous generation workhorse model.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
     value: "gpt-6-luna",
     label: "GPT-6 Luna",
     executor: "CODEX",
     description: "Fast and affordable model for easier tasks.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: MAX_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
     executor: "CODEX",
     description: "Older generation workhorse model.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-terra",
     label: "GPT-5.6 Terra",
     executor: "CODEX",
     description: "Older balanced model for straightforward work.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
     value: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     executor: "CODEX",
     description: "Older fast and efficient model.",
-    effortLevels: CODEX_EFFORT_LEVELS,
-  },
-  {
-    value: "gpt-5.5",
-    label: "GPT-5.5",
-    executor: "CODEX",
-    description: "Legacy coding model.",
-    effortLevels: CODEX_EFFORT_LEVELS,
+    effortLevels: MAX_EFFORT_LEVELS,
   },
 ];
 
@@ -149,7 +150,9 @@ export const REASONING_OPTIONS: ReasoningOption[] = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
-  { value: "x-high", label: "Extra High" },
+  { value: "xhigh", label: "Extra High" },
+  { value: "max", label: "Max" },
+  { value: "ultra", label: "Ultra" },
 ];
 
 export const SPEED_OPTIONS: SpeedOption[] = [
@@ -219,9 +222,9 @@ export function getSpeedLabel(
 function executorDefaultEffortLevels(
   executor: BaseCodingAgent,
 ): ReasoningEffort[] {
-  // Codex always exposes reasoning effort, even on its default model; other
-  // runtimes have no runtime-wide default effort control.
-  return executor === "CODEX" ? CODEX_EFFORT_LEVELS : [];
+  // The CLI picks the default model, so offer only the levels every model of
+  // that runtime accepts. pi's thinking level is its own setting.
+  return executor === "PI" ? [] : MAX_EFFORT_LEVELS;
 }
 
 /** Reasoning options a model supports, or [] when it has no effort control. */
@@ -233,6 +236,31 @@ export function getModelReasoningOptions(
     ? findModelOption(executor, modelValue)?.effortLevels ?? []
     : executorDefaultEffortLevels(executor);
   return REASONING_OPTIONS.filter((o) => levels.includes(o.value));
+}
+
+/**
+ * Keep only the effort / speed overrides the given model supports, so picking
+ * a model with a narrower capability set never sends a value its CLI rejects.
+ */
+export function retainSupportedOverrides(
+  executor: BaseCodingAgent,
+  modelValue: string,
+  overrides: {
+    reasoning_effort: ReasoningEffort | null;
+    speed: SpeedMode | null;
+  },
+): { reasoning_effort: ReasoningEffort | null; speed: SpeedMode | null } {
+  const { reasoning_effort, speed } = overrides;
+  const supportsEffort = getModelReasoningOptions(executor, modelValue).some(
+    (o) => o.value === reasoning_effort,
+  );
+  const supportsSpeed = getModelSpeedOptions(executor, modelValue).some(
+    (o) => o.value === speed,
+  );
+  return {
+    reasoning_effort: supportsEffort ? reasoning_effort : null,
+    speed: supportsSpeed ? speed : null,
+  };
 }
 
 /** Speed options a model supports, or [] when it has no speed control. */

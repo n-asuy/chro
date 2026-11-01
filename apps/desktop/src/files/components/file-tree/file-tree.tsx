@@ -2,7 +2,6 @@ import { FolderPickerDialog } from "@/components/dialogs/folder-picker-dialog";
 import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { revealInFinder } from "@/lib/project-client";
-import { usePromptEditorHandle } from "@/session/hooks/use-prompt-editor";
 import { useLayoutStore } from "@/workspace-layout/state/layout-store";
 import {
   ContextMenu,
@@ -192,29 +191,6 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     [moveDialogPaths, moveNodes],
   );
 
-  // Prompt editor handle (singleton, shared with the chat input).
-  // Methods are no-ops when the editor is not mounted.
-  const promptEditorHandle = usePromptEditorHandle();
-
-  const handleDropToPromptEditor = useCallback(
-    ({
-      nodes,
-      clientX,
-      clientY,
-    }: {
-      nodes: { path: string; name: string; isDir: boolean }[];
-      clientX: number;
-      clientY: number;
-    }) => {
-      if (!promptEditorHandle.editorRef.current) return;
-      promptEditorHandle.setCursorFromPoint(clientX, clientY);
-      for (const node of nodes) {
-        promptEditorHandle.addFilePart(node.path, !node.isDir);
-      }
-    },
-    [promptEditorHandle],
-  );
-
   const selectedDragNodes = useMemo(() => {
     const operationPaths = normalizeFileOperationPaths(selectedPaths);
     return operationPaths.flatMap((path) => {
@@ -238,7 +214,6 @@ export const FileTree = ({ onClose }: FileTreeProps) => {
     rootPath,
     selectedNodes: selectedDragNodes,
     onMove: moveNodes,
-    onDropToPromptEditor: handleDropToPromptEditor,
     onHoverDirectory: handleHoverDirectory,
   });
 

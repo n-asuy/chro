@@ -42,6 +42,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::log_writer::{self, ExecutionLogWriter};
+use crate::session_tokens::SessionTokens;
 use crate::MsgStoreMap;
 
 mod executor_approval_bridge;
@@ -74,6 +75,7 @@ pub struct LocalContainerService {
     worktree_watchers: filesystem::WorktreeWatcherService,
     run_finished_hook: Arc<RwLock<Option<RunFinishedHook>>>,
     approval_pending_hook: Arc<RwLock<Option<RunApprovalPendingHook>>>,
+    session_tokens: SessionTokens,
 }
 
 struct ExecutionHandle {
@@ -112,7 +114,13 @@ impl LocalContainerService {
             worktree_watchers,
             run_finished_hook: Arc::new(RwLock::new(None)),
             approval_pending_hook: Arc::new(RwLock::new(None)),
+            session_tokens: SessionTokens::new(),
         }
+    }
+
+    /// Credentials of the turns currently running, for the operator API.
+    pub fn session_tokens(&self) -> &SessionTokens {
+        &self.session_tokens
     }
 
     /// Install the broker's post-completion callback. Set once at bootstrap;
@@ -563,10 +571,9 @@ impl LocalContainerService {
             "[complete_task_execution] conditionally settled task_records"
         );
 
-        // Best-effort outcome summary and session title, in the background:
-        // reading the run's logs and transcript must never delay the
-        // completion path (the sidebar spinner resolves off the task_records
-        // update above).
+        // Best-effort outcome summary, in the background: reading the run's
+        // logs must never delay the completion path (the sidebar spinner
+        // resolves off the task_records update above).
         if run_status == RunStatus::Completed {
             let this = self.clone();
             let task_id = run.task_id;
@@ -581,56 +588,57 @@ impl LocalContainerService {
                         "[complete_task_execution] failed to record run outcome summary"
                     );
                 }
-                if let Err(err) = this.adopt_session_title(run_id, task_id).await {
-                    tracing::warn!(
-                        %run_id,
-                        error = %err,
-                        "[complete_task_execution] failed to adopt session title"
-                    );
-                }
             });
         }
 
         Ok(())
     }
 
-    /// Retitle the task with the name the agent gave the session it just ran,
-    /// when the agent keeps one and nobody has renamed the task. Until then
-    /// the task carries the first line of its prompt.
-    async fn adopt_session_title(&self, run_id: Uuid, task_id: Uuid) -> Result<(), ContainerError> {
-        let Some(session_id) =
-            db::models::TaskSession::external_session_id_by_run_id(self.db.pool(), run_id).await?
-        else {
-            return Ok(());
-        };
-        let Some(workspace) = TaskRun::find_by_id(self.db.pool(), run_id)
-            .await?
-            .and_then(|run| run.workspace_path)
-        else {
-            return Ok(());
-        };
-        let (agent, _) = self.create_agent_for_run(run_id).await?;
-
-        // Transcript files can be large; keep the read off the async workers.
-        let title = tokio::task::spawn_blocking(move || {
-            agent.session_title(&PathBuf::from(workspace), &session_id)
-        })
-        .await
-        .map_err(|err| anyhow!("session title read failed to join: {err}"))?;
-        let Some(title) = title else {
-            return Ok(());
-        };
-
-        let changed =
-            TaskRecord::adopt_session_title(self.db.pool(), task_id, &title.title).await?;
-        tracing::debug!(
-            %run_id,
-            %task_id,
-            source = ?title.source,
-            changed,
-            "[adopt_session_title] resolved agent session title"
-        );
-        Ok(())
+    /// Name the session a run opens: replace the task's prompt-derived title
+    /// with one the agent's model writes from the opening request.
+    ///
+    /// Detached and best-effort. The call takes seconds and may fail (CLI
+    /// signed out, offline, timed out); none of that may hold the run back,
+    /// and the task then simply keeps the title it has. A title a person
+    /// chose in the meantime is pinned and wins.
+    fn spawn_session_titling(
+        &self,
+        run_id: Uuid,
+        task_id: Uuid,
+        agent: CodingAgent,
+        request: String,
+        env: ExecutionEnv,
+    ) {
+        let pool = self.db.pool().clone();
+        tokio::spawn(async move {
+            let title = match agent.generate_session_title(&request, &env).await {
+                Ok(Some(title)) => title,
+                Ok(None) => return,
+                Err(err) => {
+                    tracing::warn!(
+                        %run_id,
+                        %task_id,
+                        error = %err,
+                        "[spawn_session_titling] failed to generate session title"
+                    );
+                    return;
+                }
+            };
+            match TaskRecord::adopt_session_title(&pool, task_id, &title).await {
+                Ok(changed) => tracing::debug!(
+                    %run_id,
+                    %task_id,
+                    changed,
+                    "[spawn_session_titling] generated session title"
+                ),
+                Err(err) => tracing::warn!(
+                    %run_id,
+                    %task_id,
+                    error = %err,
+                    "[spawn_session_titling] failed to store session title"
+                ),
+            }
+        });
     }
 
     /// Derive a one-line outcome from the run's final assistant message and
@@ -674,6 +682,8 @@ impl LocalContainerService {
     /// the buffer alive until they observe `Finished`, which is pushed again
     /// here for the abnormal paths that never pushed one.
     async fn drop_execution_registry(&self, run_id: Uuid) {
+        // The turn is over: whatever it left running must not act for it.
+        self.session_tokens.revoke_run(run_id);
         self.child_store.write().await.remove(&run_id);
         self.executions.write().await.remove(&run_id);
         self.event_channels.write().await.remove(&run_id);
@@ -716,6 +726,16 @@ impl LocalContainerService {
             }
         }
         self.drop_execution_registry(run_id).await;
+        // A run that died abnormally is still finished: the delegation barrier
+        // counts it and the session's queue moves on.
+        self.notify_run_finished(run_id).await;
+    }
+
+    async fn notify_run_finished(&self, run_id: Uuid) {
+        let hook = self.run_finished_hook.read().await.clone();
+        if let Some(hook) = hook {
+            hook(run_id);
+        }
     }
 
     async fn run_execution_process(
@@ -770,12 +790,24 @@ impl LocalContainerService {
         let repo_names = Self::collect_workspace_repo_names(&params.workspace_path);
         let repo_context = RepoContext::new(params.workspace_path.clone(), repo_names);
         let mut env = ExecutionEnv::new(repo_context, false, String::new());
-        // The session's own identity, injected so the industrialized CLI can
-        // resolve "this session" without being told: `chro task delegate`
-        // reads it to know who is delegating.
+        // The session's identity and this turn's credential. The `chro` CLI
+        // presents the token, and the server resolves `self` and attributes
+        // the call from it; the name is only for people and prompts.
         if let Some(task_id) = task_id {
-            env.vars
-                .insert("CHRO_TASK_ID".to_string(), task_id.to_string());
+            let session = TaskRecord::find_by_id(self.db.pool(), task_id)
+                .await?
+                .and_then(|task| task.slug)
+                .unwrap_or_else(|| task_id.to_string());
+            env.insert("CHRO_SESSION", session);
+            env.insert(
+                "CHRO_SESSION_TOKEN",
+                self.session_tokens.issue(task_id, run_id),
+            );
+        }
+
+        // Only a run that opens a session carries a request to name it.
+        if let (Some(request), Some(task_id)) = (params.session_title_request.clone(), task_id) {
+            self.spawn_session_titling(run_id, task_id, agent.clone(), request, env.clone());
         }
 
         let spawned = if let Some(session_id) = params.resume_session_id.as_ref() {
@@ -1201,11 +1233,8 @@ impl LocalContainerService {
 
         // Completion is a broker moment: the delegation loop (handoff edge +
         // wake) settles after the auto-commit so the packet can carry the
-        // commit the work landed on.
-        let hook = self.run_finished_hook.read().await.clone();
-        if let Some(hook) = hook {
-            hook(run_id);
-        }
+        // commit the work landed on, and the session's queue moves on.
+        self.notify_run_finished(run_id).await;
 
         Ok(())
     }
@@ -2050,82 +2079,6 @@ mod tests {
             Some(None),
             "housekeeping ran before the completion was persisted"
         );
-    }
-
-    /// Point the CLI's config-dir override at a private dir under `temp` and
-    /// write a Claude transcript there for `session_id` started from
-    /// `workspace`, so the lookup never touches the developer's real sessions.
-    fn seed_claude_transcript(
-        temp: &std::path::Path,
-        workspace: &std::path::Path,
-        session_id: &str,
-        title: &str,
-    ) {
-        let config_dir = temp.join("claude-config");
-        let project_dir_name: String = std::fs::canonicalize(workspace)
-            .unwrap()
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let project_dir = config_dir.join("projects").join(project_dir_name);
-        std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(
-            project_dir.join(format!("{session_id}.jsonl")),
-            format!(
-                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"prompt\"}}}}\n\
-                 {{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session_id}\"}}\n"
-            ),
-        )
-        .unwrap();
-        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
-    }
-
-    /// A finished run retitles its task with the name Claude Code gave the
-    /// session; a rename pins the task against later titles.
-    #[tokio::test]
-    async fn adopt_session_title_retitles_until_a_person_renames() {
-        let (service, temp) = build_service().await;
-        let pool = service.db.pool();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        seed_claude_transcript(
-            temp.path(),
-            &workspace,
-            "sess-1",
-            "Stuck task investigation",
-        );
-
-        let (task_id, run_id) = seed_running_task(&service, RunStatus::Completed).await;
-        sqlx::query(
-            "UPDATE task_runs SET workspace_path = ?, executor_label = '{\"executor\":\"CLAUDE_CODE\"}' WHERE id = ?",
-        )
-        .bind(workspace.to_string_lossy().to_string())
-        .bind(run_id)
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE task_sessions SET external_session_id = 'sess-1' WHERE task_run_id = ?",
-        )
-        .bind(run_id)
-        .execute(pool)
-        .await
-        .unwrap();
-
-        service.adopt_session_title(run_id, task_id).await.unwrap();
-        let task = TaskRecord::get(pool, task_id).await.unwrap();
-        assert_eq!(task.title, "Stuck task investigation");
-        assert!(!task.title_pinned);
-
-        TaskRecord::update_title(pool, task_id, "Chosen by hand".to_string(), None)
-            .await
-            .unwrap();
-        seed_claude_transcript(temp.path(), &workspace, "sess-1", "Retitled by the agent");
-        service.adopt_session_title(run_id, task_id).await.unwrap();
-        let pinned = TaskRecord::get(pool, task_id).await.unwrap();
-        assert_eq!(pinned.title, "Chosen by hand");
-        assert!(pinned.title_pinned);
     }
 
     /// Seed a project + task + run with the given statuses and NO session row,

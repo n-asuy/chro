@@ -61,6 +61,7 @@ declare global {
       openPath?: (path: string, app?: string) => Promise<void>;
       openInCmux?: (path: string) => Promise<void>;
       cli?: import("@/lib/cli-install-client").CliInstallApi;
+      skill?: import("@/lib/agent-skill-client").AgentSkillApi;
       update?: {
         check: () => Promise<{
           status: string;

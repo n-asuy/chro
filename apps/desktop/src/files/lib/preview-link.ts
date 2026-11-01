@@ -15,10 +15,11 @@ import { resolveEmbedPath } from "./embed-path";
 export const PREVIEW_LINK_MESSAGE_TYPE = "chro:preview-link";
 
 /**
- * Query parameter that opts an asset request into the bridge. Only the
- * top-level preview document sets it, so sub-resources stay verbatim.
+ * Query parameter that opts an asset request into the preview bridge: this
+ * link forwarding plus the annotation overlay (see `preview-annotation`). Only
+ * the top-level preview document sets it, so sub-resources stay verbatim.
  */
-export const PREVIEW_LINK_BRIDGE_PARAM = "link_bridge";
+export const PREVIEW_BRIDGE_PARAM = "preview_bridge";
 
 export type PreviewLinkMessage = {
   /** The `href` attribute exactly as written in the document. */

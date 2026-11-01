@@ -76,6 +76,9 @@ impl IntoResponse for ApiError {
                 RuntimeError::Skills(_) => {
                     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
                 }
+                RuntimeError::SessionBusy | RuntimeError::QueueChanged => {
+                    (StatusCode::CONFLICT, err.to_string()).into_response()
+                }
                 RuntimeError::Git(git_err) => {
                     use git::GitServiceError;
                     match git_err {
@@ -143,5 +146,16 @@ impl IntoResponse for ApiError {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_session_is_a_conflict_not_a_server_error() {
+        let response = ApiError::Runtime(RuntimeError::SessionBusy).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

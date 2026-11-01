@@ -13,7 +13,7 @@ use db::models::{TaskRecord, TaskRun};
 use runtime::Runtime;
 use serde::Serialize;
 
-use crate::{identifiers::resolve_task_id, ApiError, AppState};
+use crate::{ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -86,25 +86,12 @@ async fn get_approval(
 async fn respond_to_approval(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<ApprovalResponse>,
+    Json(mut payload): Json<ApprovalResponse>,
 ) -> Result<Json<ApprovalStatusResponse>, ApiError> {
-    // Governance rule 1: an agent cannot approve a run belonging to its own
-    // task. Suspended-run mechanics make this unusual, but enforce it
-    // structurally so a crafted `--from` or a parallel run of the same task
-    // cannot self-authorize. Human (`User`) responses are unrestricted.
-    if let ApprovalActor::Agent { task } = &payload.responded_by {
-        if let Some(request) = state.runtime().approvals().request(&id).await {
-            if let Some(run) = TaskRun::find_by_id(state.pool(), request.task_run_id).await? {
-                let actor_task_id = resolve_task_id(state.pool(), task).await?;
-                if run.task_id == actor_task_id {
-                    return Err(ApiError::BadRequest(
-                        "an agent cannot approve a run belonging to its own task".into(),
-                    ));
-                }
-            }
-        }
-    }
-
+    // `/rpc` is the app's own UI, so an answer here is the user's. Agents
+    // answer through the operator API, where the server attributes them from
+    // their session token; nothing a request claims can make it an agent's.
+    payload.responded_by = ApprovalActor::User;
     let status = state.runtime().approvals().respond(&id, payload).await?;
     Ok(Json(ApprovalStatusResponse { status }))
 }

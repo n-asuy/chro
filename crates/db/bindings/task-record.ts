@@ -42,8 +42,8 @@ last_executor: string | null,
 last_summary: string | null, 
 /**
  * True once a person chose the title (rename). An unpinned title is the
- * first line of the prompt and is replaced by the agent's own session
- * title when one becomes available; see `adopt_session_title`.
+ * first line of the prompt and is replaced by a title generated from the
+ * opening request when the first run starts; see `adopt_session_title`.
  */
 title_pinned: boolean, 
 /**
@@ -62,9 +62,21 @@ forked_from_title: string | null,
  */
 delegated_from_title: string | null, 
 /**
+ * Id of the task that delegated this one, read from the same delegate
+ * edge. Lets the session list count each task's delegated sessions that
+ * are still running without a per-task edge lookup. `None` once the
+ * delegating task is deleted (the edge's target is nulled).
+ */
+delegated_from_id: string | null, 
+/**
  * Directory this task is addressed to, relative to the project root
  * (`""` is the root). Set when the session is dispatched from a directory,
  * otherwise derived after the first auto-commit as the lowest common
  * ancestor of the paths it touched. `None` until either happens.
  */
-home_dir: string | null, };
+home_dir: string | null, 
+/**
+ * Short status line the session's agent or a person set ("fix
+ * implemented; running tests"). `None` until someone sets it.
+ */
+note: string | null, };

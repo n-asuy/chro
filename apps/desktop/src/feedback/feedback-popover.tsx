@@ -58,7 +58,7 @@ const CATEGORIES: CategoryDescriptor[] = [
 
 /**
  * Feedback entry point for the window-chrome header, sitting alongside the CLI
- * and Settings controls and mirroring the CLI menu's visual language. Clicking
+ * and Settings controls and mirroring the Agent status menu's visual language. Clicking
  * opens a popover that first offers a category (feedback / bug / feature) and
  * then a compose form. Submissions are sent to the cloud API (`apps/api`),
  * which persists them and notifies Slack.

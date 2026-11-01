@@ -29,18 +29,14 @@ import {
 } from "@chro/ui/tooltip";
 import { BubbleMenuButton, BubbleMenuSeparator } from "./BubbleMenu";
 import {
-  insertLink,
-  isBold,
-  isCode,
-  isHighlight,
-  isItalic,
-  isStrikethrough,
+  hasInlineMark,
+  insertMarkdownLink,
   toggleBold,
-  toggleCode,
   toggleHighlight,
+  toggleInlineCode,
   toggleItalic,
   toggleStrikethrough,
-} from "./formatting-commands";
+} from "../editor/markdown-formatting";
 
 interface FormattingMenuProps {
   /** The CodeMirror EditorView instance */
@@ -56,11 +52,11 @@ interface FormattingState {
 }
 
 const getFormattingState = (view: EditorView | null): FormattingState => ({
-  bold: view ? isBold(view) : false,
-  italic: view ? isItalic(view) : false,
-  strikethrough: view ? isStrikethrough(view) : false,
-  code: view ? isCode(view) : false,
-  highlight: view ? isHighlight(view) : false,
+  bold: view ? hasInlineMark(view.state, "**") : false,
+  italic: view ? hasInlineMark(view.state, "*") : false,
+  strikethrough: view ? hasInlineMark(view.state, "~~") : false,
+  code: view ? hasInlineMark(view.state, "`") : false,
+  highlight: view ? hasInlineMark(view.state, "==") : false,
 });
 
 const formattingStatesEqual = (a: FormattingState, b: FormattingState) =>
@@ -141,7 +137,7 @@ export function FormattingMenu({ view }: FormattingMenuProps) {
   const handleCode = useCallback(
     (_event?: MouseEvent<HTMLButtonElement>) => {
       if (view) {
-        toggleCode(view);
+        toggleInlineCode(view);
         view.focus();
       }
     },
@@ -161,7 +157,7 @@ export function FormattingMenu({ view }: FormattingMenuProps) {
   const handleLink = useCallback(
     (_event?: MouseEvent<HTMLButtonElement>) => {
       if (view) {
-        insertLink(view);
+        insertMarkdownLink(view);
         view.focus();
       }
     },

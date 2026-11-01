@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::cli_install::cli_launcher_path;
-use super::port::{find_available_port, write_port_file};
+use super::port::find_available_port;
 
 const SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVER_PORT: u16 = 4310;
@@ -140,10 +140,6 @@ pub async fn launch_runtime<R: TauriRuntime>(
     let db_path = options.dir.join("db.sqlite");
     let port = find_available_port(SERVER_HOST, server_start_port())?;
 
-    if let Err(err) = write_port_file(port) {
-        warn!("[runtime] failed to write port file: {err:#}");
-    }
-
     let mut args: Vec<String> = vec![
         "--db-path".into(),
         db_path.to_string_lossy().into_owned(),
@@ -198,8 +194,8 @@ pub async fn launch_runtime<R: TauriRuntime>(
     // Make the bundled `chro` CLI reachable to agents the server spawns. The
     // sidecar runs with its own environment (it does not inherit ours), so the
     // directory holding the CLI is passed explicitly; the server prepends it to
-    // the PATH handed to executor processes, letting `chro task ...` resolve by
-    // bare name from inside a run instead of failing with "command not found".
+    // the PATH handed to executor processes, letting `chro session ...` resolve
+    // by bare name from inside a run instead of failing with "command not found".
     if let Some(cli_dir) =
         cli_launcher_path(tauri::is_dev()).and_then(|p| p.parent().map(Path::to_path_buf))
     {
@@ -209,7 +205,7 @@ pub async fn launch_runtime<R: TauriRuntime>(
         );
     } else {
         warn!(
-            "[runtime] bundled `chro` CLI not found; `chro task ...` will be unavailable to agents"
+            "[runtime] bundled `chro` CLI not found; `chro` will be unavailable to agents"
         );
     }
 

@@ -50,8 +50,8 @@ pub struct TaskRecord {
     /// without a transcript lookup. `None` until a run completes.
     pub last_summary: Option<String>,
     /// True once a person chose the title (rename). An unpinned title is the
-    /// first line of the prompt and is replaced by the agent's own session
-    /// title when one becomes available; see `adopt_session_title`.
+    /// first line of the prompt and is replaced by a title generated from the
+    /// opening request when the first run starts; see `adopt_session_title`.
     pub title_pinned: bool,
     /// Title of the session this one was forked from, snapshotted at fork time.
     ///
@@ -66,20 +66,30 @@ pub struct TaskRecord {
     /// the delegate edge.
     #[sqlx(default)]
     pub delegated_from_title: Option<String>,
+    /// Id of the task that delegated this one, read from the same delegate
+    /// edge. Lets the session list count each task's delegated sessions that
+    /// are still running without a per-task edge lookup. `None` once the
+    /// delegating task is deleted (the edge's target is nulled).
+    #[sqlx(default)]
+    pub delegated_from_id: Option<Uuid>,
     /// Directory this task is addressed to, relative to the project root
     /// (`""` is the root). Set when the session is dispatched from a directory,
     /// otherwise derived after the first auto-commit as the lowest common
     /// ancestor of the paths it touched. `None` until either happens.
     pub home_dir: Option<String>,
+    /// Short status line the session's agent or a person set ("fix
+    /// implemented; running tests"). `None` until someone sets it.
+    pub note: Option<String>,
 }
 
 /// Selects every task column plus the fork and delegate edges' snapshot
-/// labels.
+/// labels and the delegating task's id.
 ///
 /// `task_context_refs` is indexed on `task_id`, and a task has at most one
 /// fork edge and one delegate edge, so this stays two indexed probes per row.
 const SELECT_TASKS_WITH_FORK: &str =
-    "SELECT t.*, f.label AS forked_from_title, d.label AS delegated_from_title \
+    "SELECT t.*, f.label AS forked_from_title, d.label AS delegated_from_title, \
+     d.target_task_id AS delegated_from_id \
      FROM task_records t \
      LEFT JOIN task_context_refs f ON f.task_id = t.id AND f.kind = 'fork' \
      LEFT JOIN task_context_refs d ON d.task_id = t.id AND d.kind = 'delegate'";
@@ -123,7 +133,9 @@ impl TaskRecord {
             title_pinned: false,
             forked_from_title: None,
             delegated_from_title: None,
+            delegated_from_id: None,
             home_dir: None,
+            note: None,
         }
     }
 
@@ -141,7 +153,7 @@ impl TaskRecord {
 
     /// Fetch a task by id, returning a row-not-found error if missing.
     pub async fn get(pool: &Pool<Sqlite>, task_id: Uuid) -> Result<Self, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT * FROM task_records WHERE id = ?")
+        sqlx::query_as::<_, Self>(&format!("{SELECT_TASKS_WITH_FORK} WHERE t.id = ?"))
             .bind(task_id)
             .fetch_one(pool)
             .await
@@ -183,7 +195,7 @@ impl TaskRecord {
         pool: &Pool<Sqlite>,
         rowid: i64,
     ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT * FROM task_records WHERE rowid = ?")
+        sqlx::query_as::<_, Self>(&format!("{SELECT_TASKS_WITH_FORK} WHERE t.rowid = ?"))
             .bind(rowid)
             .fetch_optional(pool)
             .await
@@ -194,7 +206,7 @@ impl TaskRecord {
         pool: &Pool<Sqlite>,
         task_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT * FROM task_records WHERE id = ?")
+        sqlx::query_as::<_, Self>(&format!("{SELECT_TASKS_WITH_FORK} WHERE t.id = ?"))
             .bind(task_id)
             .fetch_optional(pool)
             .await
@@ -205,7 +217,7 @@ impl TaskRecord {
         pool: &Pool<Sqlite>,
         slug: &str,
     ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT * FROM task_records WHERE slug = ?")
+        sqlx::query_as::<_, Self>(&format!("{SELECT_TASKS_WITH_FORK} WHERE t.slug = ?"))
             .bind(slug)
             .fetch_optional(pool)
             .await
@@ -375,6 +387,20 @@ impl TaskRecord {
         Ok(())
     }
 
+    /// Set or clear (`None`) the session's status line.
+    pub async fn set_note(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        note: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET note = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(note)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     /// Tasks of a project addressed to exactly `home_dir`, most recent first.
     pub async fn list_by_home_dir(
         pool: &Pool<Sqlite>,
@@ -411,42 +437,49 @@ impl TaskRecord {
         Ok(())
     }
 
-    /// Find task records that are expired (72+ hours since last activity) and eligible for worktree cleanup.
-    /// Activity is determined by: task_run completion time, or task_record updated_at.
-    /// Excludes tasks with any running executions.
-    pub async fn find_expired_for_cleanup(
+    /// Worktrees idle for 72+ hours, as `(worktree_path, git_repo_path)`.
+    ///
+    /// A worktree is shared by every session that works in it (forks that keep
+    /// the source's worktree, sessions started in the same checkout), so
+    /// activity is judged per path, not per task: a worktree expires only when
+    /// none of the sessions that recorded it or ran in it is running or has
+    /// been active within the window. A session's activity is its latest run
+    /// completion, or its `updated_at` when it has never completed a run.
+    pub async fn find_expired_worktrees(
         pool: &Pool<Sqlite>,
-    ) -> Result<Vec<(Uuid, String, String)>, sqlx::Error> {
-        // Returns (task_id, worktree_path, git_repo_path)
-        sqlx::query_as::<_, (Uuid, String, String)>(
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as::<_, (String, String)>(
             r#"
-            SELECT tr.id, tr.worktree_path, pr.git_repo_path
-            FROM task_records tr
-            LEFT JOIN task_runs run ON tr.id = run.task_id AND run.completed_at IS NOT NULL
-            JOIN project_records pr ON tr.project_id = pr.id
-            WHERE tr.worktree_deleted = 0
-                AND tr.worktree_path IS NOT NULL
-                -- Exclude tasks with any running executions
-                AND tr.id NOT IN (
-                    SELECT DISTINCT r2.task_id
-                    FROM task_runs r2
-                    WHERE r2.completed_at IS NULL AND r2.started_at IS NOT NULL
-                )
-            GROUP BY tr.id, tr.worktree_path, pr.git_repo_path, tr.updated_at
-            HAVING datetime('now', '-72 hours') > datetime(
-                MAX(
-                    CASE
-                        WHEN run.completed_at IS NOT NULL THEN run.completed_at
-                        ELSE tr.updated_at
-                    END
-                )
+            WITH sharers AS (
+                SELECT worktree_path AS path, id AS task_id, project_id
+                FROM task_records
+                WHERE worktree_path IS NOT NULL AND worktree_deleted = 0
+                UNION
+                SELECT run.container_ref, run.task_id, t.project_id
+                FROM task_runs run
+                JOIN task_records t ON t.id = run.task_id
+                WHERE run.container_ref IS NOT NULL
+            ),
+            task_activity AS (
+                SELECT t.id AS task_id,
+                    COALESCE(MAX(datetime(run.completed_at)), datetime(t.updated_at)) AS last_active,
+                    MAX(run.completed_at IS NULL AND run.started_at IS NOT NULL) AS running
+                FROM task_records t
+                LEFT JOIN task_runs run ON run.task_id = t.id
+                GROUP BY t.id
             )
-            ORDER BY MAX(
-                CASE
-                    WHEN run.completed_at IS NOT NULL THEN run.completed_at
-                    ELSE tr.updated_at
-                END
-            ) ASC
+            SELECT s.path, MAX(pr.git_repo_path)
+            FROM sharers s
+            JOIN task_activity a ON a.task_id = s.task_id
+            JOIN project_records pr ON pr.id = s.project_id
+            WHERE s.path IN (
+                SELECT worktree_path FROM task_records
+                WHERE worktree_path IS NOT NULL AND worktree_deleted = 0
+            )
+            GROUP BY s.path
+            HAVING COALESCE(MAX(a.running), 0) = 0
+                AND datetime('now', '-72 hours') > MAX(a.last_active)
+            ORDER BY MAX(a.last_active) ASC
             "#,
         )
         .fetch_all(pool)
@@ -515,7 +548,7 @@ impl TaskRecord {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Replace an unpinned title with the title the agent gave the session.
+    /// Replace an unpinned title with the one generated for the session.
     /// Returns whether the title changed; a pinned or already-matching title
     /// is left alone.
     pub async fn adopt_session_title(
@@ -1121,6 +1154,32 @@ mod tests {
         );
     }
 
+    /// A fork starts as "source (n)", takes the first line of its first
+    /// prompt, and then the generated title like any other session.
+    #[tokio::test]
+    async fn a_fork_takes_its_first_prompt_and_then_the_generated_title() {
+        let pool = migrated_pool().await;
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(&pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let task = TaskRecord::new_with_prompt(project.id, "source (2)", None, None);
+        task.insert(&pool).await.unwrap();
+
+        assert!(
+            TaskRecord::retitle_unstarted(&pool, task.id, "source (2)", "try the cache path")
+                .await
+                .unwrap()
+        );
+        assert!(
+            TaskRecord::adopt_session_title(&pool, task.id, "Cache path experiment")
+                .await
+                .unwrap()
+        );
+        let stored = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(stored.title, "Cache path experiment");
+        assert!(!stored.title_pinned);
+    }
+
     #[tokio::test]
     async fn retitle_unstarted_leaves_a_renamed_task_alone() {
         let pool = migrated_pool().await;
@@ -1466,5 +1525,144 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(first_order, 0, "the first update must be rolled back");
+    }
+
+    const SHARED_WORKTREE: &str = "/tmp/worktrees/ch/shared";
+
+    /// A task working in `path` whose only run ended `hours_ago` hours ago, or
+    /// is still running when `hours_ago` is None.
+    async fn task_in_worktree(pool: &Pool<Sqlite>, path: &str, hours_ago: Option<i64>) -> Uuid {
+        let task = inserted_task(pool, "shared", None).await;
+        TaskRecord::update_worktree_state(pool, task.id, Some(path.to_string()), false, false)
+            .await
+            .unwrap();
+        let mut run = TaskRun::new_local(task.id, None);
+        run.container_ref = Some(path.to_string());
+        run.workspace_path = Some(path.to_string());
+        run.start();
+        if let Some(hours) = hours_ago {
+            let ended = Utc::now() - chrono::Duration::hours(hours);
+            run.status = RunStatus::Completed;
+            run.started_at = Some(ended);
+            run.completed_at = Some(ended);
+        }
+        run.insert(pool).await.unwrap();
+        sqlx::query(
+            "UPDATE task_records SET updated_at = datetime('now', '-100 days') WHERE id = ?",
+        )
+        .bind(task.id)
+        .execute(pool)
+        .await
+        .unwrap();
+        task.id
+    }
+
+    async fn expired_paths(pool: &Pool<Sqlite>) -> Vec<String> {
+        TaskRecord::find_expired_worktrees(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(path, _repo)| path)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_worktree_idle_for_72_hours_expires() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+
+        assert_eq!(
+            expired_paths(&pool).await,
+            vec![SHARED_WORKTREE.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_worktree_stays_while_any_session_on_it_was_recently_active() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(1)).await;
+
+        assert!(
+            expired_paths(&pool).await.is_empty(),
+            "the stale session must not reclaim a worktree another session just used"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_worktree_stays_while_any_session_on_it_is_running() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+        task_in_worktree(&pool, SHARED_WORKTREE, None).await;
+
+        assert!(expired_paths(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_only_ran_in_a_worktree_still_keeps_it_alive() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+        // A session whose own record points elsewhere (or nowhere) but whose
+        // run executed in the shared worktree.
+        let visitor = task_in_worktree(&pool, SHARED_WORKTREE, Some(1)).await;
+        TaskRecord::update_worktree_state(&pool, visitor, None, false, false)
+            .await
+            .unwrap();
+
+        assert!(expired_paths(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_shared_worktree_is_reported_once() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(90)).await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+
+        assert_eq!(
+            expired_paths(&pool).await,
+            vec![SHARED_WORKTREE.to_string()]
+        );
+    }
+
+    /// Every single-row read carries the delegate edge, not only the list
+    /// queries: the event stream re-reads a task by rowid on each update and
+    /// ships the whole row, so a lookup without the join would erase the
+    /// provenance from the live session list on the task's first update.
+    #[tokio::test]
+    async fn single_row_reads_carry_the_delegating_task() {
+        use crate::models::{TaskContextRef, TaskContextRefInput};
+
+        let pool = migrated_pool().await;
+        let source = inserted_task(&pool, "billing revamp", None).await;
+        let child = inserted_task(&pool, "schema migration", None).await;
+        TaskContextRef::insert_for_task(
+            &pool,
+            child.id,
+            None,
+            None,
+            &TaskContextRefInput::delegate(source.id, Some("billing revamp".to_string())),
+            0,
+        )
+        .await
+        .unwrap();
+
+        let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM task_records WHERE id = ?")
+            .bind(child.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let reads = [
+            TaskRecord::get(&pool, child.id).await.unwrap(),
+            TaskRecord::find_by_id(&pool, child.id).await.unwrap().unwrap(),
+            TaskRecord::find_by_rowid(&pool, rowid).await.unwrap().unwrap(),
+        ];
+        for read in reads {
+            assert_eq!(read.delegated_from_id, Some(source.id));
+            assert_eq!(read.delegated_from_title.as_deref(), Some("billing revamp"));
+        }
+
+        let listed = TaskRecord::list_all(&pool).await.unwrap();
+        let source_row = listed.iter().find(|task| task.id == source.id).unwrap();
+        assert_eq!(source_row.delegated_from_id, None, "the delegating task has no delegate edge of its own");
     }
 }

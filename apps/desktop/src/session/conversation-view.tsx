@@ -34,6 +34,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentAskUserQuestionTool } from "./components/agent-ask-user-question-tool";
 import { BrailleSpinner } from "./components/braille-spinner";
 import { Markdown } from "./components/markdown";
+import { PageAnnotationsCard } from "./components/page-annotations-card";
 import RawLogText from "./components/raw-log-text";
 import { TextShimmer } from "./components/text-shimmer";
 import { ThinkingStep, ThinkingSteps } from "./components/thinking-steps";
@@ -48,6 +49,7 @@ import type {
   ToolStatus,
 } from "./types";
 import {
+  type AnnotationsContextEntry,
   type ImageEntry,
   parseContextFromContent,
   shortSessionId,
@@ -1350,22 +1352,39 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
 const ImagePill = ({ name, path }: ImageEntry) => {
   const { data: metadata } = useImageMetadata(path);
   const displayName = name || path.split("/").pop() || "image";
-
-  return (
-    <span className="group/img relative inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400">
+  const pill = (
+    <span className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400">
       <ImageIcon className="h-3 w-3 shrink-0" />
       {displayName}
-      {metadata?.exists && metadata.proxy_url && (
-        <span className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 hidden rounded-xl border border-border bg-popover p-1 shadow-sm group-hover/img:block">
+    </span>
+  );
+
+  if (!metadata?.exists || !metadata.proxy_url) return pill;
+
+  // Portalled so the preview escapes the sticky message and the scroll
+  // container that would otherwise clip it.
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>{pill}</TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="start"
+          hideArrow
+          collisionPadding={8}
+          aria-label={displayName}
+          className="rounded-lg border-border bg-popover p-1 shadow-sm backdrop-blur-none"
+          style={{ backgroundColor: undefined }}
+        >
           <img
             src={metadata.proxy_url}
             alt={displayName}
-            className="max-h-48 max-w-64 rounded object-contain"
+            className="block max-h-72 max-w-80 rounded object-contain"
             draggable={false}
           />
-        </span>
-      )}
-    </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 };
 
@@ -1373,8 +1392,14 @@ export const UserMessageContent = ({ content }: { content: string }) => {
   const { contextEntries, skillEntries, imageEntries, text } =
     parseContextFromContent(content);
 
+  const referenceEntries = contextEntries.filter(
+    (entry) => entry.kind !== "annotations",
+  );
+  const annotationEntries = contextEntries.filter(
+    (entry): entry is AnnotationsContextEntry => entry.kind === "annotations",
+  );
   const hasPills =
-    contextEntries.length > 0 ||
+    referenceEntries.length > 0 ||
     skillEntries.length > 0 ||
     imageEntries.length > 0;
 
@@ -1382,32 +1407,36 @@ export const UserMessageContent = ({ content }: { content: string }) => {
     <div className="space-y-2">
       {hasPills && (
         <div className="flex flex-wrap gap-1.5">
-          {contextEntries.map((entry) => {
-            if (entry.kind === "session") {
-              const display = shortSessionId(entry.taskId);
-              return (
-                <span
-                  key={`session-${entry.taskId}`}
-                  className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
-                  title={`Session ${entry.taskId}`}
-                >
-                  <MessageSquare className="h-3 w-3 shrink-0" />
-                  {display}
-                </span>
-              );
+          {referenceEntries.map((entry) => {
+            switch (entry.kind) {
+              case "session":
+                return (
+                  <span
+                    key={`session-${entry.taskId}`}
+                    className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
+                    title={`Session ${entry.taskId}`}
+                  >
+                    <MessageSquare className="h-3 w-3 shrink-0" />
+                    {shortSessionId(entry.taskId)}
+                  </span>
+                );
+              case "file": {
+                const displayName = entry.path.split("/").pop() || entry.path;
+                const Icon = entry.isFile ? FileText : Folder;
+                return (
+                  <span
+                    key={`file-${entry.path}`}
+                    className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
+                    title={entry.path}
+                  >
+                    <Icon className="h-3 w-3 shrink-0" />
+                    {displayName}
+                  </span>
+                );
+              }
+              default:
+                return null;
             }
-            const displayName = entry.path.split("/").pop() || entry.path;
-            const Icon = entry.isFile ? FileText : Folder;
-            return (
-              <span
-                key={`file-${entry.path}`}
-                className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
-                title={entry.path}
-              >
-                <Icon className="h-3 w-3 shrink-0" />
-                {displayName}
-              </span>
-            );
           })}
           {skillEntries.map((skill) => {
             const displayName = skill.name || skill.id;
@@ -1426,6 +1455,12 @@ export const UserMessageContent = ({ content }: { content: string }) => {
           ))}
         </div>
       )}
+      {annotationEntries.map((entry) => (
+        <PageAnnotationsCard
+          key={`${entry.path}:${entry.notes.map((note) => note.comment).join("\u0000")}`}
+          entry={entry}
+        />
+      ))}
       {text && (
         <p
           className="whitespace-pre-wrap break-words text-sm font-medium leading-relaxed text-foreground"

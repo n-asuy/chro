@@ -3,7 +3,8 @@
 //! A `kind = "session"` context ref stores the relationship; the referenced
 //! content is injected here at start-of-execution so the baseline context
 //! never depends on the agent shelling out to the CLI. The full transcript
-//! stays reachable via `chro task logs <task_id>` as an escalation path.
+//! stays reachable via `chro session read <task_id> --format markdown` as an
+//! escalation path.
 //!
 //! The transform is a pure function of (prompt, digests): it touches only the
 //! executor prompt, so retries and resumes re-derive it without stored state.
@@ -85,7 +86,7 @@ fn render_block(digest: &SessionContextDigest, with_body: bool) -> String {
 
     let (title, _) = truncate_chars(digest.title.trim(), TITLE_MAX_CHARS);
     let footer = format!(
-        "Full transcript: `chro task logs {}`\n</session_context>",
+        "Full transcript: `chro session read {} --format markdown`\n</session_context>",
         digest.task_id
     );
     let header = format!("<session_context{attrs}>\n# {title}\n");
@@ -183,7 +184,7 @@ mod tests {
         assert!(out.contains("## Last exchange"));
         assert!(out.contains("User: please fix the login redirect"));
         assert!(out.contains("Assistant: Fixed by rewriting the redirect guard."));
-        assert!(out.contains("Full transcript: `chro task logs abc-123`"));
+        assert!(out.contains("Full transcript: `chro session read abc-123 --format markdown`"));
         assert!(out.trim_end().ends_with("</session_context>"));
     }
 
@@ -198,7 +199,7 @@ mod tests {
         assert!(out.contains("<session_context task_id=\"abc\">"));
         assert!(!out.contains("## Last exchange"));
         assert!(!out.contains("branch="));
-        assert!(out.contains("Full transcript: `chro task logs abc`"));
+        assert!(out.contains("Full transcript: `chro session read abc --format markdown`"));
     }
 
     #[test]
@@ -236,7 +237,7 @@ mod tests {
             .nth(1)
             .unwrap();
         assert!(!last_block.contains("## Last exchange"));
-        assert!(last_block.contains(&format!("chro task logs {last_id}")));
+        assert!(last_block.contains(&format!("chro session read {last_id} --format markdown")));
         assert_eq!(
             out.matches("## Last exchange").count(),
             SESSION_CONTEXT_MAX_FULL_REFS

@@ -1,4 +1,4 @@
-import { create } from "zustand";
+import { type StateCreator, create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import {
   allLeaves,
@@ -28,7 +28,12 @@ interface LayoutState {
   /** Currently bound project; null until `bindProject` runs */
   projectId: string | null;
   layout: PaneLayout;
-  closeFocusTargets: Record<string, FocusTarget>;
+  /**
+   * Ids of tabs that have held focus, oldest first and the focused tab last.
+   * Closing the focused tab returns to the entry before it, so ⌘W walks back
+   * through what the user actually viewed rather than the tab-strip order.
+   */
+  focusHistory: string[];
 }
 
 interface LayoutActions {
@@ -46,7 +51,6 @@ interface LayoutActions {
       iconName?: string;
       targetLeafId?: string;
       activate?: boolean;
-      returnFocusOnClose?: boolean;
     },
   ) => string;
 
@@ -68,10 +72,10 @@ interface LayoutActions {
 
   resizeSplit: (splitId: string, sizes: [number, number]) => void;
 
-  /** Update tab metadata (title/dirty/icon) without remounting content */
+  /** Update tab metadata (title/icon/pin) without remounting content */
   patchTab: (
     tabId: string,
-    patch: Partial<Pick<Tab, "title" | "iconName" | "dirty" | "pinned">>,
+    patch: Partial<Pick<Tab, "title" | "iconName" | "pinned">>,
   ) => void;
 
   /**
@@ -85,10 +89,14 @@ interface LayoutActions {
 
 type LayoutStore = LayoutState & LayoutActions;
 
-interface FocusTarget {
-  leafId: string;
-  tabId: string;
-}
+type LayoutUpdate =
+  | Partial<LayoutState>
+  | ((prev: LayoutStore) => Partial<LayoutState>);
+
+type LayoutCreator = (
+  set: (update: LayoutUpdate) => void,
+  get: () => LayoutStore,
+) => LayoutStore;
 
 function persist(state: LayoutState) {
   if (state.projectId) saveLayout(state.projectId, state.layout);
@@ -111,34 +119,54 @@ function findTabInLayout(
   return null;
 }
 
-function getFocusedTabTarget(layout: PaneLayout): FocusTarget | null {
-  const leaf = findLeaf(layout.root, layout.focusedPaneId);
-  if (!leaf?.activeTabId) return null;
-  return { leafId: leaf.id, tabId: leaf.activeTabId };
+/**
+ * Move the focused tab to the end of the history and drop tabs that no
+ * longer exist, so every way of focusing a tab (tab click, route sync,
+ * opener, close) feeds the same timeline.
+ */
+function recordFocus<S extends LayoutState>(state: S): S {
+  const { layout } = state;
+  const focused = findLeaf(layout.root, layout.focusedPaneId)?.activeTabId;
+  const live = new Set(
+    allLeaves(layout.root).flatMap((leaf) => leaf.tabs.map((tab) => tab.id)),
+  );
+  const focusHistory = state.focusHistory.filter(
+    (id) => id !== focused && live.has(id),
+  );
+  if (focused) focusHistory.push(focused);
+  return { ...state, focusHistory };
 }
 
-function focusTargetIfPresent(
-  layout: PaneLayout,
-  target: FocusTarget,
-): PaneLayout {
-  const leaf = findLeaf(layout.root, target.leafId);
-  if (!leaf?.tabs.some((tab) => tab.id === target.tabId)) return layout;
+/** Route every store update through `recordFocus` so no action can skip it. */
+function withFocusHistory(creator: LayoutCreator): StateCreator<LayoutStore> {
+  return (set, get) =>
+    creator(
+      (update) =>
+        set((prev) =>
+          recordFocus({
+            ...prev,
+            ...(typeof update === "function" ? update(prev) : update),
+          }),
+        ),
+      get,
+    );
+}
+
+function mostRecentTab(history: string[], tabs: Tab[]): Tab | undefined {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const tab = tabs.find((t) => t.id === history[i]);
+    if (tab) return tab;
+  }
+  return undefined;
+}
+
+function focusTabIfPresent(layout: PaneLayout, tabId: string): PaneLayout {
+  const leaf = findLeafContainingTab(layout.root, tabId);
+  if (!leaf) return layout;
   return {
-    root: mapLeaf(layout.root, target.leafId, (l) => ({
-      ...l,
-      activeTabId: target.tabId,
-    })),
-    focusedPaneId: target.leafId,
+    root: mapLeaf(layout.root, leaf.id, (l) => ({ ...l, activeTabId: tabId })),
+    focusedPaneId: leaf.id,
   };
-}
-
-function omitCloseFocusTarget(
-  targets: Record<string, FocusTarget>,
-  tabId: string,
-): Record<string, FocusTarget> {
-  if (!(tabId in targets)) return targets;
-  const { [tabId]: _, ...rest } = targets;
-  return rest;
 }
 
 function focusOrInsertTab(
@@ -211,10 +239,10 @@ function withRoot(state: LayoutState, root: PaneNode | null): LayoutState {
   };
 }
 
-export const useLayoutStore = create<LayoutStore>()((set, get) => ({
+const createLayoutStore: LayoutCreator = (set, get) => ({
   projectId: null,
   layout: createInitialLayout(),
-  closeFocusTargets: {},
+  focusHistory: [],
 
   bindProject: (projectId, options = {}) => {
     const state = get();
@@ -228,7 +256,7 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
       layout: options.initialTab
         ? focusOrInsertTab(nextLayout, options.initialTab, options.freshSession)
         : nextLayout,
-      closeFocusTargets: {},
+      focusHistory: [],
     });
     if (options.initialTab) persist(get());
   },
@@ -237,7 +265,7 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     set({
       projectId: null,
       layout: createInitialLayout(),
-      closeFocusTargets: {},
+      focusHistory: [],
     }),
 
   openTab: (kind, options = {}) => {
@@ -245,10 +273,6 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     const key = tabKey(kind);
     const duplicable =
       isDuplicableKind(kind.type) || (kind.type === "session" && !kind.taskId);
-    const returnTarget =
-      options.returnFocusOnClose && options.activate !== false
-        ? getFocusedTabTarget(state.layout)
-        : null;
 
     if (!duplicable) {
       const existing = findTabInLayout(
@@ -260,10 +284,6 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
         if (options.activate !== false) {
           set((prev) => ({
             ...prev,
-            closeFocusTargets:
-              returnTarget && returnTarget.tabId !== tab.id
-                ? { ...prev.closeFocusTargets, [tab.id]: returnTarget }
-                : prev.closeFocusTargets,
             layout: {
               root: mapLeaf(prev.layout.root, leaf.id, (l) => ({
                 ...l,
@@ -290,10 +310,6 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
 
     set((prev) => ({
       ...prev,
-      closeFocusTargets:
-        returnTarget && returnTarget.tabId !== tab.id
-          ? { ...prev.closeFocusTargets, [tab.id]: returnTarget }
-          : prev.closeFocusTargets,
       layout: {
         root: mapLeaf(prev.layout.root, leaf.id, (l) => ({
           ...l,
@@ -312,12 +328,16 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     const owner = findLeafContainingTab(state.layout.root, tabId);
     if (!owner) return;
     const remaining = owner.tabs.filter((t) => t.id !== tabId);
+    const history = state.focusHistory.filter((id) => id !== tabId);
     let nextActive = owner.activeTabId;
     const closingActiveTab = owner.activeTabId === tabId;
     if (closingActiveTab) {
       const closingIdx = owner.tabs.findIndex((t) => t.id === tabId);
       const fallback =
-        remaining[closingIdx] ?? remaining[closingIdx - 1] ?? remaining[0];
+        mostRecentTab(history, remaining) ??
+        remaining[closingIdx] ??
+        remaining[closingIdx - 1] ??
+        remaining[0];
       nextActive = fallback?.id ?? null;
     }
     let nextLayout: PaneLayout;
@@ -352,17 +372,13 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
         })),
       };
     }
-    const returnTarget = closingActiveTab
-      ? state.closeFocusTargets[tabId]
-      : undefined;
-    if (returnTarget) {
-      nextLayout = focusTargetIfPresent(nextLayout, returnTarget);
+    // The previously viewed tab may live in another pane (a file opened from
+    // a session into a split); focus follows it there.
+    const previous = history.at(-1);
+    if (closingActiveTab && previous) {
+      nextLayout = focusTabIfPresent(nextLayout, previous);
     }
-    set((prev) => ({
-      ...prev,
-      closeFocusTargets: omitCloseFocusTarget(prev.closeFocusTargets, tabId),
-      layout: nextLayout,
-    }));
+    set({ layout: nextLayout });
     persist(get());
   },
 
@@ -659,7 +675,11 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     }));
     persist(get());
   },
-}));
+});
+
+export const useLayoutStore = create<LayoutStore>()(
+  withFocusHistory(createLayoutStore),
+);
 
 function clampIndex(index: number, length: number): number {
   if (index < 0) return 0;

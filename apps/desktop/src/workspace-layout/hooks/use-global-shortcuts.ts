@@ -13,13 +13,14 @@ export type GlobalShortcutAction = "palette" | "file-search" | "new-chat";
 
 type ShortcutKeyEvent = Pick<
   KeyboardEvent,
-  "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "key"
+  "defaultPrevented" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "key"
 >;
 
 /**
  * Classify a keydown into a global command, or `null` when it isn't one of
- * ours (so the caller leaves the event untouched). Ctrl stands in for ⌘ on
- * non-mac keyboards. Extracted as a pure function so the mapping is unit
+ * ours (so the caller leaves the event untouched). Keys a focused editor
+ * already handled (⌘K inserts a link in a note) stay with it. Ctrl stands in
+ * for ⌘ on non-mac keyboards. Extracted as a pure function so the mapping is unit
  * testable without a DOM.
  *
  * - ⌘K / ⌘P → session-search command palette
@@ -30,7 +31,7 @@ export function matchGlobalShortcut(
   event: ShortcutKeyEvent,
 ): GlobalShortcutAction | null {
   const isMeta = event.metaKey || event.ctrlKey;
-  if (!isMeta || event.altKey) return null;
+  if (event.defaultPrevented || !isMeta || event.altKey) return null;
   const key = event.key.toLowerCase();
 
   if (event.shiftKey) {

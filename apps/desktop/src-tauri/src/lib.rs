@@ -81,6 +81,8 @@ pub fn run() {
             commands::cli_install_status,
             commands::cli_install,
             commands::cli_remove,
+            commands::agent_skill_status,
+            commands::agent_skill_install,
             commands::update_check,
             commands::update_download,
             commands::update_install,

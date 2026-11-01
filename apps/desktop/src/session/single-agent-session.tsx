@@ -19,6 +19,7 @@ import {
   getModelSpeedOptions,
   getReasoningLabel,
   getSpeedLabel,
+  retainSupportedOverrides,
 } from "@/lib/agent-runtime-options";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
 import { cn } from "@/lib/cn";
@@ -109,6 +110,7 @@ import {
   PromptEditorWithPopover,
   SendButtonWithState,
 } from "./components/session-input-controls";
+import { SessionQueueList } from "./components/session-queue-list";
 import { SessionReferencesPopover } from "./components/session-references-popover";
 import { TaskConversation } from "./components/task-conversation";
 import { PathLinkScopeProvider } from "./components/use-path-link";
@@ -128,6 +130,7 @@ import {
   useProjectTasksStream,
   usePromptDraftPersistence,
   useSessionExecutionOptions,
+  useSessionQueueStream,
   useSessionRunController,
   useSessionSidebarState,
   useSessionTaskState,
@@ -141,6 +144,7 @@ import { useConversationFind } from "./hooks/use-conversation-find";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
 import type { PreparedPromptPayload } from "./hooks/use-single-session-controller";
+import { composerSubmitIntent } from "./lib/session-queue";
 import {
   getPromptEditorScopeState,
   usePromptEditorStore,
@@ -167,6 +171,12 @@ import {
   SESSION_DRAG_DATA_TYPE,
   parseSessionDragPayload,
 } from "./utils/session-dnd";
+import {
+  editQueuedMessage,
+  reorderSessionQueue,
+  sendQueuedMessageNow,
+  withdrawQueuedMessage,
+} from "./utils/task-message-api";
 
 // Stable empty document for the app-events stream: it carries no JSON-Patch
 // state, only fire-and-forget `ui_event` messages handled via `onMessage`.
@@ -591,6 +601,56 @@ export function SingleAgentSessionView({
     enabled: Boolean(activeStreamTaskId),
   });
 
+  const queuedMessages = useSessionQueueStream({
+    taskId: activeStreamTaskId,
+  });
+  const handleWithdrawQueued = useCallback(
+    (itemId: string) => {
+      if (!activeStreamTaskId) return;
+      void withdrawQueuedMessage(activeStreamTaskId, itemId).catch(() => {
+        // Already started or withdrawn elsewhere; the stream shows the truth.
+      });
+    },
+    [activeStreamTaskId],
+  );
+  // Queue edits report a refusal (the message started meanwhile, the queue
+  // changed under a drag) and rethrow so the list keeps the person's edit or
+  // drops its optimistic order; the stream shows the truth either way.
+  const reportQueueFailure = useCallback(
+    (error: unknown): never => {
+      addErrorMessage(error instanceof Error ? error.message : String(error));
+      throw error;
+    },
+    [addErrorMessage],
+  );
+  const handleEditQueued = useCallback(
+    async (itemId: string, prompt: string) => {
+      if (!activeStreamTaskId) return;
+      await editQueuedMessage(activeStreamTaskId, itemId, prompt).catch(
+        reportQueueFailure,
+      );
+    },
+    [activeStreamTaskId, reportQueueFailure],
+  );
+  const handleReorderQueue = useCallback(
+    async (itemIds: string[]) => {
+      if (!activeStreamTaskId) return;
+      await reorderSessionQueue(activeStreamTaskId, itemIds).catch(
+        reportQueueFailure,
+      );
+    },
+    [activeStreamTaskId, reportQueueFailure],
+  );
+  const handleSendQueuedNow = useCallback(
+    async (itemId: string) => {
+      if (!activeStreamTaskId) return;
+      await sendQueuedMessageNow(activeStreamTaskId, itemId).catch(
+        reportQueueFailure,
+      );
+    },
+    [activeStreamTaskId, reportQueueFailure],
+  );
+
   const selectedRun = useMemo(
     () => selectTargetTaskRun(taskRuns, routeRunSlug ?? undefined),
     [routeRunSlug, taskRuns],
@@ -667,15 +727,11 @@ export function SingleAgentSessionView({
     requestCancelSubmission,
     clearPendingSubmission,
   });
-  // Housekeeping reclaims expired worktrees, which nulls the run's workspace
-  // path. Every follow-up then dies in the backend with "workspace path missing
-  // on task run", so close the composer up front and say why, rather than
-  // letting the user type a prompt that can only fail.
+  // Housekeeping reclaims idle worktrees. The branch survives, and the next
+  // follow-up rebuilds the worktree from it, so the composer stays open and
+  // only says what sending will do.
   const isWorktreeCleanedUp = Boolean(activeRunRecord?.worktree_deleted);
-  const canSend =
-    Boolean(activeStreamTaskId || workspace) &&
-    !isSending &&
-    !isWorktreeCleanedUp;
+  const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
   // The runtime (Claude↔Codex↔Pi) can't change mid-session because resume
   // ids are executor-specific. Model overrides are applied to the next run;
   // Codex carries them through thread/fork and Pi/Claude pass them on resume.
@@ -924,7 +980,14 @@ export function SingleAgentSessionView({
       setSessionExecutorProfile((prev) => {
         const base = prev ?? executorProfileId;
         if (!base) return prev;
-        return { ...base, model };
+        return {
+          ...base,
+          model,
+          ...retainSupportedOverrides(base.executor, model, {
+            reasoning_effort: base.reasoning_effort ?? null,
+            speed: base.speed ?? null,
+          }),
+        };
       });
     },
     [executorProfileId, isModelLocked],
@@ -969,8 +1032,10 @@ export function SingleAgentSessionView({
             executor: option.executor,
             variant: base?.variant ?? null,
             model: option.value,
-            reasoning_effort: base?.reasoning_effort ?? null,
-            speed: base?.speed ?? null,
+            ...retainSupportedOverrides(option.executor, option.value, {
+              reasoning_effort: base?.reasoning_effort ?? null,
+              speed: base?.speed ?? null,
+            }),
           };
         }
         if (isExecutorLocked) return prev;
@@ -1113,7 +1178,7 @@ export function SingleAgentSessionView({
   );
   const showSpeed = speedOptions.length > 0;
 
-  const { submitPrompt } = useSingleSessionController({
+  const { submitPrompt, queuePrompt } = useSingleSessionController({
     workspace,
     routeProjectId,
     activeTaskId: activeStreamTaskId,
@@ -1198,7 +1263,18 @@ export function SingleAgentSessionView({
       return;
     }
 
-    if (isSending) {
+    const intent = composerSubmitIntent({
+      taskId: activeStreamTaskId,
+      turnInFlight: isSending,
+      waiting: queuedMessages.length,
+    });
+    if (intent === "hold") {
+      return;
+    }
+    if (intent === "queue") {
+      editor.clearWithSnapshot();
+      clearUploadItems();
+      await queuePrompt(payload);
       return;
     }
 
@@ -1238,9 +1314,11 @@ export function SingleAgentSessionView({
     isUploading,
     buildPromptPayload,
     isSending,
+    queuedMessages.length,
     clearUploadItems,
     setScrollToBottomSignal,
     submitPrompt,
+    queuePrompt,
     resolvePendingSubmission,
     routeTaskSlug,
   ]);
@@ -1777,6 +1855,13 @@ export function SingleAgentSessionView({
               <span>{t("sessionWorktreeCleanedNotice")}</span>
             </div>
           ) : null}
+          <SessionQueueList
+            items={queuedMessages}
+            onWithdraw={handleWithdrawQueued}
+            onEdit={handleEditQueued}
+            onReorder={handleReorderQueue}
+            onSendNow={handleSendQueuedNow}
+          />
           <ImageUploadPreviewList
             items={uploadItems}
             t={t}
@@ -1792,9 +1877,7 @@ export function SingleAgentSessionView({
             tasks={sortedTasks}
             atActiveIndex={atActiveIndex}
             onActiveIndexChange={setAtActiveIndex}
-            disabled={
-              (!workspace && !activeStreamTaskId) || isWorktreeCleanedUp
-            }
+            disabled={!workspace && !activeStreamTaskId}
             dropActive={fileDrag.isDragActive}
             onSubmit={handleSend}
             onDrop={handleDropFiles}
@@ -2153,6 +2236,7 @@ export function SingleAgentSessionView({
                 isSending={isSending}
                 isStopping={isStopping}
                 canSend={canSend}
+                canQueue={Boolean(activeStreamTaskId)}
                 isUploading={isUploading}
                 onSend={handleSend}
                 onCancel={handleCancel}

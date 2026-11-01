@@ -1,8 +1,8 @@
 # Chro CLI
 
-Run Chro in your browser without the desktop app, and manage tasks from the terminal.
+Run Chro in your browser without the desktop app, and drive its sessions from the terminal.
 
-The CLI downloads a platform-specific Rust binary (`chro-server`) from R2, starts it locally, and opens the web UI. Task subcommands talk to a running server over HTTP.
+The CLI downloads a platform-specific Rust binary (`chro-server`) from R2, starts it locally, and opens the web UI. The other commands drive a running server through its operator API.
 
 ## Install
 
@@ -18,77 +18,42 @@ Requires Node.js 18+.
 # 1. Start Chro (launches local server + opens browser UI)
 npx @chro-ai/cli
 
-# 2. Create a task and run an agent
-npx @chro-ai/cli task create "Add auth middleware" --prompt "Implement JWT auth"
+# 2. Start a session in the current repository
+npx @chro-ai/cli session new --prompt "Implement JWT auth"
 
-# 3. Watch progress
-npx @chro-ai/cli task logs <task-id>
+# 3. Wait for it, then read what it did
+npx @chro-ai/cli session wait <session> --for idle
+npx @chro-ai/cli session read <session>
 
 # 4. Merge when satisfied
-npx @chro-ai/cli task merge <task-id>
+npx @chro-ai/cli session merge <session>
 ```
 
 ## Commands
 
-### `chro`
+`chro-server` with no command starts the local server and web UI. Every other command talks to a running chro app or server. The desktop app ships the same commands as the `chro` binary and puts it on the PATH of every agent it starts.
 
-Start the local server and web UI. Equivalent to `chro dev`.
+| Command | What it does |
+|---|---|
+| `status` | Which server answers and who the caller is to it |
+| `open` | Start the desktop app and wait until it accepts commands |
+| `schema` | Every command, flag, selector, error code and exit code as JSON |
+| `project list / show / add` | Repositories and folders sessions run in |
+| `session list / show` | Sessions with their state (`idle`, `running`, `awaiting_input`), note, queue, parent and children |
+| `session new --prompt` | Start a session and its first turn |
+| `session delegate --prompt` | Hand work to a new session; the delegating session is woken with the results |
+| `session send --prompt` | Start a turn, or queue the message behind the running one |
+| `session wait --for idle\|input\|settled` | Block until the session reaches that state |
+| `session read [--since <cursor>]` | The conversation as entries; `--format markdown` for the transcript |
+| `session set --note / --title / --status` | Change a session; the note shows on its row |
+| `session unqueue <session> <message>` | Take a queued message back before it runs (id or 3+ character prefix, as listed by `session show`) |
+| `session fork / cancel / refs / diff / merge / rebase` | Branch, stop, inspect, and land a session |
+| `approval list / show / respond` | Answer tool calls and questions a session waits on |
+| `skill install / show` | Install the skill that teaches agents these commands |
 
-### `chro dev [--perf]`
+Selectors: a session is `self`, `parent`, a slug, a unique slug prefix of 3+ characters, or an id; a project is a slug, an id, or `path:<absolute dir>`. Inside a chro session, `self` is that session.
 
-Launch development services (Rust server + Vite). Pass `--perf` to enable performance recording to `log/performance/`.
-
-All `chro task` subcommands take a **task** identifier (UUID or slug). A task may have multiple runs (initial execution + follow-ups); operations target the latest run by default. Use `--run N` (1-indexed, chronological) to target a specific run.
-
-### `chro task list`
-
-List tasks for the current project (detected from CWD's git root).
-
-### `chro task create <title>`
-
-Create a new task and optionally start an agent run.
-
-| Flag | Description |
-|------|-------------|
-| `-d, --description` | Task description |
-| `--prompt` | Prompt for the agent |
-| `--no-run` | Create task only, skip agent execution |
-
-### `chro task status <task> [STATUS]`
-
-Show the task's run history, or update task status to one of: `pending`, `in_progress`, `blocked`, `completed`, `failed`, `cancelled`.
-
-### `chro task run <task> [-p, --prompt]`
-
-Start a new agent execution on an existing task.
-
-### `chro task logs <task>`
-
-Print the markdown transcript for the task (all runs combined, chronological order). Agents fetch this when a `<past_session>` tag references the task.
-
-### `chro task cancel <task> [-r, --run N]`
-
-Stop a running execution.
-
-### `chro task diff <task> [-r, --run N]`
-
-Show branch and commit range for a run.
-
-### `chro task merge <task> [-m, --message] [-r, --run N]`
-
-Merge run changes into the target branch.
-
-### `chro task rebase <task> [-o, --onto <branch>] [-r, --run N]`
-
-Rebase the run's branch onto a new base.
-
-### Global Options
-
-| Flag | Description |
-|------|-------------|
-| `-w, --project <path>` | Git repository path (default: CWD's git root) |
-| `--help` | Show help |
-| `-v, --version` | Show version |
+Output is one JSON envelope (`{"ok", "result" | "error", "meta"}`) when stdout is not a terminal; `--json` and `--human` override. Exit codes: 0 success, 1 server failure, 2 usage, 3 not found, 4 state conflict, 5 server unreachable, 6 wait timed out, 7 unauthorized or contract mismatch.
 
 ## How It Works
 
@@ -101,14 +66,14 @@ npx @chro-ai/cli
        │  verifies SHA-256 checksum
        ▼
   chro-server (Rust)
-       │  Axum web server on port 4310
-       │  SQLite database
+       │  Axum web server
+       │  SQLite database, runtime.json beside it
        │  manages Git worktrees for agent sandboxes
        ▼
   Browser UI (React SPA served by Vite or embedded)
 ```
 
-Task commands connect to a running server by reading the port from `$TMPDIR/chro/chro.port`.
+A running server writes `runtime.json` next to its database: its URL, process id, and the owner token that opens the operator API (`/v1`). Commands find the server through that file, skipping files whose process is gone. Agents started by chro get `CHRO_RUNTIME_FILE` and a per-turn `CHRO_SESSION_TOKEN`, so they reach the server that started them and act as their own session.
 
 ## Development
 
@@ -117,18 +82,14 @@ For contributors working on the CLI itself within the Chro repository.
 ### Run from source
 
 ```bash
-cd apps/cli
-cargo run                  # Start server + Vite (dev mode)
-cargo run -- task list     # Run task subcommands
-cargo run -- --perf        # Enable perf recording
+cargo run --manifest-path crates/server/Cargo.toml                         # Start the server
+cargo run --manifest-path crates/server/Cargo.toml --bin chro -- status    # Run a command
 ```
-
-The binary locates the repo root at runtime. Set `CHRO_REPO_ROOT` explicitly when running from outside the checkout.
 
 ### Test
 
 ```bash
-cargo test --manifest-path apps/cli/Cargo.toml
+cargo test --manifest-path crates/server/Cargo.toml
 ```
 
 ### Local build
@@ -155,9 +116,11 @@ sync.
 
 | Variable | Description |
 |----------|-------------|
-| `CHRO_API_URL` | Base URL of the server the `task` commands talk to. Set it to drive a server on another machine; the CLI then skips the local port file instead of expecting a server here |
-| `CHRO_API_TOKEN` | Bearer token sent with every request when `CHRO_API_URL` is set |
-| `CHRO_REPO_ROOT` | Override repo root detection |
+| `CHRO_API_URL` | Base URL of a server on another machine. Commands then skip local runtime files |
+| `CHRO_API_TOKEN` | Owner token of that server, sent as a bearer token |
+| `CHRO_OWNER_TOKEN` | Server side: use this owner token instead of generating one per start, for servers whose clients are configured out of band |
+| `CHRO_RUNTIME_FILE` | Runtime file to use first; chro sets it for every agent it starts |
+| `CHRO_USER_DATA_DIR` | Directory of the desktop app's data, and so of its runtime file |
 | `CHRO_SERVER_READY_TIMEOUT_SECS` | Server startup timeout (default: 120) |
 | `CHRO_LOCAL` | Set to `1` to use locally built binaries in `npx-cli/dist/` |
 | `CHRO_DEBUG` | Enable debug output in the npm wrapper |
@@ -166,24 +129,24 @@ sync.
 
 ```bash
 export CHRO_API_URL=https://your-host.example
-chro --project /path/on/that/host task list
+export CHRO_API_TOKEN=…   # that server's owner token
+chro session list --project path:/path/on/that/host
 ```
 
-The `task` subcommands then run against that server, and nothing is started
-locally. Pass `--project` with a path **on that machine**: the project is
-resolved from a git repository the server can see, not from your working
-directory.
+Commands then run against that server, and nothing is started locally. Name
+projects by paths **on that machine**: the server resolves them, not your
+working directory.
 
 ### Instances managed by a control plane
 
 Built only with `--features cloud`, so it is absent from released binaries.
 A control plane creates the machine and hands back its address; the ordinary
-`task` commands then target it without `CHRO_API_URL` being set by hand.
+commands then target it without `CHRO_API_URL` being set by hand.
 
 ```bash
 CHRO_CLOUD_TOKEN=… chro cloud login https://control-plane.example
 chro cloud up            # create on first use, wake afterwards
-chro task list           # runs against the instance
+chro session list        # runs against the instance
 chro cloud down          # stop, keeping the disk
 ```
 

@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import type {
+  AnnotationsAttachmentPart,
   ContentPart,
   ContextEntry,
   FileAttachmentPart,
+  PageAnnotations,
   Prompt,
   SessionAttachmentPart,
   SkillAttachmentPart,
@@ -11,13 +13,48 @@ import type {
 } from "../types/context";
 import {
   DEFAULT_PROMPT,
+  annotationsDisplayContent,
   getContextEntries,
   getSkillEntries,
+  isPageAnnotation,
   shortSessionId,
 } from "../types/context";
 
 const ZERO_WIDTH_SPACE = "\u200B";
 const DEFAULT_PROMPT_SCOPE_ID = "default";
+
+const VIEWPORT_DATASET_RE = /^(\d+)x(\d+)$/;
+
+/**
+ * Rebuild an annotations part from its pill. The notes travel as JSON in the
+ * dataset; a payload that fails the shape check yields null so the pill is
+ * read as its plain label instead of sending garbage to the agent.
+ */
+function parseAnnotationsPill(
+  el: HTMLElement,
+  offset: number,
+): AnnotationsAttachmentPart | null {
+  const { path, notes: notesJson, viewport } = el.dataset;
+  if (!path || !notesJson) return null;
+  let notes: unknown;
+  try {
+    notes = JSON.parse(notesJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(notes) || !notes.every(isPageAnnotation)) return null;
+  const size = viewport?.match(VIEWPORT_DATASET_RE);
+  const content = el.textContent ?? "";
+  return {
+    type: "annotations",
+    content,
+    path,
+    viewport: size ? { width: Number(size[1]), height: Number(size[2]) } : null,
+    notes,
+    start: offset,
+    end: offset + content.length,
+  };
+}
 
 /**
  * Recursively parse contenteditable DOM into ContentPart array.
@@ -93,6 +130,16 @@ export function parseFromDOM(root: HTMLElement): Prompt {
       parts.push(part);
       offset += displayText.length;
       return;
+    }
+
+    if (el.dataset.type === "annotations") {
+      const part = parseAnnotationsPill(el, offset);
+      if (part) {
+        flush();
+        parts.push(part);
+        offset += part.content.length;
+        return;
+      }
     }
 
     if (el.dataset.type === "skill" && el.dataset.skillId) {
@@ -171,6 +218,8 @@ function promptDisplayContent(part: ContentPart): string {
       );
     case "skill":
       return part.content || `#${part.name}`;
+    case "annotations":
+      return part.content || annotationsDisplayContent(part);
     case "text":
       return part.content;
   }
@@ -200,9 +249,51 @@ function createAttachmentPill(
       pill.dataset.skillId = part.id;
       pill.dataset.skillName = part.name;
       break;
+    case "annotations":
+      pill.dataset.type = "annotations";
+      pill.dataset.path = part.path;
+      pill.dataset.notes = JSON.stringify(part.notes);
+      if (part.viewport) {
+        pill.dataset.viewport = `${part.viewport.width}x${part.viewport.height}`;
+      }
+      pill.title = part.notes
+        .map((note, index) => `${index + 1}. ${note.comment}`)
+        .join("\n");
+      break;
   }
 
   return pill;
+}
+
+/**
+ * Append an attachment after the existing draft, set apart from the words
+ * before it and followed by a space so the caret lands past it, then restamp
+ * every offset to the displayed text.
+ */
+function appendAttachment(
+  prompt: Prompt,
+  attachment: Exclude<ContentPart, TextPart>,
+): Prompt {
+  const kept = prompt.filter(
+    (part) => part.type !== "text" || part.content.length > 0,
+  );
+  const last = kept[kept.length - 1];
+  if (last?.type === "text" && !/\s$/.test(last.content)) {
+    kept[kept.length - 1] = { ...last, content: `${last.content} ` };
+  }
+  const trailingSpace: TextPart = {
+    type: "text",
+    content: " ",
+    start: 0,
+    end: 0,
+  };
+  let offset = 0;
+  return [...kept, attachment, trailingSpace].map((part): ContentPart => {
+    const length = promptDisplayContent(part).length;
+    const stamped = { ...part, start: offset, end: offset + length };
+    offset += length;
+    return stamped;
+  });
 }
 
 function renderPromptIntoDOM(editor: HTMLElement, prompt: Prompt) {
@@ -557,6 +648,12 @@ export interface PromptEditorHandle {
   addFilePart: (path: string, isFile: boolean, branch?: string | null) => void;
   addSessionPart: (taskId: string, branch?: string | null) => void;
   addSkillPart: (id: string, name: string) => void;
+  /**
+   * Append the comments of one annotation pass. Works whether or not the
+   * composer is mounted: the store is the source of truth and a mounted editor
+   * is re-rendered from it, so another pane can fill an inactive session.
+   */
+  addAnnotationsPart: (page: PageAnnotations) => void;
   /** Remove the active "@…" trigger text without inserting a pill. */
   removeActiveTrigger: (options?: { keepPopoverOpen?: boolean }) => void;
 }
@@ -572,6 +669,15 @@ function getScopePrompt(scopeId: string): Prompt {
 
 function setActiveScope(scopeId: string) {
   activeScopeId = scopeId;
+}
+
+/**
+ * Scope of the composer the user interacted with last, or null before any.
+ * Lets another pane address "the session I was just in" without that session
+ * being focused or even mounted.
+ */
+export function getActivePromptScopeId(): string | null {
+  return activeScopeId;
 }
 
 /**
@@ -774,6 +880,22 @@ export function getPromptEditorHandle(
       );
     },
 
+    addAnnotationsPart: (page: PageAnnotations) => {
+      const part: AnnotationsAttachmentPart = {
+        type: "annotations",
+        content: annotationsDisplayContent(page),
+        path: page.path,
+        viewport: page.viewport,
+        notes: page.notes,
+        start: 0,
+        end: 0,
+      };
+      usePromptEditorStore
+        .getState()
+        .setPrompt(scopeId, appendAttachment(getScopePrompt(scopeId), part));
+      handle.syncDomFromStore();
+    },
+
     removeActiveTrigger: (options) => {
       removeActiveAtTrigger(scopeId, editorRef.current, options);
     },
@@ -781,6 +903,35 @@ export function getPromptEditorHandle(
 
   handlesByScope.set(scopeId, handle);
   return handle;
+}
+
+/** A file or directory dragged onto a composer. Paths are workspace-relative. */
+export interface DroppedFileReference {
+  path: string;
+  isDir: boolean;
+}
+
+/**
+ * Insert file pills into the composer whose editor element is `target`, at the
+ * caret nearest the drop point. The composer is resolved from the element, not
+ * from the last active scope, so a drop lands in the pane the user aimed at.
+ * Returns false when `target` is not a mounted composer.
+ */
+export function dropFileReferences(
+  target: Element,
+  references: readonly DroppedFileReference[],
+  clientX: number,
+  clientY: number,
+): boolean {
+  const handle = [...handlesByScope.values()].find(
+    (candidate) => candidate.editorRef.current === target,
+  );
+  if (!handle) return false;
+  handle.setCursorFromPoint(clientX, clientY);
+  for (const reference of references) {
+    handle.addFilePart(reference.path, !reference.isDir);
+  }
+  return true;
 }
 
 function activeHandle(): PromptEditorHandle {
@@ -830,6 +981,7 @@ export function getActivePromptEditorHandle(): PromptEditorHandle {
     addSessionPart: (taskId, branch) =>
       activeHandle().addSessionPart(taskId, branch),
     addSkillPart: (id, name) => activeHandle().addSkillPart(id, name),
+    addAnnotationsPart: (page) => activeHandle().addAnnotationsPart(page),
     removeActiveTrigger: (options) =>
       activeHandle().removeActiveTrigger(options),
   };

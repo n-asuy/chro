@@ -24,8 +24,16 @@ function resetStore() {
   useLayoutStore.setState({
     projectId: null,
     layout: createInitialLayout(),
-    closeFocusTargets: {},
+    focusHistory: [],
   });
+}
+
+function focusedTabId(): string | null {
+  const { layout } = useLayoutStore.getState();
+  return (
+    allLeaves(layout.root).find((leaf) => leaf.id === layout.focusedPaneId)
+      ?.activeTabId ?? null
+  );
 }
 
 describe("useLayoutStore", () => {
@@ -52,7 +60,7 @@ describe("useLayoutStore", () => {
     expect(focusedTab?.kind).toEqual({ type: "session", taskId: "task-1" });
   });
 
-  it("restores the previously focused tab when a return-focus tab closes", () => {
+  it("restores the previously focused tab when a refocused tab closes", () => {
     const store = useLayoutStore.getState();
     const sessionId = store.openTab({ type: "session", taskId: "task-1" });
     const diffId = store.openTab({ type: "diff", runId: "run-1" });
@@ -61,12 +69,7 @@ describe("useLayoutStore", () => {
     const leafId = useLayoutStore.getState().layout.focusedPaneId;
     useLayoutStore.getState().setActiveTab(leafId, sessionId);
     expect(
-      useLayoutStore
-        .getState()
-        .openTab(
-          { type: "diff", runId: "run-1" },
-          { returnFocusOnClose: true },
-        ),
+      useLayoutStore.getState().openTab({ type: "diff", runId: "run-1" }),
     ).toBe(diffId);
 
     useLayoutStore.getState().closeTab(diffId);
@@ -140,10 +143,7 @@ describe("useLayoutStore", () => {
   it("returns to the previous screen after a transient file tab closes", () => {
     const store = useLayoutStore.getState();
     const sessionId = store.openTab({ type: "session", taskId: "task-1" });
-    const fileId = store.openTab(
-      { type: "file", path: "preview.html" },
-      { returnFocusOnClose: true },
-    );
+    const fileId = store.openTab({ type: "file", path: "preview.html" });
 
     useLayoutStore.getState().closeTab(fileId);
 
@@ -154,5 +154,92 @@ describe("useLayoutStore", () => {
 
     expect(focusedLeaf?.activeTabId).toBe(sessionId);
     expect(focusedLeaf?.tabs.some((tab) => tab.id === fileId)).toBe(false);
+  });
+
+  it("returns to the previously viewed tab, not the positional neighbor", () => {
+    const store = useLayoutStore.getState();
+    const a = store.openTab({ type: "session", taskId: "task-a" });
+    store.openTab({ type: "session", taskId: "task-b" });
+    const c = store.openTab({ type: "session", taskId: "task-c" });
+    const leafId = useLayoutStore.getState().layout.focusedPaneId;
+    useLayoutStore.getState().setActiveTab(leafId, a);
+    useLayoutStore.getState().setActiveTab(leafId, c);
+
+    useLayoutStore.getState().closeTab(c);
+
+    expect(focusedTabId()).toBe(a);
+  });
+
+  it("walks back through the focus history on repeated closes", () => {
+    const store = useLayoutStore.getState();
+    const a = store.openTab({ type: "session", taskId: "task-a" });
+    const b = store.openTab({ type: "session", taskId: "task-b" });
+    const c = store.openTab({ type: "session", taskId: "task-c" });
+    const d = store.openTab({ type: "session", taskId: "task-d" });
+    const leafId = useLayoutStore.getState().layout.focusedPaneId;
+    for (const id of [b, d, a])
+      useLayoutStore.getState().setActiveTab(leafId, id);
+
+    useLayoutStore.getState().closeTab(a);
+    expect(focusedTabId()).toBe(d);
+    useLayoutStore.getState().closeTab(d);
+    expect(focusedTabId()).toBe(b);
+    useLayoutStore.getState().closeTab(b);
+    expect(focusedTabId()).toBe(c);
+  });
+
+  it("returns focus to the previous pane when the closed tab was opened from it", () => {
+    const store = useLayoutStore.getState();
+    const session = store.openTab({ type: "session", taskId: "task-a" });
+    const file = store.openTab({ type: "file", path: "notes.md" });
+    const sessionLeaf = useLayoutStore.getState().layout.focusedPaneId;
+    useLayoutStore.getState().splitWithTab(file, sessionLeaf, "right");
+    const other = useLayoutStore.getState().openTab({ type: "browser" });
+    useLayoutStore.getState().setActiveTab(sessionLeaf, session);
+    const fileLeaf = allLeaves(useLayoutStore.getState().layout.root).find(
+      (leaf) => leaf.tabs.some((tab) => tab.id === file),
+    )!;
+    useLayoutStore.getState().setActiveTab(fileLeaf.id, file);
+
+    useLayoutStore.getState().closeTab(file);
+
+    const { layout } = useLayoutStore.getState();
+    expect(layout.focusedPaneId).toBe(sessionLeaf);
+    expect(focusedTabId()).toBe(session);
+    expect(
+      allLeaves(layout.root).find((leaf) => leaf.id === fileLeaf.id)
+        ?.activeTabId,
+    ).toBe(other);
+  });
+
+  it("keeps focus where it is when an unfocused tab closes", () => {
+    const store = useLayoutStore.getState();
+    const a = store.openTab({ type: "session", taskId: "task-a" });
+    const b = store.openTab({ type: "session", taskId: "task-b" });
+    const leafId = useLayoutStore.getState().layout.focusedPaneId;
+    useLayoutStore.getState().setActiveTab(leafId, a);
+
+    useLayoutStore.getState().closeTab(b);
+
+    expect(focusedTabId()).toBe(a);
+  });
+
+  it("falls back to the neighbor when no earlier tab was viewed", () => {
+    const store = useLayoutStore.getState();
+    store.bindProject("project-a");
+    store.openTab({ type: "session", taskId: "task-a" });
+    const b = store.openTab({ type: "session", taskId: "task-b" });
+    const c = store.openTab({ type: "session", taskId: "task-c" });
+    const saved = useLayoutStore.getState().layout;
+    store.unbind();
+    persistenceMock.loadedLayout = {
+      ...saved,
+      root: { ...saved.root, activeTabId: b } as PaneLayout["root"],
+    };
+    store.bindProject("project-a");
+
+    useLayoutStore.getState().closeTab(b);
+
+    expect(focusedTabId()).toBe(c);
   });
 });

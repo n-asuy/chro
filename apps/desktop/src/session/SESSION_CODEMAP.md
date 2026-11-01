@@ -75,7 +75,7 @@ Generated at: 2026-08-03T11:57:33.056Z
 | `apps/desktop/src/session/hooks/use-project-tasks-stream.ts` | useProjectTasksStream, UseProjectTasksStreamResult | - |
 | `apps/desktop/src/session/hooks/use-prompt-draft-persistence.ts` | usePromptDraftPersistence | - |
 | `apps/desktop/src/session/hooks/use-prompt-editor.ts` | parseFromDOM, usePromptEditor, usePromptEditorHandle, UsePromptEditorResult | - |
-| `apps/desktop/src/session/hooks/use-prompt-queue-controller.ts` | QueuedPromptItem, usePromptQueueController | - |
+| `apps/desktop/src/session/hooks/use-session-queue-stream.ts` | useSessionQueueStream | - |
 | `apps/desktop/src/session/hooks/use-proximity-hover.ts` | ItemRect, useProximityHover | - |
 | `apps/desktop/src/session/hooks/use-session-execution-options.ts` | useSessionExecutionOptions | - |
 | `apps/desktop/src/session/hooks/use-session-read-state.ts` | useMarkViewedWhenActive, useSessionReadSync, useTaskStatusDot | - |

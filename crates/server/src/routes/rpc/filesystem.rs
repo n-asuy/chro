@@ -1,8 +1,9 @@
 //! Filesystem API routes for directory browsing.
 
 use axum::{
-    extract::{Path, Query, State},
-    response::Response,
+    extract::{Path, Query, State, WebSocketUpgrade},
+    http::HeaderMap,
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -16,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::asset_response::{stream_asset_response, AssetQuery};
-use super::path_resolve::{read_binary_resolving, read_text_resolving, stream_binary_response};
+use super::path_resolve::{
+    read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
+};
+use super::workspace::handle_file_events_ws;
 use crate::{format_system_time, ApiError, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -216,10 +220,57 @@ async fn read_workspace_file(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct WriteWorkspaceFileRequest {
+    /// Absolute path to the workspace root containing the file.
+    abs_path: String,
+    /// Path to the file relative to `abs_path`.
+    relative_path: String,
+    content: String,
+}
+
+/// Write a text file under an absolute workspace root.
+async fn write_workspace_file(
+    State(state): State<AppState>,
+    Json(payload): Json<WriteWorkspaceFileRequest>,
+) -> Result<Json<WorkspaceFileEnvelope>, ApiError> {
+    if payload.relative_path.trim().is_empty() {
+        return Err(ApiError::BadRequest("relative_path is required".into()));
+    }
+    let abs_path = resolve_workspace_root(&payload.abs_path)?;
+    let root_str = abs_path.to_string_lossy().to_string();
+    let resolved = require_internal(&payload.relative_path, &root_str)?;
+    let file = ProjectFileService::new(state.runtime(), abs_path)
+        .write_file(&resolved, &payload.content)
+        .await?;
+
+    Ok(Json(WorkspaceFileEnvelope {
+        file: WorkspaceFileResponse::from(file),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceRootQuery {
+    /// Absolute path to the workspace root being watched.
+    abs_path: String,
+}
+
+/// WebSocket stream of file change events under an absolute workspace root.
+async fn stream_workspace_file_events(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceRootQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let abs_path = resolve_workspace_root(&query.abs_path)?;
+    let events = state.runtime().subscribe_workspace_file_events(abs_path);
+    Ok(ws.on_upgrade(move |socket| handle_file_events_ws(socket, events)))
+}
+
 /// Read a binary file from any absolute workspace root.
 async fn read_workspace_binary_file(
     State(state): State<AppState>,
     Query(query): Query<WorkspaceFileQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if query.relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest(
@@ -232,7 +283,7 @@ async fn read_workspace_binary_file(
     let binary_file =
         read_binary_resolving(&service, &query.relative_path, &[root_str.as_str()]).await?;
 
-    stream_binary_response(binary_file, "private, max-age=3600").await
+    stream_binary_response(binary_file, "private, max-age=3600", &headers).await
 }
 
 /// Path-based asset endpoint for HTML preview from arbitrary workspace roots.
@@ -242,6 +293,7 @@ async fn read_workspace_asset(
     State(state): State<AppState>,
     Path((encoded_root, relative_path)): Path<(String, String)>,
     Query(asset_query): Query<AssetQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if relative_path.trim().is_empty() {
         return Err(ApiError::BadRequest("asset path is required".into()));
@@ -256,7 +308,7 @@ async fn read_workspace_asset(
     let service = ProjectFileService::new(state.runtime(), abs_path);
     let binary_file = read_binary_resolving(&service, &relative_path, &[root_str.as_str()]).await?;
 
-    stream_asset_response(binary_file, &asset_query).await
+    stream_asset_response(binary_file, &asset_query, &headers).await
 }
 
 pub(super) fn router() -> Router<AppState> {
@@ -264,7 +316,14 @@ pub(super) fn router() -> Router<AppState> {
         .route("/filesystem/directory", get(list_directory))
         .route("/filesystem/cwd", get(current_directory))
         .route("/filesystem/workspace-entries", get(list_workspace_entries))
-        .route("/filesystem/workspace-file", get(read_workspace_file))
+        .route(
+            "/filesystem/workspace-file",
+            get(read_workspace_file).put(write_workspace_file),
+        )
+        .route(
+            "/filesystem/workspace-file-events",
+            get(stream_workspace_file_events),
+        )
         .route(
             "/filesystem/workspace-binary-file",
             get(read_workspace_binary_file),

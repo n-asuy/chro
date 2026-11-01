@@ -18,6 +18,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { normalizeFilePathHref } from "./file-path-utils";
+import {
+  attachedImagePath,
+  localImageSource,
+  remoteImageSource,
+} from "./markdown-image-source";
 import { remarkWikilink } from "./remark-wikilink";
 import { useOpenPathLink, usePathLink } from "./use-path-link";
 import { resolveWebUrl } from "./web-address";
@@ -420,57 +425,36 @@ type MarkdownImageProps = {
   localImages?: LocalImageMetadata[];
 };
 
-const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
-  const { data: metadata, isLoading } = useImageMetadata(
-    src ?? "",
-    localImages,
-  );
-  const isChroImage = src?.startsWith(".chro-context/");
+const ImagePlaceholder = ({ label }: { label: string }) => (
+  <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
+    <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
+      <HelpCircle className="h-5 w-5 text-muted-foreground" />
+    </span>
+    <span className="flex min-w-0 flex-col">
+      <span className="max-w-[120px] truncate text-xs text-muted-foreground">
+        {truncatePath(label)}
+      </span>
+    </span>
+  </span>
+);
 
-  if (isChroImage && src) {
-    if (isLoading) {
-      return (
-        <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
-          <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </span>
-          <span className="flex min-w-0 flex-col">
-            <span className="max-w-[120px] truncate text-xs text-muted-foreground">
-              {truncatePath(alt || src)}
-            </span>
-          </span>
-        </span>
-      );
-    }
+/** An image the user attached to their message (`[<worktree>/].chro-context/<id>.png`). */
+const AttachedImage = ({
+  src,
+  alt,
+  localImages,
+}: {
+  src: string;
+  alt?: string;
+  localImages?: LocalImageMetadata[];
+}) => {
+  const { data: metadata, isLoading } = useImageMetadata(src, localImages);
 
-    if (metadata?.exists && metadata.proxy_url) {
-      return (
-        <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
-          <img
-            src={metadata.proxy_url}
-            alt={alt ?? ""}
-            className="h-10 w-10 flex-shrink-0 rounded object-cover"
-            draggable={false}
-          />
-          <span className="flex min-w-0 flex-col">
-            <span className="max-w-[120px] truncate text-xs text-muted-foreground">
-              {truncatePath(metadata.file_name || alt || src)}
-            </span>
-            {metadata.format && (
-              <span className="max-w-[120px] truncate text-[10px] text-muted-foreground/70">
-                {metadata.format.toUpperCase()}
-              </span>
-            )}
-          </span>
-        </span>
-      );
-    }
-
-    // Chro image but not found - show placeholder
+  if (isLoading) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
         <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
-          <HelpCircle className="h-5 w-5 text-muted-foreground" />
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
         </span>
         <span className="flex min-w-0 flex-col">
           <span className="max-w-[120px] truncate text-xs text-muted-foreground">
@@ -481,19 +465,80 @@ const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
     );
   }
 
-  // Non-chro image: show placeholder with path
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
-      <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
-        <HelpCircle className="h-5 w-5 text-muted-foreground" />
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="max-w-[120px] truncate text-xs text-muted-foreground">
-          {truncatePath(alt || src || "image")}
+  if (metadata?.exists && metadata.proxy_url) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
+        <img
+          src={metadata.proxy_url}
+          alt={alt ?? ""}
+          className="h-10 w-10 flex-shrink-0 rounded object-cover"
+          draggable={false}
+        />
+        <span className="flex min-w-0 flex-col">
+          <span className="max-w-[120px] truncate text-xs text-muted-foreground">
+            {truncatePath(metadata.file_name || alt || src)}
+          </span>
+          {metadata.format && (
+            <span className="max-w-[120px] truncate text-[10px] text-muted-foreground/70">
+              {metadata.format.toUpperCase()}
+            </span>
+          )}
         </span>
       </span>
-    </span>
+    );
+  }
+
+  return <ImagePlaceholder label={alt || src} />;
+};
+
+/**
+ * An image the agent wrote into its reply: a web image, or a local file it
+ * produced (`![before / after](/tmp/compare.png)`). Shown at reading size, since
+ * it is the content rather than a reference to it. A local file opens in the
+ * editor on click.
+ */
+const AgentImage = ({ src, alt }: { src: string; alt?: string }) => {
+  const remote = remoteImageSource(src);
+  const target = usePathLink(remote ? null : normalizeFilePathHref(src));
+  const openPathLink = useOpenPathLink();
+  const url = remote ?? localImageSource(target);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+
+  if (!url || failedUrl === url) {
+    return <ImagePlaceholder label={alt || src} />;
+  }
+
+  const image = (
+    <img
+      src={url}
+      alt={alt ?? ""}
+      title={alt || undefined}
+      loading="lazy"
+      className="block max-h-[480px] max-w-full rounded-md border border-border/50 object-contain"
+      draggable={false}
+      onError={() => setFailedUrl(url)}
+    />
   );
+
+  if (!target) return image;
+
+  return (
+    <button
+      type="button"
+      className="block max-w-full cursor-zoom-in text-left"
+      onClick={() => openPathLink(target)}
+    >
+      {image}
+    </button>
+  );
+};
+
+const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
+  if (!src) return <ImagePlaceholder label={alt || "image"} />;
+  if (attachedImagePath(src)) {
+    return <AttachedImage src={src} alt={alt} localImages={localImages} />;
+  }
+  return <AgentImage src={src} alt={alt} />;
 };
 
 /**

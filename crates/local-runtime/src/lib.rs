@@ -29,6 +29,7 @@ use worktree::WorktreeManager;
 mod container;
 mod housekeeping;
 pub(crate) mod log_writer;
+pub mod session_tokens;
 mod transcript;
 use container::LocalContainerService;
 use housekeeping::spawn_housekeeping_tasks;
@@ -301,10 +302,11 @@ impl Runtime for LocalRuntime {
 
         runtime.start_background_housekeeping();
 
-        // Close the delegation loop from the broker's completion moment: when
-        // a run finishes (after its auto-commit), the delegating session gets
-        // its handoff edge and wake. Wired here because the container cannot
-        // depend on the runtime it lives in.
+        // Settle from the broker's completion moment: when a run finishes
+        // (after its auto-commit), the delegating session gets its handoff
+        // edge and wake, and the finished session takes its next queued
+        // message. Wired here because the container cannot depend on the
+        // runtime it lives in.
         {
             let hook_runtime = runtime.clone();
             runtime
@@ -313,13 +315,13 @@ impl Runtime for LocalRuntime {
                     let hook_runtime = hook_runtime.clone();
                     tokio::spawn(async move {
                         if let Err(err) = runtime::TaskService::new(&hook_runtime)
-                            .settle_delegation_handoff(run_id)
+                            .settle_after_run(run_id)
                             .await
                         {
                             tracing::warn!(
                                 %run_id,
                                 error = %err,
-                                "delegation handoff settlement failed"
+                                "post-run settlement failed"
                             );
                         }
                     });
@@ -601,6 +603,12 @@ impl Runtime for LocalRuntime {
 }
 
 impl LocalRuntime {
+    /// Credentials of the turns currently running. The operator API resolves
+    /// an agent's bearer token through this.
+    pub fn session_tokens(&self) -> &session_tokens::SessionTokens {
+        self.container.session_tokens()
+    }
+
     fn start_background_housekeeping(&self) {
         spawn_housekeeping_tasks(self.clone());
     }

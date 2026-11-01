@@ -32,7 +32,7 @@ beforeEach(() => {
   useLayoutStore.setState({
     projectId: "project-a",
     layout: createInitialLayout(),
-    closeFocusTargets: {},
+    focusHistory: [],
   });
   renderToStaticMarkup(<Capture />);
 });

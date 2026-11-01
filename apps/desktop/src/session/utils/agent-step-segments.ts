@@ -57,7 +57,9 @@ export function segmentConversationEntries(
   let run: NormalizedDisplayEntry[] = [];
   // The latest reasoning prose seen in this turn. Tool-only runs (the agent
   // narrated in an assistant message, then ran tools) inherit it so their
-  // header stays prose instead of a raw command.
+  // header stays prose instead of a raw command. A run holding only the
+  // loading sentinel does not: it trails the answer being streamed, and
+  // inheriting would repeat the header of the run right above it.
   let carriedThinkingSummary: string | null = null;
 
   const flushRun = () => {
@@ -78,13 +80,16 @@ export function segmentConversationEntries(
       toolSummary ??= summary;
     }
     if (thinkingSummary) carriedThinkingSummary = thinkingSummary;
+    const inheritedSummary = run.every(isLoadingEntry)
+      ? null
+      : carriedThinkingSummary;
 
     segments.push({
       type: "THINKING_STEPS",
       entries: run,
       live: isLoadingEntry(last) || awaitingApproval,
       awaitingApproval,
-      label: thinkingSummary ?? carriedThinkingSummary ?? toolSummary,
+      label: thinkingSummary ?? inheritedSummary ?? toolSummary,
       key: `steps:${run[0]!.key}`,
     });
     run = [];

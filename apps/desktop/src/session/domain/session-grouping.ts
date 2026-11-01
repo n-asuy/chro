@@ -162,6 +162,40 @@ export function sortPinnedSessions(
 }
 
 /**
+ * Rows a long section shows before folding the rest behind "Show N more".
+ * Folding only pays off when it hides at least two rows: the control is as
+ * tall as a row, so hiding exactly one would save nothing.
+ */
+export const SESSION_PREVIEW_LIMIT = 5;
+
+export interface SessionPreview {
+  /** Rows to render, in the caller's order. */
+  visible: StoredTask[];
+  /** Rows folded away; 0 means the section is shown in full. */
+  hiddenCount: number;
+}
+
+/**
+ * Fold a section down to its first rows. The focused session and sessions
+ * waiting on the user stay visible wherever they sit, at their original
+ * position, so folding never hides where the user is or what blocks on them.
+ */
+export function previewSessions(
+  tasks: readonly StoredTask[],
+  isActive: (task: StoredTask) => boolean,
+): SessionPreview {
+  const visible = tasks.filter(
+    (task, index) =>
+      index < SESSION_PREVIEW_LIMIT ||
+      isActive(task) ||
+      deriveSessionState(task) === "needs_input",
+  );
+  const hiddenCount = tasks.length - visible.length;
+  if (hiddenCount < 2) return { visible: [...tasks], hiddenCount: 0 };
+  return { visible, hiddenCount };
+}
+
+/**
  * Membership test for the cross-project inbox. A session belongs when its
  * owning project is open in the workspace, or when it is a scratch ("General")
  * session that surfaces without its project ever being registered in the

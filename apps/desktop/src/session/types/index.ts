@@ -37,6 +37,9 @@ export type StoredTask = {
   /** Title of the session that delegated this one, snapshotted at delegation
    * time. Same provenance contract as `forked_from_title`. */
   delegated_from_title?: string | null;
+  /** Id of the session that delegated this one, from the same delegate edge.
+   * Lets the session list count a task's running delegated sessions. */
+  delegated_from_id?: string | null;
   /** True once housekeeping has reclaimed the run's isolated worktree. The
    * session turns read-only: its workspace path is gone, so it can no longer be
    * continued, merged or rebased — only its history remains readable. */
@@ -45,4 +48,19 @@ export type StoredTask = {
    * (`""` is the root). Set when dispatched from a directory, otherwise
    * derived from the first auto-commit. Null until either happens. */
   home_dir?: string | null;
+  /** Short status line the session's agent or a person set with
+   * `chro session set --note`. Null until someone sets it. */
+  note?: string | null;
+};
+
+/** A message waiting in a session's queue (`session_queue`). Queued from the
+ * composer, the terminal or by agents while a turn runs; it becomes the next
+ * turn when the session is idle again. */
+export type SessionQueueItem = {
+  id: string;
+  task_id: string;
+  prompt: string;
+  /** Place in the queue: lower goes first. A person can reorder it. */
+  seq: number;
+  created_at: string;
 };

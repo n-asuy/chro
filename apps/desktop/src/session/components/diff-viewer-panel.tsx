@@ -1,4 +1,5 @@
-import { isImagePath } from "@/files/media-types";
+import { MergeDiffEditor } from "@/files/components/editor/merge-diff/merge-diff-editor";
+import { isImagePath, isProsePath } from "@/files/media-types";
 import { useFilesStore } from "@/files/state/files-store";
 import { useLanguage } from "@/i18n";
 import { getTaskRunBinaryFileUrl } from "@/lib/project-client";
@@ -16,6 +17,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronRight,
   ChevronUp,
+  ExternalLink,
   FileText,
   Image as ImageIcon,
   Loader2,
@@ -38,6 +40,8 @@ const DIFF_ROW_OVERSCAN = 2;
 type DiffViewerPanelProps = {
   onClose: () => void;
   diffs: { path: string; diff: DiffContent }[];
+  /** Project whose checkout (or session worktree) the changed files live in. */
+  projectId?: string | null;
   taskRunId?: string | null;
   /** The initial snapshot has not arrived yet; distinct from "no changes". */
   isLoading?: boolean;
@@ -83,6 +87,7 @@ type DiffCardProps = {
   expanded: boolean;
   onToggle: () => void;
   viewMode: "unified" | "split";
+  projectId?: string | null;
   taskRunId?: string | null;
 };
 
@@ -130,6 +135,7 @@ function DiffCard({
   expanded,
   onToggle,
   viewMode,
+  projectId,
   taskRunId,
 }: DiffCardProps) {
   const path = item.path;
@@ -152,9 +158,12 @@ function DiffCard({
   });
   const isTooLargeToRender =
     oldContent.length + newContent.length > MAX_RENDERED_DIFF_BYTES;
+  // Prose diffs are documents to keep writing in, not code to review: they
+  // render as an editor on the working file instead of a patch listing.
+  const isProse = isProsePath(path) && !diff.is_binary;
 
   const diffFile = useMemo(() => {
-    if (!shouldBuild) {
+    if (!shouldBuild || isProse) {
       return null;
     }
     try {
@@ -172,8 +181,9 @@ function DiffCard({
       console.error("Failed to build diff", e);
       return null;
     }
-  }, [shouldBuild, oldContent, newContent, path, lang]);
+  }, [shouldBuild, isProse, oldContent, newContent, path, lang]);
 
+  const openFile = useFilesStore((s) => s.openFile);
   const add = diffFile?.additionLength ?? diff.additions ?? 0;
   const del = diffFile?.deletionLength ?? diff.deletions ?? 0;
   const PathIcon = isImage ? ImageIcon : FileText;
@@ -211,6 +221,18 @@ function DiffCard({
             </>
           )}
         </p>
+        {diff.change !== "deleted" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => openFile(`/${path}`, taskRunId ?? undefined)}
+            className="ml-2 h-6 w-6 p-0"
+            title="Open file"
+            aria-label={`Open ${path}`}
+          >
+            <ExternalLink className="h-3 w-3" />
+          </Button>
+        )}
       </div>
 
       {expanded && isImage && taskRunId && (
@@ -229,6 +251,20 @@ function DiffCard({
         </div>
       )}
 
+      {shouldBuild && isProse && (
+        <div className="border-t border-custom-border-200">
+          <MergeDiffEditor
+            path={path}
+            original={oldContent}
+            modified={newContent}
+            layout={viewMode}
+            projectId={projectId ?? null}
+            taskRunId={taskRunId ?? null}
+            editable={diff.change !== "deleted"}
+          />
+        </div>
+      )}
+
       {expanded && !isImage && diffFile && (
         <div className="border-t border-custom-border-200">
           <DiffView
@@ -244,7 +280,7 @@ function DiffCard({
         </div>
       )}
 
-      {expanded && !isImage && !diffFile && (
+      {expanded && !isImage && !diffFile && !(shouldBuild && isProse) && (
         <div className="px-4 pb-4 text-xs font-mono border-t border-custom-border-200 pt-2 text-custom-text-300">
           {diff.is_binary
             ? "Binary file changed."
@@ -264,6 +300,7 @@ function DiffCard({
 export function DiffViewerPanel({
   onClose,
   diffs,
+  projectId,
   taskRunId,
   isLoading = false,
   error = null,
@@ -273,7 +310,7 @@ export function DiffViewerPanel({
   // renderer to synchronously parse every changed file before the user could
   // interact with the tab.
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  const [viewMode, setViewMode] = useState<"unified" | "split">("unified");
+  const [viewMode, setViewMode] = useState<"unified" | "split">("split");
   const diffRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollToAnchor = useAnchorScroll(scrollRef);
@@ -526,6 +563,7 @@ export function DiffViewerPanel({
                       expanded={expandedIds.has(item.id)}
                       onToggle={() => toggle(item.id)}
                       viewMode={viewMode}
+                      projectId={projectId}
                       taskRunId={taskRunId}
                     />
                   </div>

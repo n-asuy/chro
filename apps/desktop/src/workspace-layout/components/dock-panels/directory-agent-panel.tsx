@@ -23,7 +23,7 @@ import { useRightDockStore } from "../../state/right-dock-store";
  * (opened as a file tab, edited in the repo so every harness reads it), the
  * ledger of finished sessions addressed there, and the entry point for a new
  * session scoped to it. The subject comes from the right-dock store, set by
- * the Map or by a session's home chip.
+ * a project's file tree in the left panel or by a session's home chip.
  */
 export function DirectoryAgentDockPanel() {
   const { t } = useLanguage();

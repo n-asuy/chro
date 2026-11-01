@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ancestorDirectories,
   buildDirectoryTree,
+  compactDirectoryChain,
   directoryLastActivity,
   parentDirectory,
 } from "../directory-tree";
@@ -131,5 +132,55 @@ describe("path helpers", () => {
       "apps/desktop",
       "apps/desktop/src",
     ]);
+  });
+});
+
+describe("compactDirectoryChain", () => {
+  const child = (tree: ReturnType<typeof buildDirectoryTree>, name: string) => {
+    const node = tree.children.find((c) => c.name === name);
+    if (!node) throw new Error(`missing ${name}`);
+    return node;
+  };
+
+  it("folds a run of single-folder directories into one row", () => {
+    const tree = buildDirectoryTree([
+      { path: "crates/server/src/routes/a.rs", isFile: true },
+    ]);
+    const chain = compactDirectoryChain(child(tree, "crates"));
+    expect(chain.label).toBe("crates/server/src/routes");
+    expect(chain.tail.path).toBe("crates/server/src/routes");
+    expect(chain.paths).toEqual([
+      "crates",
+      "crates/server",
+      "crates/server/src",
+      "crates/server/src/routes",
+    ]);
+  });
+
+  it("stops at a directory that also holds files", () => {
+    const tree = buildDirectoryTree([
+      { path: "crates/Cargo.toml", isFile: true },
+      { path: "crates/server/lib.rs", isFile: true },
+    ]);
+    const chain = compactDirectoryChain(child(tree, "crates"));
+    expect(chain.label).toBe("crates");
+    expect(chain.paths).toEqual(["crates"]);
+  });
+
+  it("stops at a directory with several subdirectories", () => {
+    const tree = buildDirectoryTree([
+      { path: "apps/desktop/src/a.ts", isFile: true },
+      { path: "apps/desktop/tests/b.ts", isFile: true },
+    ]);
+    const chain = compactDirectoryChain(child(tree, "apps"));
+    expect(chain.label).toBe("apps/desktop");
+    expect(chain.tail.children.map((c) => c.name)).toEqual(["src", "tests"]);
+  });
+
+  it("leaves an empty directory as a single row", () => {
+    const tree = buildDirectoryTree([{ path: "empty", isFile: false }]);
+    const chain = compactDirectoryChain(child(tree, "empty"));
+    expect(chain.label).toBe("empty");
+    expect(chain.tail.path).toBe("empty");
   });
 });

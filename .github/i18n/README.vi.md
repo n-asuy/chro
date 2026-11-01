@@ -28,6 +28,8 @@ Khởi chạy nhiều agent song song trong các worktree tách biệt, theo dõ
 
 ## Chro là gì?
 
+Chro is a serial experiment. Mỗi bản phát hành kiểm chứng một giả thuyết về cách con người điều khiển agent. Chúng tôi giữ lại những gì đứng vững, loại bỏ những gì không, và ghi lại cả hai trong [nhật ký thay đổi](../../CHANGELOG.md). Tệp và lịch sử của bạn không bao giờ là một phần của thí nghiệm.
+
 Chro là không gian làm việc để chạy các agent lập trình song song và quyết định xem thành quả của chúng đáng giá đến đâu. Bạn mô tả kết quả mình muốn, các agent thực thi trong những worktree Git tách biệt, và các thay đổi của chúng được truyền về dưới dạng diff trực tiếp. Không có gì chạm đến nhánh của bạn cho đến khi bạn phê duyệt.
 
 Chro hoạt động với các gói đăng ký agent bạn đang có sẵn (**Claude Code**, **Codex**) và giữ mọi thứ trên máy của bạn: ghi chú, kho mã nguồn và lịch sử làm việc.

@@ -1,4 +1,9 @@
 import { AgentLogo } from "@/components/agent-logo";
+import { useOptionalProjectContext } from "@/files/context/project-context";
+import {
+  textFileKey,
+  useTextFileUnsaved,
+} from "@/files/state/text-file-documents";
 import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import {
@@ -91,6 +96,7 @@ function TabBarItem({
   const isSessionTab = tab.kind.type === "session";
   const sessionAgent = useSessionTabAgent(tab);
   const isSessionRunning = useIsSessionTabRunning(tab);
+  const isUnsaved = useIsFileTabUnsaved(tab);
   // For file tabs, the tooltip shows the worktree/project-relative path so
   // duplicates with the same basename can be told apart on hover. We do not
   // embed the worktree absolute prefix in the UI — the server is the only
@@ -176,8 +182,12 @@ function TabBarItem({
               <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />
             ) : null}
             <span className="flex-1 truncate text-left">{title}</span>
-            {tab.dirty ? (
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70" />
+            {isUnsaved ? (
+              <span
+                role="img"
+                aria-label="Unsaved changes"
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70"
+              />
             ) : null}
             {isSessionRunning ? (
               <span
@@ -323,6 +333,20 @@ function NewTabButton({ leafId }: { leafId: string }) {
       <Plus className="h-4 w-4" />
     </button>
   );
+}
+
+/** Whether a file tab's document has edits that are not on disk yet. */
+function useIsFileTabUnsaved(tab: Tab): boolean {
+  const projectId = useOptionalProjectContext()?.projectId ?? null;
+  const key =
+    tab.kind.type === "file"
+      ? textFileKey({
+          projectId,
+          taskRunId: tab.kind.taskRunId,
+          path: tab.kind.path,
+        })
+      : null;
+  return useTextFileUnsaved(key);
 }
 
 function useIsSessionTabRunning(tab: Tab): boolean {

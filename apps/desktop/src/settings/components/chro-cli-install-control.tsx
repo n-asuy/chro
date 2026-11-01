@@ -46,7 +46,7 @@ function StateIcon({ attention }: { attention: CliInstallAttention }) {
 
 /**
  * State line + install/repair/remove buttons for the bundled `chro` command.
- * Shared by Settings, onboarding, and the title-bar CLI menu so every surface
+ * Shared by Settings, onboarding, and the title-bar Agent status menu so every surface
  * reads the same status and offers the same actions. Callers own the hook so
  * they can also react to the state (menu badge, onboarding gating).
  */

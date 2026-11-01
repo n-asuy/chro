@@ -16,12 +16,17 @@ const resolveBackendBaseUrl = (): string => {
 
 export const getBackendBaseUrl = (): string => resolveBackendBaseUrl();
 
+/** Absolute URL for a backend path; URLs that already carry a scheme pass through. */
+export const backendUrl = (path: string): string =>
+  /^[a-z][a-z\d+.-]*:/i.test(path)
+    ? path
+    : `${resolveBackendBaseUrl().replace(/\/$/, "")}${path}`;
+
 export const desktopFetch = async <T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> => {
-  const baseUrl = resolveBackendBaseUrl().replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}${path}`, init);
+  const response = await fetch(backendUrl(path), init);
   if (!response.ok) {
     const body = await response.text();
     throw new Error(body || `Request failed with status ${response.status}`);

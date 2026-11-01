@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { desktopFetch } from "@/lib/backend-client";
+import { backendUrl, desktopFetch } from "@/lib/backend-client";
+import { attachedImagePath } from "@/session/components/markdown-image-source";
 import type { LocalImageMetadata } from "@/session/context/local-images-context";
 
 type ImageMetadata = {
@@ -17,12 +18,12 @@ export function useImageMetadata(
   src: string,
   localImages?: LocalImageMetadata[],
 ) {
-  const isChroImage = src.startsWith(".chro-context/");
+  const path = attachedImagePath(src);
 
   // Synchronous lookup for local images (newly uploaded, not yet persisted)
   const localImage = useMemo(
-    () => localImages?.find((img) => img.path === src),
-    [localImages, src],
+    () => localImages?.find((img) => img.path === path),
+    [localImages, path],
   );
 
   // Convert to ImageMetadata format
@@ -42,13 +43,13 @@ export function useImageMetadata(
   );
 
   // Only fetch from API if: chro image and NO local image
-  const shouldFetch = isChroImage && !localImage;
+  const shouldFetch = path !== null && !localImage;
 
   const query = useQuery({
-    queryKey: ["imageMetadata", src],
+    queryKey: ["imageMetadata", path],
     queryFn: async (): Promise<ImageMetadata | null> => {
       const data = await desktopFetch<ImageMetadata>(
-        `/rpc/images/metadata?path=${encodeURIComponent(src)}`,
+        `/rpc/images/metadata?path=${encodeURIComponent(path ?? "")}`,
       );
       return data;
     },
@@ -56,9 +57,19 @@ export function useImageMetadata(
     staleTime: Infinity,
   });
 
+  // proxy_url is server-relative; <img> needs it on the backend's origin.
+  const metadata = localImageMetadata ?? query.data;
+  const data = useMemo(
+    () =>
+      metadata?.proxy_url
+        ? { ...metadata, proxy_url: backendUrl(metadata.proxy_url) }
+        : metadata,
+    [metadata],
+  );
+
   // Return local data if available, otherwise query result
   return {
-    data: localImageMetadata ?? query.data,
+    data,
     isLoading: localImage ? false : query.isLoading,
   };
 }

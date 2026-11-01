@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
 import { ReleaseButton } from "@/system/release-button";
-import { CliStatusMenu } from "./cli-status-menu";
+import { AgentStatusMenu } from "./agent-status-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,7 +77,7 @@ export function ProjectTabsHeader() {
       <div data-tauri-drag-region className="min-w-0 flex-1" />
       <ReleaseButton />
       <OpenInMenu />
-      <CliStatusMenu />
+      <AgentStatusMenu />
       <FeedbackToggle />
       <SettingsToggle />
       <RightSidebarToggle />

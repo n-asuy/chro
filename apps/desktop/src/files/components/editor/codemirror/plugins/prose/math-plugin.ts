@@ -7,6 +7,7 @@
  * - Block: $$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
  */
 
+import { spacedBlock } from "../../utility/decorations";
 import { memoizeByParsedDoc } from "../decoration-cache";
 import { needsDecorationRebuild } from "../decoration-refresh";
 import {
@@ -135,7 +136,7 @@ class BlockMathWidget extends WidgetType {
     // Render asynchronously
     this.renderMath(container);
 
-    return container;
+    return spacedBlock(container);
   }
 
   private async renderMath(container: HTMLElement): Promise<void> {

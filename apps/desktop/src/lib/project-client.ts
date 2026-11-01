@@ -279,6 +279,48 @@ export const writeProjectFile = async (
   return toDesktopFile(file);
 };
 
+/** Write a text file inside a task run's worktree. */
+export const writeTaskRunFile = async (
+  taskRunId: string,
+  relativePath: string,
+  content: string,
+): Promise<DesktopWorkspaceFile> => {
+  const { file } = await desktopFetch<ProjectFileEnvelope>(
+    `/rpc/task-runs/${taskRunId}/file`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ relative_path: relativePath, content }),
+    },
+  );
+  return toDesktopFile(file);
+};
+
+/** Write a text file under an additional absolute workspace root. */
+export const writeWorkspaceFileAtPath = async (
+  absolutePath: string,
+  relativePath: string,
+  content: string,
+): Promise<DesktopWorkspaceFile> => {
+  const { file } = await desktopFetch<ProjectFileEnvelope>(
+    "/rpc/filesystem/workspace-file",
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        abs_path: absolutePath,
+        relative_path: relativePath,
+        content,
+      }),
+    },
+  );
+  return toDesktopFile(file);
+};
+
 type DeleteProjectFileResponse = {
   deleted_path: string;
 };
@@ -375,16 +417,14 @@ export type ProjectFileEvent = {
 };
 
 /**
- * Subscribe to project file change events via WebSocket.
- * Returns an unsubscribe function.
+ * Subscribe to a `file-events` WebSocket. Returns an unsubscribe function.
  */
-export const subscribeProjectFileEvents = (
-  projectId: string,
+const subscribeFileEvents = (
+  rpcPath: string,
   onFileChanged: (event: ProjectFileEvent) => void,
 ): (() => void) => {
   const baseUrl = getBackendBaseUrl().replace(/\/$/, "");
-  const httpUrl = `${baseUrl}/rpc/projects/${projectId}/file-events`;
-  const wsUrl = httpToWs(httpUrl);
+  const wsUrl = httpToWs(`${baseUrl}${rpcPath}`);
   const ws = new WebSocket(wsUrl);
 
   ws.onmessage = (event) => {
@@ -410,6 +450,32 @@ export const subscribeProjectFileEvents = (
     ws.onclose = null;
     ws.close();
   };
+};
+
+/** Subscribe to file change events in the project checkout. */
+export const subscribeProjectFileEvents = (
+  projectId: string,
+  onFileChanged: (event: ProjectFileEvent) => void,
+): (() => void) =>
+  subscribeFileEvents(`/rpc/projects/${projectId}/file-events`, onFileChanged);
+
+/** Subscribe to file change events in a task run's worktree. */
+export const subscribeTaskRunFileEvents = (
+  taskRunId: string,
+  onFileChanged: (event: ProjectFileEvent) => void,
+): (() => void) =>
+  subscribeFileEvents(`/rpc/task-runs/${taskRunId}/file-events`, onFileChanged);
+
+/** Subscribe to file change events under an additional workspace root. */
+export const subscribeWorkspaceFileEvents = (
+  absolutePath: string,
+  onFileChanged: (event: ProjectFileEvent) => void,
+): (() => void) => {
+  const params = new URLSearchParams({ abs_path: absolutePath });
+  return subscribeFileEvents(
+    `/rpc/filesystem/workspace-file-events?${params.toString()}`,
+    onFileChanged,
+  );
 };
 
 /**

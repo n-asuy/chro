@@ -10,7 +10,7 @@ import {
   getPromptEditorScopeState,
   usePromptEditorStore,
 } from "../state/prompt-editor-store";
-import type { ContentPart, Prompt } from "../types/context";
+import { type Prompt, isContentPart } from "../types/context";
 
 const STORAGE_VERSION = 1;
 const STORAGE_KEY_PREFIX = "session:prompt-draft";
@@ -23,43 +23,6 @@ type StoredPromptDraft = {
 
 function storageKey(scopeId: string): string {
   return `${STORAGE_KEY_PREFIX}:v${STORAGE_VERSION}:${scopeId}`;
-}
-
-function isContentPart(value: unknown): value is ContentPart {
-  if (!value || typeof value !== "object") return false;
-  const part = value as Partial<ContentPart>;
-  if (
-    typeof part.type !== "string" ||
-    typeof part.content !== "string" ||
-    typeof part.start !== "number" ||
-    typeof part.end !== "number"
-  ) {
-    return false;
-  }
-
-  if (part.type === "text") {
-    return true;
-  }
-
-  if (part.type === "file") {
-    return (
-      typeof (part as { path?: unknown }).path === "string" &&
-      typeof (part as { isFile?: unknown }).isFile === "boolean"
-    );
-  }
-
-  if (part.type === "session") {
-    return typeof (part as { taskId?: unknown }).taskId === "string";
-  }
-
-  if (part.type === "skill") {
-    return (
-      typeof (part as { id?: unknown }).id === "string" &&
-      typeof (part as { name?: unknown }).name === "string"
-    );
-  }
-
-  return false;
 }
 
 function isPrompt(value: unknown): value is Prompt {

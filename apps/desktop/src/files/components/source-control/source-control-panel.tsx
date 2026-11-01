@@ -433,7 +433,8 @@ export const SourceControlPanel = () => {
   // routinely 0 while the branch still diverges from its target.
   const targetAhead = branchStatus?.commits_ahead ?? 0;
   const targetBehind = branchStatus?.commits_behind ?? 0;
-  // Rebase only needs the branch to be behind; merge needs something to land.
+  // Rebase only needs the branch to be behind; merge needs something to land
+  // and replays a branch that is behind on its own before landing it.
   const canRebase =
     Boolean(baseRef) && !isRebaseBlocked && !isRebasing && targetBehind > 0;
   const canMerge =
@@ -455,7 +456,9 @@ export const SourceControlPanel = () => {
       ? "Waiting for the run's target branch"
       : targetAhead === 0
         ? "No commits to merge yet"
-        : `Merge this branch into ${baseLabel}`;
+        : targetBehind > 0
+          ? `Replay this branch on top of ${baseLabel}, then merge it`
+          : `Merge this branch into ${baseLabel}`;
 
   const handleRebase = useCallback(() => {
     if (!baseRef) return;

@@ -3,6 +3,8 @@ import { useEffect } from "react";
 export function NavigationHandler() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A focused editor's own binding wins (⌘[ outdents a list item).
+      if (e.defaultPrevented) return;
       const isMac = navigator.platform.startsWith("Mac");
 
       if (isMac && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {

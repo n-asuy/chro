@@ -1,19 +1,35 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-import { useAutoSave } from "../../hooks/use-auto-save";
-import { useProjectId } from "../../context/project-context";
 import { useLanguage } from "@/i18n";
 import {
   getProjectBinaryFileUrl,
   getWorkspaceBinaryFileUrl,
   uploadProjectBinaryFile,
 } from "@/lib/project-client";
+import type {
+  ExcalidrawInitialDataState,
+  ExcalidrawProps,
+} from "@excalidraw/excalidraw/types";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useProjectId } from "../../context/project-context";
+import { useTextFileDocument } from "../../hooks/use-text-file-document";
+import {
+  type BinaryFileData,
+  type BinaryFiles,
+  type FileReference,
+  type SceneAppState,
+  type SceneElement,
+  imagesToExternalize,
+  parseScene,
+  sceneSignature,
+  serializeScene,
+} from "../../lib/excalidraw-scene";
 
 // Excalidraw requires its CSS to be loaded
 import "@excalidraw/excalidraw/index.css";
@@ -27,131 +43,34 @@ const excalidrawStyles = `
   }
 `;
 
-// Excalidraw types
-interface ExcalidrawElement {
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  isDeleted: boolean;
-  fileId?: string;
-  [key: string]: unknown;
-}
-
-interface AppState {
-  viewBackgroundColor: string;
-  gridSize: number | null;
-  activeTool?: { type: string } | null;
-  editingElement?: unknown;
-  theme?: string;
-  [key: string]: unknown;
-}
-
-// Excalidraw BinaryFileData format
-interface BinaryFileData {
-  mimeType: string;
-  id: string;
-  dataURL: string;
-  created: number;
-  lastRetrieved?: number;
-}
-
-type BinaryFiles = Record<string, BinaryFileData>;
-
-// Custom file reference for Obsidian-style storage
-interface FileReference {
-  path: string;
-  mimeType: string;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ExcalidrawAPI = any;
-
 const Excalidraw = lazy(() =>
   import("@excalidraw/excalidraw").then((mod) => ({ default: mod.Excalidraw })),
 );
 
+/**
+ * Edits arrive once per pointer move while drawing. Serializing on a short
+ * trailing delay keeps that off the frame budget; the auto-save debounce runs
+ * on top of it.
+ */
+const SERIALIZE_DELAY_MS = 300;
+
 interface ExcalidrawEditorProps {
+  /** Text document key (see `textFileKey`), shared with the file tab. */
+  docKey: string;
   relativePath: string;
-  fileName: string;
   initialContent: string;
   workspaceRootPath?: string;
+  /** View the drawing without writing the file or its image sidecars. */
+  readOnly: boolean;
 }
 
-// Extended file data format with file references
-interface ExcalidrawFileData {
-  type: "excalidraw";
-  version: number;
-  source: string;
-  elements: ExcalidrawElement[];
-  appState?: Partial<AppState>;
-  files?: BinaryFiles;
-  // Custom field: maps fileId to file path for Obsidian-style storage
-  fileRefs?: Record<string, FileReference>;
+type SceneChangeHandler = NonNullable<ExcalidrawProps["onChange"]>;
+
+interface LatestScene {
+  elements: readonly SceneElement[];
+  appState: SceneAppState;
+  files: BinaryFiles;
 }
-
-const createEmptyExcalidrawData = (): ExcalidrawFileData => ({
-  type: "excalidraw",
-  version: 2,
-  source: "chro",
-  elements: [],
-  appState: {
-    viewBackgroundColor: "#ffffff",
-    gridSize: null,
-  },
-  files: {},
-  fileRefs: {},
-});
-
-const parseExcalidrawContent = (content: string): ExcalidrawFileData => {
-  if (!content || content.trim() === "") {
-    return createEmptyExcalidrawData();
-  }
-
-  try {
-    const parsed = JSON.parse(content) as ExcalidrawFileData;
-    if (parsed.type !== "excalidraw") {
-      console.warn("[ExcalidrawEditor] Invalid file type, creating empty data");
-      return createEmptyExcalidrawData();
-    }
-    return parsed;
-  } catch (error) {
-    console.warn("[ExcalidrawEditor] Failed to parse content:", error);
-    return createEmptyExcalidrawData();
-  }
-};
-
-// Serialize data - exclude base64 data for files that have refs
-const serializeExcalidrawData = (
-  elements: readonly ExcalidrawElement[],
-  appState: AppState,
-  files: BinaryFiles,
-  fileRefs: Record<string, FileReference>,
-): string => {
-  // Only keep file data for files without refs (backward compatibility)
-  const filteredFiles: BinaryFiles = {};
-  for (const [id, file] of Object.entries(files)) {
-    if (!fileRefs[id]) {
-      filteredFiles[id] = file;
-    }
-  }
-
-  const data: ExcalidrawFileData = {
-    type: "excalidraw",
-    version: 2,
-    source: "chro",
-    elements: elements.filter((el) => !el.isDeleted) as ExcalidrawElement[],
-    appState: {
-      viewBackgroundColor: appState.viewBackgroundColor,
-      gridSize: appState.gridSize,
-    },
-    files: filteredFiles,
-    fileRefs,
-  };
-  return JSON.stringify(data, null, 2);
-};
 
 // Get the images directory path for an excalidraw file
 const getImagesDir = (excalidrawPath: string): string => {
@@ -167,30 +86,47 @@ const generateImageFilename = (mimeType: string): string => {
 };
 
 export const ExcalidrawEditor = ({
+  docKey,
   relativePath,
-  fileName,
   initialContent,
   workspaceRootPath,
+  readOnly,
 }: ExcalidrawEditorProps) => {
   const projectId = useProjectId();
   const { language } = useLanguage();
-  const [excalidrawAPI, setExcalidrawAPI] = useState<ExcalidrawAPI>(null);
-  const [content, setContent] = useState(initialContent);
-  const contentRef = useRef(content);
-  const isInitialLoadRef = useRef(true);
+  const scene = useMemo(() => parseScene(initialContent), [initialContent]);
 
-  // Track file references (fileId -> path)
-  const [fileRefs, setFileRefs] = useState<Record<string, FileReference>>(
-    () => {
-      const parsed = parseExcalidrawContent(initialContent);
-      return parsed.fileRefs ?? {};
-    },
+  const fileRefsRef = useRef(scene.fileRefs);
+  const embeddedAtLoadRef = useRef<ReadonlySet<string>>(
+    new Set(Object.keys(scene.files)),
   );
-  const fileRefsRef = useRef(fileRefs);
-  fileRefsRef.current = fileRefs;
+  const inFlightRef = useRef(new Set<string>());
+  // The first callback reports the scene as loaded; it becomes the baseline.
+  const lastSignatureRef = useRef<string | null>(null);
+  const latestSceneRef = useRef<LatestScene | null>(null);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushSceneRef = useRef<() => void>(() => {});
 
-  // Keep content ref in sync
-  contentRef.current = content;
+  // Declared before the text document so this cleanup runs first on unmount
+  // (React runs a component's effect cleanups in declaration order): the edit
+  // still waiting to be serialized reaches the document before it closes and
+  // writes.
+  useEffect(
+    () => () => {
+      if (flushTimerRef.current) flushSceneRef.current();
+      // An upload finishing after unmount must not schedule another flush.
+      latestSceneRef.current = null;
+    },
+    [],
+  );
+
+  const { edit: editTextDocument, save: saveTextDocument } =
+    useTextFileDocument({
+      docKey,
+      root: projectId ? { kind: "project", projectId } : null,
+      relativePath,
+      enabled: !readOnly,
+    });
 
   // Load file references and convert to BinaryFileData for Excalidraw
   const loadFileRefsAsDataURLs = useCallback(
@@ -232,161 +168,128 @@ export const ExcalidrawEditor = ({
   );
 
   // Initial data with loaded file references
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [initialData, setInitialData] = useState<any>(null);
+  const [initialData, setInitialData] =
+    useState<ExcalidrawInitialDataState | null>(null);
 
   useEffect(() => {
     const loadInitialData = async () => {
-      const parsed = parseExcalidrawContent(initialContent);
-      const loadedFiles = await loadFileRefsAsDataURLs(parsed.fileRefs ?? {});
+      const loadedFiles = await loadFileRefsAsDataURLs(scene.fileRefs);
 
-      // Merge loaded files with any existing base64 files
-      const mergedFiles = { ...parsed.files, ...loadedFiles };
-
-      setInitialData({
-        elements: parsed.elements,
+      const data = {
+        elements: scene.elements,
         appState: {
-          ...parsed.appState,
+          ...scene.appState,
           theme: "light",
         },
-        files: mergedFiles,
+        // Merge loaded files with any existing base64 files
+        files: { ...scene.files, ...loadedFiles },
         scrollToContent: true,
-      });
+      };
+      // The scene is parsed JSON in its on-disk shape; Excalidraw restores and
+      // validates elements, app state and files when it reads initialData.
+      setInitialData(data as unknown as ExcalidrawInitialDataState);
     };
 
     void loadInitialData();
-  }, [initialContent, loadFileRefsAsDataURLs]);
-
-  // Auto-save
-  const { saveNow, isDirty } = useAutoSave({
-    relativePath,
-    content,
-    enabled: !workspaceRootPath,
-    debounceMs: 2000,
-  });
-
-  // Save on blur
-  useEffect(() => {
-    const handleBlur = () => {
-      if (isDirty) {
-        void saveNow();
-      }
-    };
-
-    window.addEventListener("blur", handleBlur);
-    return () => window.removeEventListener("blur", handleBlur);
-  }, [isDirty, saveNow]);
-
-  // Save before window close
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (isDirty) {
-        void saveNow();
-      }
-    };
-
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [isDirty, saveNow]);
+  }, [scene, loadFileRefsAsDataURLs]);
 
   // Handle image file upload - saves to vault and returns file reference
   const uploadImageFile = useCallback(
-    async (
-      fileId: string,
-      dataURL: string,
-      mimeType: string,
-    ): Promise<FileReference | null> => {
-      if (!projectId || workspaceRootPath) return null;
+    async (file: BinaryFileData): Promise<FileReference | null> => {
+      if (!projectId) return null;
 
       try {
         // Convert dataURL to Blob
-        const response = await fetch(dataURL);
+        const response = await fetch(file.dataURL);
         const blob = await response.blob();
 
-        // Generate path
-        const imagesDir = getImagesDir(relativePath);
-        const filename = generateImageFilename(mimeType);
-        const imagePath = `${imagesDir}/${filename}`;
-
-        // Upload to vault
+        const imagePath = `${getImagesDir(relativePath)}/${generateImageFilename(file.mimeType)}`;
         await uploadProjectBinaryFile(projectId, imagePath, blob);
 
-        return { path: imagePath, mimeType };
+        return { path: imagePath, mimeType: file.mimeType };
       } catch (error) {
         console.error("[ExcalidrawEditor] Failed to upload image:", error);
         return null;
       }
     },
-    [projectId, relativePath, workspaceRootPath],
+    [projectId, relativePath],
   );
 
-  // Handle onChange - detect new images and upload them
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleChange = useCallback(
-    (elements: readonly any[], appState: any, files: any) => {
-      // Skip the initial onChange call
-      if (isInitialLoadRef.current) {
-        isInitialLoadRef.current = false;
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+    flushTimerRef.current = setTimeout(
+      () => flushSceneRef.current(),
+      SERIALIZE_DELAY_MS,
+    );
+  }, []);
+
+  const flushScene = useCallback(() => {
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const latest = latestSceneRef.current;
+    if (!latest) return;
+
+    editTextDocument(
+      serializeScene({
+        source: scene.source,
+        elements: [...latest.elements],
+        appState: latest.appState,
+        files: latest.files,
+        fileRefs: fileRefsRef.current,
+      }),
+    );
+
+    const pending = imagesToExternalize({
+      files: latest.files,
+      fileRefs: fileRefsRef.current,
+      embeddedAtLoad: embeddedAtLoadRef.current,
+      inFlight: inFlightRef.current,
+    });
+    for (const fileId of pending) {
+      inFlightRef.current.add(fileId);
+      void uploadImageFile(latest.files[fileId]).then((ref) => {
+        inFlightRef.current.delete(fileId);
+        if (!ref) return;
+        fileRefsRef.current = { ...fileRefsRef.current, [fileId]: ref };
+        // Re-serialize so the inline base64 copy leaves the document.
+        scheduleFlush();
+      });
+    }
+  }, [scene.source, uploadImageFile, scheduleFlush, editTextDocument]);
+  flushSceneRef.current = flushScene;
+
+  const handleChange = useCallback<SceneChangeHandler>(
+    (elements, appState, files) => {
+      if (readOnly) return;
+      const signature = sceneSignature(elements, appState, files);
+      if (lastSignatureRef.current === null) {
+        lastSignatureRef.current = signature;
         return;
       }
-
-      // Serialize and save immediately (sync part)
-      const currentRefs = { ...fileRefsRef.current };
-      const serialized = serializeExcalidrawData(
-        elements,
-        appState,
-        files,
-        currentRefs,
-      );
-      setContent(serialized);
-
-      // Upload new images asynchronously (don't block onChange)
-      const uploadNewImages = async () => {
-        let refsUpdated = false;
-        const updatedRefs = { ...currentRefs };
-
-        for (const [fileId, file] of Object.entries(files) as [
-          string,
-          BinaryFileData,
-        ][]) {
-          // Skip if already has a ref
-          if (updatedRefs[fileId]) continue;
-
-          // Upload new image
-          const ref = await uploadImageFile(
-            fileId,
-            file.dataURL,
-            file.mimeType,
-          );
-          if (ref) {
-            updatedRefs[fileId] = ref;
-            refsUpdated = true;
-          }
-        }
-
-        if (refsUpdated) {
-          setFileRefs(updatedRefs);
-          // Re-serialize with updated refs to remove base64 data
-          const updated = serializeExcalidrawData(
-            elements,
-            appState,
-            files,
-            updatedRefs,
-          );
-          setContent(updated);
-        }
-      };
-
-      void uploadNewImages();
+      if (signature === lastSignatureRef.current) return;
+      lastSignatureRef.current = signature;
+      latestSceneRef.current = { elements, appState, files };
+      scheduleFlush();
     },
-    [uploadImageFile],
+    [readOnly, scheduleFlush],
   );
 
-  const elementCount = excalidrawAPI
-    ? excalidrawAPI
-        .getSceneElements()
-        .filter((el: ExcalidrawElement) => !el.isDeleted).length
-    : 0;
+  // Unload writes immediately, including an edit still waiting to be
+  // serialized.
+  const saveImmediately = useCallback(() => {
+    if (readOnly) return;
+    if (flushTimerRef.current) flushScene();
+    void saveTextDocument();
+  }, [readOnly, flushScene, saveTextDocument]);
+
+  useEffect(() => {
+    window.addEventListener("beforeunload", saveImmediately);
+    return () => {
+      window.removeEventListener("beforeunload", saveImmediately);
+    };
+  }, [saveImmediately]);
 
   // Show loading until initial data is ready
   if (!initialData) {
@@ -412,9 +315,9 @@ export const ExcalidrawEditor = ({
         >
           <div style={{ width: "100%", height: "100%" }}>
             <Excalidraw
-              excalidrawAPI={setExcalidrawAPI}
               initialData={initialData}
               onChange={handleChange}
+              viewModeEnabled={readOnly}
               langCode={language === "ja" ? "ja-JP" : "en"}
               UIOptions={{
                 canvasActions: {

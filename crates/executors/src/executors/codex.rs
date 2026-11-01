@@ -44,6 +44,7 @@ use crate::{
         AppendPrompt, AvailabilityInfo, CancellationToken, ExecutorError, ExecutorExitResult,
         SpawnedChild, StandardCodingAgentExecutor,
     },
+    session_title,
     spawn::Invocation,
     stdout_dup::create_stdout_pipe_writer,
 };
@@ -99,7 +100,10 @@ pub enum AskForApproval {
     Never,
 }
 
-/// Reasoning effort for the underlying model
+/// Reasoning effort for the underlying model, shared by Codex
+/// (`model_reasoning_effort`) and Claude Code (`--effort`). Each model supports
+/// a subset: `ultra` is Codex-only, and the desktop picker only offers the
+/// levels a model advertises.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, TS, JsonSchema, AsRefStr)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
@@ -108,6 +112,8 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
+    Ultra,
 }
 
 /// Model reasoning summary style
@@ -171,6 +177,27 @@ pub struct Codex {
 }
 
 impl Codex {
+    /// Arguments of the one-shot call that titles a session: no saved thread,
+    /// no writes, and little reasoning, on the model the person already uses
+    /// (a small model is not available to every account). Every argument is
+    /// free of shell metacharacters because a Windows batch shim forwards them
+    /// through the command interpreter.
+    fn title_params(&self) -> Vec<&'static str> {
+        let mut params = vec![
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-c",
+            "model_reasoning_effort=low",
+        ];
+        if self.oss.unwrap_or(false) {
+            params.push("--oss");
+        }
+        params
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::for_manifest(&cli_manifest::CODEX);
         builder = builder.extend_params(["app-server"]);
@@ -298,11 +325,8 @@ impl Codex {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .current_dir(current_dir)
-            .args(&args)
-            .env("NODE_NO_WARNINGS", "1")
-            .env("NO_COLOR", "1")
-            .env("RUST_LOG", "error");
-        env.apply_to_command(&mut process);
+            .args(&args);
+        apply_environment(&mut process, env);
 
         let mut child = process.group_spawn()?;
 
@@ -473,6 +497,25 @@ impl StandardCodingAgentExecutor for Codex {
         codex_home().map(|home| home.join("config.toml"))
     }
 
+    async fn generate_session_title(
+        &self,
+        request: &str,
+        env: &ExecutionEnv,
+    ) -> Result<Option<String>, ExecutorError> {
+        let Invocation { program, args } = CommandBuilder::for_manifest(&cli_manifest::CODEX)
+            .extend_params(self.title_params())
+            .build_initial()?
+            .into_resolved()
+            .await?;
+
+        let mut process = Command::new(program);
+        // A directory that belongs to no project, so the call reads nothing
+        // of the workspace.
+        process.current_dir(std::env::temp_dir()).args(&args);
+        apply_environment(&mut process, &env.clone().with_profile(&self.cmd));
+        session_title::generate(process, request).await
+    }
+
     async fn get_availability_info(&self) -> AvailabilityInfo {
         if let Some(timestamp) = codex_home()
             .and_then(|home| std::fs::metadata(home.join("auth.json")).ok())
@@ -502,9 +545,59 @@ impl StandardCodingAgentExecutor for Codex {
     }
 }
 
+/// The environment every Codex process chro starts runs in: quiet output,
+/// then the run's own variables.
+fn apply_environment(process: &mut Command, env: &ExecutionEnv) {
+    process
+        .env("NODE_NO_WARNINGS", "1")
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "error");
+    env.apply_to_command(process);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_uses_the_cli_wire_names() {
+        let all = [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Xhigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+            (ReasoningEffort::Ultra, "ultra"),
+        ];
+        for (effort, wire) in all {
+            assert_eq!(effort.as_ref(), wire);
+            assert_eq!(serde_json::to_value(&effort).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(wire.into()).unwrap(),
+                effort
+            );
+        }
+    }
+
+    #[test]
+    fn title_call_is_a_read_only_one_shot_that_leaves_no_thread() {
+        let codex: Codex = serde_json::from_str("{}").unwrap();
+        let params = codex.title_params();
+        assert_eq!(params.first(), Some(&"exec"));
+        assert!(params.contains(&"--ephemeral"));
+        assert!(params.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+        assert!(!params.contains(&"--oss"));
+        // A Windows batch shim rejects any of these characters in argv.
+        for param in &params {
+            assert!(
+                !param.contains(['&', '|', '<', '>', '^', '"', '%', '!', '\r', '\n']),
+                "unsafe for the command interpreter: {param}"
+            );
+        }
+
+        let local: Codex = serde_json::from_str(r#"{"oss":true}"#).unwrap();
+        assert!(local.title_params().contains(&"--oss"));
+    }
 
     #[test]
     fn fork_params_preserve_model_override() {
