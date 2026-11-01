@@ -25,10 +25,10 @@ use super::{
 
 /// What `install` puts in the harness folders: when to use chro, and to load
 /// the guide from the binary.
-pub(crate) const SKILL_MD: &str = include_str!("../../../../skills/chro/SKILL.md");
+pub(crate) const SKILL_MD: &str = include_str!("../../skill/SKILL.md");
 /// The full guide, printed by `chro skill show`. Never installed, so a copy
 /// can never outlive the binary it describes.
-pub(crate) const GUIDE_MD: &str = include_str!("../../../../skills/chro/guide.md");
+pub(crate) const GUIDE_MD: &str = include_str!("../../skill/guide.md");
 const SKILL_NAME: &str = "chro";
 
 #[derive(Subcommand, Debug)]
@@ -123,7 +123,11 @@ pub(crate) struct Locations {
 }
 
 impl Locations {
-    pub fn for_home(home: &Path, claude_config: Option<PathBuf>, codex_home: Option<PathBuf>) -> Self {
+    pub fn for_home(
+        home: &Path,
+        claude_config: Option<PathBuf>,
+        codex_home: Option<PathBuf>,
+    ) -> Self {
         let claude = claude_config.unwrap_or_else(|| home.join(".claude"));
         let codex = codex_home.unwrap_or_else(|| home.join(".codex"));
         Self {
@@ -184,7 +188,10 @@ fn install_canonical(
         Ok(_) if !is_ours(&file) && !force => {
             return Ok(report(
                 Outcome::Conflict,
-                Some("another skill named chro lives here; rerun with --force to move it aside".into()),
+                Some(
+                    "another skill named chro lives here; rerun with --force to move it aside"
+                        .into(),
+                ),
             ))
         }
         Ok(_) => Outcome::Updated,
@@ -230,7 +237,9 @@ fn install_link(
             _ => {
                 return Ok(report(
                     Outcome::Conflict,
-                    Some("links to a different skill; rerun with --force to replace the link".into()),
+                    Some(
+                        "links to a different skill; rerun with --force to replace the link".into(),
+                    ),
                 ))
             }
         },
@@ -263,7 +272,9 @@ fn move_aside(path: &Path) -> Result<(), ErrorBody> {
     let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let aside = path.with_file_name(format!(
         "{}.bak-{stamp}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or(SKILL_NAME)
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(SKILL_NAME)
     ));
     fs::rename(path, &aside).map_err(|err| io_error(path, err))
 }
@@ -284,10 +295,12 @@ fn make_link(target: &Path, link: &Path) -> Result<(), ErrorBody> {
         .status()
         .map_err(|err| io_error(link, err))
         .and_then(|status| {
-            status
-                .success()
-                .then_some(())
-                .ok_or_else(|| ErrorBody::new(ErrorCode::Internal, format!("mklink /J {} failed", link.display())))
+            status.success().then_some(()).ok_or_else(|| {
+                ErrorBody::new(
+                    ErrorCode::Internal,
+                    format!("mklink /J {} failed", link.display()),
+                )
+            })
         })
 }
 
@@ -418,11 +431,17 @@ mod tests {
 
         let report = install(&locations, V1, false, false).unwrap();
         assert_eq!(report.targets[1].outcome, Outcome::Conflict);
-        assert!(!fs::symlink_metadata(&squatter).unwrap().file_type().is_symlink());
+        assert!(!fs::symlink_metadata(&squatter)
+            .unwrap()
+            .file_type()
+            .is_symlink());
 
         let forced = install(&locations, V1, false, true).unwrap();
         assert_eq!(forced.targets[1].outcome, Outcome::Updated);
-        assert!(fs::symlink_metadata(&squatter).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&squatter)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let kept = fs::read_dir(&locations.harnesses[0].1)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -517,7 +536,10 @@ mod skill_text_tests {
     #[test]
     fn every_command_the_skill_shows_parses() {
         let commands = commands();
-        assert!(commands.len() > 15, "expected the skill to show its commands");
+        assert!(
+            commands.len() > 15,
+            "expected the skill to show its commands"
+        );
         for args in commands {
             if let Err(err) = TerminalCli::try_parse_from(&args) {
                 panic!("`{}` does not parse:\n{err}", args.join(" "));

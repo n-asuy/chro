@@ -84,7 +84,10 @@ fn walk(command: &Command, path: &mut Vec<String>, out: &mut Vec<CommandSchema>)
     if subcommands.is_empty() {
         out.push(CommandSchema {
             path: path.clone(),
-            about: command.get_about().map(ToString::to_string).unwrap_or_default(),
+            about: command
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             args: command
                 .get_arguments()
                 .filter(|arg| !matches!(arg.get_id().as_str(), "help" | "version"))
@@ -137,8 +140,17 @@ mod tests {
     fn every_leaf_command_is_listed_once() {
         let schema = schema();
         let paths: Vec<String> = schema.commands.iter().map(|c| c.path.join(" ")).collect();
-        for expected in ["status", "session send", "session wait", "approval respond", "skill install"] {
-            assert!(paths.contains(&expected.to_string()), "{expected} missing from {paths:?}");
+        for expected in [
+            "status",
+            "session send",
+            "session wait",
+            "approval respond",
+            "skill install",
+        ] {
+            assert!(
+                paths.contains(&expected.to_string()),
+                "{expected} missing from {paths:?}"
+            );
         }
         let mut deduped = paths.clone();
         deduped.dedup();
@@ -153,7 +165,11 @@ mod tests {
             .iter()
             .find(|c| c.path == ["session", "wait"])
             .unwrap();
-        let condition = wait.args.iter().find(|a| a.long.as_deref() == Some("--for")).unwrap();
+        let condition = wait
+            .args
+            .iter()
+            .find(|a| a.long.as_deref() == Some("--for"))
+            .unwrap();
         assert!(condition.required);
         assert_eq!(condition.values, vec!["idle", "input", "settled"]);
         let session = wait.args.iter().find(|a| a.positional).unwrap();

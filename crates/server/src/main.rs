@@ -19,8 +19,10 @@ async fn main() -> ExitCode {
             }
         },
         // Commands block on HTTP calls; keep them off the async workers.
-        Some(command) => tokio::task::spawn_blocking(move || chro_server::cli::run(command, cli.global))
-            .await
-            .unwrap_or(ExitCode::FAILURE),
+        Some(command) => {
+            tokio::task::spawn_blocking(move || chro_server::cli::run(command, cli.global))
+                .await
+                .unwrap_or(ExitCode::FAILURE)
+        }
     }
 }

@@ -110,7 +110,9 @@ pub(crate) fn candidates() -> Vec<PathBuf> {
     if let Some(dir) = desktop_data_dir() {
         push(dir.join(RUNTIME_FILE_NAME));
     }
-    push(runtime_file::path_for_database(&db::DBService::default_path()));
+    push(runtime_file::path_for_database(
+        &db::DBService::default_path(),
+    ));
     out
 }
 

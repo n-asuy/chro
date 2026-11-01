@@ -139,8 +139,11 @@ pub(crate) async fn deduplicate(
         }
         Err(err) => {
             ledger.abandon(&key);
-            V1Error::new(ErrorCode::Internal, format!("response too large to record: {err}"))
-                .into_response()
+            V1Error::new(
+                ErrorCode::Internal,
+                format!("response too large to record: {err}"),
+            )
+            .into_response()
         }
     }
 }

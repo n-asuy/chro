@@ -11,9 +11,9 @@ use tokio::sync::Semaphore;
 use crate::browser_session::BrowserService;
 use crate::operator::IdempotencyLedger;
 use crate::perf;
-use crate::runtime_identity::RuntimeIdentity;
 use crate::routes::rpc::cli_status::LatestReleaseCache;
 use crate::routes::rpc::usage::UsageCache;
+use crate::runtime_identity::RuntimeIdentity;
 
 /// Once-per-process gate for index pre-warming, keyed by canonical repo path.
 /// A single warm is enough: afterwards the lazy paths keep each index fresh

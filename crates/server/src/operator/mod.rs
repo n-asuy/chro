@@ -108,11 +108,9 @@ fn check_contract(headers: &HeaderMap) -> Result<(), V1Error> {
 }
 
 async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let caller = match resolve_caller(
-        request.headers(),
-        &state.identity().owner_token,
-        |token| state.runtime().session_tokens().resolve(token),
-    ) {
+    let caller = match resolve_caller(request.headers(), &state.identity().owner_token, |token| {
+        state.runtime().session_tokens().resolve(token)
+    }) {
         Ok(caller) => caller,
         Err(err) => return err.into_response(),
     };
@@ -328,7 +326,12 @@ mod tests {
 
     #[test]
     fn requests_without_a_known_token_are_unauthorized() {
-        for auth in [None, Some("Bearer "), Some("Basic owner-token"), Some("Bearer nope")] {
+        for auth in [
+            None,
+            Some("Bearer "),
+            Some("Basic owner-token"),
+            Some("Bearer nope"),
+        ] {
             let err = resolve_caller(&headers(auth), OWNER, no_sessions).unwrap_err();
             assert_eq!(err.0.code, ErrorCode::Unauthorized, "{auth:?}");
         }
@@ -341,12 +344,18 @@ mod tests {
             check_contract(&map).unwrap_err().0.code,
             ErrorCode::ContractMismatch
         );
-        map.insert(HEADER_CONTRACT_REV, HeaderValue::from_static("0.0.0+deadbeef"));
+        map.insert(
+            HEADER_CONTRACT_REV,
+            HeaderValue::from_static("0.0.0+deadbeef"),
+        );
         assert_eq!(
             check_contract(&map).unwrap_err().0.code,
             ErrorCode::ContractMismatch
         );
-        map.insert(HEADER_CONTRACT_REV, HeaderValue::from_str(CONTRACT_REV).unwrap());
+        map.insert(
+            HEADER_CONTRACT_REV,
+            HeaderValue::from_str(CONTRACT_REV).unwrap(),
+        );
         assert!(check_contract(&map).is_ok());
     }
 

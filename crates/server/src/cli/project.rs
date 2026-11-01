@@ -58,13 +58,20 @@ fn absolute(path: PathBuf) -> Result<PathBuf, ErrorBody> {
     Ok(cwd.join(path))
 }
 
-pub(crate) fn run(command: ProjectCommand, client: Result<Client, ErrorBody>, mode: Mode) -> ExitCode {
+pub(crate) fn run(
+    command: ProjectCommand,
+    client: Result<Client, ErrorBody>,
+    mode: Mode,
+) -> ExitCode {
     let client = match client {
         Ok(client) => client,
         Err(err) => return fail(mode, err),
     };
     match command {
-        ProjectCommand::List => finish(mode, client.call(&routes::PROJECTS, &[], &[], None::<&NoBody>)),
+        ProjectCommand::List => finish(
+            mode,
+            client.call(&routes::PROJECTS, &[], &[], None::<&NoBody>),
+        ),
         ProjectCommand::Show { project } => finish(
             mode,
             project

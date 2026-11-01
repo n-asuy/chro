@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.54
+## 0.1.55
 
 - Changed the `chro` command from `chro task …` to `chro session …`, and the `task` subcommands are gone. Sessions are started, delegated, sent to, waited on (`session wait --for idle|input|settled`), read, noted, forked, merged and rebased through the server's operator API, approvals are answered with `chro approval`, and `chro schema` prints every command, flag and error code as JSON. The commands work against a running `chro-server` without the desktop app open. `chro skill install` installs the skill that teaches Claude Code and Codex these commands, and onboarding and the title-bar agent menu now offer to install or update it
 - Added a message queue to the composer: a message sent while a turn is running waits in a list above the input, where it can be dragged into a different order, edited, removed, or sent now (which stops the running turn and sends it). Queued messages are stored by the server, so `chro session send` and `chro session unqueue` see the same queue

@@ -67,7 +67,10 @@ pub fn run(command: Commands, global: GlobalArgs) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => output::fail(
                 mode,
-                server_contract::ErrorBody::new(server_contract::ErrorCode::Internal, err.to_string()),
+                server_contract::ErrorBody::new(
+                    server_contract::ErrorCode::Internal,
+                    err.to_string(),
+                ),
             ),
         },
     }

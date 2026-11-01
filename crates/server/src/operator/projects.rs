@@ -36,8 +36,7 @@ pub(crate) async fn ensure(
     State(state): State<AppState>,
     Json(body): Json<EnsureProject>,
 ) -> V1Result<ProjectView> {
-    let project =
-        selectors::project_ensuring(state.pool(), &format!("path:{}", body.path)).await?;
+    let project = selectors::project_ensuring(state.pool(), &format!("path:{}", body.path)).await?;
     state.spawn_index_prewarm(PathBuf::from(&project.git_repo_path));
     Ok(V1(project_view(&project)))
 }

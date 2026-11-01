@@ -117,7 +117,9 @@ impl Client {
             Ok(response) => response.into_string(),
             Err(ureq::Error::Status(_, response)) => response.into_string(),
             Err(ureq::Error::Transport(err)) => {
-                return Err(self.unreachable(route.is_mutating(), err.to_string()).into())
+                return Err(self
+                    .unreachable(route.is_mutating(), err.to_string())
+                    .into())
             }
         }
         .map_err(|err| Failure::from(self.unreachable(route.is_mutating(), err.to_string())))?;

@@ -68,7 +68,9 @@ impl RuntimeIdentity {
         match runtime_file::remove_if_owned(&self.file, &self.runtime_id) {
             Ok(true) => tracing::info!(path = %self.file.display(), "removed runtime file"),
             Ok(false) => {}
-            Err(err) => tracing::warn!(path = %self.file.display(), "failed to remove runtime file: {err}"),
+            Err(err) => {
+                tracing::warn!(path = %self.file.display(), "failed to remove runtime file: {err}")
+            }
         }
     }
 }

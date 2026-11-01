@@ -26,7 +26,11 @@ fn launcher(exe: &Path) -> Option<Command> {
             return Some(command);
         }
     }
-    let name = if cfg!(windows) { "chro-desktop.exe" } else { "chro-desktop" };
+    let name = if cfg!(windows) {
+        "chro-desktop.exe"
+    } else {
+        "chro-desktop"
+    };
     let sibling = dir.join(name);
     sibling.is_file().then(|| Command::new(sibling))
 }
@@ -61,7 +65,11 @@ pub(crate) fn open() -> Result<Target, ErrorBody> {
             Err(err) => {
                 return Err(ErrorBody::new(
                     ErrorCode::Timeout,
-                    format!("the app did not come up within {}s: {}", READY_TIMEOUT.as_secs(), err.message),
+                    format!(
+                        "the app did not come up within {}s: {}",
+                        READY_TIMEOUT.as_secs(),
+                        err.message
+                    ),
                 ))
             }
         }
@@ -82,7 +90,11 @@ mod tests {
     #[test]
     fn the_desktop_executable_beside_the_cli_is_the_launcher() {
         let dir = tempfile::tempdir().unwrap();
-        let name = if cfg!(windows) { "chro-desktop.exe" } else { "chro-desktop" };
+        let name = if cfg!(windows) {
+            "chro-desktop.exe"
+        } else {
+            "chro-desktop"
+        };
         std::fs::write(dir.path().join(name), b"").unwrap();
         assert!(launcher(&dir.path().join("chro")).is_some());
     }

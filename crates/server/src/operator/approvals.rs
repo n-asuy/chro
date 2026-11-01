@@ -69,9 +69,14 @@ pub(crate) async fn show(
         .await
         .ok_or_else(|| V1Error::not_found(format!("approval {id}")))?;
     let request = service.request(&id).await;
-    Ok(V1(
-        views::approval_view(&state, &id, request.as_ref(), &status, None).await?,
-    ))
+    Ok(V1(views::approval_view(
+        &state,
+        &id,
+        request.as_ref(),
+        &status,
+        None,
+    )
+    .await?))
 }
 
 /// The session an approval belongs to, while it is still known.
@@ -109,8 +114,8 @@ pub(crate) async fn respond(
             reason: body.reason.clone(),
         },
     };
-    let answers = (!body.answers.is_empty())
-        .then(|| body.answers.into_iter().collect::<HashMap<_, _>>());
+    let answers =
+        (!body.answers.is_empty()).then(|| body.answers.into_iter().collect::<HashMap<_, _>>());
     let status = state
         .runtime()
         .approvals()

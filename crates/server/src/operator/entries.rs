@@ -147,9 +147,11 @@ fn turn_entries(
             NormalizedEntryType::ErrorMessage { error_type } => {
                 (EntryKind::Error, None, tag(error_type, "type"))
             }
-            NormalizedEntryType::UserFeedback { denied_tool } => {
-                (EntryKind::User, Some(denied_tool.clone()), Some("denied".into()))
-            }
+            NormalizedEntryType::UserFeedback { denied_tool } => (
+                EntryKind::User,
+                Some(denied_tool.clone()),
+                Some("denied".into()),
+            ),
             // The prompt already stands for the user's message; the rest is
             // presentation detail of the app.
             NormalizedEntryType::UserMessage
@@ -201,7 +203,13 @@ fn select(entries: Vec<EntryView>, since: Option<Cursor>, limit: usize) -> Entri
 
 /// The normalized conversation of one turn, live or finished.
 async fn normalized(state: &AppState, run: &TaskRun) -> Result<Vec<NormalizedEntry>, V1Error> {
-    let live = state.runtime().msg_stores().read().await.get(&run.id).cloned();
+    let live = state
+        .runtime()
+        .msg_stores()
+        .read()
+        .await
+        .get(&run.id)
+        .cloned();
     let patches: Vec<Value> = match live {
         // A live store streams forever; its history is the snapshot so far.
         Some(store) => store
@@ -212,18 +220,20 @@ async fn normalized(state: &AppState, run: &TaskRun) -> Result<Vec<NormalizedEnt
                 _ => None,
             })
             .collect(),
-        None => state
-            .runtime()
-            .stream_logs(run.id)
-            .await?
-            .filter_map(|entry| async move {
-                match entry {
-                    Ok(LogEntry::JsonPatch(value)) => Some(value),
-                    _ => None,
-                }
-            })
-            .collect()
-            .await,
+        None => {
+            state
+                .runtime()
+                .stream_logs(run.id)
+                .await?
+                .filter_map(|entry| async move {
+                    match entry {
+                        Ok(LogEntry::JsonPatch(value)) => Some(value),
+                        _ => None,
+                    }
+                })
+                .collect()
+                .await
+        }
     };
     Ok(fold_patches(&patches))
 }
@@ -353,7 +363,10 @@ mod tests {
             ]
         );
         assert_eq!(entries[0].cursor, "2.0");
-        assert_eq!(entries[1].cursor, "2.3", "positions survive skipped entries");
+        assert_eq!(
+            entries[1].cursor, "2.3",
+            "positions survive skipped entries"
+        );
         assert_eq!(entries[1].tool.as_deref(), Some("Bash"));
         assert_eq!(entries[3].cursor, "2.5", "the end follows the last entry");
         assert_eq!(entries[1].status.as_deref(), Some("success"));
@@ -396,7 +409,10 @@ mod tests {
             100,
         );
         assert!(caught_up.entries.is_empty());
-        assert_eq!(caught_up.next_cursor, rest.next_cursor, "cursor holds steady");
+        assert_eq!(
+            caught_up.next_cursor, rest.next_cursor,
+            "cursor holds steady"
+        );
     }
 
     #[test]

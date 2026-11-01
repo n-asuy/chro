@@ -36,7 +36,11 @@ pub enum ApprovalCommand {
         #[arg(long, requires = "deny")]
         reason: Option<String>,
         /// Answer a question as "question=option" (repeatable); implies approve
-        #[arg(long = "answer", value_name = "QUESTION=OPTION", conflicts_with = "deny")]
+        #[arg(
+            long = "answer",
+            value_name = "QUESTION=OPTION",
+            conflicts_with = "deny"
+        )]
         answers: Vec<String>,
     },
 }
@@ -74,7 +78,11 @@ fn respond_body(
     })
 }
 
-pub(crate) fn run(command: ApprovalCommand, client: Result<Client, ErrorBody>, mode: Mode) -> ExitCode {
+pub(crate) fn run(
+    command: ApprovalCommand,
+    client: Result<Client, ErrorBody>,
+    mode: Mode,
+) -> ExitCode {
     let client = match client {
         Ok(client) => client,
         Err(err) => return fail(mode, err),
@@ -82,11 +90,15 @@ pub(crate) fn run(command: ApprovalCommand, client: Result<Client, ErrorBody>, m
     match command {
         ApprovalCommand::List { session } => {
             let query: Vec<_> = session.into_iter().map(|s| ("session", s)).collect();
-            finish(mode, client.call(&routes::APPROVALS, &[], &query, None::<&NoBody>))
+            finish(
+                mode,
+                client.call(&routes::APPROVALS, &[], &query, None::<&NoBody>),
+            )
         }
-        ApprovalCommand::Show { approval } => {
-            finish(mode, client.call(&routes::APPROVAL, &[&approval], &[], None))
-        }
+        ApprovalCommand::Show { approval } => finish(
+            mode,
+            client.call(&routes::APPROVAL, &[&approval], &[], None),
+        ),
         ApprovalCommand::Respond {
             approval,
             approve,
@@ -98,8 +110,8 @@ pub(crate) fn run(command: ApprovalCommand, client: Result<Client, ErrorBody>, m
             respond_body(approve, deny, reason, answers)
                 .map_err(Failure::from)
                 .and_then(|body| {
-                client.call(&routes::APPROVAL_RESPOND, &[&approval], &[], Some(&body))
-            }),
+                    client.call(&routes::APPROVAL_RESPOND, &[&approval], &[], Some(&body))
+                }),
         ),
     }
 }
@@ -112,7 +124,10 @@ mod tests {
     fn answers_imply_approval_and_parse_question_option_pairs() {
         let body = respond_body(false, false, None, vec!["Which db? = sqlite".into()]).unwrap();
         assert_eq!(body.decision, Decision::Approve);
-        assert_eq!(body.answers.get("Which db?").map(String::as_str), Some("sqlite"));
+        assert_eq!(
+            body.answers.get("Which db?").map(String::as_str),
+            Some("sqlite")
+        );
     }
 
     #[test]
