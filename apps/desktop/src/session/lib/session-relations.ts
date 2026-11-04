@@ -182,6 +182,26 @@ export function sessionRelations(
 }
 
 /**
+ * The session together with every session it relates to, in either
+ * direction, so the left panel can mark them as one group. Empty when the
+ * session relates to no other session: a group of one marks nothing.
+ */
+export function relatedSessionGroup(
+  taskId: string,
+  outgoing: readonly TaskContextRef[],
+  incoming: readonly TaskContextRef[],
+): ReadonlySet<string> {
+  const group = new Set<string>();
+  for (const ref of outgoing) {
+    if (ref.target_task_id) group.add(ref.target_task_id);
+  }
+  for (const ref of incoming) group.add(ref.task_id);
+  group.delete(taskId);
+  if (group.size > 0) group.add(taskId);
+  return group;
+}
+
+/**
  * For each task, how many of the sessions it delegated are running right now.
  * Tasks with none are absent.
  */

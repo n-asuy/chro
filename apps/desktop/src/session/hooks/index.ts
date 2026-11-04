@@ -50,6 +50,9 @@ export type { UseConversationHistoryResult } from "./use-conversation-history";
 export { useSessionTaskState } from "./use-session-task-state";
 export type { UseSessionTaskStateResult } from "./use-session-task-state";
 
+export { useSessionContextRefs } from "./use-session-context-refs";
+export type { SessionContextRefs } from "./use-session-context-refs";
+
 export { useArchivedSessions } from "./use-archived-sessions";
 export type {
   ArchivedSession,

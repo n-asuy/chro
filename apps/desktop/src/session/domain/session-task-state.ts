@@ -155,9 +155,17 @@ export function applyPendingSubmissionToTasks(
   }
   claimed.add(targetId);
 
-  const title = derivePendingTaskTitle(pending.prompt);
   const byId = new Map(streamedTasks.map((task) => [task.id, task]));
   const current = byId.get(targetId);
+  // A submission the backend has already settled contributes nothing. Cleanup
+  // runs only where a view of the submission's own project is mounted, but
+  // cross-project lists overlay every project's submissions, so a leftover one
+  // must not keep forcing its optimistic active session onto the real row.
+  if (isPendingSubmissionSettledByTask(pending, current)) {
+    return streamedTasks;
+  }
+
+  const title = derivePendingTaskTitle(pending.prompt);
   const isFinished = Boolean(pending.finishedAt);
   const pendingActiveSessionId = isFinished
     ? null

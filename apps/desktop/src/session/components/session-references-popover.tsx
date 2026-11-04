@@ -3,32 +3,20 @@ import {
   type TranslationKey,
   useLanguage,
 } from "@/i18n";
-import { desktopFetch } from "@/lib/backend-client";
 import { slugOrId } from "@/lib/slug";
-import { useTaskStatusDot } from "@/session/hooks";
+import { useSessionContextRefs, useTaskStatusDot } from "@/session/hooks";
 import {
   type SessionRelation,
   type SessionRelationKind,
-  type TaskContextRef,
   sessionRelations,
 } from "@/session/lib/session-relations";
 import type { StoredTask } from "@/session/types";
 import { Button } from "@chro/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
-import { useQuery } from "@tanstack/react-query";
 import { FileText, Folder, Link2, Loader2, MessageSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { SessionActivityIndicator } from "./session-activity-indicator";
 import { SessionLeadingMarker } from "./session-leading-marker";
-
-type TaskContextRefsResponse = {
-  refs: TaskContextRef[];
-};
-
-type TaskContextRefsResult = {
-  outgoing: TaskContextRef[];
-  incoming: TaskContextRef[];
-};
 
 type SessionReferencesPopoverProps = {
   taskId?: string | null;
@@ -52,22 +40,6 @@ const RELATION_LABEL: Record<SessionRelationKind, TranslationKey> = {
 
 const shortId = (id: string): string => id.replace(/-/g, "").slice(0, 4);
 
-const fetchTaskContextRefs = async (
-  taskId: string,
-): Promise<TaskContextRefsResult> => {
-  const encoded = encodeURIComponent(taskId);
-  const [outgoing, incoming] = await Promise.all([
-    desktopFetch<TaskContextRefsResponse>(`/rpc/tasks/${encoded}/context-refs`),
-    desktopFetch<TaskContextRefsResponse>(
-      `/rpc/tasks/${encoded}/referenced-by`,
-    ),
-  ]);
-  return {
-    outgoing: outgoing.refs,
-    incoming: incoming.refs,
-  };
-};
-
 /**
  * Every session and file this session is related to, one row per
  * counterpart: the relation (delegated to / from, continued from / in, uses,
@@ -84,12 +56,7 @@ export function SessionReferencesPopover({
 }: SessionReferencesPopoverProps) {
   const { t } = useLanguage();
   const [open, setOpen] = useState(false);
-  const refsQuery = useQuery({
-    queryKey: ["task-context-refs", taskId],
-    queryFn: () => fetchTaskContextRefs(taskId ?? ""),
-    enabled: Boolean(taskId),
-    staleTime: 10_000,
-  });
+  const refsQuery = useSessionContextRefs(taskId);
   const { refetch } = refsQuery;
 
   useEffect(() => {

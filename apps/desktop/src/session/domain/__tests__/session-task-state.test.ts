@@ -615,4 +615,41 @@ describe("applyPendingSubmissionGroupsToTasks", () => {
       "project-1",
     );
   });
+
+  it("stops showing a session as running once the backend settles it, even if no view finished the submission", () => {
+    // A follow-up sent in project-1, after which the user moved to project-2.
+    // Nothing mounted for project-1 marks the submission finished or clears
+    // it, so it is still present and unfinished when its run ends. The
+    // cross-project list must read the settled raw row, not keep forcing the
+    // optimistic active session on it.
+    const pending = resolvePendingSessionSubmission(
+      createPendingSessionSubmission({
+        scopeId: "scope-1",
+        requestId: "req-1",
+        prompt: "Continue",
+        createdAt: "2025-01-02T00:00:00.000Z",
+        taskId: "task-1",
+        taskSlug: "task-one",
+      }),
+      {
+        execution_id: "exec-1",
+        task_run_id: "run-1",
+        task_id: "task-1",
+        project_id: "project-1",
+        executor_session_id: "sess-1",
+      },
+    );
+    const settled = makeTask({
+      status: "completed",
+      active_session_id: null,
+      updated_at: "2025-01-02T00:05:00.000Z",
+    });
+
+    const result = applyPendingSubmissionGroupsToTasks(
+      [settled],
+      [{ projectId: "project-1", submissions: [pending] }],
+    );
+
+    expect(result).toEqual([settled]);
+  });
 });

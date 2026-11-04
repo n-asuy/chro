@@ -24,10 +24,14 @@ import {
   useArchivedSessions,
   useInboxTasksStream,
   useMarkViewedWhenActive,
+  useSessionContextRefs,
   useTaskStatusDot,
 } from "@/session/hooks";
 import { formatRelativeTime } from "@/session/lib/relative-time";
-import { runningDelegationCounts } from "@/session/lib/session-relations";
+import {
+  relatedSessionGroup,
+  runningDelegationCounts,
+} from "@/session/lib/session-relations";
 import { useAllPendingSessionSubmissions } from "@/session/state/pending-session-submissions-store";
 import type { StoredTask } from "@/session/types";
 import {
@@ -108,6 +112,7 @@ import { ProjectColorDot } from "../project-color-dot";
 import { ProjectColorPicker } from "../project-color-picker";
 import { ProjectSwitcherDropdown } from "../project-switcher-dropdown";
 import { ProjectDirectoryTree } from "./directory-map-panel";
+import { RelationConnector } from "./relation-connector";
 import { SessionRowContainer } from "./session-row";
 
 const ICON_BUTTON_CLASS =
@@ -127,6 +132,7 @@ const REVEAL_ON_HOVER_CLASS =
 
 const EMPTY_ARCHIVED: readonly ArchivedSessionSummary[] = [];
 const NO_TASKS: readonly StoredTask[] = [];
+const NO_RELATED_SESSIONS: ReadonlySet<string> = new Set();
 
 /**
  * How sessions are ordered inside each group. `name-asc`/`name-desc` order by
@@ -410,6 +416,37 @@ export function ProjectsDockPanel() {
   const runningDelegations = useMemo(
     () => runningDelegationCounts(merged),
     [merged],
+  );
+
+  // The focused session and the sessions it relates to (its Refs) are marked
+  // as one group. Refetched whenever the focused session changes on the
+  // stream, which is when it gains a delegation or a reference.
+  const activeTask = useMemo(
+    () =>
+      activeTaskKey
+        ? merged.find(
+            (task) => task.id === activeTaskKey || task.slug === activeTaskKey,
+          ) ?? null
+        : null,
+    [merged, activeTaskKey],
+  );
+  const activeRefsQuery = useSessionContextRefs(activeTask?.id);
+  const { refetch: refetchActiveRefs } = activeRefsQuery;
+  const activeUpdatedAt = activeTask?.updated_at;
+  useEffect(() => {
+    if (activeUpdatedAt) void refetchActiveRefs();
+  }, [activeUpdatedAt, refetchActiveRefs]);
+  const activeRefs = activeRefsQuery.data;
+  const relatedSessions = useMemo(
+    () =>
+      activeTask && activeRefs
+        ? relatedSessionGroup(
+            activeTask.id,
+            activeRefs.outgoing,
+            activeRefs.incoming,
+          )
+        : NO_RELATED_SESSIONS,
+    [activeTask, activeRefs],
   );
 
   const openProjectIds = useMemo(
@@ -715,8 +752,12 @@ export function ProjectsDockPanel() {
         <div className="flex min-h-0 flex-1 flex-col">
           <div
             ref={sessionListRef}
-            className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+            className="relative min-h-0 flex-1 overflow-y-auto px-2 pb-3"
           >
+            <RelationConnector
+              containerRef={sessionListRef}
+              enabled={relatedSessions.size > 0}
+            />
             {isLoading && !hasAnyContent ? (
               <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
                 <LoadingDot isLoading className="h-3 w-3" />
@@ -751,6 +792,7 @@ export function ProjectsDockPanel() {
                             activeTaskKey === task.id ||
                             activeTaskKey === task.slug
                           }
+                          isRelated={relatedSessions.has(task.id)}
                           onOpen={() => openSession(task)}
                           onArchive={() => archiveSession(task)}
                           onFork={(workspace) =>
@@ -815,6 +857,7 @@ export function ProjectsDockPanel() {
                           isPinned={isPinned}
                           onTogglePin={togglePin}
                           runningDelegations={runningDelegations}
+                          relatedSessions={relatedSessions}
                           t={t}
                         />
                       ))
@@ -857,6 +900,7 @@ export function ProjectsDockPanel() {
                               runningDelegations.get(task.id) ?? 0
                             }
                             isActive={isActiveTask(task)}
+                            isRelated={relatedSessions.has(task.id)}
                             onOpen={() => openSession(task)}
                             onArchive={() => archiveSession(task)}
                             onFork={(workspace) =>
@@ -1109,6 +1153,8 @@ interface SessionGroupSectionProps {
   onTogglePin: (taskId: string) => void;
   /** Running delegated sessions per delegating task id. */
   runningDelegations: ReadonlyMap<string, number>;
+  /** The focused session's relation group, marked on its rows. */
+  relatedSessions: ReadonlySet<string>;
   t: TranslationFunction;
 }
 
@@ -1127,6 +1173,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
   isPinned,
   onTogglePin,
   runningDelegations,
+  relatedSessions,
   t,
 }: SessionGroupSectionProps) {
   const activeTaskKey = useFocusedSessionTaskKey();
@@ -1261,6 +1308,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
                   onTogglePin={() => onTogglePin(task.id)}
                   runningDelegations={runningDelegations.get(task.id) ?? 0}
                   isActive={isActiveTask(task)}
+                  isRelated={relatedSessions.has(task.id)}
                   onOpen={() => openSession(task)}
                   onArchive={() => archiveSession(task)}
                   onFork={(workspace) => void forkSession(task, workspace)}

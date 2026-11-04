@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredTask } from "../types";
 import {
   type TaskContextRef,
+  relatedSessionGroup,
   runningDelegationCounts,
   sessionRelations,
 } from "./session-relations";
@@ -227,5 +228,27 @@ describe("runningDelegationCounts", () => {
     expect(counts.get("lead")).toBe(2);
     expect(counts.get("other")).toBe(1);
     expect(counts.has("a")).toBe(false);
+  });
+});
+
+describe("relatedSessionGroup", () => {
+  it("holds the session and every session it relates to, in either direction", () => {
+    const outgoing = [
+      ref({ kind: "handoff", target_task_id: "child" }),
+      ref({ kind: "session", target_task_id: "used" }),
+      ref({ kind: "file", path: "README.md" }),
+    ];
+    const incoming = [ref({ kind: "session", task_id: "reader" })];
+    expect(relatedSessionGroup(ME, outgoing, incoming)).toEqual(
+      new Set([ME, "child", "used", "reader"]),
+    );
+  });
+
+  it("is empty when the session relates to no other session", () => {
+    const outgoing = [
+      ref({ kind: "file", path: "README.md" }),
+      ref({ kind: "session", target_task_id: ME }),
+    ];
+    expect(relatedSessionGroup(ME, outgoing, []).size).toBe(0);
   });
 });

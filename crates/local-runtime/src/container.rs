@@ -535,7 +535,7 @@ impl LocalContainerService {
 
         let result = sqlx::query(
             "UPDATE task_records
-             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
+             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now', 'subsec')
              WHERE id = ?
                AND (
                    active_session_id IN (
@@ -1551,7 +1551,7 @@ impl ContainerService for LocalContainerService {
         for run_id in orphaned_run_ids {
             finalized_tasks += sqlx::query(
                 "UPDATE task_records
-                 SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
+                 SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now', 'subsec')
                  WHERE active_session_id IN (
                      SELECT id FROM task_sessions WHERE task_run_id = ?
                  )",
@@ -1574,7 +1574,7 @@ impl ContainerService for LocalContainerService {
         // running at startup, so every remaining in-progress task is stale.
         let stranded_tasks = sqlx::query(
             "UPDATE task_records
-             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now')
+             SET status = ?, active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now', 'subsec')
              WHERE status = ? AND active_session_id IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM task_runs
@@ -1813,6 +1813,7 @@ fn result_closes_run(payload: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use db::models::{AgentProfile, TaskSession};
 
     /// Build a `LocalContainerService` backed by a throwaway on-disk SQLite db.
@@ -2021,6 +2022,31 @@ mod tests {
         assert_eq!(task_after.status, TaskStatus::InProgress);
         assert_eq!(task_after.active_session_id, Some(newer_session.id));
         assert!(task_after.awaiting_input);
+    }
+
+    /// The UI settles a just-sent turn once the task row shows no active
+    /// session AND was updated after the send. A turn that ends in the same
+    /// second it was sent would fail that comparison forever if the clear
+    /// truncated `updated_at` to whole seconds.
+    #[tokio::test]
+    async fn run_completion_stamps_task_with_subsecond_time() {
+        let (service, _temp) = build_service().await;
+        let (task_id, run_id) = seed_running_task(&service, RunStatus::Running).await;
+        let sent_at = Utc::now();
+
+        service.mark_run_completion(run_id, Some(0)).await.unwrap();
+
+        let task_after = TaskRecord::find_by_id(service.db.pool(), task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_after.active_session_id, None);
+        assert!(
+            task_after.updated_at >= sent_at,
+            "updated_at {} precedes the send at {}",
+            task_after.updated_at,
+            sent_at
+        );
     }
 
     /// Once a run is terminal, a delayed process-exit notification cannot

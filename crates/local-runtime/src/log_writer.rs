@@ -16,19 +16,34 @@ use uuid::Uuid;
 /// disk is the raw provider protocol, which is O(n) in the agent's output. This
 /// cap bounds pathological runs (e.g. a command dumping hundreds of MB) so a
 /// single run can never exhaust memory or freeze the UI on read.
-pub const MAX_RUN_LOG_BYTES: u64 = 64 * 1024 * 1024;
+///
+/// The last quarter of the cap is a tail reserve (see [`ExecutionLogWriter`]):
+/// a run's final answer arrives last, so the budget must never be spent before
+/// the run ends.
+pub const MAX_RUN_LOG_BYTES: u64 = 80 * 1024 * 1024;
+
+/// Room kept below the hard cap for the truncation marker itself.
+const MARKER_HEADROOM_BYTES: u64 = 1024;
 
 /// File-based JSONL log writer for task run execution logs.
 ///
-/// Writes log entries as newline-delimited JSON to disk. Three invariants keep
+/// Writes log entries as newline-delimited JSON to disk. These invariants keep
 /// the file bounded and safe at rest:
 /// 1. `JsonPatch` entries are dropped (dead weight — reconstructed on read).
-/// 2. Bulk `Stdout`/`Stderr` output is capped at [`MAX_RUN_LOG_BYTES`].
-/// 3. Known secret material is redacted before it touches disk.
+/// 2. Base64 media payloads (screenshots the agent reads) are replaced with a
+///    size marker; no renderer displays them and they dominate image-heavy runs.
+/// 3. Bulk `Stdout`/`Stderr` output is bounded by `max_bytes` in two stages.
+///    Up to the bulk budget (three quarters) every line is kept. Past it, only
+///    lines of at most `max_bytes / 1024` are kept, so oversized tool results
+///    and cumulative snapshots stop while the small lines that end a run (the
+///    final answer, the result record) still land. At `max_bytes` all bulk
+///    output stops.
+/// 4. Known secret material is redacted before it touches disk.
 pub struct ExecutionLogWriter {
     file: tokio::fs::File,
     max_bytes: u64,
     bytes_written: u64,
+    eliding: bool,
     truncated: bool,
 }
 
@@ -55,12 +70,28 @@ impl ExecutionLogWriter {
         // across re-opens (a non-active follow-up append creates a fresh writer
         // against the same file).
         let bytes_written = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-        Ok(Self {
+        let mut writer = Self {
             file,
             max_bytes,
             bytes_written,
-            truncated: bytes_written >= max_bytes,
-        })
+            eliding: false,
+            truncated: false,
+        };
+        writer.eliding = bytes_written >= writer.bulk_budget();
+        writer.truncated = bytes_written >= writer.hard_limit();
+        Ok(writer)
+    }
+
+    fn bulk_budget(&self) -> u64 {
+        self.max_bytes - self.max_bytes / 4
+    }
+
+    fn tail_line_max(&self) -> u64 {
+        self.max_bytes / 1024
+    }
+
+    fn hard_limit(&self) -> u64 {
+        self.max_bytes.saturating_sub(MARKER_HEADROOM_BYTES)
     }
 
     pub async fn append_entry(&mut self, entry: &LogEntry) -> std::io::Result<()> {
@@ -80,19 +111,33 @@ impl ExecutionLogWriter {
         }
 
         let line = serialize_entry(entry)?;
+        let len = line.len() as u64;
 
-        if is_bulk && self.bytes_written + line.len() as u64 > self.max_bytes {
+        if is_bulk && self.bytes_written + len > self.hard_limit() {
             self.truncated = true;
             let marker = LogEntry::Stderr(format!(
                 "[chro] execution log truncated: exceeded {} bytes of raw output for this run",
                 self.max_bytes
             ));
-            let marker_line = serialize_entry(&marker)?;
-            self.file.write_all(marker_line.as_bytes()).await?;
-            self.bytes_written += marker_line.len() as u64;
+            return self.write_line(&serialize_entry(&marker)?).await;
+        }
+
+        if is_bulk && self.bytes_written + len > self.bulk_budget() && len > self.tail_line_max() {
+            if !self.eliding {
+                self.eliding = true;
+                let marker = LogEntry::Stderr(format!(
+                    "[chro] execution log over budget: lines larger than {} bytes are no longer persisted for this run",
+                    self.tail_line_max()
+                ));
+                self.write_line(&serialize_entry(&marker)?).await?;
+            }
             return Ok(());
         }
 
+        self.write_line(&line).await
+    }
+
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
         self.file.write_all(line.as_bytes()).await?;
         self.bytes_written += line.len() as u64;
         Ok(())
@@ -106,12 +151,13 @@ impl ExecutionLogWriter {
     }
 }
 
-/// Serialize a single entry to a JSONL line, redacting secrets in bulk output.
+/// Serialize a single entry to a JSONL line, eliding media and redacting
+/// secrets in bulk output.
 fn serialize_entry(entry: &LogEntry) -> std::io::Result<String> {
     let redacted;
     let to_write = match entry {
         LogEntry::Stdout(s) => {
-            redacted = LogEntry::Stdout(redact_secrets(s).into_owned());
+            redacted = LogEntry::Stdout(redact_secrets(&elide_base64_media(s)).into_owned());
             &redacted
         }
         LogEntry::Stderr(s) => {
@@ -218,6 +264,50 @@ pub async fn read_log_entries_with_limit(
 /// first as compact JSON.
 fn is_json_patch_line(line: &str) -> bool {
     line.starts_with(r#"{"type":"json_patch""#)
+}
+
+/// Replace the payload of every base64 media source (`{"type":"base64",
+/// "data":...}`, the shape providers use for image blocks) in a protocol line
+/// with a size marker. Lines without such a source are returned untouched, so
+/// only media lines pay for a JSON round-trip.
+fn elide_base64_media(line: &str) -> Cow<'_, str> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE
+        .get_or_init(|| Regex::new(r#""type"\s*:\s*"base64""#).expect("valid base64-media regex"));
+    if !re.is_match(line) {
+        return Cow::Borrowed(line);
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Cow::Borrowed(line);
+    };
+    if elide_base64_sources(&mut value) {
+        Cow::Owned(value.to_string())
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+fn elide_base64_sources(value: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut changed = false;
+            if map.get("type").and_then(Value::as_str) == Some("base64") {
+                if let Some(Value::String(data)) = map.get_mut("data") {
+                    *data = format!("[chro: omitted {} bytes of base64 media]", data.len());
+                    changed = true;
+                }
+            }
+            for child in map.values_mut() {
+                changed |= elide_base64_sources(child);
+            }
+            changed
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |changed, item| elide_base64_sources(item) | changed),
+        _ => false,
+    }
 }
 
 /// Redact known secret material (auth tokens, API keys, bearer credentials)
@@ -416,10 +506,11 @@ mod tests {
             let mut writer = ExecutionLogWriter::with_limit(dir.path(), run_id, cap)
                 .await
                 .unwrap();
-            // Write well past the cap.
-            for _ in 0..64 {
+            // Write well past the cap in lines small enough to pass the tail
+            // reserve (e.g. a command streaming output deltas).
+            for _ in 0..8192 {
                 writer
-                    .append_entry(&LogEntry::Stdout("X".repeat(4096)))
+                    .append_entry(&LogEntry::Stdout("X".repeat(16)))
                     .await
                     .unwrap();
             }
@@ -431,9 +522,7 @@ mod tests {
             .await
             .unwrap()
             .len();
-        // File stays within a small constant factor of the cap (one over-budget
-        // line plus the truncation marker plus the trailing control entry).
-        assert!(size < cap + 16 * 1024, "file should be bounded, got {size}");
+        assert!(size <= cap, "file should be bounded, got {size}");
 
         let read_back = read_log_entries(dir.path(), run_id).await.unwrap();
         assert!(
@@ -446,5 +535,154 @@ mod tests {
             read_back.iter().any(|e| matches!(e, LogEntry::Finished)),
             "control entries must survive truncation"
         );
+    }
+
+    fn image_tool_result_line(data: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "tool_use_id": "toolu_1",
+                "type": "tool_result",
+                "content": [{
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": data}
+                }]
+            }]},
+            "session_id": "s1"
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn base64_media_payloads_are_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = Uuid::new_v4();
+        let data = "iVBORw0KGgo".repeat(30_000);
+
+        {
+            let mut writer = ExecutionLogWriter::new(dir.path(), run_id).await.unwrap();
+            writer
+                .append_entry(&LogEntry::Stdout(image_tool_result_line(&data)))
+                .await
+                .unwrap();
+        }
+
+        let read_back = read_log_entries(dir.path(), run_id).await.unwrap();
+        let [LogEntry::Stdout(line)] = read_back.as_slice() else {
+            panic!("expected one stdout entry, got {read_back:?}");
+        };
+        assert!(!line.contains("iVBORw0KGgo"), "media bytes must be elided");
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let block = &value["message"]["content"][0];
+        assert_eq!(block["tool_use_id"], "toolu_1");
+        let source = &block["content"][0]["source"];
+        assert_eq!(source["type"], "base64");
+        assert_eq!(source["media_type"], "image/png");
+        assert_eq!(
+            source["data"],
+            format!("[chro: omitted {} bytes of base64 media]", data.len())
+        );
+    }
+
+    #[tokio::test]
+    async fn lines_without_media_are_persisted_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = Uuid::new_v4();
+        // Key order and spacing must survive: only media lines are rewritten.
+        let line =
+            r#"{"type":"assistant", "message":{"content":[{"type":"text","text":"type base64"}]}}"#;
+
+        {
+            let mut writer = ExecutionLogWriter::new(dir.path(), run_id).await.unwrap();
+            writer
+                .append_entry(&LogEntry::Stdout(line.into()))
+                .await
+                .unwrap();
+        }
+
+        let read_back = read_log_entries(dir.path(), run_id).await.unwrap();
+        assert_eq!(read_back, vec![LogEntry::Stdout(line.into())]);
+    }
+
+    #[tokio::test]
+    async fn small_lines_survive_past_the_bulk_budget() {
+        // The tail of a run (the agent's final answer) matters most. Once the
+        // bulk budget is spent, oversized lines are dropped but small protocol
+        // lines keep being persisted so the conversation still ends where the
+        // run ended.
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = Uuid::new_v4();
+        let cap: u64 = 1024 * 1024;
+
+        {
+            let mut writer = ExecutionLogWriter::with_limit(dir.path(), run_id, cap)
+                .await
+                .unwrap();
+            for _ in 0..64 {
+                writer
+                    .append_entry(&LogEntry::Stdout("X".repeat(32 * 1024)))
+                    .await
+                    .unwrap();
+            }
+            writer
+                .append_entry(&LogEntry::Stdout(
+                    r#"{"type":"result","result":"done"}"#.into(),
+                ))
+                .await
+                .unwrap();
+            writer.append_entry(&LogEntry::Finished).await.unwrap();
+        }
+
+        let read_back = read_log_entries(dir.path(), run_id).await.unwrap();
+        let tail: Vec<_> = read_back.iter().rev().take(2).collect();
+        assert_eq!(
+            tail,
+            vec![
+                &LogEntry::Finished,
+                &LogEntry::Stdout(r#"{"type":"result","result":"done"}"#.into()),
+            ]
+        );
+        let elision_markers = read_back
+            .iter()
+            .filter(|e| matches!(e, LogEntry::Stderr(s) if s.contains("over budget")))
+            .count();
+        assert_eq!(elision_markers, 1, "the elision marker is written once");
+        let size = tokio::fs::metadata(log_file_path(dir.path(), run_id))
+            .await
+            .unwrap()
+            .len();
+        assert!(size <= cap + 1024, "file must stay bounded, got {size}");
+    }
+
+    #[tokio::test]
+    async fn reader_returns_everything_the_writer_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = Uuid::new_v4();
+        let cap: u64 = 1024 * 1024;
+        let line = "Y".repeat(512);
+
+        {
+            let mut writer = ExecutionLogWriter::with_limit(dir.path(), run_id, cap)
+                .await
+                .unwrap();
+            for _ in 0..4096 {
+                writer
+                    .append_entry(&LogEntry::Stdout(line.clone()))
+                    .await
+                    .unwrap();
+            }
+            writer.append_entry(&LogEntry::Finished).await.unwrap();
+        }
+
+        let read_back = read_log_entries_with_limit(dir.path(), run_id, cap)
+            .await
+            .unwrap();
+        assert!(
+            !read_back
+                .iter()
+                .any(|e| matches!(e, LogEntry::Stderr(s) if s.contains("on read"))),
+            "a file within the writer's cap must not be truncated on read"
+        );
+        assert!(matches!(read_back.last(), Some(LogEntry::Finished)));
     }
 }

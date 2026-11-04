@@ -36,6 +36,8 @@ export interface SessionRowContainerProps {
   /** How many sessions this one delegated are running right now. */
   runningDelegations: number;
   isActive: boolean;
+  /** In the focused session's relation group (itself and its Refs). */
+  isRelated: boolean;
   onOpen: () => void;
   onArchive: () => void;
   onFork: (workspace?: ForkWorkspace) => void;
@@ -67,6 +69,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
             showProject={props.showProject}
             projectName={props.projectName}
             isActive={props.isActive}
+            isRelated={props.isRelated}
             isPinned={props.isPinned}
             onTogglePin={props.onTogglePin}
             runningDelegations={props.runningDelegations}
@@ -142,6 +145,7 @@ interface SessionRowProps {
   showProject: boolean;
   projectName: string | null;
   isActive: boolean;
+  isRelated: boolean;
   isPinned: boolean;
   onTogglePin: () => void;
   runningDelegations: number;
@@ -156,6 +160,7 @@ function SessionRow({
   showProject,
   projectName,
   isActive,
+  isRelated,
   isPinned,
   onTogglePin,
   runningDelegations,
@@ -174,6 +179,7 @@ function SessionRow({
       ref={preview.setAnchor}
       role="option"
       aria-selected={isActive}
+      data-related={isRelated || undefined}
       tabIndex={0}
       draggable
       onClick={onOpen}
@@ -209,7 +215,10 @@ function SessionRow({
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        <span className="flex w-4 shrink-0 items-center justify-center">
+        <span
+          data-row-marker
+          className="flex w-4 shrink-0 items-center justify-center"
+        >
           <SessionLeadingMarker kind={dotKind} t={t} />
         </span>
         <span className="flex min-w-0 flex-1 flex-col">

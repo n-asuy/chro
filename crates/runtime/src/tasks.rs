@@ -1702,7 +1702,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         sqlx::query(
-            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now', 'subsec') WHERE id = ?",
         )
         .bind(session.id)
         .bind(task.id)
@@ -1988,7 +1988,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         }
 
         sqlx::query(
-            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_records SET active_session_id = ?, awaiting_input = 0, updated_at = datetime('now', 'subsec') WHERE id = ?",
         )
         .bind(session.id)
         .bind(task.id)
@@ -2244,7 +2244,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             );
         }
         if let Err(clear_err) = sqlx::query(
-            "UPDATE task_records SET active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE task_records SET active_session_id = NULL, awaiting_input = 0, updated_at = datetime('now', 'subsec') WHERE id = ?",
         )
         .bind(task_id)
         .execute(self.pool())

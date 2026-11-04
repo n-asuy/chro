@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.56
+
+- Added a connector line in the left panel that joins the focused session to the sessions it relates to (the ones listed in its Refs), so a delegation or reference group reads as one wherever its rows sit in the list
+- Fixed the sidebar spinner staying on after a run ended when a session from another project had been sent just before
+- Fixed long runs losing the end of their conversation once the run log hit its size limit: screenshots the agent reads are no longer stored in the log, the limit is raised, and the last part of the budget is kept for the final answer
+
 ## 0.1.55
 
 - Changed the `chro` command from `chro task …` to `chro session …`, and the `task` subcommands are gone. Sessions are started, delegated, sent to, waited on (`session wait --for idle|input|settled`), read, noted, forked, merged and rebased through the server's operator API, approvals are answered with `chro approval`, and `chro schema` prints every command, flag and error code as JSON. The commands work against a running `chro-server` without the desktop app open. `chro skill install` installs the skill that teaches Claude Code and Codex these commands, and onboarding and the title-bar agent menu now offer to install or update it
