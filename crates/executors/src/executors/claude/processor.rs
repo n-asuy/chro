@@ -19,7 +19,7 @@ use log_types::{
     should_suppress_system_message,
 };
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::types::{
     API_ERROR_MESSAGE, API_ERROR_SUBTYPE, AmpBashResult, ApprovalStatus, ClaudeContentBlockDelta,
@@ -1081,18 +1081,14 @@ impl ClaudeLogProcessor {
                     patches.push(ConversationPatch::add_normalized_entry(idx, entry));
                 }
             }
+            // Claude Code keeps adding out-of-band protocol messages
+            // (`command_lifecycle`, …). Like system subtypes they are not
+            // conversation content, so they go to the log, never the UI.
             ClaudeJson::Unknown { data } => {
-                let entry = NormalizedEntry {
-                    timestamp: None,
-                    entry_type: NormalizedEntryType::SystemMessage,
-                    content: format!(
-                        "Unrecognized JSON message: {}",
-                        serde_json::to_value(data).unwrap_or_default()
-                    ),
-                    metadata: None,
-                };
-                let idx = entry_index_provider.next();
-                patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                debug!(
+                    "Ignoring unrecognized Claude message: {}",
+                    serde_json::to_value(data).unwrap_or_default()
+                );
             }
         }
 
@@ -1626,6 +1622,22 @@ mod tests {
         assert_eq!(json.session_id(), Some("fb365ed8"));
         let patches = processor.normalize_entries(&json, "/tmp", &provider);
         assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_unrecognized_message_type_is_silent() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let json: ClaudeJson = serde_json::from_str(
+            r#"{"command_uuid":"c79a7fb2","session_id":"420cb3d7","state":"completed","type":"command_lifecycle","uuid":"4e8745ee"}"#,
+        )
+        .unwrap();
+        assert!(matches!(json, ClaudeJson::Unknown { .. }));
+        let patches = processor.normalize_entries(&json, "/tmp", &provider);
+        assert!(
+            patches.is_empty(),
+            "unrecognized protocol messages must never reach the UI, got {patches:?}"
+        );
     }
 
     #[test]

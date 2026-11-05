@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.57
+
+- Fixed raw "Unrecognized JSON message: {...}" lines appearing in Claude conversations when the Claude Code CLI sends a status message chro does not know, such as `command_lifecycle`. These messages are now logged instead of shown
+
 ## 0.1.56
 
 - Added a connector line in the left panel that joins the focused session to the sessions it relates to (the ones listed in its Refs), so a delegation or reference group reads as one wherever its rows sit in the list
