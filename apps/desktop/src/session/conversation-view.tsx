@@ -64,7 +64,10 @@ import { SESSION_SELECT_TEXT_ATTR } from "./utils/session-select-all";
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const COLLAPSED_HEIGHT = 192; // 12rem = 48 * 4px
+// Two lines of prompt text (text-sm, leading-relaxed) plus the bubble's top
+// padding: the user message stays pinned while its response scrolls, so a long
+// prompt must not eat the reading space.
+const COLLAPSED_HEIGHT = 52;
 
 interface ExpandableUserMessageProps {
   children: ReactNode;
@@ -119,7 +122,7 @@ const ExpandableUserMessage = ({
           <div className="pb-2">{children}</div>
           {!expanded && needsExpansion && (
             <div
-              className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-background via-background/80 to-transparent cursor-pointer flex items-end justify-center pb-1"
+              className="absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-background to-transparent cursor-pointer flex items-end justify-center pb-1"
               onClick={() => setExpanded(true)}
               role="button"
               tabIndex={0}

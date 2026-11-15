@@ -143,7 +143,7 @@ pub fn replay_log_entries(
 ) -> Vec<log_types::LogEntry> {
     let entry_index = EntryIndexProvider::new();
     let mut state = LogState::new();
-    let mut result: Vec<log_types::LogEntry> = Vec::new();
+    let mut result = log_types::ReplayLog::new();
 
     for entry in entries {
         let line = match entry {
@@ -173,7 +173,7 @@ pub fn replay_log_entries(
         }
     }
 
-    result
+    result.into_entries()
 }
 
 fn patch_entry(patch: Patch) -> log_types::LogEntry {
@@ -432,10 +432,7 @@ fn command_result(result: &Value) -> CommandRunResult {
         .get("exitCode")
         .and_then(Value::as_i64)
         .map(|code| CommandExitStatus::ExitCode { code: code as i32 });
-    CommandRunResult {
-        exit_status,
-        output: Some(result_to_text(result)),
-    }
+    CommandRunResult::new(exit_status, Some(result_to_text(result)))
 }
 
 fn tool_content(tool_name: &str, args: &Value) -> String {

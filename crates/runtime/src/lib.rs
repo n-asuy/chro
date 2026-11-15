@@ -33,13 +33,13 @@ use worktree::WorktreeManager;
 
 pub use container::{ContainerError, ContainerService};
 pub use execution::{ExecutionEvent, ExecutionStartParams};
+pub use session_turns::{SendOutcome, WhenBusy};
 pub use tasks::{
     ExecutionSessionStart, ForkOutcome, ForkWorkspace, MergeOutcome, MessageOptions, RebaseOutcome,
     SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
     TaskMessageMode, TaskMessageStart, TaskRunBranchStatus, TaskRunTaskProject, TaskRunWithTask,
     TaskService,
 };
-pub use session_turns::SendOutcome;
 pub use workspace::{canonicalize_path, ProjectFileService};
 
 pub type ExecutionEventStream = BroadcastStream<ExecutionEvent>;

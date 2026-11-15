@@ -8,7 +8,8 @@
 //!
 //! A message that may wait joins the session's queue and becomes the next turn
 //! when the current one ends; one that may not is refused with
-//! [`RuntimeError::SessionBusy`].
+//! [`RuntimeError::SessionBusy`]; one that interrupts stops the current turn
+//! and starts ahead of everything queued.
 
 use std::{
     collections::HashMap,
@@ -26,12 +27,24 @@ use crate::{
     Runtime, RuntimeError,
 };
 
-/// What happened to a message sent with [`TaskService::send_or_queue`].
+/// What a message does when its session already has a turn in flight or
+/// messages waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenBusy {
+    /// Wait in the queue and run when the turns ahead of it have ended.
+    Queue,
+    /// Fail with [`RuntimeError::SessionBusy`].
+    Refuse,
+    /// Stop the turn in flight and run next, ahead of everything queued.
+    Interrupt,
+}
+
+/// What happened to a message sent with [`TaskService::deliver`].
 #[derive(Debug)]
 pub enum SendOutcome {
-    /// The session was idle and the message started a turn.
+    /// The message started a turn.
     Started(Box<TaskMessageStart>),
-    /// The session was busy; the message waits at this 1-based position.
+    /// The message waits at this 1-based position.
     Queued { position: u32 },
 }
 
@@ -68,18 +81,20 @@ fn queued_options(stored: Option<&str>) -> Result<MessageOptions, RuntimeError> 
 enum Admission {
     Start,
     Queue,
+    Interrupt,
     Busy,
 }
 
 /// A message starts a turn only when nothing is in flight and nothing is
-/// waiting ahead of it; otherwise it queues if allowed, or is refused.
-fn admit(turn_in_flight: bool, waiting: u32, may_queue: bool) -> Admission {
+/// waiting ahead of it; otherwise its [`WhenBusy`] decides.
+fn admit(turn_in_flight: bool, waiting: u32, when_busy: WhenBusy) -> Admission {
     if !turn_in_flight && waiting == 0 {
-        Admission::Start
-    } else if may_queue {
-        Admission::Queue
-    } else {
-        Admission::Busy
+        return Admission::Start;
+    }
+    match when_busy {
+        WhenBusy::Queue => Admission::Queue,
+        WhenBusy::Refuse => Admission::Busy,
+        WhenBusy::Interrupt => Admission::Interrupt,
     }
 }
 
@@ -99,34 +114,35 @@ impl<R: Runtime> TaskService<'_, R> {
     /// Start a turn with `params` if the session is idle with nothing queued,
     /// and fail with [`RuntimeError::SessionBusy`] otherwise. The app's
     /// composer sends this way to an idle session; while a turn runs it
-    /// queues through [`Self::send_or_queue`].
+    /// queues through [`Self::deliver`].
     pub async fn send_task_message(
         &self,
         params: SendTaskMessageParams,
     ) -> Result<TaskMessageStart, RuntimeError> {
         let lock = turn_lock(params.task_id);
         let _guard = lock.lock().await;
-        match self.admission(params.task_id, false).await? {
+        match self.admission(params.task_id, WhenBusy::Refuse).await? {
             (Admission::Start, _) => self.start_turn(params).await,
             _ => Err(RuntimeError::SessionBusy),
         }
     }
 
-    /// Deliver the message to its session: start a turn when it is idle, queue
-    /// it behind the current turn when it is busy and `queue` allows, and fail
-    /// with [`RuntimeError::SessionBusy`] otherwise.
+    /// Deliver the message to its session: start a turn when it is idle with
+    /// nothing queued, and otherwise do what `when_busy` says.
     ///
-    /// Messages already queued keep their place: an idle session with a
-    /// non-empty queue queues this one too and starts the oldest.
-    pub async fn send_or_queue(
+    /// A queued message keeps the order: an idle session with a non-empty
+    /// queue queues this one too and starts the oldest. An interrupting one
+    /// starts now unless the stopped turn is still winding down, in which
+    /// case it waits at the front and starts when that turn ends.
+    pub async fn deliver(
         &self,
         params: SendTaskMessageParams,
-        queue: bool,
+        when_busy: WhenBusy,
     ) -> Result<SendOutcome, RuntimeError> {
         let task_id = params.task_id;
         let lock = turn_lock(task_id);
         let _guard = lock.lock().await;
-        let (admission, busy) = self.admission(task_id, queue).await?;
+        let (admission, busy) = self.admission(task_id, when_busy).await?;
         match admission {
             Admission::Start => {
                 let start = self.start_turn(params).await?;
@@ -134,27 +150,7 @@ impl<R: Runtime> TaskService<'_, R> {
             }
             Admission::Busy => Err(RuntimeError::SessionBusy),
             Admission::Queue => {
-                // Uploaded images nothing links to are swept by housekeeping;
-                // link them now so they outlive the wait.
-                if let Some(ids) = params
-                    .options
-                    .image_ids
-                    .as_deref()
-                    .filter(|ids| !ids.is_empty())
-                {
-                    self.runtime()
-                        .image()
-                        .link_images_to_task(task_id, ids)
-                        .await?;
-                }
-                let options = stored_options(&params.options)?;
-                let (_, position) = SessionQueueItem::enqueue(
-                    self.pool(),
-                    task_id,
-                    &params.prompt,
-                    options.as_deref(),
-                )
-                .await?;
+                let (_, position) = self.enqueue(&params).await?;
                 if busy {
                     return Ok(SendOutcome::Queued { position });
                 }
@@ -162,6 +158,14 @@ impl<R: Runtime> TaskService<'_, R> {
                 self.start_next_queued(task_id).await?;
                 Ok(SendOutcome::Queued {
                     position: position.saturating_sub(1),
+                })
+            }
+            Admission::Interrupt => {
+                let (item_id, _) = self.enqueue(&params).await?;
+                SessionQueueItem::move_to_front(self.pool(), task_id, item_id).await?;
+                Ok(match self.interrupt_for_front(task_id).await? {
+                    Some(start) => SendOutcome::Started(Box::new(start)),
+                    None => SendOutcome::Queued { position: 1 },
                 })
             }
         }
@@ -172,11 +176,38 @@ impl<R: Runtime> TaskService<'_, R> {
     async fn admission(
         &self,
         task_id: Uuid,
-        may_queue: bool,
+        when_busy: WhenBusy,
     ) -> Result<(Admission, bool), RuntimeError> {
         let busy = self.turn_in_flight(task_id).await?;
         let waiting = SessionQueueItem::count(self.pool(), task_id).await?;
-        Ok((admit(busy, waiting, may_queue), busy))
+        Ok((admit(busy, waiting, when_busy), busy))
+    }
+
+    /// Put the message at the back of the session's queue; returns its id and
+    /// 1-based position. Caller holds the turn lock.
+    async fn enqueue(&self, params: &SendTaskMessageParams) -> Result<(Uuid, u32), RuntimeError> {
+        // Uploaded images nothing links to are swept by housekeeping; link
+        // them now so they outlive the wait.
+        if let Some(ids) = params
+            .options
+            .image_ids
+            .as_deref()
+            .filter(|ids| !ids.is_empty())
+        {
+            self.runtime()
+                .image()
+                .link_images_to_task(params.task_id, ids)
+                .await?;
+        }
+        let options = stored_options(&params.options)?;
+        let (item, position) = SessionQueueItem::enqueue(
+            self.pool(),
+            params.task_id,
+            &params.prompt,
+            options.as_deref(),
+        )
+        .await?;
+        Ok((item.id, position))
     }
 
     /// Start the session's oldest queued message as a turn if the session is
@@ -263,6 +294,17 @@ impl<R: Runtime> TaskService<'_, R> {
         if !SessionQueueItem::move_to_front(self.pool(), task_id, item_id).await? {
             return Err(RuntimeError::NotFound("queued message"));
         }
+        Ok(self.interrupt_for_front(task_id).await?.is_some())
+    }
+
+    /// Stop the session's turns in flight and start the queue's front message.
+    /// Returns the started turn, or `None` while a stopped turn is still
+    /// winding down (its settlement starts the front message instead).
+    /// Caller holds the turn lock.
+    async fn interrupt_for_front(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<TaskMessageStart>, RuntimeError> {
         let in_flight: Vec<Uuid> = sqlx::query_scalar(
             "SELECT id FROM task_runs \
              WHERE task_id = ? AND status IN ('running', 'pending') AND dropped = 0",
@@ -274,9 +316,9 @@ impl<R: Runtime> TaskService<'_, R> {
             self.runtime().cancel_execution(run_id).await?;
         }
         if self.turn_in_flight(task_id).await? {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(self.start_next_queued(task_id).await?.is_some())
+        self.start_next_queued(task_id).await
     }
 
     /// Drop every message waiting in the session's queue; returns how many.
@@ -350,25 +392,35 @@ mod tests {
     use super::*;
     use crate::tasks::TaskMessageMode;
 
+    const POLICIES: [WhenBusy; 3] = [WhenBusy::Queue, WhenBusy::Refuse, WhenBusy::Interrupt];
+
     #[test]
     fn an_idle_session_with_nothing_waiting_starts_the_turn() {
-        assert_eq!(admit(false, 0, true), Admission::Start);
-        assert_eq!(admit(false, 0, false), Admission::Start);
+        for when_busy in POLICIES {
+            assert_eq!(admit(false, 0, when_busy), Admission::Start);
+        }
     }
 
     #[test]
-    fn a_busy_session_queues_or_refuses() {
-        assert_eq!(admit(true, 0, true), Admission::Queue);
-        assert_eq!(admit(true, 0, false), Admission::Busy);
+    fn a_busy_session_queues_refuses_or_is_interrupted() {
+        assert_eq!(admit(true, 0, WhenBusy::Queue), Admission::Queue);
+        assert_eq!(admit(true, 0, WhenBusy::Refuse), Admission::Busy);
+        assert_eq!(admit(true, 0, WhenBusy::Interrupt), Admission::Interrupt);
     }
 
     #[test]
     fn waiting_messages_go_first_so_nothing_jumps_the_queue() {
         // Idle with a backlog (its head failed to start): a new message must
         // not overtake it, whether it may queue or not.
-        assert_eq!(admit(false, 1, true), Admission::Queue);
-        assert_eq!(admit(false, 1, false), Admission::Busy);
-        assert_eq!(admit(true, 2, false), Admission::Busy);
+        assert_eq!(admit(false, 1, WhenBusy::Queue), Admission::Queue);
+        assert_eq!(admit(false, 1, WhenBusy::Refuse), Admission::Busy);
+        assert_eq!(admit(true, 2, WhenBusy::Refuse), Admission::Busy);
+    }
+
+    #[test]
+    fn an_interrupting_message_goes_ahead_of_the_backlog() {
+        assert_eq!(admit(false, 1, WhenBusy::Interrupt), Admission::Interrupt);
+        assert_eq!(admit(true, 2, WhenBusy::Interrupt), Admission::Interrupt);
     }
 
     #[test]

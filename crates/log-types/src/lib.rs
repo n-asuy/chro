@@ -3,16 +3,22 @@ use json_patch::Patch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod command_output;
 mod diff;
 mod entry_index;
 mod normalized;
 mod patch;
+mod replay_log;
+pub use command_output::{
+    COMMAND_OUTPUT_LIMIT, OutputTail, TRUNCATED_OUTPUT_MARKER, bound_command_output,
+};
 pub use diff::{
     Diff, DiffChangeKind, compute_line_change_counts, create_unified_diff, create_unified_diff_hunk,
 };
 pub use entry_index::*;
 pub use normalized::*;
 pub use patch::*;
+pub use replay_log::{Fold, PatchFolder, ReplayLog, fold_value_into};
 
 /// Trait for pushing log entries to a message store.
 pub trait LogEntryPusher: Send + Sync {

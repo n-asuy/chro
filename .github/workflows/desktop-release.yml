@@ -207,14 +207,24 @@ jobs:
        github.event.inputs.target_os == 'all' ||
        github.event.inputs.target_os == 'windows')
     runs-on: windows-latest
-    # SSL.com eSigner (cloud code signing) credentials. Exposed as env so step
-    # `if:` guards and Tauri's signCommand wrapper can detect/use them. Absent
-    # on forks/manual test builds, so those builds stay unsigned.
+    # Azure Artifact Signing authenticates with GitHub OIDC (no secrets). The
+    # Entra app's federated credential trusts this environment, which makes the
+    # token subject `repo:<owner>/<repo>:environment:windows-signing` for every
+    # tag instead of a per-tag ref.
+    environment: windows-signing
+    permissions:
+      contents: write
+      id-token: write
+    # Signing is configured when both repository/environment variables are set.
+    # They are absent on forks and may be absent for manual test builds, which
+    # then stay unsigned; tagged releases refuse to continue without them.
     env:
-      ES_USERNAME: ${{ secrets.ES_USERNAME }}
-      ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
-      ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
-      ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+      ARTIFACT_SIGNING_CLIENT_ID: ${{ vars.ARTIFACT_SIGNING_CLIENT_ID }}
+      ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+      WINDOWS_SIGNING: ${{ vars.ARTIFACT_SIGNING_CLIENT_ID != '' && vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE != '' }}
+      # Matched against the signer subject of every verified binary. The exact
+      # CN comes from the validated identity, so match on the organization.
+      WINDOWS_SIGNER_SUBJECT: Curino
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,15 +235,10 @@ jobs:
       # App Control on end-user machines, so refuse to publish one. Manual
       # (workflow_dispatch) builds may stay unsigned for internal testing.
       - name: Require code-signing for tagged releases
-        if: >
-          startsWith(github.ref, 'refs/tags/') &&
-          (env.ES_USERNAME == '' ||
-           env.ES_PASSWORD == '' ||
-           env.ES_CREDENTIAL_ID == '' ||
-           env.ES_TOTP_SECRET == '')
+        if: startsWith(github.ref, 'refs/tags/') && env.WINDOWS_SIGNING != 'true'
         shell: bash
         run: |
-          echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET). Refusing to publish an unsigned Windows release that Smart App Control will block." >&2
+          echo "::error::Missing Artifact Signing variables (ARTIFACT_SIGNING_CLIENT_ID/ARTIFACT_SIGNING_CERTIFICATE_PROFILE). Refusing to publish an unsigned Windows release that Smart App Control will block." >&2
           exit 1
 
       - name: Setup Bun
@@ -268,27 +273,19 @@ jobs:
           VERSION=$(node -p "require('./apps/desktop/package.json').version")
           echo "value=$VERSION" >> $GITHUB_OUTPUT
 
-      # The action bootstraps SSL.com's Java CodeSignTool and exports
-      # CODE_SIGN_TOOL_PATH. Tauri then calls scripts/sign-windows.ps1 through
+      # Installs SignTool + the Artifact Signing dlib and exports their paths.
+      # Tauri then calls scripts/sign-windows.ps1 through
       # bundle.windows.signCommand for every Windows binary at the correct point
-      # in the bundle lifecycle.
-      - name: Setup SSL.com CodeSignTool
-        if: >
-          env.ES_USERNAME != '' &&
-          env.ES_PASSWORD != '' &&
-          env.ES_CREDENTIAL_ID != '' &&
-          env.ES_TOTP_SECRET != ''
-        uses: sslcom/esigner-codesign@v1.3.2
+      # in the bundle lifecycle, so each file is signed before it is packaged.
+      - name: Setup Azure Artifact Signing
+        if: env.WINDOWS_SIGNING == 'true'
+        uses: ./.github/actions/setup-artifact-signing
         with:
-          command: --version
-          environment_name: PROD
+          client-id: ${{ env.ARTIFACT_SIGNING_CLIENT_ID }}
+          certificate-profile: ${{ env.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
       - name: Package signed desktop (Windows x64)
-        if: >
-          env.ES_USERNAME != '' &&
-          env.ES_PASSWORD != '' &&
-          env.ES_CREDENTIAL_ID != '' &&
-          env.ES_TOTP_SECRET != ''
+        if: env.WINDOWS_SIGNING == 'true'
         env:
           NODE_ENV: production
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -305,26 +302,17 @@ jobs:
           if (Test-Path -LiteralPath $log) {
             Get-Content -LiteralPath $log
           } else {
-            Write-Host "No signing log at $log: the sign hook never started."
+            Write-Host "No signing log at ${log}: the sign hook never started."
           }
 
       - name: Package unsigned desktop (manual test build)
-        if: >
-          !startsWith(github.ref, 'refs/tags/') &&
-          (env.ES_USERNAME == '' ||
-           env.ES_PASSWORD == '' ||
-           env.ES_CREDENTIAL_ID == '' ||
-           env.ES_TOTP_SECRET == '')
+        if: "!startsWith(github.ref, 'refs/tags/') && env.WINDOWS_SIGNING != 'true'"
         env:
           NODE_ENV: production
         run: bun ./apps/desktop/scripts/deployer.ts package --project desktop --skip-sign -- --win --x64
 
       - name: Verify packaged Windows signatures
-        if: >
-          env.ES_USERNAME != '' &&
-          env.ES_PASSWORD != '' &&
-          env.ES_CREDENTIAL_ID != '' &&
-          env.ES_TOTP_SECRET != ''
+        if: env.WINDOWS_SIGNING == 'true'
         shell: pwsh
         run: |
           # NSIS ignores the sign hook's exit status for the uninstaller, so a
@@ -340,6 +328,32 @@ jobs:
             throw "The Windows sign hook reported $($hookFailures.Count) failure(s)."
           }
 
+          # One signature per Windows binary Tauri hands to the hook: the two
+          # sidecars, chro-desktop.exe, five NSIS plugin DLLs, the uninstaller,
+          # and the installer. A lower count means a file skipped the hook.
+          $expectedSignatureCount = 10
+          $signedFiles = @(Select-String -LiteralPath $signLog -Pattern '^Signed: ')
+          $signedFiles | ForEach-Object { Write-Host $_.Line }
+          if ($signedFiles.Count -ne $expectedSignatureCount) {
+            throw "Expected $expectedSignatureCount signed files, the sign hook signed $($signedFiles.Count)."
+          }
+
+          function Assert-ExpectedSigner {
+            param([string]$Label, [string]$Path)
+            $signature = Get-AuthenticodeSignature -FilePath $Path
+            if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
+              throw "Signature is not valid for '$Label': $($signature.StatusMessage)"
+            }
+            $subject = $signature.SignerCertificate.Subject
+            if ($subject -notlike "*$env:WINDOWS_SIGNER_SUBJECT*") {
+              throw "Unexpected signer for '$Label': $subject (expected '$env:WINDOWS_SIGNER_SUBJECT')"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Signature for '$Label' carries no timestamp; it would expire with the short-lived certificate."
+            }
+            Write-Host "$Label signer: $subject"
+          }
+
           $releaseDir = "apps/desktop/release/${{ steps.desktop_version.outputs.value }}"
           $installer = Get-ChildItem -Path $releaseDir -Filter "*-setup.exe" |
             Select-Object -First 1
@@ -347,12 +361,7 @@ jobs:
             throw "No Windows installer found in '$releaseDir'."
           }
 
-          $installerSignature = Get-AuthenticodeSignature -FilePath $installer.FullName
-          if ($installerSignature.Status -ne "Valid" -or
-              $null -eq $installerSignature.SignerCertificate) {
-            throw "Installer signature is not valid: $($installerSignature.StatusMessage)"
-          }
-          Write-Host "Installer signer:" $installerSignature.SignerCertificate.Subject
+          Assert-ExpectedSigner -Label $installer.Name -Path $installer.FullName
 
           # Inspect the actual payload that users receive, not the build tree
           # that Tauri restores to its unsigned state after bundling.
@@ -379,12 +388,7 @@ jobs:
             if ($null -eq $packagedFile) {
               throw "Installer payload is missing an expected binary: $expectedFile"
             }
-            $packagedSignature = Get-AuthenticodeSignature -FilePath $packagedFile.FullName
-            if ($packagedSignature.Status -ne "Valid" -or
-                $null -eq $packagedSignature.SignerCertificate) {
-              throw "Packaged binary signature is not valid for '$expectedFile': $($packagedSignature.StatusMessage)"
-            }
-            Write-Host "$expectedFile signer:" $packagedSignature.SignerCertificate.Subject
+            Assert-ExpectedSigner -Label $expectedFile -Path $packagedFile.FullName
           }
 
       - name: Upload Artifact

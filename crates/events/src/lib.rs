@@ -193,6 +193,11 @@ impl EventService {
         &self.resources.entry_counter
     }
 
+    /// Seed the row indexes the hooks and stream filters resolve against.
+    ///
+    /// Streams build their own initial snapshot from the database, so this
+    /// publishes nothing: a whole-database patch here was serialized on every
+    /// startup and then read by no one.
     pub async fn hydrate(&self) -> Result<(), EventError> {
         if self.snapshot_seeded.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -201,62 +206,50 @@ impl EventService {
         let pool = self.db.pool();
 
         let tasks = TaskRecord::list_all(pool).await?;
-        let mut task_projects = HashMap::new();
-        let mut task_map = serde_json::Map::new();
-        for task in &tasks {
-            task_projects.insert(task.id, task.project_id);
-            task_map.insert(task.id.to_string(), serde_json::to_value(task)?);
-        }
+        let task_projects: HashMap<_, _> = tasks
+            .iter()
+            .map(|task| (task.id, task.project_id))
+            .collect();
         {
             let mut guard = self.resources.indexes.task_projects.write();
             guard.clear();
-            for (task_id, project_id) in &task_projects {
-                guard.insert(*task_id, *project_id);
-            }
+            guard.extend(
+                task_projects
+                    .iter()
+                    .map(|(task, project)| (*task, *project)),
+            );
         }
         {
             let mappings = fetch_row_mappings(pool, "task_records").await?;
             let mut rowids = self.resources.indexes.task_rowids.write();
             rowids.clear();
-            for (rowid, id) in mappings {
-                rowids.insert(rowid, id);
-            }
+            rowids.extend(mappings);
         }
 
         let runs = TaskRun::list_all(pool).await?;
-        let mut run_payloads = Vec::new();
-        for run in runs {
-            if let Some(project_id) = task_projects.get(&run.task_id).copied() {
-                run_payloads.push(TaskRunEventValue::new(run, project_id));
-            }
-        }
-        let mut run_map = serde_json::Map::new();
         let mut run_ids = HashSet::new();
         {
             let mut projects_guard = self.resources.indexes.run_projects.write();
             let mut tasks_guard = self.resources.indexes.run_tasks.write();
             projects_guard.clear();
             tasks_guard.clear();
-            for payload in &run_payloads {
-                projects_guard.insert(payload.run.id, payload.project_id);
-                tasks_guard.insert(payload.run.id, payload.run.task_id);
-                run_ids.insert(payload.run.id);
-                run_map.insert(payload.run.id.to_string(), serde_json::to_value(payload)?);
+            for run in &runs {
+                let Some(project_id) = task_projects.get(&run.task_id).copied() else {
+                    continue;
+                };
+                projects_guard.insert(run.id, project_id);
+                tasks_guard.insert(run.id, run.task_id);
+                run_ids.insert(run.id);
             }
         }
         {
             let mappings = fetch_row_mappings(pool, "task_runs").await?;
             let mut rowids = self.resources.indexes.run_rowids.write();
             rowids.clear();
-            for (rowid, id) in mappings {
-                if run_ids.contains(&id) {
-                    rowids.insert(rowid, id);
-                }
-            }
+            rowids.extend(mappings.into_iter().filter(|(_, id)| run_ids.contains(id)));
         }
 
         let sessions = TaskSession::list_all(pool).await?;
-        let mut session_map = serde_json::Map::new();
         let mut session_ids = HashSet::new();
         {
             let mut tasks_guard = self.resources.indexes.session_tasks.write();
@@ -264,83 +257,50 @@ impl EventService {
             for session in &sessions {
                 tasks_guard.insert(session.id, session.task_id);
                 session_ids.insert(session.id);
-                session_map.insert(session.id.to_string(), serde_json::to_value(session)?);
             }
         }
         {
             let mappings = fetch_row_mappings(pool, "task_sessions").await?;
             let mut rowids = self.resources.indexes.session_rowids.write();
             rowids.clear();
-            for (rowid, id) in mappings {
-                if session_ids.contains(&id) {
-                    rowids.insert(rowid, id);
-                }
-            }
+            rowids.extend(
+                mappings
+                    .into_iter()
+                    .filter(|(_, id)| session_ids.contains(id)),
+            );
         }
 
         let drafts = TaskDraft::list_all(pool).await?;
-        let mut draft_payloads = Vec::new();
-        for draft in drafts {
-            if let Some(project_id) = task_projects.get(&draft.task_id).copied() {
-                draft_payloads.push(TaskDraftEventValue::new(draft, project_id));
-            }
-        }
-        let mut draft_map = serde_json::Map::new();
         let mut draft_ids = HashSet::new();
         {
             let mut guard = self.resources.indexes.draft_projects.write();
             guard.clear();
-            for payload in &draft_payloads {
-                guard.insert(payload.draft.id, payload.project_id);
-                draft_ids.insert(payload.draft.id);
-                draft_map.insert(payload.draft.id.to_string(), serde_json::to_value(payload)?);
+            for draft in &drafts {
+                let Some(project_id) = task_projects.get(&draft.task_id).copied() else {
+                    continue;
+                };
+                guard.insert(draft.id, project_id);
+                draft_ids.insert(draft.id);
             }
         }
         {
             let mappings = fetch_row_mappings(pool, "task_drafts").await?;
             let mut rowids = self.resources.indexes.draft_rowids.write();
             rowids.clear();
-            for (rowid, id) in mappings {
-                if draft_ids.contains(&id) {
-                    rowids.insert(rowid, id);
-                }
-            }
+            rowids.extend(
+                mappings
+                    .into_iter()
+                    .filter(|(_, id)| draft_ids.contains(id)),
+            );
         }
 
         let queued = SessionQueueItem::list_all(pool).await?;
-        let mut queue_map = serde_json::Map::new();
         {
             let mut guard = self.resources.indexes.queue_tasks.write();
             guard.clear();
-            for item in &queued {
-                guard.insert(item.id, item.task_id);
-                queue_map.insert(item.id.to_string(), serde_json::to_value(item)?);
-            }
+            guard.extend(queued.iter().map(|item| (item.id, item.task_id)));
         }
 
-        let patch = Patch(vec![
-            PatchOperation::Replace(ReplaceOperation {
-                path: "/tasks".to_string(),
-                value: Value::Object(task_map),
-            }),
-            PatchOperation::Replace(ReplaceOperation {
-                path: "/task_runs".to_string(),
-                value: Value::Object(run_map),
-            }),
-            PatchOperation::Replace(ReplaceOperation {
-                path: "/task_sessions".to_string(),
-                value: Value::Object(session_map),
-            }),
-            PatchOperation::Replace(ReplaceOperation {
-                path: "/task_drafts".to_string(),
-                value: Value::Object(draft_map),
-            }),
-            PatchOperation::Replace(ReplaceOperation {
-                path: "/session_queue".to_string(),
-                value: Value::Object(queue_map),
-            }),
-        ]);
-        self.resources.msg_store.push_patch(patch);
         Ok(())
     }
 
@@ -529,7 +489,7 @@ async fn dispatch_committed_changes(
             match change {
                 PendingChange::Delete { collection, id } => {
                     published.remove(&(collection, id));
-                    msg_store.push_patch(remove_patch(collection, id));
+                    msg_store.broadcast(LogEntry::from(remove_patch(collection, id)));
                 }
                 PendingChange::Upsert {
                     table,
@@ -540,14 +500,16 @@ async fn dispatch_committed_changes(
                         let mut guard = entry_counter.write().await;
                         *guard += 1;
                         let path = format!("/entries/{}", *guard);
-                        msg_store.push_patch(Patch(vec![PatchOperation::Add(AddOperation {
-                            path,
-                            value: serde_json::json!({
-                                "table": table,
-                                "operation": format_sqlite_op(operation),
-                                "rowid": rowid,
-                            }),
-                        })]));
+                        msg_store.broadcast(LogEntry::from(Patch(vec![PatchOperation::Add(
+                            AddOperation {
+                                path,
+                                value: serde_json::json!({
+                                    "table": table,
+                                    "operation": format_sqlite_op(operation),
+                                    "rowid": rowid,
+                                }),
+                            },
+                        )])));
                         continue;
                     }
 
@@ -605,10 +567,10 @@ async fn publish_changed_row(
                 escape_segment(&snapshot.id.to_string())
             );
             let value = snapshot.value;
-            msg_store.push_patch(Patch(vec![match operation {
+            msg_store.broadcast(LogEntry::from(Patch(vec![match operation {
                 SqliteOperation::Insert => PatchOperation::Add(AddOperation { path, value }),
                 _ => PatchOperation::Replace(ReplaceOperation { path, value }),
-            }]));
+            }])));
             return;
         }
 

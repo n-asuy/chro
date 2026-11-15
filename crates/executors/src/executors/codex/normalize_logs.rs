@@ -31,7 +31,7 @@ use lazy_static::lazy_static;
 use log_types::{
     ActionType, CommandExitStatus, CommandRunResult, ConversationPatch, EntryIndexProvider,
     FileChange as NormalizedFileChange, NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
-    ToolResult, ToolResultValueType, ToolStatus,
+    OutputTail, ToolResult, ToolResultValueType, ToolStatus,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -58,8 +58,8 @@ struct StreamingText {
 
 struct CommandState {
     command: String,
-    stdout: String,
-    stderr: String,
+    stdout: OutputTail,
+    stderr: OutputTail,
     formatted_output: Option<String>,
     status: ToolStatus,
     exit_code: Option<i32>,
@@ -77,16 +77,18 @@ impl ToNormalizedEntry for CommandState {
                 tool_name: "bash".to_string(),
                 action_type: ActionType::CommandRun {
                     command: self.command.clone(),
-                    result: Some(CommandRunResult {
-                        exit_status: self
-                            .exit_code
+                    result: Some(CommandRunResult::new(
+                        self.exit_code
                             .map(|code| CommandExitStatus::ExitCode { code }),
-                        output: if self.formatted_output.is_some() {
+                        if self.formatted_output.is_some() {
                             self.formatted_output.clone()
                         } else {
-                            build_command_output(Some(&self.stdout), Some(&self.stderr))
+                            build_command_output(
+                                Some(self.stdout.as_str()),
+                                Some(self.stderr.as_str()),
+                            )
                         },
-                    }),
+                    )),
                 },
                 status: self.status.clone(),
             },
@@ -251,6 +253,23 @@ enum UpdateMode {
 }
 
 impl LogState {
+    /// Grow a known command's output, remembering that its entry is stale.
+    fn apply_output_delta(&mut self, delta: OutputDelta, unflushed: &mut Vec<String>) {
+        let Some(command_state) = self.commands.get_mut(&delta.command_id) else {
+            return;
+        };
+        if delta.text.is_empty() {
+            return;
+        }
+        match delta.stream {
+            ExecOutputStream::Stdout => command_state.stdout.push_str(&delta.text),
+            ExecOutputStream::Stderr => command_state.stderr.push_str(&delta.text),
+        }
+        if !unflushed.contains(&delta.command_id) {
+            unflushed.push(delta.command_id);
+        }
+    }
+
     fn new() -> Self {
         Self {
             assistant: None,
@@ -404,11 +423,24 @@ pub fn replay_log_entries(
 ) -> Vec<log_types::LogEntry> {
     let entry_index = EntryIndexProvider::new();
     let mut state = LogState::new();
-    let mut result: Vec<log_types::LogEntry> = Vec::new();
+    let mut result = log_types::ReplayLog::new();
+    let mut unflushed_output: Vec<String> = Vec::new();
 
     for entry in entries {
+        let method = match entry {
+            log_types::LogEntry::Stdout(line) => line_method(line),
+            _ => None,
+        };
+        if let (log_types::LogEntry::Stdout(line), Some(method)) = (entry, method.as_deref())
+            && let Some(delta) = parse_output_delta(method, line)
+        {
+            state.apply_output_delta(delta, &mut unflushed_output);
+            continue;
+        }
+        flush_command_output(&mut unflushed_output, &state, &mut result);
+
         let line = match entry {
-            log_types::LogEntry::Stdout(s) => s.clone(),
+            log_types::LogEntry::Stdout(s) => s.as_str(),
             log_types::LogEntry::UserPrompt(prompt) => {
                 let idx = entry_index.next();
                 let normalized = NormalizedEntry {
@@ -430,28 +462,33 @@ pub fn replay_log_entries(
         };
 
         // Try parsing error, approval, jsonrpc response, server notification, and codex events
-        // in the same order as the async version.
-        if let Ok(error) = serde_json::from_str::<Error>(&line) {
-            let idx = entry_index.next();
-            let patch = ConversationPatch::add_normalized_entry(idx, error.to_normalized_entry());
-            let json_value = serde_json::to_value(&patch).unwrap_or(serde_json::Value::Null);
-            result.push(log_types::LogEntry::JsonPatch(json_value));
-            continue;
-        }
-
-        if let Ok(approval) = serde_json::from_str::<Approval>(&line) {
-            for patch in approval_patches(approval, &mut state, &entry_index) {
-                result.push(patch_log_entry(patch));
+        // in the same order as the async version. Errors, approvals and
+        // responses carry no `method`, so notification lines (nearly all of
+        // them) skip those attempts; a failed typed parse scans the whole line.
+        if method.is_none() {
+            if let Ok(error) = serde_json::from_str::<Error>(line) {
+                let idx = entry_index.next();
+                let patch =
+                    ConversationPatch::add_normalized_entry(idx, error.to_normalized_entry());
+                let json_value = serde_json::to_value(&patch).unwrap_or(serde_json::Value::Null);
+                result.push(log_types::LogEntry::JsonPatch(json_value));
+                continue;
             }
-            continue;
+
+            if let Ok(approval) = serde_json::from_str::<Approval>(line) {
+                for patch in approval_patches(approval, &mut state, &entry_index) {
+                    result.push(patch_log_entry(patch));
+                }
+                continue;
+            }
+
+            if serde_json::from_str::<JSONRPCResponse>(line).is_ok() {
+                // Model info is handled by the live normalizer; skip here for replay.
+                continue;
+            }
         }
 
-        if serde_json::from_str::<JSONRPCResponse>(&line).is_ok() {
-            // Model info is handled by the live normalizer; skip here for replay.
-            continue;
-        }
-
-        if let Ok(server_notification) = serde_json::from_str::<ServerNotification>(&line) {
+        if let Ok(server_notification) = serde_json::from_str::<ServerNotification>(line) {
             for patch in
                 direct_server_notification_patches(server_notification, &mut state, &entry_index)
             {
@@ -461,7 +498,7 @@ pub fn replay_log_entries(
             continue;
         }
 
-        let notification: JSONRPCNotification = match serde_json::from_str(&line) {
+        let notification: JSONRPCNotification = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(_) => continue,
         };
@@ -613,8 +650,8 @@ pub fn replay_log_entries(
                     call_id.clone(),
                     CommandState {
                         command: command_text,
-                        stdout: String::new(),
-                        stderr: String::new(),
+                        stdout: OutputTail::default(),
+                        stderr: OutputTail::default(),
                         formatted_output: None,
                         status: ToolStatus::Created,
                         exit_code: None,
@@ -626,29 +663,6 @@ pub fn replay_log_entries(
                 let json_value = serde_json::to_value(&patch).unwrap_or(serde_json::Value::Null);
                 result.push(log_types::LogEntry::JsonPatch(json_value));
                 None
-            }
-            EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
-                call_id,
-                stream,
-                chunk,
-            }) => {
-                if let Some(command_state) = state.commands.get_mut(&call_id) {
-                    let chunk = String::from_utf8_lossy(&chunk);
-                    if chunk.is_empty() {
-                        continue;
-                    }
-                    match stream {
-                        ExecOutputStream::Stdout => command_state.stdout.push_str(&chunk),
-                        ExecOutputStream::Stderr => command_state.stderr.push_str(&chunk),
-                    }
-                    let patch = command_entry_patch(command_state, false);
-                    let json_value =
-                        serde_json::to_value(&patch).unwrap_or(serde_json::Value::Null);
-                    result.push(log_types::LogEntry::JsonPatch(json_value));
-                    None
-                } else {
-                    None
-                }
             }
             EventMsg::ExecCommandEnd(ExecCommandEndEvent {
                 call_id,
@@ -878,8 +892,75 @@ pub fn replay_log_entries(
             result.push(log_types::LogEntry::JsonPatch(json_value));
         }
     }
+    flush_command_output(&mut unflushed_output, &state, &mut result);
 
-    result
+    result.into_entries()
+}
+
+/// One chunk of a running command's output, from either protocol.
+struct OutputDelta {
+    command_id: String,
+    stream: ExecOutputStream,
+    text: String,
+}
+
+/// The top-level `method` of a protocol line. Reading it skips the rest of
+/// the line without building anything, far cheaper than a failed typed parse.
+fn line_method(line: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct MethodOnly {
+        method: Option<String>,
+    }
+    serde_json::from_str::<MethodOnly>(line).ok()?.method
+}
+
+/// Recognize a command-output delta line, given its `method`.
+///
+/// A replay treats these specially: a command can stream thousands of deltas,
+/// and building (and serializing) the whole command entry for each one is
+/// `O(n²)` in its output even though no one observes the intermediate states.
+fn parse_output_delta(method: &str, line: &str) -> Option<OutputDelta> {
+    match method {
+        "item/commandExecution/outputDelta" => match serde_json::from_str(line).ok()? {
+            ServerNotification::CommandExecutionOutputDelta(notification) => Some(OutputDelta {
+                command_id: notification.item_id,
+                stream: ExecOutputStream::Stdout,
+                text: notification.delta,
+            }),
+            _ => None,
+        },
+        "codex/event/exec_command_output_delta" => {
+            let notification: JSONRPCNotification = serde_json::from_str(line).ok()?;
+            let params =
+                serde_json::from_value::<CodexNotificationParams>(notification.params?).ok()?;
+            match params.msg {
+                EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+                    call_id,
+                    stream,
+                    chunk,
+                }) => Some(OutputDelta {
+                    command_id: call_id,
+                    stream,
+                    text: String::from_utf8_lossy(&chunk).into_owned(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Emit the entry of every command whose output grew since its last patch.
+fn flush_command_output(
+    unflushed: &mut Vec<String>,
+    state: &LogState,
+    result: &mut log_types::ReplayLog,
+) {
+    for command_id in unflushed.drain(..) {
+        if let Some(command_state) = state.commands.get(&command_id) {
+            result.push(patch_log_entry(command_entry_patch(command_state, false)));
+        }
+    }
 }
 
 pub fn normalize_logs(msg_store: Arc<MsgStore>, _worktree_path: &Path) {
@@ -1049,8 +1130,8 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, _worktree_path: &Path) {
                         call_id.clone(),
                         CommandState {
                             command: command_text,
-                            stdout: String::new(),
-                            stderr: String::new(),
+                            stdout: OutputTail::default(),
+                            stderr: OutputTail::default(),
                             formatted_output: None,
                             status: ToolStatus::Created,
                             exit_code: None,
@@ -1608,8 +1689,8 @@ fn direct_server_notification_patches(
                         id.clone(),
                         CommandState {
                             command,
-                            stdout: String::new(),
-                            stderr: String::new(),
+                            stdout: OutputTail::default(),
+                            stderr: OutputTail::default(),
                             formatted_output: None,
                             status: ToolStatus::Created,
                             exit_code: None,
@@ -1734,8 +1815,8 @@ fn direct_server_notification_patches(
                         (
                             CommandState {
                                 command,
-                                stdout: String::new(),
-                                stderr: String::new(),
+                                stdout: OutputTail::default(),
+                                stderr: OutputTail::default(),
                                 formatted_output: None,
                                 status: ToolStatus::Created,
                                 exit_code: None,
@@ -2222,6 +2303,21 @@ mod tests {
             .expect("expected a json patch")
     }
 
+    /// The conversation a client ends up with: replay patches folded with
+    /// JSON Patch array semantics. Tests assert this, not the patch sequence,
+    /// because a replay is free to fold superseded updates.
+    fn conversation(entries: &[log_types::LogEntry]) -> Vec<serde_json::Value> {
+        let mut doc = serde_json::json!({ "entries": [] });
+        for patch in patch_values(entries) {
+            let patch: json_patch::Patch = serde_json::from_value(patch.clone()).unwrap();
+            json_patch::patch(&mut doc, &patch).unwrap();
+        }
+        match doc["entries"].take() {
+            serde_json::Value::Array(entries) => entries,
+            other => panic!("entries is not an array: {other}"),
+        }
+    }
+
     fn patch_values(entries: &[log_types::LogEntry]) -> Vec<&serde_json::Value> {
         entries
             .iter()
@@ -2282,84 +2378,169 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 3);
+        assert_eq!(conversation.len(), 1, "deltas update the started entry");
         assert_eq!(
-            patches[0].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("add")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[2].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("replace")
-        );
-        for patch in &patches {
-            assert_eq!(
-                patch.pointer("/0/path").and_then(|v| v.as_str()),
-                Some("/entries/0")
-            );
-        }
-        assert_eq!(
-            patches[2]
-                .pointer("/0/value/content/type/action_type/result/output")
+            conversation[0]
+                .pointer("/content/type/action_type/result/output")
                 .and_then(|v| v.as_str()),
             Some("stdout:\nfirst\nsecond")
         );
     }
 
     #[test]
-    fn app_server_command_output_deltas_replace_the_started_entry() {
-        let entries = replay_log_entries(
-            &[
-                log_types::LogEntry::Stdout(
-                    r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"cmd-1","command":"cargo test","cwd":"/tmp","processId":null,"status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"thread","turnId":"turn"}}"#.to_string(),
-                ),
-                log_types::LogEntry::Stdout(
-                    r#"{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread","turnId":"turn","itemId":"cmd-1","delta":"first\n"}}"#.to_string(),
-                ),
-                log_types::LogEntry::Stdout(
-                    r#"{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread","turnId":"turn","itemId":"cmd-1","delta":"second\n"}}"#.to_string(),
-                ),
-                log_types::LogEntry::Stdout(
-                    r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"cmd-1","command":"cargo test","cwd":"/tmp","processId":null,"status":"completed","commandActions":[],"aggregatedOutput":"first\nsecond\n","exitCode":0,"durationMs":5},"threadId":"thread","turnId":"turn"}}"#.to_string(),
-                ),
-            ],
-            Path::new("."),
-        );
+    fn app_server_command_output_deltas_fold_into_one_bounded_entry() {
+        // A measured run streamed 10 000 deltas into one command. Each delta
+        // re-sends the whole entry, so an unfolded replay holds O(n²) bytes
+        // (17.7 GB for 3.8 MB of output). Scaled down to keep the test fast.
+        const DELTAS: usize = 1_000;
+        let delta = "x".repeat(100) + "\n";
+        let mut log = vec![log_types::LogEntry::Stdout(
+            r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"cmd-1","command":"cargo test","cwd":"/tmp","processId":null,"status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"thread","turnId":"turn"}}"#.to_string(),
+        )];
+        let delta_line = serde_json::json!({
+            "method": "item/commandExecution/outputDelta",
+            "params": {"threadId": "thread", "turnId": "turn", "itemId": "cmd-1", "delta": delta},
+        })
+        .to_string();
+        log.extend((0..DELTAS).map(|_| log_types::LogEntry::Stdout(delta_line.clone())));
+        log.push(log_types::LogEntry::Stdout(
+            r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"cmd-1","command":"cargo test","cwd":"/tmp","processId":null,"status":"completed","commandActions":[],"aggregatedOutput":"done\n","exitCode":0,"durationMs":5},"threadId":"thread","turnId":"turn"}}"#.to_string(),
+        ));
+
+        let entries = replay_log_entries(&log, Path::new("."));
         let patches = patch_values(&entries);
 
-        assert_eq!(patches.len(), 4);
+        assert_eq!(patches.len(), 1, "every update folds into the entry's add");
         assert_eq!(
             patches[0].pointer("/0/op").and_then(|v| v.as_str()),
             Some("add")
         );
         assert_eq!(
-            patches[1].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("replace")
+            patches[0].pointer("/0/path").and_then(|v| v.as_str()),
+            Some("/entries/0")
         );
         assert_eq!(
-            patches[2].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[3].pointer("/0/op").and_then(|v| v.as_str()),
-            Some("replace")
-        );
-        for patch in &patches {
-            assert_eq!(
-                patch.pointer("/0/path").and_then(|v| v.as_str()),
-                Some("/entries/0")
-            );
-        }
-        assert_eq!(
-            patches[3]
+            patches[0]
                 .pointer("/0/value/content/type/status/status")
                 .and_then(|v| v.as_str()),
             Some("success")
+        );
+        let replay_bytes: usize = entries.iter().map(log_types::LogEntry::approx_bytes).sum();
+        let output_bytes = DELTAS * delta.len();
+        assert!(
+            replay_bytes < 2 * output_bytes,
+            "replay holds {replay_bytes} bytes for {output_bytes} bytes of output"
+        );
+    }
+
+    #[test]
+    fn deferred_command_output_reaches_the_final_conversation() {
+        let started = |id: &str| {
+            log_types::LogEntry::Stdout(format!(
+                r#"{{"method":"item/started","params":{{"item":{{"type":"commandExecution","id":"{id}","command":"cargo test","cwd":"/tmp","processId":null,"status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null}},"threadId":"thread","turnId":"turn"}}}}"#
+            ))
+        };
+        let output = |id: &str, delta: &str| {
+            log_types::LogEntry::Stdout(format!(
+                r#"{{"method":"item/commandExecution/outputDelta","params":{{"threadId":"thread","turnId":"turn","itemId":"{id}","delta":"{delta}"}}}}"#
+            ))
+        };
+        let message = log_types::LogEntry::Stdout(
+            r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"message-a","delta":"hi"}}"#.to_string(),
+        );
+
+        let entries = replay_log_entries(
+            &[
+                started("cmd-1"),
+                output("cmd-1", "a"),
+                message,
+                output("cmd-1", "b"),
+                started("cmd-2"),
+                output("cmd-2", "c"),
+                output("unknown", "ignored"),
+            ],
+            Path::new("."),
+        );
+        let conversation = conversation(&entries);
+        let output_of = |index: usize| {
+            conversation[index]
+                .pointer("/content/type/action_type/result/output")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+
+        assert_eq!(conversation.len(), 3);
+        assert_eq!(output_of(0).as_deref(), Some("stdout:\nab"));
+        assert_eq!(
+            conversation[1]
+                .pointer("/content/content")
+                .and_then(Value::as_str),
+            Some("hi")
+        );
+        assert_eq!(
+            output_of(2).as_deref(),
+            Some("stdout:\nc"),
+            "output still pending when the log ends is flushed"
+        );
+    }
+
+    #[test]
+    fn running_command_entry_carries_a_bounded_tail_of_its_output() {
+        let mut log = vec![log_types::LogEntry::Stdout(
+            r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"cmd-1","command":"tail -f log","cwd":"/tmp","processId":null,"status":"inProgress","commandActions":[],"aggregatedOutput":null,"exitCode":null,"durationMs":null},"threadId":"thread","turnId":"turn"}}"#.to_string(),
+        )];
+        for line in 0..20_000 {
+            log.push(log_types::LogEntry::Stdout(
+                serde_json::json!({
+                    "method": "item/commandExecution/outputDelta",
+                    "params": {"threadId": "thread", "turnId": "turn", "itemId": "cmd-1", "delta": format!("line {line}\n")},
+                })
+                .to_string(),
+            ));
+        }
+
+        let entries = replay_log_entries(&log, Path::new("."));
+        let conversation = conversation(&entries);
+        let output = conversation[0]
+            .pointer("/content/type/action_type/result/output")
+            .and_then(Value::as_str)
+            .unwrap();
+
+        assert!(output.starts_with(log_types::TRUNCATED_OUTPUT_MARKER));
+        assert!(output.ends_with("line 19999"));
+        assert!(output.len() <= log_types::COMMAND_OUTPUT_LIMIT + 64);
+    }
+
+    #[test]
+    fn method_less_lines_still_replay_as_errors_approvals_and_responses() {
+        let error = Error::launch_error("codex not found".to_string()).raw();
+        let approval = serde_json::to_string(&Approval::ApprovalRequested {
+            call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            approval_id: "approval-1".into(),
+            requested_at: "2026-11-10T00:00:00Z".into(),
+            timeout_at: "2026-11-10T00:05:00Z".into(),
+        })
+        .unwrap();
+
+        let entries = replay_log_entries(
+            &[
+                log_types::LogEntry::Stdout(r#"{"id":1,"result":{"userAgent":"x"}}"#.into()),
+                log_types::LogEntry::Stdout(error),
+                log_types::LogEntry::Stdout(approval),
+            ],
+            Path::new("."),
+        );
+        let conversation = conversation(&entries);
+
+        assert_eq!(conversation.len(), 2, "the response adds nothing");
+        assert!(
+            conversation[0]
+                .pointer("/content/content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("codex not found"))
         );
     }
 
@@ -2376,24 +2557,16 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 2);
         assert_eq!(
-            patches[0].pointer("/0/op").and_then(Value::as_str),
-            Some("add")
+            conversation.len(),
+            1,
+            "completion updates the started entry"
         );
         assert_eq!(
-            patches[1].pointer("/0/op").and_then(Value::as_str),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/0")
-        );
-        assert_eq!(
-            patches[1]
-                .pointer("/0/value/content/type/status/status")
+            conversation[0]
+                .pointer("/content/type/status/status")
                 .and_then(Value::as_str),
             Some("success")
         );
@@ -2412,24 +2585,16 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 2);
         assert_eq!(
-            patches[0].pointer("/0/op").and_then(Value::as_str),
-            Some("add")
+            conversation.len(),
+            1,
+            "completion updates the started entry"
         );
         assert_eq!(
-            patches[1].pointer("/0/op").and_then(Value::as_str),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/0")
-        );
-        assert_eq!(
-            patches[1]
-                .pointer("/0/value/content/content")
+            conversation[0]
+                .pointer("/content/content")
                 .and_then(Value::as_str),
             Some("Rust release notes")
         );
@@ -2448,26 +2613,18 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 2);
+        assert_eq!(conversation.len(), 1, "completion updates the file's entry");
         assert_eq!(
-            patches[0].pointer("/0/op").and_then(Value::as_str),
-            Some("add")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/op").and_then(Value::as_str),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[1]
-                .pointer("/0/value/content/type/action_type/path")
+            conversation[0]
+                .pointer("/content/type/action_type/path")
                 .and_then(Value::as_str),
             Some("src/lib.rs")
         );
         assert_eq!(
-            patches[1]
-                .pointer("/0/value/content/type/status/status")
+            conversation[0]
+                .pointer("/content/type/status/status")
                 .and_then(Value::as_str),
             Some("success")
         );
@@ -2574,30 +2731,20 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 3);
+        assert_eq!(conversation.len(), 2, "each message item owns one entry");
         assert_eq!(
-            patches[0].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/0")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/1")
-        );
-        assert_eq!(
-            patches[2].pointer("/0/op").and_then(Value::as_str),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[2].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/0")
-        );
-        assert_eq!(
-            patches[2]
-                .pointer("/0/value/content/content")
+            conversation[0]
+                .pointer("/content/content")
                 .and_then(Value::as_str),
             Some("A1A2")
+        );
+        assert_eq!(
+            conversation[1]
+                .pointer("/content/content")
+                .and_then(Value::as_str),
+            Some("B1")
         );
     }
 
@@ -2614,20 +2761,8 @@ mod tests {
             ],
             Path::new("."),
         );
-        let patches = patch_values(&entries);
+        let conversation = conversation(&entries);
 
-        assert_eq!(patches.len(), 2);
-        assert_eq!(
-            patches[0].pointer("/0/op").and_then(Value::as_str),
-            Some("add")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/op").and_then(Value::as_str),
-            Some("replace")
-        );
-        assert_eq!(
-            patches[1].pointer("/0/path").and_then(Value::as_str),
-            Some("/entries/0")
-        );
+        assert_eq!(conversation.len(), 1, "both start events share one entry");
     }
 }

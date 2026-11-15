@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Chro",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "identifier": "com.chro-ai.desktop",
   "build": {
     "beforeDevCommand": "bun run dev:vite",
     "devUrl": "http://localhost:3400",
-    "beforeBuildCommand": "bun run tauri:icons && bun run build:vite",
+    "beforeBuildCommand": "bun run build:vite",
     "frontendDist": "../dist-vite"
   },
   "app": {

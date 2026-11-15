@@ -4,11 +4,15 @@ import {
   type TranslationKey,
   useLanguage,
 } from "@/i18n";
+import { CHRO_CLI_NPM_INSTALL_COMMAND } from "@/lib/cli-install-client";
 import { cn } from "@/lib/cn";
 import { getVersion } from "@/lib/desktop-bridge";
 import type { BaseCodingAgent } from "@/lib/executor-client";
-import { CHRO_CLI_NPM_INSTALL_COMMAND } from "@/lib/cli-install-client";
 import { setUiValue } from "@/lib/ui-state-client";
+import {
+  useNestDelegations,
+  useSessionListPreferencesStore,
+} from "@/workspace-layout/state/session-list-preferences-store";
 import { Alert, AlertDescription, AlertTitle } from "@chro/ui/alert";
 import { Badge } from "@chro/ui/badge";
 import { Button } from "@chro/ui/button";
@@ -52,9 +56,9 @@ import {
   useState,
 } from "react";
 import { BetaFeaturesSection } from "./components/beta-features-section";
+import { ChroCliInstallControl } from "./components/chro-cli-install-control";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
-import { ChroCliInstallControl } from "./components/chro-cli-install-control";
 import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
 import { useCliInstall } from "./hooks/use-cli-install";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
@@ -155,6 +159,10 @@ export function SettingsPanel({
     setAppLanguage,
     t,
   });
+  const nestDelegations = useNestDelegations();
+  const setNestDelegations = useSessionListPreferencesStore(
+    (s) => s.setNestDelegations,
+  );
   const {
     executorProfileId,
     executorProfileLoading,
@@ -526,6 +534,17 @@ export function SettingsPanel({
               onCheckedChange={handleHiddenToggle}
               disabled={preferencesLoading || preferencesSaveState === "saving"}
               aria-label={t("hiddenFilesToggleLabel")}
+            />
+          }
+        />
+        <SettingsRow
+          title={t("nestDelegationsCardTitle")}
+          description={t("nestDelegationsCardDescription")}
+          control={
+            <Switch
+              checked={nestDelegations}
+              onCheckedChange={setNestDelegations}
+              aria-label={t("nestDelegationsCardTitle")}
             />
           }
         />

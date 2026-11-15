@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.58
+
+- Changed the operator API's send-message request: the `queue` true/false field is replaced by `when_busy`, which takes `queue`, `refuse` or `interrupt`. A script that still sends `"queue": false` now has its message queued instead of refused. `chro session send --no-queue` works as before
+- Windows builds are now signed through Azure Artifact Signing, and the publisher shown by Windows changes to Curino LLC. Every binary in the installer still carries a timestamped signature, and a release still refuses to publish when signing is not configured
+- Added `chro session send --now`, which stops the session's running turn and runs the message next, ahead of anything already queued. It cannot be combined with `--no-queue`
+- Added an option to nest delegated sessions under the session that delegated them in the left panel, turned on in Settings with "Nest delegated sessions". A delegating session shows how many sessions sit under it and folds them away with a click, a folded row shows when one of them needs your input, and under the Recent sort a group moves up with its most recently active session
+- Added session links in conversations: a session id an agent writes, such as `20CFfEXi`, shows as that session's title with its agent icon, previews the session on hover, and opens it on click
+- Added Back and Forward buttons to the title bar, next to the window controls. They do the same as ⌘[ and ⌘] and are disabled when there is nowhere to go
+- Changed a long prompt pinned at the top of the conversation to collapse to two lines, so its reply keeps the reading space. Click it to expand
+- Changed editing a queued message to save with ⌘Return or Ctrl+Return. Return now adds a new line, and confirming an IME conversion no longer saves the edit by accident
+- Fixed the server using tens of gigabytes of memory and slowing down when a command printed a lot of output. Each command in a conversation now keeps the last 64 KB of its output, marked "[chro] earlier output truncated" (the full output stays in the run log), and fast-changing output is sent to the app in batches
+- Fixed dev servers, browsers and watchers started by agents running forever after their session was done. Every five minutes chro stops the ones whose session was deleted, was cancelled, had its workspace cleaned up, or has had no run for 30 minutes
+- Fixed a session's delegation, note and cleaned-up-workspace notice disappearing from the left panel while a follow-up message was being sent
+
 ## 0.1.57
 
 - Fixed raw "Unrecognized JSON message: {...}" lines appearing in Claude conversations when the Claude Code CLI sends a status message chro does not know, such as `command_lifecycle`. These messages are now logged instead of shown

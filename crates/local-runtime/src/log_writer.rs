@@ -240,8 +240,8 @@ pub async fn read_log_entries_with_limit(
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let entry = match entry {
             LogEntry::JsonPatch(_) => continue,
-            LogEntry::Stdout(s) => LogEntry::Stdout(redact_secrets(&s).into_owned()),
-            LogEntry::Stderr(s) => LogEntry::Stderr(redact_secrets(&s).into_owned()),
+            LogEntry::Stdout(s) => LogEntry::Stdout(redact_secrets_owned(s)),
+            LogEntry::Stderr(s) => LogEntry::Stderr(redact_secrets_owned(s)),
             other => other,
         };
 
@@ -316,14 +316,41 @@ fn elide_base64_sources(value: &mut serde_json::Value) -> bool {
 /// conversation — it only prevents secrets from sitting in plaintext on disk or
 /// leaking into transcripts/CLI output.
 fn redact_secrets(s: &str) -> Cow<'_, str> {
+    /// JSON keys whose string values are secret.
+    const SECRET_KEYS: [&str; 8] = [
+        "authToken",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apiKey",
+        "client_secret",
+        "secret_key",
+    ];
     static RE: OnceLock<Regex> = OnceLock::new();
+    // Every match contains a key verbatim, and almost no line contains one.
+    // Checking for the keys first skips the regex, whose search otherwise
+    // starts at every `"` of every JSON line.
+    if !SECRET_KEYS.iter().any(|key| s.contains(key)) {
+        return Cow::Borrowed(s);
+    }
     let re = RE.get_or_init(|| {
-        Regex::new(
-            r#"("(?:authToken|access_token|refresh_token|id_token|api_key|apiKey|client_secret|secret_key)"\s*:\s*")[^"]*(")"#,
-        )
+        Regex::new(&format!(
+            r#"("(?:{})"\s*:\s*")[^"]*(")"#,
+            SECRET_KEYS.join("|")
+        ))
         .expect("valid secret-redaction regex")
     });
     re.replace_all(s, "${1}[REDACTED]${2}")
+}
+
+/// [`redact_secrets`] for an owned line: returns it as-is when nothing
+/// matched instead of copying it.
+fn redact_secrets_owned(s: String) -> String {
+    match redact_secrets(&s) {
+        Cow::Borrowed(_) => s,
+        Cow::Owned(redacted) => redacted,
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +499,37 @@ mod tests {
             read_back,
             vec![LogEntry::Stdout("real".into()), LogEntry::Finished]
         );
+    }
+
+    #[test]
+    fn every_secret_key_is_redacted() {
+        for key in [
+            "authToken",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "api_key",
+            "apiKey",
+            "client_secret",
+            "secret_key",
+        ] {
+            let line = format!(r#"{{"{key}" : "s3cr3t", "other": "kept"}}"#);
+
+            let redacted = redact_secrets(&line);
+
+            assert_eq!(
+                redacted,
+                format!(r#"{{"{key}" : "[REDACTED]", "other": "kept"}}"#),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn lines_without_secrets_are_not_copied() {
+        let line = r#"{"method":"item/commandExecution/outputDelta","params":{"delta":"ok"}}"#;
+
+        assert!(matches!(redact_secrets(line), Cow::Borrowed(_)));
     }
 
     #[tokio::test]

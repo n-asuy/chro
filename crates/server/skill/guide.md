@@ -60,6 +60,12 @@ chro session send <session> --prompt "Also cover the logout path"
 
 A message to an idle session starts a turn. A message to a busy session waits in its queue and runs when the current turn ends; add `--no-queue` to fail with `session_busy` instead.
 
+To change a session's direction instead of waiting, add `--now`: the current turn stops and the message runs next, ahead of anything already queued.
+
+```bash
+chro session send <session> --prompt "Stop; the bug is in auth.rs, not the router" --now
+```
+
 `chro session show <session>` lists the queue with each message's id. Take one back before it runs with `unqueue`, which accepts the id or a unique prefix of 3+ characters:
 
 ```bash

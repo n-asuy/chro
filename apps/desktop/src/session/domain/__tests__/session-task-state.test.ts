@@ -125,6 +125,39 @@ describe("applyPendingSubmissionToTasks", () => {
     });
   });
 
+  it("keeps the existing task's other fields while overlaying a follow-up", () => {
+    const pending = createPendingSessionSubmission({
+      scopeId: "scope-1",
+      requestId: "req-1",
+      prompt: "Follow up prompt",
+      createdAt: "2025-01-02T00:00:00.000Z",
+      taskId: "task-1",
+      taskSlug: "task-one",
+    });
+    const delegated = makeTask({
+      delegated_from_id: "parent-task",
+      delegated_from_title: "Parent",
+      worktree_deleted: true,
+      last_summary: "Done",
+      note: "waiting on review",
+    });
+
+    const [overlaid] = applyPendingSubmissionToTasks(
+      [delegated],
+      pending,
+      "project-1",
+    );
+    expect(overlaid).toMatchObject({
+      delegated_from_id: "parent-task",
+      delegated_from_title: "Parent",
+      worktree_deleted: true,
+      last_summary: "Done",
+      note: "waiting on review",
+      active_session_id: "optimistic-run-req-1",
+      updated_at: "2025-01-02T00:00:00.000Z",
+    });
+  });
+
   it("adopts a freshly-streamed task instead of duplicating the optimistic row", () => {
     const pending = createPendingSessionSubmission({
       scopeId: "scope-1",

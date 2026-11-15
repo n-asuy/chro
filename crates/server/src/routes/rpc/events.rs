@@ -37,12 +37,28 @@ async fn handle_app_events_ws(socket: WebSocket, msg_store: std::sync::Arc<event
 
     tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
 
-    let mut stream = msg_store.history_plus_stream();
+    let mut stream = app_events(&msg_store);
     while let Some(entry) = stream.next().await {
         if sender.send(entry.to_ws_message_unchecked()).await.is_err() {
             break;
         }
     }
+}
+
+/// The app event bus: UI events only.
+///
+/// The global store also carries every database change patch, which each
+/// data stream filters and snapshots on its own. The desktop listens here only
+/// for UI events, and forwarding the rest made it clone and patch a document
+/// nobody reads on every database write. History is kept so an event raised
+/// before the window connected (a tray "open settings") still arrives.
+fn app_events(
+    msg_store: &events::MsgStore,
+) -> futures::stream::BoxStream<'static, log_types::LogEntry> {
+    msg_store
+        .history_plus_stream()
+        .filter(|entry| futures::future::ready(matches!(entry, log_types::LogEntry::UiEvent(_))))
+        .boxed()
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,4 +77,24 @@ async fn trigger_ui_event(
         .events()
         .emit_ui_event(payload.kind, payload.data);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log_types::{LogEntry, UiEventPayload};
+
+    #[tokio::test]
+    async fn only_ui_events_reach_the_app_event_bus() {
+        let store = events::MsgStore::new();
+        store.push(LogEntry::JsonPatch(serde_json::json!([
+            { "op": "replace", "path": "/tasks", "value": {} }
+        ])));
+        let open_settings = LogEntry::UiEvent(UiEventPayload::new(UiEventKind::OpenSettings, None));
+        store.push(open_settings.clone());
+
+        let first = app_events(&store).next().await;
+
+        assert_eq!(first, Some(open_settings));
+    }
 }

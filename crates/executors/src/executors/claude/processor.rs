@@ -202,7 +202,7 @@ impl ClaudeLogProcessor {
     pub fn normalize_log_entries(entries: &[LogEntry], worktree_path: &str) -> Vec<LogEntry> {
         let entry_index_provider = EntryIndexProvider::new();
         let mut processor = Self::new();
-        let mut result: Vec<LogEntry> = Vec::new();
+        let mut result = log_types::ReplayLog::new();
         let mut buffer = String::new();
         let mut session_id_emitted = false;
 
@@ -318,7 +318,7 @@ impl ClaudeLogProcessor {
             result.push(LogEntry::JsonPatch(json_value));
         }
 
-        result
+        result.into_entries()
     }
 
     /// Normalize Claude tool_result content to either Markdown string or parsed JSON.
@@ -808,19 +808,19 @@ impl ClaudeLogProcessor {
                                 let result = if let Ok(result) =
                                     serde_json::from_str::<AmpBashResult>(&content_str)
                                 {
-                                    Some(CommandRunResult {
-                                        exit_status: Some(CommandExitStatus::ExitCode {
+                                    Some(CommandRunResult::new(
+                                        Some(CommandExitStatus::ExitCode {
                                             code: result.exit_code,
                                         }),
-                                        output: Some(result.output),
-                                    })
+                                        Some(result.output),
+                                    ))
                                 } else {
-                                    Some(CommandRunResult {
-                                        exit_status: is_error.map(|is_err| {
-                                            CommandExitStatus::Success { success: !is_err }
+                                    Some(CommandRunResult::new(
+                                        is_error.map(|is_err| CommandExitStatus::Success {
+                                            success: !is_err,
                                         }),
-                                        output: Some(content_str),
-                                    })
+                                        Some(content_str),
+                                    ))
                                 };
 
                                 let status = if is_error.unwrap_or(false) {

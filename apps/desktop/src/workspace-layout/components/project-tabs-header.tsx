@@ -4,8 +4,12 @@ import { useLanguage } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { useOptionalProjectTasks } from "@/session/context/project-tasks-context";
 import { useSettingsModal } from "@/settings/components/settings-modal-provider";
+import {
+  canGoBack,
+  canGoForward,
+  useHistorySpanStore,
+} from "@/system/history-span";
 import { ReleaseButton } from "@/system/release-button";
-import { AgentStatusMenu } from "./agent-status-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,7 +25,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@chro/ui/tooltip";
+import { useRouter } from "@tanstack/react-router";
 import {
+  ArrowLeft,
+  ArrowRight,
   Check,
   ChevronDown,
   Copy,
@@ -29,7 +36,7 @@ import {
   PanelRight,
   Settings,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   type OpenInAppId,
   type OpenInOption,
@@ -43,6 +50,7 @@ import {
 } from "../lib/open-in";
 import { useDockStore } from "../state/dock-store";
 import { useRightDockStore } from "../state/right-dock-store";
+import { AgentStatusMenu } from "./agent-status-menu";
 import { OpenInAppIcon } from "./open-in-app-icon";
 
 const isDarwin = (): boolean => runtimePlatform() === "darwin";
@@ -50,7 +58,7 @@ const isDarwin = (): boolean => runtimePlatform() === "darwin";
 /**
  * Slim window chrome bar. Project switching lives in the left-dock project tree
  * (see ProjectsDockPanel), so this bar carries the left-dock toggle (just past
- * the traffic lights), the release/version chip (which opens the release-notes
+ * the traffic lights) followed by history back/forward, the release/version chip (which opens the release-notes
  * modal and doubles as the update prompt), the global Settings entry, and the
  * right-dock toggle. It reserves the macOS traffic-light inset and serves as the
  * window drag region.
@@ -74,6 +82,7 @@ export function ProjectTabsHeader() {
       )}
     >
       <LeftSidebarToggle />
+      <HistoryNavigation />
       <div data-tauri-drag-region className="min-w-0 flex-1" />
       <ReleaseButton />
       <OpenInMenu />
@@ -287,6 +296,73 @@ function LeftSidebarToggle() {
                 {runningCount > 99 ? "99+" : runningCount}
               </span>
             ) : null}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" align="center">
+          {label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+/**
+ * Back/forward through the window's navigation history, the same moves as
+ * ⌘[ / ⌘] and the mouse side buttons (see NavigationHandler). Each button is
+ * disabled when there is no entry in its direction.
+ */
+function HistoryNavigation() {
+  const { t } = useLanguage();
+  const router = useRouter();
+  const span = useHistorySpanStore((s) => s.span);
+
+  return (
+    <div className="ml-1 inline-flex shrink-0 items-center">
+      <HistoryNavigationButton
+        label={t("navigateBack")}
+        disabled={!canGoBack(span)}
+        onClick={() => router.history.back()}
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+      </HistoryNavigationButton>
+      <HistoryNavigationButton
+        label={t("navigateForward")}
+        disabled={!canGoForward(span)}
+        onClick={() => router.history.forward()}
+      >
+        <ArrowRight className="h-3.5 w-3.5" />
+      </HistoryNavigationButton>
+    </div>
+  );
+}
+
+function HistoryNavigationButton({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={onClick}
+            aria-label={label}
+            disabled={disabled}
+            className={cn(
+              "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+              "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+              "disabled:pointer-events-none disabled:opacity-40",
+            )}
+          >
+            {children}
           </button>
         </TooltipTrigger>
         <TooltipContent side="bottom" align="center">

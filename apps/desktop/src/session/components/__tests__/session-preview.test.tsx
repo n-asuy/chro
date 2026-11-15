@@ -2,7 +2,7 @@ import { LanguageProvider } from "@/i18n";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { PreviewConversation } from "../session-preview";
+import { PreviewConversation, computePanelPosition } from "../session-preview";
 
 /**
  * Static render only: this checks what the hover panel shows for a given turn
@@ -116,5 +116,57 @@ describe("PreviewConversation loading rail", () => {
     });
 
     expect(html).not.toContain("border-r");
+  });
+});
+
+describe("computePanelPosition", () => {
+  const viewport = { width: 1200, height: 800 };
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+      width,
+      height,
+    }) as DOMRect;
+
+  it("places a row's panel beside the row", () => {
+    const position = computePanelPosition(
+      rect(0, 100, 240, 28),
+      460,
+      "side",
+      viewport,
+    );
+
+    expect(position.left).toBe(248);
+    expect(position.top).toBe(100);
+  });
+
+  it("places an inline reference's panel below the text, not over it", () => {
+    const position = computePanelPosition(
+      rect(500, 100, 80, 18),
+      460,
+      "below",
+      viewport,
+    );
+
+    expect(position.left).toBe(500);
+    expect(position.top).toBe(126);
+    expect(position.bottom).toBeUndefined();
+  });
+
+  it("opens above an inline reference near the bottom of the window", () => {
+    const position = computePanelPosition(
+      rect(900, 700, 80, 18),
+      460,
+      "below",
+      viewport,
+    );
+
+    // Anchored by its bottom edge just above the text, kept inside the window.
+    expect(position.top).toBeUndefined();
+    expect(position.bottom).toBe(800 - 700 + 8);
+    expect(position.left).toBe(1200 - 12 - 460);
   });
 });

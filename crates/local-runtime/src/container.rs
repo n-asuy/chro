@@ -798,7 +798,7 @@ impl LocalContainerService {
                 .await?
                 .and_then(|task| task.slug)
                 .unwrap_or_else(|| task_id.to_string());
-            env.insert("CHRO_SESSION", session);
+            env.insert(crate::session_processes::SESSION_ENV, session);
             env.insert(
                 "CHRO_SESSION_TOKEN",
                 self.session_tokens.issue(task_id, run_id),

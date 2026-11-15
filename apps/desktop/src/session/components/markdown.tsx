@@ -2,6 +2,7 @@ import { useLanguage } from "@/i18n";
 import { openExpandedView } from "@/lib/mermaid-expanded-view";
 import { openExternalUrl } from "@/lib/open-external-url";
 import type { LocalImageMetadata } from "@/session/context/local-images-context";
+import { useSessionBySlug } from "@/session/context/session-directory-context";
 import { useImageMetadata } from "@/session/hooks/use-image-metadata";
 import { HelpCircle, Loader2, Maximize2 } from "lucide-react";
 import {
@@ -23,7 +24,13 @@ import {
   localImageSource,
   remoteImageSource,
 } from "./markdown-image-source";
+import {
+  SESSION_MENTION_SLUG_ATTRIBUTE,
+  isSessionSlugShaped,
+  remarkSessionMention,
+} from "./remark-session-mention";
 import { remarkWikilink } from "./remark-wikilink";
+import { SessionMention } from "./session-mention";
 import { useOpenPathLink, usePathLink } from "./use-path-link";
 import { resolveWebUrl } from "./web-address";
 
@@ -317,9 +324,16 @@ const CodeRenderer: NonNullable<Components["code"]> = ({
   // below: `chro-ai.com` also parses as a file name ending in a `.com`
   // extension, and opening it as a file is the wrong action.
   const webUrl = isCodeBlock ? null : resolveWebUrl(text);
+  // Agents also quote session slugs in code spans (`20CFfEXi`).
+  const mentionedSession = useSessionBySlug(
+    !isCodeBlock && isSessionSlugShaped(text) ? text : null,
+  );
   // Only what actually exists on disk becomes a link, so a decorated span
-  // always opens something. Nothing is probed for code blocks or web addresses.
-  const pathTarget = usePathLink(isCodeBlock || webUrl ? null : text);
+  // always opens something. Nothing is probed for code blocks, web addresses
+  // or sessions.
+  const pathTarget = usePathLink(
+    isCodeBlock || webUrl || mentionedSession ? null : text,
+  );
   const openPathLink = useOpenPathLink();
 
   if (isCodeBlock) {
@@ -336,6 +350,10 @@ const CodeRenderer: NonNullable<Components["code"]> = ({
         {children}
       </code>
     );
+  }
+
+  if (mentionedSession) {
+    return <SessionMention slug={text}>{children}</SessionMention>;
   }
 
   const interactiveCode = (
@@ -789,8 +807,16 @@ const createComponents = (
         {children}
       </td>
     ),
-    // Wikilink renderer - custom node from remarkWikilink
+    // Wikilink and session-mention renderer - custom nodes from
+    // remarkWikilink and remarkSessionMention
     span: ({ node, children, ...props }) => {
+      const sessionSlug = (props as Record<string, unknown>)[
+        SESSION_MENTION_SLUG_ATTRIBUTE
+      ];
+      if (typeof sessionSlug === "string") {
+        return <SessionMention slug={sessionSlug}>{children}</SessionMention>;
+      }
+
       const className = props.className;
       const isWikilink =
         Array.isArray(className) && className.includes("wikilink");
@@ -864,7 +890,12 @@ export const Markdown = memo(
           // remarkBreaks runs last so wikilink parsing still sees whole text
           // nodes. Agent output is chat prose, not a CommonMark document: a
           // newline the agent typed is a newline the reader is meant to see.
-          remarkPlugins={[remarkGfm, remarkWikilink, remarkBreaks]}
+          remarkPlugins={[
+            remarkGfm,
+            remarkWikilink,
+            remarkSessionMention,
+            remarkBreaks,
+          ]}
           components={components}
         >
           {formatted}

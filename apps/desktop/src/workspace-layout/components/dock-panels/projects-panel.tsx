@@ -6,19 +6,20 @@ import { getUiValue, isUiStateReady, setUiValue } from "@/lib/ui-state-client";
 import { ArchivePopover } from "@/session/components/archive-popover";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
 import { SessionLeadingMarker } from "@/session/components/session-leading-marker";
-import {
-  SessionPreviewProvider,
-  useSessionPreviewTrigger,
-} from "@/session/components/session-preview";
 import { projectBadgeColor } from "@/session/domain/project-color";
 import {
   type GroupLabels,
   type SessionGroup,
   groupSessions,
   isInboxSession,
-  previewSessions,
   sortPinnedSessions,
 } from "@/session/domain/session-grouping";
+import {
+  type SessionListRow,
+  type SessionRowsOptions,
+  buildSessionRows,
+  previewSessions,
+} from "@/session/domain/session-rows";
 import { applyPendingSubmissionGroupsToTasks } from "@/session/domain/session-task-state";
 import {
   useArchivedSessions,
@@ -107,6 +108,7 @@ import {
   type OpenProjectTab,
   useOpenProjectsStore,
 } from "../../state/open-projects-store";
+import { useNestDelegations } from "../../state/session-list-preferences-store";
 import { KeyboardHint } from "../keyboard-hint";
 import { ProjectColorDot } from "../project-color-dot";
 import { ProjectColorPicker } from "../project-color-picker";
@@ -155,6 +157,14 @@ const SORT_OPTIONS: readonly {
 
 const isSortMode = (value: unknown): value is SortMode =>
   value === "name-asc" || value === "name-desc" || value === "recent";
+
+/**
+ * Where a delegation tree sits in a recency-sorted list: with its newest
+ * member, so a tree whose delegated work is active does not sink. Name sorts
+ * keep the delegating session's own position.
+ */
+const treeRankFor = (mode: SortMode): SessionRowsOptions["rank"] =>
+  mode === "recent" ? "subtree" : "root";
 
 /** The three fixed top-level bands, each independently collapsible. */
 export type SectionId = "pinned" | "projects" | "chats";
@@ -298,9 +308,19 @@ export function ProjectsDockPanel() {
     DEFAULT_SORT_MODE,
     isSortMode,
   );
+  // Chosen in Settings → Workspace.
+  const nestDelegations = useNestDelegations();
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // Delegating sessions whose nested sessions are folded away. Session-scoped,
+  // like per-project collapse: it is browsing state, not a preference.
+  const [collapsedDelegations, setCollapsedDelegations] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const toggleDelegation = useCallback((taskId: string) => {
+    setCollapsedDelegations((prev) => toggleKey(prev, taskId));
+  }, []);
   // Long sections show a short preview; these keys were unfolded with
   // "Show N more". Session-scoped, like per-project collapse.
   const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(
@@ -499,6 +519,33 @@ export function ProjectsDockPanel() {
     [visibleSorted, scratchProjectIds, isPinned],
   );
 
+  // Pinned keeps its urgency order, so a tree there stays where its root is.
+  const pinnedRows = useMemo(
+    () =>
+      buildSessionRows(pinnedTasks, {
+        nest: nestDelegations,
+        collapsed: collapsedDelegations,
+        rank: "root",
+      }),
+    [pinnedTasks, nestDelegations, collapsedDelegations],
+  );
+
+  // Shared by Chats and every project section; stable so the memoized
+  // sections only re-render when the nesting actually changes.
+  const listRowsOptions = useMemo<SessionRowsOptions>(
+    () => ({
+      nest: nestDelegations,
+      collapsed: collapsedDelegations,
+      rank: treeRankFor(sortMode),
+    }),
+    [nestDelegations, collapsedDelegations, sortMode],
+  );
+
+  const chatRows = useMemo(
+    () => buildSessionRows(chatTasks, listRowsOptions),
+    [chatTasks, listRowsOptions],
+  );
+
   const projectTasks = useMemo(
     () =>
       visibleSorted.filter(
@@ -649,279 +696,276 @@ export function ProjectsDockPanel() {
     openProjects.length > 0;
 
   return (
-    <SessionPreviewProvider>
-      <div className="flex h-full flex-col">
-        <div className="flex h-11 shrink-0 items-center justify-between px-2">
-          <div className="flex items-center gap-1">
-            <ChoiceDropdown
-              ariaLabel={t("sortProjects")}
-              title={t("sortProjects")}
-              icon={<ArrowDownUp className="h-4 w-4" />}
-              current={sortMode}
-              options={SORT_OPTIONS.map((o) => ({
-                value: o.mode,
-                label: t(o.labelKey),
-              }))}
-              onSelect={setSortMode}
-            />
-            <TooltipProvider delayDuration={120}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={t("collapseAllProjects")}
-                    onClick={collapseAll}
-                    disabled={!hasExpanded && projectGroups.length === 0}
-                    className={ICON_BUTTON_CLASS}
-                  >
-                    <ChevronsDownUp className="h-4 w-4" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" align="center">
-                  {t("collapseAllProjects")}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            <TooltipProvider delayDuration={120}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div>
-                    <ProjectSwitcherDropdown
-                      open={switcherOpen}
-                      onOpenChange={setSwitcherOpen}
-                      align="start"
-                      side="bottom"
-                      trigger={
-                        <button
-                          type="button"
-                          aria-label={t("openAnotherProject")}
-                          onClick={() => setSwitcherOpen(true)}
-                          className={ICON_BUTTON_CLASS}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </button>
-                      }
-                    />
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" align="center">
-                  {t("openAnotherProject")}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
+    <div className="flex h-full flex-col">
+      <div className="flex h-11 shrink-0 items-center justify-between px-2">
+        <div className="flex items-center gap-1">
+          <ChoiceDropdown
+            ariaLabel={t("sortProjects")}
+            title={t("sortProjects")}
+            icon={<ArrowDownUp className="h-4 w-4" />}
+            current={sortMode}
+            options={SORT_OPTIONS.map((o) => ({
+              value: o.mode,
+              label: t(o.labelKey),
+            }))}
+            onSelect={setSortMode}
+          />
           <TooltipProvider delayDuration={120}>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  aria-label={t("openCommandPalette")}
-                  onClick={openPalette}
+                  aria-label={t("collapseAllProjects")}
+                  onClick={collapseAll}
+                  disabled={!hasExpanded && projectGroups.length === 0}
                   className={ICON_BUTTON_CLASS}
                 >
-                  <Search className="h-4 w-4" />
+                  <ChevronsDownUp className="h-4 w-4" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent
-                side="bottom"
-                align="center"
-                className="flex items-center gap-2"
-              >
-                <span>{t("openCommandPalette")}</span>
-                <KeyboardHint keys={["mod", "K"]} />
+              <TooltipContent side="bottom" align="center">
+                {t("collapseAllProjects")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div>
+                  <ProjectSwitcherDropdown
+                    open={switcherOpen}
+                    onOpenChange={setSwitcherOpen}
+                    align="start"
+                    side="bottom"
+                    trigger={
+                      <button
+                        type="button"
+                        aria-label={t("openAnotherProject")}
+                        onClick={() => setSwitcherOpen(true)}
+                        className={ICON_BUTTON_CLASS}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </button>
+                    }
+                  />
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="center">
+                {t("openAnotherProject")}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
-        <div className="shrink-0 px-2 pb-1">
-          <button
-            type="button"
-            onClick={handleNewChat}
-            className="group flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] text-custom-sidebar-text-300 transition hover:bg-foreground/5 hover:text-custom-sidebar-text-100"
-          >
-            <SquarePen className="h-4 w-4 shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-left">
-              {t("newChat")}
-            </span>
-            <KeyboardHint
-              keys={["mod", "N"]}
-              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-            />
-          </button>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div
-            ref={sessionListRef}
-            className="relative min-h-0 flex-1 overflow-y-auto px-2 pb-3"
-          >
-            <RelationConnector
-              containerRef={sessionListRef}
-              enabled={relatedSessions.size > 0}
-            />
-            {isLoading && !hasAnyContent ? (
-              <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
-                <LoadingDot isLoading className="h-3 w-3" />
-              </div>
-            ) : (
-              <>
-                {pinnedTasks.length > 0 ? (
-                  <div className="mb-1">
-                    <SectionHeader
-                      label={t("pinnedSection")}
-                      count={pinnedTasks.length}
-                      collapsed={collapsedSections.includes("pinned")}
-                      onToggle={() => toggleSection("pinned")}
-                    />
-                    <SectionBody
-                      collapsed={collapsedSections.includes("pinned")}
-                      className="flex flex-col gap-0.5"
-                    >
-                      {pinnedTasks.map((task) => (
-                        <SessionRowContainer
-                          key={task.id}
-                          task={task}
-                          indented={false}
-                          showProject
-                          projectName={originLabelFor(task)}
-                          isPinned
-                          onTogglePin={() => togglePin(task.id)}
-                          runningDelegations={
-                            runningDelegations.get(task.id) ?? 0
-                          }
-                          isActive={
-                            activeTaskKey === task.id ||
-                            activeTaskKey === task.slug
-                          }
-                          isRelated={relatedSessions.has(task.id)}
-                          onOpen={() => openSession(task)}
-                          onArchive={() => archiveSession(task)}
-                          onFork={(workspace) =>
-                            void forkSession(task, workspace)
-                          }
-                          canUseWorktree={
-                            !scratchProjectIds.has(task.project_id)
-                          }
-                          t={t}
-                        />
-                      ))}
-                    </SectionBody>
-                  </div>
-                ) : null}
-
+        <TooltipProvider delayDuration={120}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("openCommandPalette")}
+                onClick={openPalette}
+                className={ICON_BUTTON_CLASS}
+              >
+                <Search className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="bottom"
+              align="center"
+              className="flex items-center gap-2"
+            >
+              <span>{t("openCommandPalette")}</span>
+              <KeyboardHint keys={["mod", "K"]} />
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+      <div className="shrink-0 px-2 pb-1">
+        <button
+          type="button"
+          onClick={handleNewChat}
+          className="group flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] text-custom-sidebar-text-300 transition hover:bg-foreground/5 hover:text-custom-sidebar-text-100"
+        >
+          <SquarePen className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-left">
+            {t("newChat")}
+          </span>
+          <KeyboardHint
+            keys={["mod", "N"]}
+            className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+          />
+        </button>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          ref={sessionListRef}
+          className="relative min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+        >
+          <RelationConnector
+            containerRef={sessionListRef}
+            enabled={relatedSessions.size > 0}
+          />
+          {isLoading && !hasAnyContent ? (
+            <div className="flex items-center gap-2 py-1.5 pl-2.5 text-xs text-custom-sidebar-text-400">
+              <LoadingDot isLoading className="h-3 w-3" />
+            </div>
+          ) : (
+            <>
+              {pinnedTasks.length > 0 ? (
                 <div className="mb-1">
                   <SectionHeader
-                    label={t("projects")}
-                    count={projectGroups.length}
-                    collapsed={collapsedSections.includes("projects")}
-                    onToggle={() => toggleSection("projects")}
+                    label={t("pinnedSection")}
+                    count={pinnedTasks.length}
+                    collapsed={collapsedSections.includes("pinned")}
+                    onToggle={() => toggleSection("pinned")}
                   />
                   <SectionBody
-                    collapsed={collapsedSections.includes("projects")}
-                  >
-                    {projectGroups.length === 0 ? (
-                      <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-                        {t("noProjectsYet")}
-                      </div>
-                    ) : (
-                      projectGroups.map((group) => (
-                        <SessionGroupSection
-                          key={group.key}
-                          group={group}
-                          collapsed={collapsed.has(group.key)}
-                          onToggle={() => toggleCollapsed(group.key)}
-                          unfolded={unfolded.has(group.key)}
-                          onToggleUnfolded={() => toggleUnfolded(group.key)}
-                          projectTasks={
-                            group.projectId
-                              ? tasksByProject[group.projectId] ?? NO_TASKS
-                              : NO_TASKS
-                          }
-                          sortMode={sortMode}
-                          project={
-                            group.projectId
-                              ? openProjectsById[group.projectId] ?? null
-                              : null
-                          }
-                          projectRecord={
-                            group.projectId
-                              ? projectsById[group.projectId] ?? null
-                              : null
-                          }
-                          onSetBadgeColor={setProjectBadgeColor}
-                          archived={
-                            group.projectId
-                              ? archivedByProject[group.projectId] ??
-                                EMPTY_ARCHIVED
-                              : EMPTY_ARCHIVED
-                          }
-                          isPinned={isPinned}
-                          onTogglePin={togglePin}
-                          runningDelegations={runningDelegations}
-                          relatedSessions={relatedSessions}
-                          t={t}
-                        />
-                      ))
-                    )}
-                  </SectionBody>
-                </div>
-
-                <div className="mb-1">
-                  <SectionHeader
-                    label={t("chatsSection")}
-                    count={chatTasks.length}
-                    collapsed={collapsedSections.includes("chats")}
-                    onToggle={() => toggleSection("chats")}
-                  />
-                  <SectionBody
-                    collapsed={collapsedSections.includes("chats")}
+                    collapsed={collapsedSections.includes("pinned")}
                     className="flex flex-col gap-0.5"
                   >
-                    {chatTasks.length === 0 ? (
-                      <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
-                        {t("noChats")}
-                      </div>
-                    ) : (
-                      <FoldableSessionList
-                        tasks={chatTasks}
-                        unfolded={unfolded.has("chats")}
-                        onToggleUnfolded={() => toggleUnfolded("chats")}
-                        isActive={isActiveTask}
+                    {pinnedRows.map((row) => (
+                      <SessionRowContainer
+                        key={row.task.id}
+                        row={row}
                         indented={false}
+                        showProject
+                        projectName={originLabelFor(row.task)}
+                        isPinned
+                        onTogglePin={() => togglePin(row.task.id)}
+                        runningDelegations={
+                          runningDelegations.get(row.task.id) ?? 0
+                        }
+                        onToggleNested={() => toggleDelegation(row.task.id)}
+                        isActive={isActiveTask(row.task)}
+                        isRelated={relatedSessions.has(row.task.id)}
+                        onOpen={() => openSession(row.task)}
+                        onArchive={() => archiveSession(row.task)}
+                        onFork={(workspace) =>
+                          void forkSession(row.task, workspace)
+                        }
+                        canUseWorktree={
+                          !scratchProjectIds.has(row.task.project_id)
+                        }
                         t={t}
-                        renderRow={(task) => (
-                          <SessionRowContainer
-                            task={task}
-                            indented={false}
-                            showProject={false}
-                            projectName={null}
-                            isPinned={isPinned(task.id)}
-                            onTogglePin={() => togglePin(task.id)}
-                            runningDelegations={
-                              runningDelegations.get(task.id) ?? 0
-                            }
-                            isActive={isActiveTask(task)}
-                            isRelated={relatedSessions.has(task.id)}
-                            onOpen={() => openSession(task)}
-                            onArchive={() => archiveSession(task)}
-                            onFork={(workspace) =>
-                              void forkSession(task, workspace)
-                            }
-                            canUseWorktree={
-                              !scratchProjectIds.has(task.project_id)
-                            }
-                            t={t}
-                          />
-                        )}
                       />
-                    )}
+                    ))}
                   </SectionBody>
                 </div>
-              </>
-            )}
-          </div>
+              ) : null}
+
+              <div className="mb-1">
+                <SectionHeader
+                  label={t("projects")}
+                  count={projectGroups.length}
+                  collapsed={collapsedSections.includes("projects")}
+                  onToggle={() => toggleSection("projects")}
+                />
+                <SectionBody collapsed={collapsedSections.includes("projects")}>
+                  {projectGroups.length === 0 ? (
+                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                      {t("noProjectsYet")}
+                    </div>
+                  ) : (
+                    projectGroups.map((group) => (
+                      <SessionGroupSection
+                        key={group.key}
+                        group={group}
+                        collapsed={collapsed.has(group.key)}
+                        onToggle={() => toggleCollapsed(group.key)}
+                        unfolded={unfolded.has(group.key)}
+                        onToggleUnfolded={() => toggleUnfolded(group.key)}
+                        projectTasks={
+                          group.projectId
+                            ? tasksByProject[group.projectId] ?? NO_TASKS
+                            : NO_TASKS
+                        }
+                        sortMode={sortMode}
+                        project={
+                          group.projectId
+                            ? openProjectsById[group.projectId] ?? null
+                            : null
+                        }
+                        projectRecord={
+                          group.projectId
+                            ? projectsById[group.projectId] ?? null
+                            : null
+                        }
+                        onSetBadgeColor={setProjectBadgeColor}
+                        archived={
+                          group.projectId
+                            ? archivedByProject[group.projectId] ??
+                              EMPTY_ARCHIVED
+                            : EMPTY_ARCHIVED
+                        }
+                        isPinned={isPinned}
+                        onTogglePin={togglePin}
+                        runningDelegations={runningDelegations}
+                        rowsOptions={listRowsOptions}
+                        onToggleDelegation={toggleDelegation}
+                        relatedSessions={relatedSessions}
+                        t={t}
+                      />
+                    ))
+                  )}
+                </SectionBody>
+              </div>
+
+              <div className="mb-1">
+                <SectionHeader
+                  label={t("chatsSection")}
+                  count={chatTasks.length}
+                  collapsed={collapsedSections.includes("chats")}
+                  onToggle={() => toggleSection("chats")}
+                />
+                <SectionBody
+                  collapsed={collapsedSections.includes("chats")}
+                  className="flex flex-col gap-0.5"
+                >
+                  {chatTasks.length === 0 ? (
+                    <div className="py-1.5 pl-2.5 text-sm text-custom-sidebar-text-400">
+                      {t("noChats")}
+                    </div>
+                  ) : (
+                    <FoldableSessionList
+                      rows={chatRows}
+                      unfolded={unfolded.has("chats")}
+                      onToggleUnfolded={() => toggleUnfolded("chats")}
+                      isActive={isActiveTask}
+                      indented={false}
+                      t={t}
+                      renderRow={(row) => (
+                        <SessionRowContainer
+                          row={row}
+                          indented={false}
+                          showProject={false}
+                          projectName={null}
+                          isPinned={isPinned(row.task.id)}
+                          onTogglePin={() => togglePin(row.task.id)}
+                          runningDelegations={
+                            runningDelegations.get(row.task.id) ?? 0
+                          }
+                          onToggleNested={() => toggleDelegation(row.task.id)}
+                          isActive={isActiveTask(row.task)}
+                          isRelated={relatedSessions.has(row.task.id)}
+                          onOpen={() => openSession(row.task)}
+                          onArchive={() => archiveSession(row.task)}
+                          onFork={(workspace) =>
+                            void forkSession(row.task, workspace)
+                          }
+                          canUseWorktree={
+                            !scratchProjectIds.has(row.task.project_id)
+                          }
+                          t={t}
+                        />
+                      )}
+                    />
+                  )}
+                </SectionBody>
+              </div>
+            </>
+          )}
         </div>
       </div>
-    </SessionPreviewProvider>
+    </div>
   );
 }
 
@@ -1068,7 +1112,7 @@ function SectionBody({
  * trailing control unfolds the rest (and folds it back).
  */
 function FoldableSessionList({
-  tasks,
+  rows,
   unfolded,
   onToggleUnfolded,
   isActive,
@@ -1076,32 +1120,32 @@ function FoldableSessionList({
   renderRow,
   t,
 }: {
-  tasks: readonly StoredTask[];
+  rows: readonly SessionListRow[];
   unfolded: boolean;
   onToggleUnfolded: () => void;
   isActive: (task: StoredTask) => boolean;
   indented: boolean;
-  renderRow: (task: StoredTask) => ReactNode;
+  renderRow: (row: SessionListRow) => ReactNode;
   t: TranslationFunction;
 }) {
-  const preview = previewSessions(tasks, isActive);
+  const preview = previewSessions(rows, isActive);
   const folded = preview.hiddenCount > 0 && !unfolded;
-  const rows = folded ? preview.visible : tasks;
-  const fadedTask = folded ? rows[rows.length - 1] : undefined;
-  const fadeLast = fadedTask !== undefined && !isActive(fadedTask);
+  const shown = folded ? preview.visible : rows;
+  const fadedRow = folded ? shown[shown.length - 1] : undefined;
+  const fadeLast = fadedRow !== undefined && !isActive(fadedRow.task);
 
   return (
     <>
-      {rows.map((task) => (
+      {shown.map((row) => (
         <div
-          key={task.id}
+          key={row.task.id}
           className={cn(
             fadeLast &&
-              task === fadedTask &&
+              row === fadedRow &&
               "[mask-image:linear-gradient(to_bottom,rgb(0_0_0/0.55),rgb(0_0_0/0.2))] hover:[mask-image:none]",
           )}
         >
-          {renderRow(task)}
+          {renderRow(row)}
         </div>
       ))}
       {preview.hiddenCount > 0 ? (
@@ -1153,6 +1197,9 @@ interface SessionGroupSectionProps {
   onTogglePin: (taskId: string) => void;
   /** Running delegated sessions per delegating task id. */
   runningDelegations: ReadonlyMap<string, number>;
+  /** How the section's sessions become rows (delegation nesting). */
+  rowsOptions: SessionRowsOptions;
+  onToggleDelegation: (taskId: string) => void;
   /** The focused session's relation group, marked on its rows. */
   relatedSessions: ReadonlySet<string>;
   t: TranslationFunction;
@@ -1173,6 +1220,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
   isPinned,
   onTogglePin,
   runningDelegations,
+  rowsOptions,
+  onToggleDelegation,
   relatedSessions,
   t,
 }: SessionGroupSectionProps) {
@@ -1202,6 +1251,11 @@ const SessionGroupSection = memo(function SessionGroupSection({
 
   const isActiveTask = (task: StoredTask) =>
     activeTaskKey === task.id || activeTaskKey === task.slug;
+
+  const rows = useMemo(
+    () => buildSessionRows(group.tasks, rowsOptions),
+    [group.tasks, rowsOptions],
+  );
 
   // Only a repository has a checkout to browse; scratch chats do not.
   const canShowFiles = project !== null && !projectRecord?.isGeneral;
@@ -1292,26 +1346,27 @@ const SessionGroupSection = memo(function SessionGroupSection({
             </div>
           ) : (
             <FoldableSessionList
-              tasks={group.tasks}
+              rows={rows}
               unfolded={unfolded}
               onToggleUnfolded={onToggleUnfolded}
               isActive={isActiveTask}
               indented
               t={t}
-              renderRow={(task) => (
+              renderRow={(row) => (
                 <SessionRowContainer
-                  task={task}
+                  row={row}
                   indented
                   showProject={false}
                   projectName={null}
-                  isPinned={isPinned(task.id)}
-                  onTogglePin={() => onTogglePin(task.id)}
-                  runningDelegations={runningDelegations.get(task.id) ?? 0}
-                  isActive={isActiveTask(task)}
-                  isRelated={relatedSessions.has(task.id)}
-                  onOpen={() => openSession(task)}
-                  onArchive={() => archiveSession(task)}
-                  onFork={(workspace) => void forkSession(task, workspace)}
+                  isPinned={isPinned(row.task.id)}
+                  onTogglePin={() => onTogglePin(row.task.id)}
+                  runningDelegations={runningDelegations.get(row.task.id) ?? 0}
+                  onToggleNested={() => onToggleDelegation(row.task.id)}
+                  isActive={isActiveTask(row.task)}
+                  isRelated={relatedSessions.has(row.task.id)}
+                  onOpen={() => openSession(row.task)}
+                  onArchive={() => archiveSession(row.task)}
+                  onFork={(workspace) => void forkSession(row.task, workspace)}
                   canUseWorktree={project !== null}
                   t={t}
                 />

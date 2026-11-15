@@ -1,5 +1,6 @@
 import { useProjectContext } from "@/files/context/project-context";
 import { useFilesStore } from "@/files/state/files-store";
+import { SessionPreviewProvider } from "@/session/components/session-preview";
 import { ProjectTasksProvider } from "@/session/context/project-tasks-context";
 import { useSessionReadSync } from "@/session/hooks";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
@@ -26,17 +27,25 @@ import { PaneDndContext } from "./pane-dnd-context";
 import { PaneTreeView } from "./pane-tree-view";
 import { ProjectTabsHeader } from "./project-tabs-header";
 import { RightDock } from "./right-dock";
+import { LayoutSessionDirectory } from "./session-directory-provider";
 import { SessionSearchPalette } from "./session-search-palette";
 
 /**
  * Top-level shell: ElectronTitlebar + LeftDock + Center pane tree. Mounts
  * dnd context so tab drag-drop works across all panes. Reads the active
  * project from `ProjectProvider` (must be mounted higher in the tree).
+ *
+ * One session preview panel and one session directory serve every surface:
+ * the session lists and the session references inside messages.
  */
 export function LayoutShell() {
   return (
     <ProjectTasksProvider>
-      <LayoutShellInner />
+      <LayoutSessionDirectory>
+        <SessionPreviewProvider>
+          <LayoutShellInner />
+        </SessionPreviewProvider>
+      </LayoutSessionDirectory>
     </ProjectTasksProvider>
   );
 }

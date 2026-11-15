@@ -14,7 +14,7 @@ use executors::{BaseCodingAgent, ExecutorProfileId, ReasoningEffort};
 use git::DiffTarget;
 use runtime::{
     ForkWorkspace, MessageOptions, Runtime, RuntimeError, SendOutcome, SendTaskMessageParams,
-    TaskService,
+    TaskService, WhenBusy,
 };
 use serde::Deserialize;
 use server_contract::{
@@ -291,7 +291,10 @@ pub(crate) async fn fork(
             .await?;
         let turn = match prompt {
             Some(prompt) => match service
-                .send_or_queue(SendTaskMessageParams::text(outcome.task.id, prompt), true)
+                .deliver(
+                    SendTaskMessageParams::text(outcome.task.id, prompt),
+                    WhenBusy::Queue,
+                )
                 .await?
             {
                 SendOutcome::Started(start) => Some(start.execution.task_run),
@@ -324,7 +327,10 @@ pub(crate) async fn send(
     let runtime = state.runtime().clone();
     let outcome = detached(async move {
         TaskService::new(&runtime)
-            .send_or_queue(SendTaskMessageParams::text(task.id, prompt), body.queue)
+            .deliver(
+                SendTaskMessageParams::text(task.id, prompt),
+                when_busy(body.when_busy),
+            )
             .await
     })
     .await
@@ -333,6 +339,7 @@ pub(crate) async fn send(
         if err.0.code == ErrorCode::SessionBusy {
             err.with_next(format!("chro session wait {handle} --for idle"))
                 .with_next(format!("chro session send {handle} --prompt <text>"))
+                .with_next(format!("chro session send {handle} --prompt <text> --now"))
         } else {
             err
         }
@@ -349,6 +356,15 @@ pub(crate) async fn send(
             turn: None,
         },
     }))
+}
+
+fn when_busy(wire: server_contract::api::WhenBusy) -> WhenBusy {
+    use server_contract::api::WhenBusy as Wire;
+    match wire {
+        Wire::Queue => WhenBusy::Queue,
+        Wire::Refuse => WhenBusy::Refuse,
+        Wire::Interrupt => WhenBusy::Interrupt,
+    }
 }
 
 /// Stop the session: discard queued messages, then cancel the turn in flight.

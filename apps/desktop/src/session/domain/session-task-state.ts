@@ -172,7 +172,10 @@ export function applyPendingSubmissionToTasks(
     : pending.runId ?? pending.tempRunId;
   const pendingUpdatedAt = pending.finishedAt ?? pending.createdAt;
 
+  // Spread the streamed row first: the overlay only owns the live-run fields,
+  // so delegation edges, provenance and worktree state survive the send.
   byId.set(targetId, {
+    ...current,
     id: targetId,
     slug: current?.slug ?? pending.taskSlug,
     project_id: projectId ?? current?.project_id ?? "",

@@ -1,0 +1,119 @@
+name: Setup Azure Artifact Signing
+description: >
+  Installs SignTool and the Azure Artifact Signing dlib, writes the signing
+  metadata, and exports the environment that apps/desktop/scripts/sign-windows.ps1
+  reads. Authentication is GitHub OIDC workload identity federation: the sign
+  hook mints a fresh GitHub ID token for every file, so the calling job needs
+  `permissions: id-token: write` and no client secret exists anywhere.
+
+inputs:
+  client-id:
+    description: Application (client) ID of the Entra app federated with this repository.
+    required: true
+  certificate-profile:
+    description: Certificate profile name in the Artifact Signing account.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Require Artifact Signing configuration
+      shell: pwsh
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CERTIFICATE_PROFILE: ${{ inputs.certificate-profile }}
+      run: |
+        $missing = @()
+        if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID)) { $missing += "client-id (vars.ARTIFACT_SIGNING_CLIENT_ID)" }
+        if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_PROFILE)) { $missing += "certificate-profile (vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE)" }
+        if ($missing.Count -gt 0) {
+          Write-Host "::error::Missing Artifact Signing configuration: $($missing -join ', ')."
+          exit 1
+        }
+        if ([string]::IsNullOrWhiteSpace($env:ACTIONS_ID_TOKEN_REQUEST_URL)) {
+          Write-Host "::error::GitHub OIDC is unavailable. The calling job needs 'permissions: id-token: write'."
+          exit 1
+        }
+
+    # The Artifact Signing dlib targets .NET 10 (see its runtimeconfig.json).
+    - name: Setup .NET runtime for the signing dlib
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Install SignTool and the Artifact Signing dlib
+      shell: pwsh
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        CERTIFICATE_PROFILE: ${{ inputs.certificate-profile }}
+        # Curino LLC's Artifact Signing account (Japan East).
+        TENANT_ID: 9e4ad386-934c-40a9-99b4-5737606a5964
+        SIGNING_ENDPOINT: https://jpe.codesigning.azure.net
+        SIGNING_ACCOUNT: curino-codesigning
+      run: |
+        $ErrorActionPreference = "Stop"
+        $root = Join-Path $env:RUNNER_TEMP "artifact-signing"
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+        # Pinned packages, verified by hash before use.
+        $packages = @(
+          @{ Id = "microsoft.windows.sdk.buildtools"; Version = "10.0.28000.2957"; Sha256 = "b7163fc6f636172726d0985963e4f7f11c41afe1c7fdfe78f8051877360ed696" },
+          @{ Id = "microsoft.artifactsigning.client"; Version = "1.0.151"; Sha256 = "35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a" }
+        )
+        $extracted = @{}
+        foreach ($package in $packages) {
+          $name = "$($package.Id).$($package.Version)"
+          $archive = Join-Path $root "$name.zip"
+          $uri = "https://api.nuget.org/v3-flatcontainer/$($package.Id)/$($package.Version)/$name.nupkg"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $package.Sha256) {
+            throw "SHA-256 mismatch for $name (expected $($package.Sha256), got $actual)."
+          }
+          $destination = Join-Path $root $name
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          $extracted[$package.Id] = $destination
+        }
+
+        $signtool = Get-ChildItem -Path (Join-Path $extracted["microsoft.windows.sdk.buildtools"] "bin") `
+          -Recurse -File -Filter "signtool.exe" |
+          Where-Object { $_.Directory.Name -eq "x64" } |
+          Select-Object -First 1
+        if ($null -eq $signtool) { throw "x64 signtool.exe not found in the SDK build tools package." }
+
+        $dlib = Join-Path $extracted["microsoft.artifactsigning.client"] "bin\x64\Azure.CodeSigning.Dlib.dll"
+        if (-not (Test-Path -LiteralPath $dlib -PathType Leaf)) { throw "Artifact Signing dlib not found at '$dlib'." }
+
+        # Restrict DefaultAzureCredential to workload identity so a misconfigured
+        # federation fails with that credential's error instead of falling
+        # through to unrelated credential types.
+        $metadata = [ordered]@{
+          Endpoint = $env:SIGNING_ENDPOINT
+          CodeSigningAccountName = $env:SIGNING_ACCOUNT
+          CertificateProfileName = $env:CERTIFICATE_PROFILE
+          CorrelationId = "$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          ExcludeCredentials = @(
+            "ManagedIdentityCredential",
+            "SharedTokenCacheCredential",
+            "VisualStudioCredential",
+            "VisualStudioCodeCredential",
+            "AzureCliCredential",
+            "AzurePowerShellCredential",
+            "AzureDeveloperCliCredential",
+            "InteractiveBrowserCredential"
+          )
+        }
+        $metadataPath = Join-Path $root "metadata.json"
+        $metadata | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding utf8
+
+        Write-Host "SignTool: $($signtool.FullName)"
+        Write-Host "Dlib: $dlib"
+        Get-Content -LiteralPath $metadataPath | Write-Host
+
+        @(
+          "SIGNTOOL_PATH=$($signtool.FullName)",
+          "ARTIFACT_SIGNING_DLIB=$dlib",
+          "ARTIFACT_SIGNING_METADATA=$metadataPath",
+          "AZURE_CLIENT_ID=$env:CLIENT_ID",
+          "AZURE_TENANT_ID=$env:TENANT_ID"
+        ) | Add-Content -LiteralPath $env:GITHUB_ENV

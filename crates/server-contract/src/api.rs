@@ -240,10 +240,22 @@ pub struct Forked {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendMessage {
     pub prompt: String,
-    /// When the session is busy: `true` queues the message behind the current
-    /// turn, `false` fails with `session_busy`.
-    #[serde(default = "default_true")]
-    pub queue: bool,
+    #[serde(default)]
+    pub when_busy: WhenBusy,
+}
+
+/// What a message does when its session has a turn running or messages
+/// waiting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenBusy {
+    /// Wait in the queue and run when the turns ahead of it have ended.
+    #[default]
+    Queue,
+    /// Fail with `session_busy`.
+    Refuse,
+    /// Stop the running turn and run next, ahead of everything queued.
+    Interrupt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,7 +498,19 @@ mod tests {
     #[test]
     fn messages_queue_unless_told_otherwise() {
         let parsed: SendMessage = serde_json::from_value(json!({ "prompt": "next" })).unwrap();
-        assert!(parsed.queue);
+        assert_eq!(parsed.when_busy, WhenBusy::Queue);
+    }
+
+    #[test]
+    fn a_message_may_refuse_to_wait_or_interrupt_the_running_turn() {
+        for (wire, when_busy) in [
+            ("refuse", WhenBusy::Refuse),
+            ("interrupt", WhenBusy::Interrupt),
+        ] {
+            let parsed: SendMessage =
+                serde_json::from_value(json!({ "prompt": "now", "when_busy": wire })).unwrap();
+            assert_eq!(parsed.when_busy, when_busy);
+        }
     }
 
     #[test]

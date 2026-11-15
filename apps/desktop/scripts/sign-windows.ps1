@@ -7,9 +7,12 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# Tauri runs this hook with captured output and reports any failure only as
-# "failed to run pwsh", so everything is also appended to a log file that the
-# release workflow prints when the build fails.
+# Tauri runs this hook (bundle.windows.signCommand) for the main app, sidecars,
+# NSIS plugins, the uninstaller, and the final installer. It captures the
+# hook's output and reports any failure only as "failed to run pwsh", and NSIS
+# ignores the exit status for the uninstaller. Everything is therefore also
+# appended to a log file that the release workflow gates on: every failure is
+# an "ERROR: " line and every success is exactly one "Signed: " line.
 $logDirectory = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
 $logPath = Join-Path $logDirectory "sign-windows.log"
 
@@ -25,14 +28,27 @@ function Fail-Signing {
   throw $Message
 }
 
+function Invoke-SignTool {
+  param([string[]]$Arguments)
+  $output = @(& $env:SIGNTOOL_PATH @Arguments 2>&1)
+  $exitCode = $LASTEXITCODE
+  $output | ForEach-Object { Write-SignLog "$_" }
+  return $exitCode
+}
+
 Write-SignLog "--- sign-windows.ps1 $(Get-Date -Format o) file=$FilePath cwd=$(Get-Location)"
 
+# SIGNTOOL_PATH, ARTIFACT_SIGNING_*, and AZURE_* are exported by the
+# setup-artifact-signing action. ACTIONS_ID_TOKEN_REQUEST_* exist only when the
+# job grants `id-token: write`.
 $requiredEnvironmentVariables = @(
-  "CODE_SIGN_TOOL_PATH",
-  "ES_USERNAME",
-  "ES_PASSWORD",
-  "ES_CREDENTIAL_ID",
-  "ES_TOTP_SECRET"
+  "SIGNTOOL_PATH",
+  "ARTIFACT_SIGNING_DLIB",
+  "ARTIFACT_SIGNING_METADATA",
+  "AZURE_CLIENT_ID",
+  "AZURE_TENANT_ID",
+  "ACTIONS_ID_TOKEN_REQUEST_URL",
+  "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
 )
 
 $missingEnvironmentVariables = @(
@@ -46,55 +62,47 @@ if ($missingEnvironmentVariables.Count -gt 0) {
 }
 
 $resolvedFilePath = (Resolve-Path -LiteralPath $FilePath).Path
-$codeSignTool = Join-Path $env:CODE_SIGN_TOOL_PATH "CodeSignTool.bat"
 
-if (-not (Test-Path -LiteralPath $codeSignTool -PathType Leaf)) {
-  Fail-Signing "SSL.com CodeSignTool was not found at '$codeSignTool'."
+# The dlib authenticates through DefaultAzureCredential's workload identity
+# credential, which exchanges the GitHub OIDC token in AZURE_FEDERATED_TOKEN_FILE
+# for an Entra access token. A fresh GitHub token is minted for every file:
+# signing runs at the end of a long Rust build, well past the lifetime of any
+# token obtained when the job started.
+$tokenFile = Join-Path $logDirectory "artifact-signing-oidc-$([guid]::NewGuid()).jwt"
+try {
+  try {
+    $tokenResponse = Invoke-RestMethod `
+      -Uri "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=api://AzureADTokenExchange" `
+      -Headers @{ Authorization = "Bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)" }
+  } catch {
+    Fail-Signing "Could not obtain a GitHub OIDC token: $($_.Exception.Message)"
+  }
+  Set-Content -LiteralPath $tokenFile -Value $tokenResponse.value -NoNewline
+  $env:AZURE_FEDERATED_TOKEN_FILE = $tokenFile
+
+  # SignTool selects the Authenticode handler from the PE content, not the file
+  # extension, so the NSIS uninstaller (handed over as a .tmp file) is signed
+  # in place like every other binary.
+  $signExitCode = Invoke-SignTool @(
+    "sign", "/v",
+    "/fd", "SHA256",
+    "/tr", "http://timestamp.acs.microsoft.com",
+    "/td", "SHA256",
+    "/dlib", $env:ARTIFACT_SIGNING_DLIB,
+    "/dmdf", $env:ARTIFACT_SIGNING_METADATA,
+    $resolvedFilePath
+  )
+  if ($signExitCode -ne 0) {
+    Fail-Signing "SignTool failed to sign '$resolvedFilePath' (exit code $signExitCode)."
+  }
+} finally {
+  Remove-Item -LiteralPath $tokenFile -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:AZURE_FEDERATED_TOKEN_FILE -ErrorAction SilentlyContinue
 }
 
-# CodeSignTool decides whether it can sign a file by its extension. NSIS hands
-# the uninstaller to this hook as a .tmp file (and ignores the hook's exit
-# status), so anything without a recognised extension is signed through an
-# .exe-named copy whose signed bytes then replace the original.
-$signableExtensions = @(".exe", ".dll", ".msi")
-$extension = [IO.Path]::GetExtension($resolvedFilePath).ToLowerInvariant()
-$signTarget = $resolvedFilePath
-if ($extension -notin $signableExtensions) {
-  $signTarget = "$resolvedFilePath.exe"
-  Copy-Item -LiteralPath $resolvedFilePath -Destination $signTarget -Force
-  Write-SignLog "Signing '$extension' file through a temporary .exe copy: $signTarget"
+$verifyExitCode = Invoke-SignTool @("verify", "/pa", "/tw", $resolvedFilePath)
+if ($verifyExitCode -ne 0) {
+  Fail-Signing "Authenticode verification failed for '$resolvedFilePath' (exit code $verifyExitCode)."
 }
 
-# CodeSignTool normally writes a signed copy to a separate directory. Tauri's
-# signCommand contract requires the file passed as %1 to be signed in place, so
-# use eSigner's override mode. Tauri invokes this script for the main app,
-# sidecars, NSIS plugins/uninstaller, and the final installer.
-$signerOutput = @(
-  & $codeSignTool sign `
-    "-username=$env:ES_USERNAME" `
-    "-password=$env:ES_PASSWORD" `
-    "-credential_id=$env:ES_CREDENTIAL_ID" `
-    "-totp_secret=$env:ES_TOTP_SECRET" `
-    "-input_file_path=$signTarget" `
-    "-override=true" 2>&1
-)
-$signerExitCode = $LASTEXITCODE
-$signerOutput | ForEach-Object { Write-SignLog "$_" }
-
-$signerText = $signerOutput -join "`n"
-$reportedFailure = $signerText -match "Error|Exception|Missing required option|Unmatched argument"
-if ($signerExitCode -ne 0 -or $reportedFailure) {
-  Fail-Signing "SSL.com CodeSignTool failed to sign '$signTarget' (exit code $signerExitCode)."
-}
-
-$signature = Get-AuthenticodeSignature -FilePath $signTarget
-if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
-  Fail-Signing "Authenticode verification failed for '$signTarget': $($signature.StatusMessage)"
-}
-
-if ($signTarget -ne $resolvedFilePath) {
-  Move-Item -LiteralPath $signTarget -Destination $resolvedFilePath -Force
-}
-
-Write-SignLog "Verified Authenticode signature: $resolvedFilePath"
-Write-SignLog "Signer: $($signature.SignerCertificate.Subject)"
+Write-SignLog "Signed: $resolvedFilePath"

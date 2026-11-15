@@ -12,7 +12,8 @@ export type SessionSubline = {
  * session actually did, which no other row element carries; a note set before
  * any run finished comes next. Provenance follows (a forked row is only
  * legible if you can see what it continues; also the only signal before the
- * first run), then the project name for pinned rows.
+ * first run), then the project name for pinned rows. A row nested under the
+ * session that delegated it skips the delegation: its position says it.
  */
 export function sessionSubline(
   task: StoredTask,
@@ -20,6 +21,7 @@ export function sessionSubline(
     isRunning: boolean;
     showProject: boolean;
     projectName: string | null;
+    nestedUnderDelegator: boolean;
   },
 ): SessionSubline {
   if (opts.isRunning && task.note) return { kind: "note", text: task.note };
@@ -28,7 +30,7 @@ export function sessionSubline(
   if (task.forked_from_title) {
     return { kind: "forked", text: task.forked_from_title };
   }
-  if (task.delegated_from_title) {
+  if (task.delegated_from_title && !opts.nestedUnderDelegator) {
     return { kind: "delegated", text: task.delegated_from_title };
   }
   if (opts.showProject && opts.projectName) {

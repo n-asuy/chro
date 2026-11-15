@@ -1,8 +1,10 @@
 name: Verify Code Signing
 
-# Fast, standalone check of the SSL.com eSigner credentials. Signs a throwaway
-# executable so an auth/config problem surfaces in ~1-2 minutes instead of after
-# the full ~30-minute desktop Rust build. Manual-trigger only.
+# Fast, standalone check of the Azure Artifact Signing setup (OIDC federation,
+# role assignment, certificate profile). Signs a throwaway executable through
+# the same Tauri sign hook the release uses, so an auth/config problem surfaces
+# in a few minutes instead of after the full ~30-minute desktop Rust build.
+# Manual-trigger only.
 on:
   workflow_dispatch:
 
@@ -11,27 +13,26 @@ permissions:
 
 jobs:
   verify:
-    name: Verify SSL.com eSigner auth
+    name: Verify Azure Artifact Signing
     runs-on: windows-latest
+    # Same environment as the release job, so this exercises the same federated
+    # credential subject.
+    environment: windows-signing
+    permissions:
+      contents: read
+      id-token: write
     env:
-      ES_USERNAME: ${{ secrets.ES_USERNAME }}
-      ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
-      ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
-      ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+      WINDOWS_SIGNER_SUBJECT: Curino
     steps:
-      - name: Require eSigner secrets
-        if: >
-          env.ES_USERNAME == '' ||
-          env.ES_PASSWORD == '' ||
-          env.ES_CREDENTIAL_ID == '' ||
-          env.ES_TOTP_SECRET == ''
-        shell: bash
-        run: |
-          echo "::error::Missing SSL.com eSigner secrets (ES_USERNAME/ES_PASSWORD/ES_CREDENTIAL_ID/ES_TOTP_SECRET)." >&2
-          exit 1
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Fails fast when the variables or the OIDC permission are missing.
+      - name: Setup Azure Artifact Signing
+        uses: ./.github/actions/setup-artifact-signing
+        with:
+          client-id: ${{ vars.ARTIFACT_SIGNING_CLIENT_ID }}
+          certificate-profile: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
       # A minimal real PE the signer can operate on. Windows PowerShell 5.1's
       # CodeDOM compiler emits a standalone unsigned exe; PowerShell 7 (pwsh)
@@ -44,14 +45,32 @@ jobs:
             -OutputAssembly test.exe -OutputType ConsoleApplication
           if (-not (Test-Path test.exe)) { throw 'test.exe was not created' }
 
-      - name: Setup SSL.com CodeSignTool
-        uses: sslcom/esigner-codesign@v1.3.2
-        with:
-          command: --version
-          environment_name: PROD
-
       - name: Sign with the Tauri signCommand wrapper
         shell: pwsh
         run: |
           & "${{ github.workspace }}/apps/desktop/scripts/sign-windows.ps1" `
             "${{ github.workspace }}/test.exe"
+
+      - name: Check signer and timestamp
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature -FilePath test.exe
+          if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
+            throw "Signature is not valid: $($signature.StatusMessage)"
+          }
+          $subject = $signature.SignerCertificate.Subject
+          Write-Host "Signer: $subject"
+          if ($subject -notlike "*$env:WINDOWS_SIGNER_SUBJECT*") {
+            throw "Unexpected signer: $subject (expected '$env:WINDOWS_SIGNER_SUBJECT')"
+          }
+          if ($null -eq $signature.TimeStamperCertificate) {
+            throw "Signature carries no timestamp."
+          }
+          Write-Host "Timestamped by: $($signature.TimeStamperCertificate.Subject)"
+
+      - name: Show Windows signing log
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "sign-windows.log"
+          if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }

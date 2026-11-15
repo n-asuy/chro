@@ -85,8 +85,12 @@ pub enum SessionCommand {
         #[arg(long)]
         prompt: String,
         /// Fail with session_busy instead of queueing behind a running turn
-        #[arg(long)]
+        #[arg(long, conflicts_with = "now")]
         no_queue: bool,
+        /// Stop the running turn and run this message next, ahead of anything
+        /// queued
+        #[arg(long)]
+        now: bool,
     },
     /// Wait until a session is idle, needs input, or either
     Wait {
@@ -351,6 +355,7 @@ pub(crate) fn run(
             session,
             prompt,
             no_queue,
+            now,
         } => finish(
             mode,
             prompt_text(prompt)
@@ -362,7 +367,7 @@ pub(crate) fn run(
                         &[],
                         Some(&SendMessage {
                             prompt,
-                            queue: !no_queue,
+                            when_busy: when_busy(no_queue, now),
                         }),
                     )
                 }),
@@ -475,9 +480,44 @@ pub(crate) fn run(
     }
 }
 
+fn when_busy(no_queue: bool, now: bool) -> WhenBusy {
+    match (no_queue, now) {
+        (_, true) => WhenBusy::Interrupt,
+        (true, false) => WhenBusy::Refuse,
+        (false, false) => WhenBusy::Queue,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+    use crate::args::{Commands, TerminalCli};
+
+    fn sent_when_busy(flags: &[&str]) -> Result<WhenBusy, clap::Error> {
+        let args = ["chro", "session", "send", "ab12", "--prompt", "go"]
+            .into_iter()
+            .chain(flags.iter().copied());
+        match TerminalCli::try_parse_from(args)?.command {
+            Some(Commands::Session {
+                command: SessionCommand::Send { no_queue, now, .. },
+            }) => Ok(when_busy(no_queue, now)),
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sent_message_queues_refuses_or_interrupts_by_flag() {
+        assert_eq!(sent_when_busy(&[]).unwrap(), WhenBusy::Queue);
+        assert_eq!(sent_when_busy(&["--no-queue"]).unwrap(), WhenBusy::Refuse);
+        assert_eq!(sent_when_busy(&["--now"]).unwrap(), WhenBusy::Interrupt);
+    }
+
+    #[test]
+    fn now_and_no_queue_contradict_each_other() {
+        assert!(sent_when_busy(&["--now", "--no-queue"]).is_err());
+    }
 
     #[test]
     fn durations_accept_the_units_people_type() {

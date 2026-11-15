@@ -28,6 +28,7 @@ use worktree::WorktreeManager;
 
 mod container;
 mod housekeeping;
+mod session_processes;
 pub(crate) mod log_writer;
 pub mod session_tokens;
 mod transcript;
@@ -72,7 +73,7 @@ impl NormalizedLogReplayCache {
             .map(|cached| cached.entries.clone())
     }
 
-    fn insert(&mut self, task_run_id: Uuid, entries: Vec<LogEntry>) {
+    fn insert(&mut self, task_run_id: Uuid, entries: Arc<Vec<LogEntry>>) {
         let bytes = entries.iter().fold(0usize, |total, entry| {
             total.saturating_add(entry.approx_bytes())
         });
@@ -85,13 +86,8 @@ impl NormalizedLogReplayCache {
             return;
         }
 
-        self.entries.insert(
-            task_run_id,
-            CachedNormalizedLog {
-                entries: Arc::new(entries),
-                bytes,
-            },
-        );
+        self.entries
+            .insert(task_run_id, CachedNormalizedLog { entries, bytes });
         self.total_bytes = self.total_bytes.saturating_add(bytes);
         self.order.push_back(task_run_id);
 
@@ -114,6 +110,15 @@ impl NormalizedLogReplayCache {
             self.order.retain(|id| id != task_run_id);
         }
     }
+}
+
+/// Stream a shared replay, cloning one entry at a time as it is sent.
+fn stream_shared_entries(
+    entries: Arc<Vec<LogEntry>>,
+) -> BoxStream<'static, Result<LogEntry, std::io::Error>> {
+    stream::iter(0..entries.len())
+        .map(move |index| Ok(entries[index].clone()))
+        .boxed()
 }
 
 #[derive(Clone)]
@@ -497,10 +502,7 @@ impl Runtime for LocalRuntime {
 
         if is_run_cacheable {
             if let Some(cached_entries) = self.normalized_log_cache.read().await.get(&task_run_id) {
-                let len = cached_entries.len();
-                return Ok(stream::iter(0..len)
-                    .map(move |index| Ok(cached_entries[index].clone()))
-                    .boxed());
+                return Ok(stream_shared_entries(cached_entries));
             }
         }
 
@@ -572,14 +574,17 @@ impl Runtime for LocalRuntime {
         .await
         .map_err(|join_error| RuntimeError::Io(std::io::Error::other(join_error)))?;
 
+        // Shared, never copied: a replay can be hundreds of MB, and the cache
+        // and the stream must not each hold their own copy.
+        let entries = Arc::new(entries);
         if is_run_cacheable {
             self.normalized_log_cache
                 .write()
                 .await
-                .insert(task_run_id, entries.clone());
+                .insert(task_run_id, Arc::clone(&entries));
         }
 
-        Ok(stream::iter(entries.into_iter().map(Ok)).boxed())
+        Ok(stream_shared_entries(entries))
     }
 
     async fn task_transcript_markdown(&self, task_id: Uuid) -> Result<String, RuntimeError> {
@@ -611,6 +616,7 @@ impl LocalRuntime {
 
     fn start_background_housekeeping(&self) {
         spawn_housekeeping_tasks(self.clone());
+        session_processes::spawn_session_process_sweeper(self.db().clone());
     }
 }
 
@@ -819,7 +825,7 @@ mod load_guard_tests {
             .map(|_| Uuid::new_v4())
             .collect();
         for id in &ids {
-            cache.insert(*id, vec![LogEntry::Finished]);
+            cache.insert(*id, Arc::new(vec![LogEntry::Finished]));
         }
 
         assert!(cache.get(&ids[0]).is_none());
@@ -834,7 +840,9 @@ mod load_guard_tests {
         let id = Uuid::new_v4();
         cache.insert(
             id,
-            vec![LogEntry::Stdout("x".repeat(NORMALIZED_LOG_CACHE_BYTES))],
+            Arc::new(vec![LogEntry::Stdout(
+                "x".repeat(NORMALIZED_LOG_CACHE_BYTES),
+            )]),
         );
 
         assert!(cache.get(&id).is_none());

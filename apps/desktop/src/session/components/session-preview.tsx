@@ -10,9 +10,7 @@ import {
 import { Loader2 } from "lucide-react";
 import {
   type ReactNode,
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -23,6 +21,11 @@ import { UserMessageContent } from "../conversation-view";
 import type { StoredTask } from "../types";
 import { CollapsibleMessage } from "./collapsible-message";
 import { Markdown } from "./markdown";
+import {
+  type PreviewController,
+  PreviewContext,
+  type PreviewPlacement,
+} from "./session-preview-trigger";
 
 /** Delay before a sustained hover first opens the preview. Once open, moving to
  * another row slides immediately with no delay. */
@@ -77,26 +80,65 @@ const extractPendingQuestion = (
 
 interface PreviewTarget {
   /** Snapshot of the hovered task, taken at hover time. Everything the header
-   * needs (title, agent, provenance, awaiting flag) is already on the row's
-   * task record, so the panel grounds itself without any extra fetch. */
+   * needs (title, agent, provenance, awaiting flag) is already on the task
+   * record, so the panel grounds itself without any extra fetch. */
   task: StoredTask;
   rect: DOMRect;
+  placement: PreviewPlacement;
 }
 
+/** Viewport-space placement (the panel is `position: fixed`). Exactly one of
+ * `top` / `bottom` is set: a panel opened above its anchor is pinned by its
+ * bottom edge, since its height is not known until it renders. */
 interface PanelPosition {
-  top: number;
+  top?: number;
+  bottom?: number;
   left: number;
   maxHeight: number;
 }
 
+/** Below an inline anchor, unless the room there is this short and the room
+ * above is larger. */
+const MIN_ROOM_BELOW = 240;
+
 /**
- * Place the panel to the right of the row, flipping to the left edge when it
- * would overflow the viewport, and clamp it vertically. Coordinates are in
- * viewport space (the panel is `position: fixed`).
+ * Place the panel for an anchor. `side`: to the right of the row, flipping to
+ * its left when it would overflow, clamped vertically. `below`: under the
+ * anchor's text, flipping above it near the bottom of the window, clamped
+ * horizontally. Exported for tests.
  */
-function computePosition(rect: DOMRect, width: number): PanelPosition {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+export function computePanelPosition(
+  rect: DOMRect,
+  width: number,
+  placement: PreviewPlacement,
+  viewport: { width: number; height: number } = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  },
+): PanelPosition {
+  const { width: vw, height: vh } = viewport;
+  const maxHeight = Math.min(PANEL_MAX_HEIGHT, vh - VIEWPORT_MARGIN * 2);
+
+  if (placement === "below") {
+    const left = Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(rect.left, vw - VIEWPORT_MARGIN - width),
+    );
+    const roomBelow = vh - VIEWPORT_MARGIN - (rect.bottom + GAP);
+    const roomAbove = rect.top - GAP - VIEWPORT_MARGIN;
+    if (roomBelow >= MIN_ROOM_BELOW || roomBelow >= roomAbove) {
+      return {
+        top: rect.bottom + GAP,
+        left,
+        maxHeight: Math.min(maxHeight, roomBelow),
+      };
+    }
+    return {
+      bottom: vh - rect.top + GAP,
+      left,
+      maxHeight: Math.min(maxHeight, roomAbove),
+    };
+  }
 
   let left = rect.right + GAP;
   if (left + width + VIEWPORT_MARGIN > vw) {
@@ -104,7 +146,6 @@ function computePosition(rect: DOMRect, width: number): PanelPosition {
   }
   left = Math.max(VIEWPORT_MARGIN, left);
 
-  const maxHeight = Math.min(PANEL_MAX_HEIGHT, vh - VIEWPORT_MARGIN * 2);
   let top = rect.top;
   if (top + maxHeight > vh - VIEWPORT_MARGIN) {
     top = vh - VIEWPORT_MARGIN - maxHeight;
@@ -112,12 +153,6 @@ function computePosition(rect: DOMRect, width: number): PanelPosition {
   top = Math.max(VIEWPORT_MARGIN, top);
 
   return { top, left, maxHeight };
-}
-
-interface PreviewController {
-  notifyEnter: (task: StoredTask, el: HTMLElement) => void;
-  notifyLeave: () => void;
-  notifyDismiss: () => void;
 }
 
 /**
@@ -138,55 +173,16 @@ function exchangeTurnsQueryOptions(task: StoredTask) {
   };
 }
 
-const PreviewContext = createContext<PreviewController | null>(null);
-
-/**
- * Hover trigger for a single session row. Attach `setAnchor` to the row element
- * and spread `hoverProps`; the shared panel (rendered once by
- * {@link SessionPreviewProvider}) handles display and slides between rows.
- */
-export function useSessionPreviewTrigger(task: StoredTask): {
-  setAnchor: (el: HTMLElement | null) => void;
-  hoverProps: {
-    onPointerEnter: () => void;
-    onPointerLeave: () => void;
-    onPointerDown: () => void;
-  };
-} {
-  const controller = useContext(PreviewContext);
-  const elRef = useRef<HTMLElement | null>(null);
-  const taskRef = useRef(task);
-  taskRef.current = task;
-
-  const setAnchor = useCallback((el: HTMLElement | null) => {
-    elRef.current = el;
-  }, []);
-
-  const onPointerEnter = useCallback(() => {
-    if (elRef.current) controller?.notifyEnter(taskRef.current, elRef.current);
-  }, [controller]);
-  const onPointerLeave = useCallback(() => {
-    controller?.notifyLeave();
-  }, [controller]);
-  const onPointerDown = useCallback(() => {
-    controller?.notifyDismiss();
-  }, [controller]);
-
-  return {
-    setAnchor,
-    hoverProps: { onPointerEnter, onPointerLeave, onPointerDown },
-  };
-}
-
 interface PreviewView {
   open: boolean;
   target: PreviewTarget | null;
 }
 
 /**
- * Provides a single hover-preview panel shared by every descendant session row.
- * Hovering a row opens the panel; moving to another row while it is open slides
- * the same panel to the new row instead of closing and reopening. The reply is
+ * Provides a single hover-preview panel shared by every descendant session
+ * anchor: rows in the session lists and session references in messages.
+ * Hovering an anchor opens the panel; moving to another while it is open slides
+ * the same panel to the new anchor instead of closing and reopening. The reply is
  * fetched lazily for whichever row is targeted and the panel is portaled to
  * `document.body` with a high z-index so it escapes sidebar clipping.
  */
@@ -230,7 +226,7 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
   }, [clearOpenTimer, commit]);
 
   const notifyEnter = useCallback(
-    (task: StoredTask, el: HTMLElement) => {
+    (task: StoredTask, el: HTMLElement, placement: PreviewPlacement) => {
       clearCloseTimer();
       // Warm the turn list during the open delay so the history rail renders
       // together with the panel instead of expanding it a beat later.
@@ -238,6 +234,7 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
       const target: PreviewTarget = {
         task,
         rect: el.getBoundingClientRect(),
+        placement,
       };
       if (openRef.current) {
         // Already showing: slide the same panel to the new row.
@@ -363,7 +360,7 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
   const showLoading = query.isLoading || (query.isFetching && !hasContent);
   const panelWidth = PANEL_WIDTH + (showRail ? RAIL_WIDTH : 0);
   const position = view.target
-    ? computePosition(view.target.rect, panelWidth)
+    ? computePanelPosition(view.target.rect, panelWidth, view.target.placement)
     : null;
   const provenance = targetTask?.forked_from_title
     ? t("forkedFrom", { title: targetTask.forked_from_title })
@@ -376,56 +373,63 @@ export function SessionPreviewProvider({ children }: { children: ReactNode }) {
       {children}
       {view.open && position
         ? createPortal(
-            <div
-              ref={panelRef}
-              role="tooltip"
-              onPointerEnter={clearCloseTimer}
-              onPointerLeave={scheduleClose}
-              style={{
-                position: "fixed",
-                top: position.top,
-                left: position.left,
-                width: panelWidth,
-                maxHeight: position.maxHeight,
-                transition: `top ${SLIDE_MS}ms ease, left ${SLIDE_MS}ms ease`,
-              }}
-              className="z-[200] flex flex-col overflow-hidden rounded-xl border border-border bg-popover px-3 py-2.5 text-[12px] leading-relaxed text-popover-foreground shadow-lg"
-            >
-              {/* Grounding header, rendered from the hover-time task snapshot
+            // Session references in the previewed reply stay clickable but do
+            // not retarget the panel they are shown in.
+            <PreviewContext.Provider value={null}>
+              <div
+                ref={panelRef}
+                role="tooltip"
+                onPointerEnter={clearCloseTimer}
+                onPointerLeave={scheduleClose}
+                style={{
+                  position: "fixed",
+                  top: position.top,
+                  bottom: position.bottom,
+                  left: position.left,
+                  width: panelWidth,
+                  maxHeight: position.maxHeight,
+                  transition: `top ${SLIDE_MS}ms ease, bottom ${SLIDE_MS}ms ease, left ${SLIDE_MS}ms ease`,
+                }}
+                className="z-[200] flex flex-col overflow-hidden rounded-xl border border-border bg-popover px-3 py-2.5 text-[12px] leading-relaxed text-popover-foreground shadow-lg"
+              >
+                {/* Grounding header, rendered from the hover-time task snapshot
                   with no fetch: which session this is, run by which agent, how
                   recently. Session state (spinner/pause/failure) is NOT
                   repeated here; the row right next to the panel already shows
                   it. */}
-              <div className="flex shrink-0 items-center gap-2">
-                <AgentLogo
-                  agent={targetTask?.last_executor}
-                  className="h-3.5 w-3.5 shrink-0"
-                />
-                <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
-                  {targetTask?.title}
-                </span>
-                <span className="shrink-0 text-[11px] text-muted-foreground">
-                  {targetTask ? formatRelativeTime(targetTask.updated_at) : ""}
-                </span>
-              </div>
-              {provenance ? (
-                <div className="mt-0.5 shrink-0 truncate text-[11px] text-muted-foreground">
-                  {provenance}
+                <div className="flex shrink-0 items-center gap-2">
+                  <AgentLogo
+                    agent={targetTask?.last_executor}
+                    className="h-3.5 w-3.5 shrink-0"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-foreground">
+                    {targetTask?.title}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {targetTask
+                      ? formatRelativeTime(targetTask.updated_at)
+                      : ""}
+                  </span>
                 </div>
-              ) : null}
-              <PreviewConversation
-                // Reset turn selection and expand/scroll state when the panel
-                // slides to another session.
-                key={targetTask?.id ?? "none"}
-                taskId={targetTask?.id ?? null}
-                turns={turns && turns.length > 1 ? turns : null}
-                turnsLoading={turnsLoading}
-                latestExchange={exchange ?? null}
-                latestLoading={showLoading}
-                latestError={query.isError}
-                pendingQuestion={pendingQuestion}
-              />
-            </div>,
+                {provenance ? (
+                  <div className="mt-0.5 shrink-0 truncate text-[11px] text-muted-foreground">
+                    {provenance}
+                  </div>
+                ) : null}
+                <PreviewConversation
+                  // Reset turn selection and expand/scroll state when the panel
+                  // slides to another session.
+                  key={targetTask?.id ?? "none"}
+                  taskId={targetTask?.id ?? null}
+                  turns={turns && turns.length > 1 ? turns : null}
+                  turnsLoading={turnsLoading}
+                  latestExchange={exchange ?? null}
+                  latestLoading={showLoading}
+                  latestError={query.isError}
+                  pendingQuestion={pendingQuestion}
+                />
+              </div>
+            </PreviewContext.Provider>,
             document.body,
           )
         : null}

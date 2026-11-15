@@ -7,6 +7,19 @@ use uuid::Uuid;
 use crate::slug::generate_slug;
 use crate::types::{ExecutionMode, RunStatus, TaskStatus};
 
+/// A session's liveness as seen by whoever cleans up after its agents.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionActivity {
+    /// The session was cancelled or its worktree reclaimed: nothing it started
+    /// is wanted any more.
+    pub closed: bool,
+    /// A run of the session is queued or in progress.
+    pub running: bool,
+    /// Time since the session's latest run finished, or since it last changed
+    /// when no run has finished.
+    pub idle: std::time::Duration,
+}
+
 /// Task record (core entity)
 ///
 /// Represents a task with its current state, references, and metadata.
@@ -484,6 +497,42 @@ impl TaskRecord {
         )
         .fetch_all(pool)
         .await
+    }
+
+    /// What the session named `key` (its slug, or its id when it has none; the
+    /// value agents receive as `CHRO_SESSION`) is doing now, for deciding
+    /// whether processes its agents left behind may still be wanted.
+    ///
+    /// `None` means no such session exists any more.
+    pub async fn find_session_activity(
+        pool: &Pool<Sqlite>,
+        key: &str,
+    ) -> Result<Option<SessionActivity>, sqlx::Error> {
+        let id = Uuid::parse_str(key).ok();
+        let row = sqlx::query_as::<_, (bool, bool, f64)>(
+            r#"
+            SELECT
+                t.status = 'cancelled' OR t.worktree_deleted = 1,
+                COALESCE(MAX(run.status IN ('pending', 'running')), 0),
+                MAX(0.0, (julianday('now') - julianday(
+                    COALESCE(MAX(datetime(run.completed_at)), datetime(t.updated_at))
+                )) * 86400.0)
+            FROM task_records t
+            LEFT JOIN task_runs run ON run.task_id = t.id
+            WHERE t.slug = ?1 OR t.id = ?2
+            GROUP BY t.id
+            LIMIT 1
+            "#,
+        )
+        .bind(key)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|(closed, running, idle_seconds)| SessionActivity {
+            closed,
+            running,
+            idle: std::time::Duration::from_secs_f64(idle_seconds),
+        }))
     }
 
     /// Update the status of a task record.
@@ -1664,5 +1713,122 @@ mod tests {
         let listed = TaskRecord::list_all(&pool).await.unwrap();
         let source_row = listed.iter().find(|task| task.id == source.id).unwrap();
         assert_eq!(source_row.delegated_from_id, None, "the delegating task has no delegate edge of its own");
+    }
+
+    async fn inserted_run(pool: &Pool<Sqlite>, task_id: Uuid, status: &str, completed_at: Option<&str>) {
+        sqlx::query("INSERT INTO task_runs (id, task_id, status, completed_at) VALUES (?, ?, ?, ?)")
+            .bind(Uuid::new_v4())
+            .bind(task_id)
+            .bind(status)
+            .bind(completed_at)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_activity_is_none_for_an_unknown_session() {
+        let pool = migrated_pool().await;
+        assert!(TaskRecord::find_session_activity(&pool, "no-such-session")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn session_activity_resolves_by_slug_and_by_id() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "dev server", None).await;
+        let slug = task.slug.clone().expect("inserted tasks carry a slug");
+
+        assert!(TaskRecord::find_session_activity(&pool, &slug).await.unwrap().is_some());
+        assert!(TaskRecord::find_session_activity(&pool, &task.id.to_string())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn session_activity_reports_a_running_or_queued_run() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "dev server", None).await;
+        inserted_run(&pool, task.id, "completed", Some("2020-01-01 00:00:00")).await;
+        inserted_run(&pool, task.id, "running", None).await;
+
+        let activity = TaskRecord::find_session_activity(&pool, &task.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(activity.running);
+        assert!(!activity.closed);
+
+        let queued = inserted_task(&pool, "queued", None).await;
+        inserted_run(&pool, queued.id, "pending", None).await;
+        let activity = TaskRecord::find_session_activity(&pool, &queued.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(activity.running);
+    }
+
+    #[tokio::test]
+    async fn session_activity_measures_idle_time_from_the_latest_run_completion() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "dev server", None).await;
+        inserted_run(&pool, task.id, "completed", Some("2020-01-01 00:00:00")).await;
+        inserted_run(&pool, task.id, "failed", Some("2020-01-02 00:00:00")).await;
+
+        let activity = TaskRecord::find_session_activity(&pool, &task.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!activity.running);
+        assert!(!activity.closed);
+        let since_latest = (chrono::Utc::now()
+            - chrono::NaiveDate::from_ymd_opt(2020, 1, 2)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc())
+        .to_std()
+        .unwrap();
+        let drift = since_latest.abs_diff(activity.idle);
+        assert!(drift < std::time::Duration::from_secs(60), "idle {:?} vs {:?}", activity.idle, since_latest);
+    }
+
+    #[tokio::test]
+    async fn session_activity_of_a_session_without_runs_counts_from_its_last_update() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "never ran", None).await;
+        let activity = TaskRecord::find_session_activity(&pool, &task.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!activity.running);
+        assert!(activity.idle < std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn session_activity_is_closed_once_cancelled_or_its_worktree_is_gone() {
+        let pool = migrated_pool().await;
+        let cancelled = inserted_task(&pool, "cancelled", None).await;
+        TaskRecord::update_status(&pool, cancelled.id, TaskStatus::Cancelled)
+            .await
+            .unwrap();
+        let activity = TaskRecord::find_session_activity(&pool, &cancelled.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(activity.closed);
+
+        let reclaimed = inserted_task(&pool, "reclaimed", None).await;
+        TaskRecord::mark_worktree_deleted(&pool, reclaimed.id, false)
+            .await
+            .unwrap();
+        let activity = TaskRecord::find_session_activity(&pool, &reclaimed.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(activity.closed);
     }
 }

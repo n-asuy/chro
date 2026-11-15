@@ -3,11 +3,11 @@ import { cn } from "@/lib/cn";
 import type { ForkWorkspace } from "@/lib/fork-client";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
 import { SessionLeadingMarker } from "@/session/components/session-leading-marker";
-import { useSessionPreviewTrigger } from "@/session/components/session-preview";
+import { useSessionPreviewTrigger } from "@/session/components/session-preview-trigger";
+import type { SessionListRow } from "@/session/domain/session-rows";
 import { useMarkViewedWhenActive, useTaskStatusDot } from "@/session/hooks";
 import { formatRelativeTime } from "@/session/lib/relative-time";
 import { sessionSubline } from "@/session/lib/session-subline";
-import type { StoredTask } from "@/session/types";
 import {
   SESSION_DRAG_DATA_TYPE,
   serializeSessionDragPayload,
@@ -22,12 +22,19 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@chro/ui/context-menu";
-import { Archive, GitBranch, Hourglass, Pin, PinOff } from "lucide-react";
+import {
+  Archive,
+  ChevronRight,
+  GitBranch,
+  Hourglass,
+  Pin,
+  PinOff,
+} from "lucide-react";
 
 /** One session in the left panel (Pinned, a project section, or Chats). */
 
 export interface SessionRowContainerProps {
-  task: StoredTask;
+  row: SessionListRow;
   indented: boolean;
   showProject: boolean;
   projectName: string | null;
@@ -35,6 +42,8 @@ export interface SessionRowContainerProps {
   onTogglePin: () => void;
   /** How many sessions this one delegated are running right now. */
   runningDelegations: number;
+  /** Shows or hides the sessions nested under this row. */
+  onToggleNested: () => void;
   isActive: boolean;
   /** In the focused session's relation group (itself and its Refs). */
   isRelated: boolean;
@@ -64,7 +73,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
       <ContextMenuTrigger asChild>
         <div>
           <SessionRow
-            task={props.task}
+            row={props.row}
             indented={props.indented}
             showProject={props.showProject}
             projectName={props.projectName}
@@ -73,6 +82,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
             isPinned={props.isPinned}
             onTogglePin={props.onTogglePin}
             runningDelegations={props.runningDelegations}
+            onToggleNested={props.onToggleNested}
             onOpen={props.onOpen}
             onArchive={props.onArchive}
             t={props.t}
@@ -140,7 +150,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
 }
 
 interface SessionRowProps {
-  task: StoredTask;
+  row: SessionListRow;
   indented: boolean;
   showProject: boolean;
   projectName: string | null;
@@ -149,13 +159,19 @@ interface SessionRowProps {
   isPinned: boolean;
   onTogglePin: () => void;
   runningDelegations: number;
+  onToggleNested: () => void;
   onOpen: () => void;
   onArchive: () => void;
   t: TranslationFunction;
 }
 
+/** Horizontal step per nesting level: one leading-marker slot. */
+const NEST_STEP_PX = 16;
+/** Left padding of a top-level row (`px-2.5`) and of one in a project (`pl-5`). */
+const ROW_INSET_PX = 10;
+const INDENTED_ROW_INSET_PX = 20;
 function SessionRow({
-  task,
+  row,
   indented,
   showProject,
   projectName,
@@ -164,12 +180,21 @@ function SessionRow({
   isPinned,
   onTogglePin,
   runningDelegations,
+  onToggleNested,
   onOpen,
   onArchive,
   t,
 }: SessionRowProps) {
+  const { task } = row;
   const isRunning = Boolean(task.active_session_id);
-  const subline = sessionSubline(task, { isRunning, showProject, projectName });
+  const subline = sessionSubline(task, {
+    isRunning,
+    showProject,
+    projectName,
+    nestedUnderDelegator: row.depth > 0,
+  });
+  const runningOutOfView = runningDelegations - row.shownRunningChildren;
+  const inset = indented ? INDENTED_ROW_INSET_PX : ROW_INSET_PX;
   const isAwaitingInput = Boolean(task.awaiting_input);
   const dotKind = useTaskStatusDot(task);
   useMarkViewedWhenActive(task, isActive);
@@ -206,9 +231,9 @@ function SessionRow({
           task.title?.trim() || task.id.slice(0, 8),
         );
       }}
+      style={{ paddingLeft: inset + row.depth * NEST_STEP_PX }}
       className={cn(
-        "group/row flex cursor-pointer items-center justify-between gap-2 rounded-md py-1.5 transition-colors",
-        indented ? "pl-5 pr-2.5" : "px-2.5",
+        "group/row flex cursor-pointer items-center justify-between gap-2 rounded-md py-1.5 pr-2.5 transition-colors",
         isActive
           ? "bg-foreground/5 text-custom-sidebar-text-100"
           : "hover:bg-foreground/5",
@@ -232,17 +257,48 @@ function SessionRow({
                 {t("sessionUnresolved")}
               </span>
             )}
-            {runningDelegations > 0 ? (
+            {runningOutOfView > 0 ? (
               <span
-                title={t("runningDelegations", { count: runningDelegations })}
+                title={t("runningDelegations", { count: runningOutOfView })}
                 aria-label={t("runningDelegations", {
-                  count: runningDelegations,
+                  count: runningOutOfView,
                 })}
                 className="inline-flex shrink-0 items-center gap-0.5 text-xs text-custom-sidebar-text-400"
               >
                 <Hourglass className="h-3 w-3" aria-hidden="true" />
-                {runningDelegations}
+                {runningOutOfView}
               </span>
+            ) : null}
+            {row.descendantCount > 0 ? (
+              <button
+                type="button"
+                aria-expanded={row.expanded}
+                aria-label={
+                  row.expanded
+                    ? t("collapseDelegations")
+                    : t("expandDelegations", { count: row.descendantCount })
+                }
+                title={
+                  row.expanded
+                    ? t("collapseDelegations")
+                    : t("expandDelegations", { count: row.descendantCount })
+                }
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleNested();
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+                className="inline-flex h-[18px] shrink-0 items-center gap-px rounded-full pr-1 pl-1.5 text-xs tabular-nums text-custom-sidebar-text-400 transition-colors hover:bg-foreground/5 hover:text-custom-sidebar-text-100"
+              >
+                {row.descendantCount}
+                <ChevronRight
+                  aria-hidden="true"
+                  className={cn(
+                    "h-3 w-3 transition-transform",
+                    row.expanded && "rotate-90",
+                  )}
+                />
+              </button>
             ) : null}
           </span>
           {subline ? (
@@ -260,6 +316,13 @@ function SessionRow({
         {isRunning ? (
           <span className="inline-flex items-center group-hover/row:hidden">
             <SessionActivityIndicator awaitingInput={isAwaitingInput} t={t} />
+          </span>
+        ) : row.hiddenNeedsInput ? (
+          <span
+            title={t("delegationAwaitingInput")}
+            className="inline-flex items-center group-hover/row:hidden"
+          >
+            <SessionActivityIndicator awaitingInput t={t} />
           </span>
         ) : (
           <span className="text-sm text-custom-sidebar-text-400 group-hover/row:hidden">

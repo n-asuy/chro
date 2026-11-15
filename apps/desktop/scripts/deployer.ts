@@ -783,7 +783,7 @@ function runTauriBuild(
   if (skipSigning) {
     // This is Tauri's native signing switch. It keeps local/OSS builds working
     // even though the checked-in Windows configuration has a release-only
-    // SSL.com signCommand.
+    // Azure Artifact Signing signCommand.
     tauriArgs.push("--no-sign");
   }
   withUnsignedTauriConfig(skipSigning, () => {

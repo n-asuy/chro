@@ -52,7 +52,7 @@ rm -rf "$SCRIPT_DIR/npx-cli/dist"
 mkdir -p "$SCRIPT_DIR/npx-cli/dist/$PLATFORM_DIR"
 
 echo "Building frontend..."
-(cd "$REPO_ROOT" && bun run --filter=@chro/desktop build)
+(cd "$REPO_ROOT" && bun run --filter=@chro/desktop build:vite)
 
 echo "Building chro-server (release)..."
 cargo build --release --manifest-path "$SERVER_CARGO"

@@ -44,8 +44,10 @@ pub enum CommandExitStatus {
     Success { success: bool },
 }
 
-/// Result of a command execution.
+/// Result of a command execution. Built with [`CommandRunResult::new`], which
+/// bounds the output an entry carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommandRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_status: Option<CommandExitStatus>,

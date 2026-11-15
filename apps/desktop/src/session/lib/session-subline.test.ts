@@ -12,7 +12,12 @@ const base: StoredTask = {
   sort_order: 0,
 };
 
-const noProject = { isRunning: false, showProject: false, projectName: null };
+const noProject = {
+  isRunning: false,
+  showProject: false,
+  projectName: null,
+  nestedUnderDelegator: false,
+};
 
 describe("sessionSubline", () => {
   it("shows the agent's note while a turn runs, even over a summary", () => {
@@ -48,11 +53,24 @@ describe("sessionSubline", () => {
     ).toEqual({ kind: "delegated", text: "Lead" });
     expect(
       sessionSubline(base, {
-        isRunning: false,
+        ...noProject,
         showProject: true,
         projectName: "repo",
       }),
     ).toEqual({ kind: "project", text: "repo" });
     expect(sessionSubline(base, noProject)).toBeNull();
+  });
+
+  it("drops the delegator when the row already sits under it", () => {
+    const delegated = { ...base, delegated_from_title: "Lead" };
+    expect(
+      sessionSubline(delegated, { ...noProject, nestedUnderDelegator: true }),
+    ).toBeNull();
+    expect(
+      sessionSubline(
+        { ...delegated, forked_from_title: "Parent" },
+        { ...noProject, nestedUnderDelegator: true },
+      ),
+    ).toEqual({ kind: "forked", text: "Parent" });
   });
 });

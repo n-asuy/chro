@@ -17,7 +17,7 @@ use axum::{
 };
 use events::EventError;
 use futures::{stream::BoxStream, SinkExt, StreamExt};
-use log_types::LogEntry;
+use log_types::{LogEntry, ReplayLog};
 use runtime::Runtime;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -32,6 +32,10 @@ use uuid::Uuid;
 
 type StreamResult = Result<BoxStream<'static, Result<LogEntry, std::io::Error>>, EventError>;
 const FIRST_PATCH_STALL_MS: u64 = 15_000;
+/// How long a log stream gathers entries before sending them.
+const LOG_COALESCE_WINDOW: Duration = Duration::from_millis(50);
+/// Most entries gathered into one batch (a replay's are all ready at once).
+const LOG_COALESCE_MAX: usize = 512;
 
 /// Create the streams router with all WebSocket endpoints.
 pub(crate) fn router() -> Router<AppState> {
@@ -330,7 +334,7 @@ async fn handle_stream_task_run_logs_ws(mut socket: WebSocket, state: AppState, 
 
     let stream_result = state.runtime().stream_logs(task_run_id).await;
     let mut stream = match stream_result {
-        Ok(s) => s,
+        Ok(s) => coalesce_entry_updates(s),
         Err(err) => {
             first_patch_seen.store(true, Ordering::Relaxed);
             stall_timer.abort();
@@ -454,6 +458,45 @@ async fn handle_stream_task_run_logs_ws(mut socket: WebSocket, state: AppState, 
     let _ = SinkExt::close(&mut socket).await;
 }
 
+/// Batch a log stream over short windows and fold superseded entry updates
+/// within each batch.
+///
+/// A streaming entry (command output, assistant text) is re-sent whole on
+/// every chunk the agent emits, far faster than a client can use. Folding
+/// sends it at most once per window, so the bytes on the wire and the work in
+/// the client follow the window rate, not the chunk rate.
+fn coalesce_entry_updates(
+    stream: BoxStream<'static, Result<LogEntry, std::io::Error>>,
+) -> BoxStream<'static, Result<LogEntry, std::io::Error>> {
+    tokio_stream::StreamExt::chunks_timeout(stream, LOG_COALESCE_MAX, LOG_COALESCE_WINDOW)
+        .flat_map(|batch| futures::stream::iter(fold_batch(batch)))
+        .boxed()
+}
+
+/// Fold one batch, keeping errors in their place relative to entries.
+fn fold_batch(
+    batch: Vec<Result<LogEntry, std::io::Error>>,
+) -> Vec<Result<LogEntry, std::io::Error>> {
+    let mut out = Vec::with_capacity(batch.len());
+    let mut folded = ReplayLog::new();
+    for item in batch {
+        match item {
+            Ok(entry) => folded.push(entry),
+            Err(err) => {
+                out.extend(
+                    std::mem::take(&mut folded)
+                        .into_entries()
+                        .into_iter()
+                        .map(Ok),
+                );
+                out.push(Err(err));
+            }
+        }
+    }
+    out.extend(folded.into_entries().into_iter().map(Ok));
+    out
+}
+
 fn log_entry_to_vk_message(entry: LogEntry) -> Option<Message> {
     match entry {
         LogEntry::JsonPatch(value) => Some(Message::Text(
@@ -488,4 +531,70 @@ fn parse_patch_stats(value: &Value) -> (usize, bool) {
     }
 
     (ops.len(), contains_entry_patch)
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+
+    fn entry_patch(op: &str, index: usize, content: &str) -> LogEntry {
+        LogEntry::JsonPatch(json!([{
+            "op": op,
+            "path": format!("/entries/{index}"),
+            "value": { "content": content },
+        }]))
+    }
+
+    #[tokio::test]
+    async fn ready_updates_of_one_entry_are_sent_once_per_batch() {
+        const UPDATES: usize = 1_000;
+        let mut items = vec![Ok(entry_patch("add", 0, ""))];
+        items.extend((0..UPDATES).map(|n| Ok(entry_patch("replace", 0, &n.to_string()))));
+        items.push(Ok(LogEntry::Finished));
+
+        let sent: Vec<_> = coalesce_entry_updates(futures::stream::iter(items).boxed())
+            .map(Result::unwrap)
+            .collect()
+            .await;
+
+        let batches = (UPDATES + 2).div_ceil(LOG_COALESCE_MAX);
+        assert_eq!(
+            sent.len(),
+            batches + 1,
+            "one update per batch, then Finished"
+        );
+        assert_eq!(sent[batches - 1], entry_patch("replace", 0, "999"));
+        assert_eq!(sent[batches], LogEntry::Finished);
+    }
+
+    #[tokio::test]
+    async fn a_live_entry_is_sent_without_waiting_for_more() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut stream = coalesce_entry_updates(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx).boxed(),
+        );
+
+        tx.send(Ok(entry_patch("add", 0, "a"))).unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("sent within the window, not held until the stream ends");
+
+        assert_eq!(first.unwrap().unwrap(), entry_patch("add", 0, "a"));
+    }
+
+    #[test]
+    fn errors_keep_their_place_and_split_folding() {
+        let batch = vec![
+            Ok(entry_patch("add", 0, "a")),
+            Err(std::io::Error::other("boom")),
+            Ok(entry_patch("replace", 0, "a2")),
+        ];
+
+        let out = fold_batch(batch);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().unwrap(), &entry_patch("add", 0, "a"));
+        assert!(out[1].is_err());
+        assert_eq!(out[2].as_ref().unwrap(), &entry_patch("replace", 0, "a2"));
+    }
 }

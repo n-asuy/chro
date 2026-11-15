@@ -1,6 +1,19 @@
+import { useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
+import { useHistorySpanStore } from "./history-span";
 
 export function NavigationHandler() {
+  const router = useRouter();
+
+  useEffect(() => {
+    const { record } = useHistorySpanStore.getState();
+    // Seed with the entry the app (re)loaded on; it may sit deep in the stack.
+    record("REPLACE", router.history.location.state.__TSR_index);
+    return router.history.subscribe(({ location, action }) => {
+      record(action.type, location.state.__TSR_index);
+    });
+  }, [router]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // A focused editor's own binding wins (⌘[ outdents a list item).

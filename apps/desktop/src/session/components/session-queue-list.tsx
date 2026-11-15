@@ -33,6 +33,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { shouldSubmitPrompt } from "../lib/prompt-submit-policy";
 import {
   moveQueueItem,
   pendingQueueOrder,
@@ -322,6 +323,8 @@ function QueuedMessageEditor({
     );
   };
 
+  // Saves on the composer's own submit chord, so a bare Return stays a newline
+  // and the Return that confirms an IME conversion never saves.
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // The composer and pane shortcuts must not see keys typed here.
     event.stopPropagation();
@@ -329,7 +332,17 @@ function QueuedMessageEditor({
     if (event.key === "Escape") {
       event.preventDefault();
       onCancel();
-    } else if (event.key === "Enter" && !event.shiftKey) {
+    } else if (
+      shouldSubmitPrompt({
+        key: event.key,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        isComposing: event.nativeEvent.isComposing,
+        keyCode: event.nativeEvent.keyCode,
+      })
+    ) {
       event.preventDefault();
       save();
     }

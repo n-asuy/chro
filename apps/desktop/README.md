@@ -130,7 +130,7 @@ cannot skip the export-sanitization, provenance, and signing gates.
 
 Tauri is configured for:
 - **macOS** — dmg + app (signed and notarized)
-- **Windows** — nsis (signed via SSL.com eSigner in CI)
+- **Windows** — nsis (signed via Azure Artifact Signing in CI; see `.github/actions/setup-artifact-signing`)
 
 The packaged app bundles:
 - Compiled Vite output (`dist-vite/`)

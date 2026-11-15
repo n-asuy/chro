@@ -24,7 +24,7 @@ use log_types::LogEntry;
 use runtime::{
     ForkWorkspace, MessageOptions, ProjectFileService, Runtime, RuntimeError, SendOutcome,
     SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
-    TaskMessageMode, TaskService,
+    TaskMessageMode, TaskService, WhenBusy,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -831,9 +831,12 @@ async fn queue_task_message(
     let task_id = resolve_task_id(state.pool(), &task_id).await?;
     let params = message_params(&state, task_id, &payload).await?;
     let runtime = state.runtime().clone();
-    let outcome =
-        run_detached(async move { TaskService::new(&runtime).send_or_queue(params, true).await })
-            .await?;
+    let outcome = run_detached(async move {
+        TaskService::new(&runtime)
+            .deliver(params, WhenBusy::Queue)
+            .await
+    })
+    .await?;
     Ok(Json(match outcome {
         SendOutcome::Started(_) => QueueTaskMessageResponse {
             queued: false,
