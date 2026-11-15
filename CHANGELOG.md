@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.59
+
+- macOS builds are now signed and notarized by Curino LLC, matching the Windows builds. The first launch after updating may ask again for permissions you had already granted to chro, such as controlling other apps
+- Fixed the Intel Mac app and the Intel Mac CLI missing from 0.1.58: their build machine type was retired, so they are now built on the same machine type as the Apple silicon builds
+
 ## 0.1.58
 
 - Changed the operator API's send-message request: the `queue` true/false field is replaced by `when_busy`, which takes `queue`, `refuse` or `interrupt`. A script that still sends `"queue": false` now has its message queued instead of refused. `chro session send --no-queue` works as before

@@ -83,7 +83,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             arch: x64
             triple: x86_64-apple-darwin
             artifact_name: desktop-macos-x64
