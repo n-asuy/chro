@@ -3,6 +3,8 @@ export const SESSION_DRAG_DATA_TYPE = "application/x-chro-session-reference";
 export interface SessionDragPayload {
   taskId: string;
   branch: string | null;
+  /** Shown on the pill the drop creates; empty when the session is untitled. */
+  title: string;
 }
 
 export function serializeSessionDragPayload(
@@ -26,6 +28,7 @@ export function parseSessionDragPayload(
     return {
       taskId: parsed.taskId,
       branch: typeof parsed.branch === "string" ? parsed.branch : null,
+      title: typeof parsed.title === "string" ? parsed.title : "",
     };
   } catch {
     return null;

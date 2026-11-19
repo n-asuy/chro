@@ -1,6 +1,6 @@
 [package]
 name = "chro-desktop"
-version = "0.1.59"
+version = "0.1.61"
 description = "Chro desktop application"
 authors = ["Chro"]
 license = "Apache-2.0"
@@ -61,6 +61,20 @@ base64 = "0.22"
 mac-notification-sys = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSPort"] }
+# The edge toolbar samples the cursor off the main thread (CGEvent location).
+core-graphics = "0.25"
+# The edge toolbar's voice input and region capture: on-device speech
+# recognition fed from the microphone, and a screenshot of a picked region.
+# Speech and ScreenCaptureKit are loaded when first used (privacy.rs), so the
+# app still launches on systems older than they are.
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-graphics", "NSBitmapImageRep", "NSImageRep", "NSScreen", "NSWindow", "NSResponder", "NSEvent", "NSGraphics"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionTask", "SFSpeechRecognitionResult", "SFTranscription"] }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioFile", "AVAudioNode", "AVAudioIONode", "AVAudioBuffer", "AVAudioFormat", "AVAudioTime", "AVAudioTypes"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCShareableContent", "SCScreenshotManager", "SCStream"] }
 
 [dev-dependencies]
 tempfile = "3"

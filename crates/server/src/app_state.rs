@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use local_runtime::LocalRuntime;
 use runtime::Runtime;
@@ -9,6 +9,7 @@ use sqlx::{Pool, Sqlite};
 use tokio::sync::Semaphore;
 
 use crate::browser_session::BrowserService;
+use crate::mobile::MobileHub;
 use crate::operator::IdempotencyLedger;
 use crate::perf;
 use crate::routes::rpc::cli_status::LatestReleaseCache;
@@ -48,6 +49,8 @@ pub(crate) struct AppState {
     pub(crate) identity: Arc<RuntimeIdentity>,
     /// Request ids of recent mutating operator calls.
     pub(crate) idempotency: Arc<IdempotencyLedger>,
+    /// Paired phones, once their listener runs.
+    pub(crate) mobile: Arc<OnceLock<Arc<MobileHub>>>,
 }
 
 impl AppState {
@@ -62,7 +65,18 @@ impl AppState {
             prewarm: Arc::new(PrewarmRegistry::default()),
             identity: Arc::new(identity),
             idempotency: Arc::new(IdempotencyLedger::default()),
+            mobile: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub(crate) fn mobile(&self) -> Option<Arc<MobileHub>> {
+        self.mobile.get().cloned()
+    }
+
+    /// Make the phone hub reachable from every clone of this state. Only the
+    /// first install takes effect.
+    pub(crate) fn install_mobile(&self, hub: Arc<MobileHub>) {
+        let _ = self.mobile.set(hub);
     }
 
     pub(crate) fn identity(&self) -> &RuntimeIdentity {

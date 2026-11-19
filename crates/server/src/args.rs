@@ -32,6 +32,11 @@ pub struct ServerArgs {
     /// Do not open a browser on startup
     #[arg(long)]
     pub no_open: bool,
+    /// Serve paired phones on exactly this port (0: any free port) instead
+    /// of 6768 and its fallbacks. Give a second server on the machine its own
+    /// port so it never answers phones paired with the first one.
+    #[arg(long = "mobile-port")]
+    pub mobile_port: Option<u16>,
 }
 
 /// `chro`: drive a running chro app or server from a terminal or from an
@@ -110,21 +115,14 @@ pub enum Commands {
 #[cfg(feature = "cloud")]
 #[derive(Subcommand, Debug)]
 pub enum CloudCommand {
-    /// Record which control plane to use and how to authenticate to it
-    Login {
-        /// Base URL of the control plane
-        url: String,
-        /// Token issued by that control plane. Falls back to CHRO_CLOUD_TOKEN,
-        /// so it need not appear in shell history.
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Make the instance usable, creating it the first time
-    Up,
-    /// Stop the instance, keeping its disk
-    Down,
-    /// Show the instance and where it can be reached
+    /// Sign in through the browser; the app token is saved in the OS keychain
+    Login,
+    /// Create or wake the instance belonging to a chro session
+    Up { session_id: uuid::Uuid },
+    /// Stop an instance, keeping its disk
+    Down { instance_id: String },
+    /// List the caller's instances
     Status,
-    /// Destroy the instance and everything on it
-    Destroy,
+    /// Destroy an instance and everything on it
+    Destroy { instance_id: String },
 }

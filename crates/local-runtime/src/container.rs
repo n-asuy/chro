@@ -45,6 +45,7 @@ use crate::log_writer::{self, ExecutionLogWriter};
 use crate::session_tokens::SessionTokens;
 use crate::MsgStoreMap;
 
+mod cloud;
 mod executor_approval_bridge;
 
 use executor_approval_bridge::ExecutorApprovalBridge;
@@ -92,6 +93,20 @@ fn task_status_for_terminal_run_status(run_status: RunStatus) -> Option<TaskStat
 }
 
 impl LocalContainerService {
+    pub async fn cloud_log_page(
+        &self,
+        run_id: Uuid,
+        cursor: u64,
+    ) -> std::io::Result<(Vec<LogEntry>, u64, bool)> {
+        log_writer::read_log_page(&self.logs_dir, run_id, cursor).await
+    }
+    pub fn cloud_repository_root(&self) -> PathBuf {
+        self.logs_dir.join("cloud-repositories")
+    }
+    pub async fn cloud_run_active(&self, run_id: Uuid) -> bool {
+        self.executions.read().await.contains_key(&run_id)
+    }
+
     pub fn new(
         db: DBService,
         git: GitService,
@@ -158,7 +173,8 @@ impl LocalContainerService {
         Ok(fallback)
     }
 
-    /// Create a CodingAgent from the task run's executor profile.
+    /// Create a CodingAgent from the task run's executor profile, with the
+    /// user's launch settings for that agent (extra arguments, question tool).
     async fn create_agent_for_run(
         &self,
         run_id: Uuid,
@@ -167,6 +183,20 @@ impl LocalContainerService {
         let configs = ExecutorConfigs::get_cached();
         let coding_agent = configs.get_coding_agent_or_default(&profile_id);
         let base_agent = coding_agent.base_agent();
+        let (launch_args, question_tool) = {
+            let config = self.config.read().await;
+            (
+                config
+                    .agent_launch_args
+                    .get(&base_agent)
+                    .cloned()
+                    .unwrap_or_default(),
+                !config.question_tool_disabled.contains(&base_agent),
+            )
+        };
+        let coding_agent = coding_agent
+            .with_launch_args(&launch_args)
+            .with_question_tool(question_tool);
         tracing::debug!(
             profile_id = %profile_id,
             resolved_agent = ?base_agent,
@@ -382,10 +412,11 @@ impl LocalContainerService {
         let git = self.git.clone();
         let workspace = workspace_path.to_path_buf();
         let sha = commit_sha.to_string();
-        let paths = runtime::perf::spawn_blocking_instrumented("git.commit_changed_paths", move || {
-            git.commit_changed_paths(&workspace, &sha)
-        })
-        .await;
+        let paths =
+            runtime::perf::spawn_blocking_instrumented("git.commit_changed_paths", move || {
+                git.commit_changed_paths(&workspace, &sha)
+            })
+            .await;
         let paths = match paths {
             Ok(Ok(paths)) => paths,
             Ok(Err(e)) => {
@@ -745,6 +776,13 @@ impl LocalContainerService {
         mut cancel_rx: oneshot::Receiver<()>,
         msg_store: Arc<MsgStore>,
     ) -> Result<(), ContainerError> {
+        let cloud: Option<String> = sqlx::query_scalar("SELECT l.location FROM session_execution_locations l JOIN task_runs r ON r.task_id = l.task_id WHERE r.id = ?")
+            .bind(params.task_run_id).fetch_optional(self.db.pool()).await?;
+        if cloud.as_deref() == Some("cloud") {
+            return self
+                .run_cloud_execution(params, events_tx, cancel_rx, msg_store)
+                .await;
+        }
         let run_id = params.task_run_id;
         let process_started_at = std::time::Instant::now();
         let is_follow_up = params.resume_session_id.is_some();
@@ -1605,6 +1643,17 @@ impl ContainerService for LocalContainerService {
         let run = TaskRun::find_by_id(self.db.pool(), task_run_id)
             .await?
             .ok_or(ContainerError::TaskRunNotFound(task_run_id))?;
+        let location: Option<String> = sqlx::query_scalar(
+            "SELECT location FROM session_execution_locations WHERE task_id = ?",
+        )
+        .bind(run.task_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        if location.as_deref() == Some("cloud")
+            && matches!(run.status, RunStatus::Pending | RunStatus::Running)
+        {
+            return self.cloud_diff_stream(task_run_id, stats_only).await;
+        }
         let project_repo_path = self.get_project_repo_path(run.task_id).await?;
         let latest_merge = TaskMerge::find_latest_by_task(self.db.pool(), run.task_id).await?;
 
@@ -2042,7 +2091,7 @@ mod tests {
             .unwrap();
         assert_eq!(task_after.active_session_id, None);
         assert!(
-            task_after.updated_at >= sent_at,
+            task_after.updated_at.timestamp_millis() >= sent_at.timestamp_millis(),
             "updated_at {} precedes the send at {}",
             task_after.updated_at,
             sent_at

@@ -49,6 +49,7 @@ import {
   writeStoredOpenInAppId,
 } from "../lib/open-in";
 import { useDockStore } from "../state/dock-store";
+import { useLayoutStore } from "../state/layout-store";
 import { useRightDockStore } from "../state/right-dock-store";
 import { AgentStatusMenu } from "./agent-status-menu";
 import { OpenInAppIcon } from "./open-in-app-icon";
@@ -261,10 +262,13 @@ function OpenInMenu() {
 function LeftSidebarToggle() {
   const { t } = useLanguage();
   const collapsed = useDockStore((s) => s.collapsed);
-  const toggleCollapsed = useDockStore((s) => s.toggleCollapsed);
+  const setCollapsed = useDockStore((s) => s.setCollapsed);
+  const paneMaximized = useLayoutStore((s) => s.paneMaximized);
   const runningCount = useOptionalProjectTasks()?.runningCount ?? 0;
 
-  const open = !collapsed;
+  // A maximized pane hides the dock, so the toggle reports what is on screen
+  // and its "open" click reveals the dock (which restores the panes).
+  const open = !collapsed && !paneMaximized;
   const label = open ? t("closeSidebar") : t("openSidebar");
 
   return (
@@ -273,7 +277,7 @@ function LeftSidebarToggle() {
         <TooltipTrigger asChild>
           <button
             type="button"
-            onClick={toggleCollapsed}
+            onClick={() => setCollapsed(open)}
             aria-label={label}
             aria-pressed={open}
             className={cn(
@@ -409,8 +413,10 @@ function RightSidebarToggle() {
   const activePanel = useRightDockStore((s) => s.activePanel);
   const setActivePanel = useRightDockStore((s) => s.setActivePanel);
   const setCollapsed = useRightDockStore((s) => s.setCollapsed);
+  const paneMaximized = useLayoutStore((s) => s.paneMaximized);
 
-  const open = !collapsed && activePanel !== null;
+  // See LeftSidebarToggle: a maximized pane hides the dock.
+  const open = !collapsed && activePanel !== null && !paneMaximized;
 
   const handleClick = useCallback(() => {
     if (open) {

@@ -1,0 +1,10 @@
+# SwiftPM and Xcode build output
+.build/
+.swiftpm/
+DerivedData/
+build/
+# The Xcode project is generated from project.yml by XcodeGen
+*.xcodeproj/
+xcuserdata/
+# Generated from project.yml (info:) by XcodeGen
+ChroMobile/Info.plist

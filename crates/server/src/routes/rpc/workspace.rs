@@ -75,7 +75,7 @@ pub(super) async fn handle_file_events_ws(
                             "is_directory": event.is_directory,
                         })
                         .to_string();
-                        if sender.send(Message::Text(data.into())).await.is_err() {
+                        if sender.send(Message::Text(data)).await.is_err() {
                             break;
                         }
                     }

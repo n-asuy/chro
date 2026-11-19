@@ -51,6 +51,8 @@ npx @chro-ai/cli session merge <session>
 | `approval list / show / respond` | Answer tool calls and questions a session waits on |
 | `skill install / show` | Install the skill that teaches agents these commands |
 
+The skill can also be installed without the binary: `npx skills add n-asuy/chro --skill chro`. Both ways write the same folder, `~/.agents/skills/chro`.
+
 Selectors: a session is `self`, `parent`, a slug, a unique slug prefix of 3+ characters, or an id; a project is a slug, an id, or `path:<absolute dir>`. Inside a chro session, `self` is that session.
 
 Output is one JSON envelope (`{"ok", "result" | "error", "meta"}`) when stdout is not a terminal; `--json` and `--human` override. Exit codes: 0 success, 1 server failure, 2 usage, 3 not found, 4 state conflict, 5 server unreachable, 6 wait timed out, 7 unauthorized or contract mismatch.

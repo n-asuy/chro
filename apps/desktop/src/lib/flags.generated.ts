@@ -3,6 +3,8 @@
 
 /** Every feature flag key known to the application. */
 export type FlagKey =
+  | "cloud_sessions"
+  | "edge_toolbar"
   | "session_references_popover";
 
 /**
@@ -11,5 +13,17 @@ export type FlagKey =
  * arrives, and keeps them if it never does.
  */
 export const FLAG_DEFAULTS: Record<FlagKey, boolean> = {
+  cloud_sessions: false,
+  edge_toolbar: true,
+  session_references_popover: false,
+};
+
+/**
+ * Flags whose user switch is opt-in: offered, but off until the
+ * user turns them on in Settings > Beta features.
+ */
+export const FLAG_OPT_IN: Record<FlagKey, boolean> = {
+  cloud_sessions: false,
+  edge_toolbar: true,
   session_references_popover: false,
 };

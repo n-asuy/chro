@@ -5,6 +5,7 @@ pub mod cli_status;
 pub mod command;
 pub mod env;
 pub mod executors;
+pub mod launch_args;
 pub mod logs;
 pub mod mcp_config;
 pub mod process;
@@ -21,6 +22,9 @@ pub use executors::{
 };
 
 pub use command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides};
+pub use launch_args::{
+    LaunchArgsError, reserved_launch_flags, supports_question_tool, validate_launch_args,
+};
 pub use env::{ExecutionEnv, RepoContext};
 pub use executors::claude::ClaudeCode;
 pub use executors::claude::ClaudeLogProcessor;

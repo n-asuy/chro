@@ -15,13 +15,13 @@ import {
   Bug,
   ChevronLeft,
   Lightbulb,
+  type LucideIcon,
   Megaphone,
   MessageSquare,
   Send,
   X,
-  type LucideIcon,
 } from "lucide-react";
-import { type ReactNode, useCallback, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type FeedbackCategory, submitFeedback } from "./feedback-api";
 
 interface CategoryDescriptor {
@@ -63,6 +63,9 @@ const CATEGORIES: CategoryDescriptor[] = [
  * then a compose form. Submissions are sent to the cloud API (`apps/api`),
  * which persists them and notifies Slack.
  */
+/** Dispatched on `window` to open the feedback popover from elsewhere (the edge toolbar). */
+export const OPEN_FEEDBACK_EVENT = "chro:open-feedback";
+
 export function FeedbackToggle() {
   const { t } = useLanguage();
   const [open, setOpen] = useState(false);
@@ -85,6 +88,12 @@ export function FeedbackToggle() {
     },
     [reset],
   );
+
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_FEEDBACK_EVENT, show);
+    return () => window.removeEventListener(OPEN_FEEDBACK_EVENT, show);
+  }, []);
 
   const activeDescriptor = CATEGORIES.find((c) => c.category === category);
 

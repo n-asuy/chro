@@ -3,7 +3,6 @@ apps/lp/
 docs/
 .agents/
 .claude/
-skills/
 skills-lock.json
 .github/workflows/oss-sanitization.yml
 .github/workflows/sync-oss.yml

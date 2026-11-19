@@ -1,3 +1,4 @@
+import { useSessionDirectory } from "@/session/context/session-directory-context";
 import { createContext, useCallback, useContext, useRef } from "react";
 import type { StoredTask } from "../types";
 
@@ -65,4 +66,56 @@ export function useSessionPreviewTrigger(
     setAnchor,
     hoverProps: { onPointerEnter, onPointerLeave, onPointerDown },
   };
+}
+
+const SESSION_PILL_SELECTOR = '[data-type="session"][data-task-id]';
+
+/**
+ * Hover trigger for the session pills inside an element that owns its DOM
+ * outside React (the composer's contentEditable). Spread the handlers on that
+ * element; a pill under the pointer opens the shared panel for its session
+ * the way a `useSessionPreviewTrigger` anchor does.
+ */
+export function useSessionPillPreview(placement: PreviewPlacement = "below"): {
+  onPointerOver: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerOut: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerDown: () => void;
+} {
+  const controller = useContext(PreviewContext);
+  const directory = useSessionDirectory();
+  const anchorRef = useRef<HTMLElement | null>(null);
+
+  const onPointerOver = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      const pill = (event.target as Element).closest<HTMLElement>(
+        SESSION_PILL_SELECTOR,
+      );
+      if (!pill || pill === anchorRef.current) return;
+      const task = directory?.byId(pill.dataset.taskId ?? "");
+      if (!task) return;
+      anchorRef.current = pill;
+      controller?.notifyEnter(task, pill, placement);
+    },
+    [controller, directory, placement],
+  );
+
+  const onPointerOut = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const next = event.relatedTarget;
+      if (next instanceof Node && anchor.contains(next)) return;
+      anchorRef.current = null;
+      controller?.notifyLeave();
+    },
+    [controller],
+  );
+
+  const onPointerDown = useCallback(() => {
+    if (!anchorRef.current) return;
+    anchorRef.current = null;
+    controller?.notifyDismiss();
+  }, [controller]);
+
+  return { onPointerOver, onPointerOut, onPointerDown };
 }

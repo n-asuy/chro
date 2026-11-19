@@ -25,6 +25,8 @@ export interface SessionAttachmentPart extends PartBase {
   type: "session";
   taskId: string;
   branch?: string | null;
+  /** Full title, shown on hover; the pill's text is its shortened label. */
+  title?: string;
 }
 
 export interface SkillAttachmentPart extends PartBase {

@@ -1,0 +1,737 @@
+{
+  "GET /rpc/approvals": {
+    "pending": [
+      "unknown"
+    ]
+  },
+  "GET /rpc/executor/profile": {
+    "profile": {
+      "executor": "string"
+    },
+    "profiles": {
+      "executors": {
+        "CLAUDE_CODE": {
+          "DEFAULT": {
+            "CLAUDE_CODE": {
+              "append_prompt": "null"
+            }
+          }
+        },
+        "CODEX": {
+          "DEFAULT": {
+            "CODEX": {
+              "append_prompt": "null",
+              "sandbox": "string"
+            }
+          }
+        },
+        "PI": {
+          "DEFAULT": {
+            "PI": {
+              "append_prompt": "null"
+            }
+          }
+        }
+      }
+    }
+  },
+  "GET /rpc/flags/registry": {
+    "flags": [
+      {
+        "enabled": "boolean",
+        "key": "string"
+      }
+    ]
+  },
+  "GET /rpc/mcp-config": {
+    "config_path": "string",
+    "exists": "boolean",
+    "mcp_config": {
+      "is_toml_config": "boolean",
+      "servers": {},
+      "servers_path": [
+        "string"
+      ],
+      "template": {
+        "mcpServers": {}
+      }
+    },
+    "parse_error": "null",
+    "raw_content": "null",
+    "servers_count": "number"
+  },
+  "GET /rpc/preferences": {
+    "preferences": {
+      "analytics_enabled": "boolean",
+      "language": "string",
+      "show_hidden_entries": "boolean",
+      "telemetry_id": "string"
+    }
+  },
+  "GET /rpc/preferences/appearance": {
+    "appearance": {
+      "accent": "null",
+      "theme": "string"
+    }
+  },
+  "GET /rpc/preferences/editor": {
+    "editor": {
+      "font_family": "null",
+      "font_size": "number",
+      "indent_with_spaces": "boolean",
+      "line_height": "number",
+      "line_wrapping": "boolean",
+      "show_line_numbers": "boolean",
+      "tab_size": "number",
+      "vim_mode": "boolean"
+    }
+  },
+  "GET /rpc/preferences/merge": {
+    "merge_commit_template": "string"
+  },
+  "GET /rpc/projects": {
+    "projects": [
+      {
+        "badge_color": "null",
+        "cleanup_script": "null",
+        "copy_files": "null",
+        "created_at": "string",
+        "dev_script": "null",
+        "git_repo_path": "string",
+        "id": "string",
+        "is_general": "boolean",
+        "name": "string",
+        "setup_script": "null",
+        "slug": "string",
+        "updated_at": "string"
+      }
+    ]
+  },
+  "GET /rpc/projects/:project_id": {
+    "is_general": "boolean",
+    "project": {
+      "badge_color": "null",
+      "cleanup_script": "null",
+      "copy_files": "null",
+      "created_at": "string",
+      "dev_script": "null",
+      "git_repo_path": "string",
+      "id": "string",
+      "name": "string",
+      "setup_script": "null",
+      "slug": "string",
+      "updated_at": "string"
+    }
+  },
+  "GET /rpc/projects/:project_id/active-run": {
+    "task": {
+      "active_session_id": "null",
+      "awaiting_input": "boolean",
+      "branch": "null",
+      "created_at": "string",
+      "delegated_from_id": "null",
+      "delegated_from_title": "null",
+      "description": "null",
+      "due_at": "null",
+      "forked_from_title": "null",
+      "home_dir": "null",
+      "id": "string",
+      "last_executor": "null",
+      "last_summary": "null",
+      "note": "null",
+      "parent_task_id": "null",
+      "project_id": "string",
+      "slug": "string",
+      "sort_order": "number",
+      "status": "string",
+      "title": "string",
+      "title_pinned": "boolean",
+      "updated_at": "string",
+      "worktree_deleted": "boolean",
+      "worktree_path": "null"
+    },
+    "task_run": {
+      "after_head_commit": "null",
+      "before_head_commit": "null",
+      "branch_name": "string",
+      "completed_at": "null",
+      "container_ref": "string",
+      "created_at": "string",
+      "diffs_prefix": "null",
+      "dropped": "boolean",
+      "execution_mode": "string",
+      "executor_action": "null",
+      "executor_action_type": "null",
+      "executor_job_id": "null",
+      "executor_label": "null",
+      "exit_code": "null",
+      "id": "string",
+      "logs_retrieval_failed": "boolean",
+      "logs_uri": "null",
+      "resume_session_id": "null",
+      "run_reason": "null",
+      "s3_prefix": "null",
+      "slug": "string",
+      "started_at": "null",
+      "status": "string",
+      "summary_uri": "null",
+      "target_branch": "string",
+      "task_id": "string",
+      "updated_at": "string",
+      "workspace_path": "string",
+      "worktree_deleted": "boolean"
+    }
+  },
+  "GET /rpc/projects/:project_id/directory-agent": {
+    "brief": "null",
+    "inheritedBrief": "null",
+    "ledger": [
+      "unknown"
+    ],
+    "path": "string"
+  },
+  "GET /rpc/projects/:project_id/entries": {
+    "entries": [
+      {
+        "createdAt": "string",
+        "displayName": "string",
+        "extension": "string",
+        "hasChildren": "null",
+        "modifiedAt": "string",
+        "name": "string",
+        "relativePath": "string",
+        "size": "number",
+        "type": "string"
+      }
+    ]
+  },
+  "GET /rpc/projects/:project_id/file": {
+    "file": {
+      "content": "string",
+      "modified_at": "string",
+      "relative_path": "string",
+      "size": "number",
+      "truncated": "boolean"
+    }
+  },
+  "GET /rpc/projects/:project_id/git/branch": {
+    "branch": "string"
+  },
+  "GET /rpc/projects/:project_id/git/branches": {
+    "branches": [
+      {
+        "is_current": "boolean",
+        "is_remote": "boolean",
+        "last_commit_timestamp": "number",
+        "name": "string"
+      }
+    ],
+    "isRepository": "boolean"
+  },
+  "GET /rpc/projects/:project_id/git/decorated-tree": {
+    "changedFilesTree": [
+      {
+        "displayName": "string",
+        "id": "string",
+        "name": "string",
+        "path": "string",
+        "relativePath": "string",
+        "type": "string"
+      }
+    ],
+    "commitsAhead": "number",
+    "commitsBehind": "number",
+    "currentBranch": "string",
+    "decorations": {
+      "files": {
+        "README.md": "string",
+        "notes.md": "string",
+        "shelf.png": "string"
+      },
+      "folders": {}
+    },
+    "status": {
+      "hasChanges": "boolean",
+      "modified": [
+        {
+          "path": "string",
+          "status": "string"
+        }
+      ],
+      "staged": [
+        "unknown"
+      ],
+      "untracked": [
+        "string"
+      ]
+    }
+  },
+  "GET /rpc/projects/:project_id/git/diff": {
+    "diffs": [
+      {
+        "diff": {
+          "additions": {
+            "anyOf": [
+              "number",
+              "null"
+            ]
+          },
+          "change": "string",
+          "content_omitted": "boolean",
+          "deletions": {
+            "anyOf": [
+              "number",
+              "null"
+            ]
+          },
+          "is_binary": "boolean",
+          "new_content": {
+            "anyOf": [
+              "string",
+              "null"
+            ]
+          },
+          "new_path": "string",
+          "old_content": {
+            "anyOf": [
+              "null",
+              "string",
+              "null"
+            ]
+          },
+          "old_path": "string"
+        },
+        "path": "string"
+      }
+    ]
+  },
+  "GET /rpc/projects/:project_id/git/status": {
+    "commitsAhead": "number",
+    "commitsBehind": "number",
+    "currentBranch": "string",
+    "status": {
+      "hasChanges": "boolean",
+      "modified": [
+        {
+          "path": "string",
+          "status": "string"
+        }
+      ],
+      "staged": [
+        "unknown"
+      ],
+      "untracked": [
+        "string"
+      ]
+    }
+  },
+  "GET /rpc/projects/:project_id/media": {
+    "items": [
+      {
+        "kind": "string",
+        "modifiedAt": "string",
+        "relativePath": "string",
+        "size": "number"
+      }
+    ],
+    "truncated": "boolean"
+  },
+  "GET /rpc/projects/:project_id/resolve-file": {
+    "relative_path": "string",
+    "root": "string"
+  },
+  "GET /rpc/projects/:project_id/search": {
+    "results": [
+      {
+        "is_file": "boolean",
+        "line_matches": [
+          "unknown"
+        ],
+        "match_type": "string",
+        "modified_at": "null",
+        "path": "string"
+      }
+    ],
+    "total_files": "number",
+    "total_line_matches": "number",
+    "truncated": "boolean"
+  },
+  "GET /rpc/projects/:project_id/sessions": {
+    "sessions": [
+      "unknown"
+    ]
+  },
+  "GET /rpc/projects/:project_id/tree": {
+    "entries": [
+      {
+        "isFile": "boolean",
+        "path": "string"
+      }
+    ],
+    "overflowed": "boolean"
+  },
+  "GET /rpc/session-list": {
+    "sessions": [
+      {
+        "active_session_id": "null",
+        "awaiting_input": "boolean",
+        "branch": "null",
+        "delegated_from_id": "null",
+        "forked_from_title": "null",
+        "id": "string",
+        "last_executor": "null",
+        "last_summary": "null",
+        "note": "null",
+        "project_id": "string",
+        "status": "string",
+        "title": "string",
+        "updated_at": "string",
+        "worktree_deleted": "boolean"
+      }
+    ],
+    "total": "number"
+  },
+  "GET /rpc/task-runs/:id/entries": {
+    "entries": [
+      {
+        "createdAt": "string",
+        "displayName": "string",
+        "extension": "string",
+        "hasChildren": "null",
+        "modifiedAt": "string",
+        "name": "string",
+        "relativePath": "string",
+        "size": "number",
+        "type": "string"
+      }
+    ]
+  },
+  "GET /rpc/task-runs/:id/file": {
+    "file": {
+      "content": "string",
+      "modified_at": "string",
+      "relative_path": "string",
+      "size": "number",
+      "truncated": "boolean"
+    }
+  },
+  "GET /rpc/task-runs/:id/git/branch": {
+    "branch": "string"
+  },
+  "GET /rpc/task-runs/:id/git/branches": {
+    "branches": [
+      {
+        "is_current": "boolean",
+        "is_remote": "boolean",
+        "last_commit_timestamp": "number",
+        "name": "string"
+      }
+    ],
+    "isRepository": "boolean"
+  },
+  "GET /rpc/task-runs/:id/git/decorated-tree": {
+    "changedFilesTree": [
+      {
+        "displayName": "string",
+        "id": "string",
+        "name": "string",
+        "path": "string",
+        "relativePath": "string",
+        "type": "string"
+      }
+    ],
+    "commitsAhead": "number",
+    "commitsBehind": "number",
+    "currentBranch": "string",
+    "decorations": {
+      "files": {
+        "README.md": "string",
+        "notes.md": "string",
+        "shelf.png": "string"
+      },
+      "folders": {}
+    },
+    "status": {
+      "hasChanges": "boolean",
+      "modified": [
+        {
+          "path": "string",
+          "status": "string"
+        }
+      ],
+      "staged": [
+        "unknown"
+      ],
+      "untracked": [
+        "string"
+      ]
+    }
+  },
+  "GET /rpc/task-runs/:id/git/diff": {
+    "diffs": [
+      {
+        "diff": {
+          "additions": {
+            "anyOf": [
+              "number",
+              "null"
+            ]
+          },
+          "change": "string",
+          "content_omitted": "boolean",
+          "deletions": {
+            "anyOf": [
+              "number",
+              "null"
+            ]
+          },
+          "is_binary": "boolean",
+          "new_content": {
+            "anyOf": [
+              "string",
+              "null"
+            ]
+          },
+          "new_path": "string",
+          "old_content": {
+            "anyOf": [
+              "null",
+              "string",
+              "null"
+            ]
+          },
+          "old_path": "string"
+        },
+        "path": "string"
+      }
+    ]
+  },
+  "GET /rpc/task-runs/:id/git/status": {
+    "commitsAhead": "number",
+    "commitsBehind": "number",
+    "currentBranch": "string",
+    "status": {
+      "hasChanges": "boolean",
+      "modified": [
+        {
+          "path": "string",
+          "status": "string"
+        }
+      ],
+      "staged": [
+        "unknown"
+      ],
+      "untracked": [
+        "string"
+      ]
+    }
+  },
+  "GET /rpc/task-runs/:id/media": {
+    "items": [
+      {
+        "kind": "string",
+        "modifiedAt": "string",
+        "relativePath": "string",
+        "size": "number"
+      }
+    ],
+    "truncated": "boolean"
+  },
+  "GET /rpc/task-runs/:id/resolve-file": {
+    "relative_path": "string",
+    "root": "string"
+  },
+  "GET /rpc/task-runs/:id/with-task": {
+    "project": {
+      "badge_color": "null",
+      "cleanup_script": "null",
+      "copy_files": "null",
+      "created_at": "string",
+      "dev_script": "null",
+      "git_repo_path": "string",
+      "id": "string",
+      "name": "string",
+      "setup_script": "null",
+      "slug": "string",
+      "updated_at": "string"
+    },
+    "task": {
+      "active_session_id": "null",
+      "awaiting_input": "boolean",
+      "branch": "null",
+      "created_at": "string",
+      "delegated_from_id": "null",
+      "delegated_from_title": "null",
+      "description": "null",
+      "due_at": "null",
+      "forked_from_title": "null",
+      "home_dir": "null",
+      "id": "string",
+      "last_executor": "null",
+      "last_summary": "null",
+      "note": "null",
+      "parent_task_id": "null",
+      "project_id": "string",
+      "slug": "string",
+      "sort_order": "number",
+      "status": "string",
+      "title": "string",
+      "title_pinned": "boolean",
+      "updated_at": "string",
+      "worktree_deleted": "boolean",
+      "worktree_path": "null"
+    },
+    "task_run": {
+      "after_head_commit": "null",
+      "before_head_commit": "null",
+      "branch_name": "string",
+      "completed_at": "null",
+      "container_ref": "string",
+      "created_at": "string",
+      "diffs_prefix": "null",
+      "dropped": "boolean",
+      "execution_mode": "string",
+      "executor_action": "null",
+      "executor_action_type": "null",
+      "executor_job_id": "null",
+      "executor_label": "null",
+      "exit_code": "null",
+      "id": "string",
+      "logs_retrieval_failed": "boolean",
+      "logs_uri": "null",
+      "resume_session_id": "null",
+      "run_reason": "null",
+      "s3_prefix": "null",
+      "slug": "string",
+      "started_at": "null",
+      "status": "string",
+      "summary_uri": "null",
+      "target_branch": "string",
+      "task_id": "string",
+      "updated_at": "string",
+      "workspace_path": "string",
+      "worktree_deleted": "boolean"
+    }
+  },
+  "GET /rpc/tasks/:id/context-refs": {
+    "refs": [
+      {
+        "branch": "null",
+        "created_at": "string",
+        "id": "string",
+        "kind": "string",
+        "label": "null",
+        "metadata_json": "null",
+        "mode": "string",
+        "path": "null",
+        "sort_order": "number",
+        "target_session_id": "null",
+        "target_task_id": "string",
+        "task_id": "string",
+        "task_run_id": "null",
+        "task_session_id": "null",
+        "updated_at": "string"
+      }
+    ]
+  },
+  "GET /rpc/tasks/:id/exchanges": {
+    "turns": [
+      "unknown"
+    ]
+  },
+  "GET /rpc/tasks/:id/images": {
+    "images": [
+      {
+        "created_at": "string",
+        "file_path": "string",
+        "hash": "string",
+        "id": "string",
+        "mime_type": "string",
+        "original_name": "string",
+        "size_bytes": "number",
+        "updated_at": "string"
+      }
+    ]
+  },
+  "GET /rpc/tasks/:id/last-message": {
+    "assistant": "null",
+    "user": "null"
+  },
+  "GET /rpc/tasks/:id/pending-question": {
+    "approval": "null"
+  },
+  "GET /rpc/tasks/:id/referenced-by": {
+    "refs": [
+      "unknown"
+    ]
+  },
+  "GET /rpc/tasks/:id/runs": {
+    "runs": [
+      {
+        "after_head_commit": "null",
+        "before_head_commit": "null",
+        "branch_name": "string",
+        "completed_at": "null",
+        "container_ref": "string",
+        "created_at": "string",
+        "diffs_prefix": "null",
+        "dropped": "boolean",
+        "execution_mode": "string",
+        "executor_action": "null",
+        "executor_action_type": "null",
+        "executor_job_id": "null",
+        "executor_label": "null",
+        "exit_code": "null",
+        "id": "string",
+        "logs_retrieval_failed": "boolean",
+        "logs_uri": "null",
+        "resume_session_id": "null",
+        "run_reason": "null",
+        "s3_prefix": "null",
+        "slug": "string",
+        "started_at": "null",
+        "status": "string",
+        "summary_uri": "null",
+        "target_branch": "string",
+        "task_id": "string",
+        "updated_at": "string",
+        "workspace_path": "string",
+        "worktree_deleted": "boolean"
+      }
+    ]
+  },
+  "GET /rpc/tasks/:id/transcript": {
+    "markdown": "string",
+    "task_id": "string"
+  },
+  "GET /rpc/tasks/:task_id/merges": {
+    "merges": [
+      "unknown"
+    ]
+  },
+  "GET /rpc/ui-state": {
+    "ui_state": {}
+  },
+  "SUBSCRIBE /streams/session-list": {
+    "counts": {
+      "archived": "number",
+      "live": "number"
+    },
+    "tasks": {
+      "active_session_id": "null",
+      "awaiting_input": "boolean",
+      "branch": "null",
+      "delegated_from_id": "null",
+      "forked_from_title": "null",
+      "id": "string",
+      "last_executor": "null",
+      "last_summary": "null",
+      "note": "null",
+      "project_id": "string",
+      "status": "string",
+      "title": "string",
+      "updated_at": "string",
+      "worktree_deleted": "boolean"
+    }
+  }
+}

@@ -8,10 +8,41 @@ use std::os::unix::io::{FromRawFd, IntoRawFd, OwnedFd};
 #[cfg(windows)]
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 
+use std::sync::Arc;
+
 use command_group::AsyncGroupChild;
-use tokio::io::AsyncWrite;
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt, BufWriter},
+    sync::Mutex,
+};
 
 use crate::executors::ExecutorError;
+
+/// Async writer that mirrors raw protocol lines into a synthetic stdout pipe
+/// consumed by the log normalizer.
+#[derive(Clone)]
+pub struct LogWriter {
+    writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+}
+
+impl LogWriter {
+    pub fn new(writer: impl AsyncWrite + Send + Unpin + 'static) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(BufWriter::new(Box::new(writer)))),
+        }
+    }
+
+    pub async fn log_raw(&self, raw: &str) -> Result<(), ExecutorError> {
+        let mut guard = self.writer.lock().await;
+        guard
+            .write_all(raw.as_bytes())
+            .await
+            .map_err(ExecutorError::Io)?;
+        guard.write_all(b"\n").await.map_err(ExecutorError::Io)?;
+        guard.flush().await.map_err(ExecutorError::Io)?;
+        Ok(())
+    }
+}
 
 /// Create a fresh stdout pipe for the child process and return an async writer
 /// that writes directly to the child's new stdout.

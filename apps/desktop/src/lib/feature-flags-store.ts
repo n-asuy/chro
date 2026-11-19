@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { fetchFlagRegistry } from "./flags-client";
-import { FLAG_DEFAULTS, type FlagKey } from "./flags.generated";
+import { FLAG_DEFAULTS, FLAG_OPT_IN, type FlagKey } from "./flags.generated";
 
 /**
  * Beta features the user has switched off on this machine. Stored in
@@ -16,6 +16,13 @@ import { FLAG_DEFAULTS, type FlagKey } from "./flags.generated";
 export const BETA_OPT_OUTS_STORAGE_KEY = "chro:beta-features-off";
 
 /**
+ * Opt-in beta features (`FLAG_OPT_IN`) the user has switched on on this
+ * machine. Stored like the opt-outs. Switching one on still needs the backend
+ * to offer it, so the kill switch keeps the last word.
+ */
+export const BETA_OPT_INS_STORAGE_KEY = "chro:beta-features-on";
+
+/**
  * Developer-forced values, dev builds only. Release builds never read this
  * key and expose no way to write it, so the kill-switch property above still
  * holds for every shipped binary. Set from the devtools console via
@@ -24,9 +31,17 @@ export const BETA_OPT_OUTS_STORAGE_KEY = "chro:beta-features-off";
 export const DEV_FLAG_OVERRIDES_STORAGE_KEY = "chro:dev-flag-overrides";
 
 export function readPersistedOptOuts(): string[] {
+  return readPersistedKeys(BETA_OPT_OUTS_STORAGE_KEY);
+}
+
+export function readPersistedOptIns(): string[] {
+  return readPersistedKeys(BETA_OPT_INS_STORAGE_KEY);
+}
+
+function readPersistedKeys(storageKey: string): string[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(BETA_OPT_OUTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -37,13 +52,10 @@ export function readPersistedOptOuts(): string[] {
   }
 }
 
-function persistOptOuts(keys: string[]): void {
+function persistKeys(storageKey: string, keys: string[]): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(
-      BETA_OPT_OUTS_STORAGE_KEY,
-      JSON.stringify(keys),
-    );
+    window.localStorage.setItem(storageKey, JSON.stringify(keys));
   } catch {
     // localStorage can be unavailable in restricted webviews.
   }
@@ -84,15 +96,17 @@ interface FeatureFlagState {
   resolved: Record<string, boolean>;
   /** Keys the user switched off; only meaningful for a resolved-on flag. */
   optedOut: string[];
+  /** Opt-in keys the user switched on; only meaningful for a resolved-on flag. */
+  optedIn: string[];
   /** Developer-forced values; always empty in release builds. */
   devOverrides: Record<string, boolean>;
   loaded: boolean;
   loading: boolean;
   load: () => Promise<void>;
   /**
-   * Switch a beta feature on or off for this machine. Switching *on* only
-   * clears an opt-out, so it can never turn on a feature the backend has not
-   * resolved on.
+   * Switch a beta feature on or off for this machine: an opt-out feature
+   * records an opt-out, an opt-in feature (`FLAG_OPT_IN`) an opt-in. Either
+   * way it can never turn on a feature the backend has not resolved on.
    *
    * Keyed by `string` rather than `FlagKey`: the caller is the settings
    * section walking its own list of user-facing features. Gating a feature is
@@ -110,6 +124,7 @@ interface FeatureFlagState {
 export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
   resolved: { ...FLAG_DEFAULTS },
   optedOut: readPersistedOptOuts(),
+  optedIn: readPersistedOptIns(),
   devOverrides: readPersistedDevOverrides(),
   loaded: false,
   loading: false,
@@ -132,10 +147,18 @@ export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
   },
 
   setBetaEnabled: (key, enabled) => {
+    if (isOptIn(key)) {
+      const optedIn = enabled
+        ? [...new Set([...get().optedIn, key])]
+        : get().optedIn.filter((entry) => entry !== key);
+      persistKeys(BETA_OPT_INS_STORAGE_KEY, optedIn);
+      set({ optedIn });
+      return;
+    }
     const optedOut = enabled
       ? get().optedOut.filter((entry) => entry !== key)
       : [...new Set([...get().optedOut, key])];
-    persistOptOuts(optedOut);
+    persistKeys(BETA_OPT_OUTS_STORAGE_KEY, optedOut);
     set({ optedOut });
   },
 
@@ -158,19 +181,30 @@ export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
   },
 }));
 
+/** Whether a flag's user switch is opt-in (off until switched on). */
+function isOptIn(key: string): boolean {
+  return (FLAG_OPT_IN as Record<string, boolean>)[key] ?? false;
+}
+
 /**
  * Precedence: a developer force (dev builds only) wins outright; otherwise
- * the backend decides whether the feature is offered at all, and the user can
- * only switch an offered feature off.
+ * the backend decides whether the feature is offered at all, and the user's
+ * switch decides within that: an opt-out feature is on until switched off,
+ * an opt-in feature is off until switched on.
  */
 export function selectFlag(
-  state: Pick<FeatureFlagState, "resolved" | "optedOut" | "devOverrides">,
+  state: Pick<
+    FeatureFlagState,
+    "resolved" | "optedOut" | "optedIn" | "devOverrides"
+  >,
   key: string,
 ): boolean {
   const forced = state.devOverrides[key];
   if (forced !== undefined) return forced;
   if (!(state.resolved[key] ?? false)) return false;
-  return !state.optedOut.includes(key);
+  return isOptIn(key)
+    ? state.optedIn.includes(key)
+    : !state.optedOut.includes(key);
 }
 
 /** Effective value of a feature flag. Feature code should gate on this hook. */

@@ -744,3 +744,71 @@ mod tests {
         assert!(matches!(read_back.last(), Some(LogEntry::Finished)));
     }
 }
+
+/// A bounded incremental transport read. The byte cursor advances only over
+/// complete JSONL records, so a concurrently written tail is retried intact.
+pub async fn read_log_page(
+    logs_dir: &Path,
+    run_id: Uuid,
+    cursor: u64,
+) -> std::io::Result<(Vec<LogEntry>, u64, bool)> {
+    use tokio::io::{AsyncSeekExt, SeekFrom};
+    let file = match tokio::fs::File::open(log_file_path(logs_dir, run_id)).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((vec![], cursor, true))
+        }
+        Err(error) => return Err(error),
+    };
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(cursor)).await?;
+    let mut entries = vec![];
+    let mut next = cursor;
+    let mut line = String::new();
+    for _ in 0..512 {
+        line.clear();
+        let size = reader.read_line(&mut line).await?;
+        if size == 0 || !line.ends_with('\n') {
+            break;
+        }
+        next += size as u64;
+        entries.push(
+            LogEntry::from_json_line(line.trim())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
+        if next - cursor >= 1024 * 1024 {
+            break;
+        }
+    }
+    let caught_up = next >= reader.get_ref().metadata().await?.len();
+    Ok((entries, next, caught_up))
+}
+
+#[cfg(test)]
+mod cloud_page_tests {
+    use super::*;
+    #[tokio::test]
+    async fn transport_cursor_never_consumes_a_partial_record() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        tokio::fs::create_dir_all(root.path().join("runs"))
+            .await
+            .unwrap();
+        let path = log_file_path(root.path(), id);
+        let first = LogEntry::Stdout("one".into()).to_json_line().unwrap();
+        let second = LogEntry::Stdout("two".into()).to_json_line().unwrap();
+        tokio::fs::write(&path, format!("{first}{}", &second[..5]))
+            .await
+            .unwrap();
+        let (page, cursor, caught_up) = read_log_page(root.path(), id, 0).await.unwrap();
+        assert_eq!(page, vec![LogEntry::Stdout("one".into())]);
+        assert_eq!(cursor, first.len() as u64);
+        assert!(!caught_up);
+        tokio::fs::write(&path, format!("{first}{second}"))
+            .await
+            .unwrap();
+        let (page, _, caught_up) = read_log_page(root.path(), id, cursor).await.unwrap();
+        assert_eq!(page, vec![LogEntry::Stdout("two".into())]);
+        assert!(caught_up);
+    }
+}

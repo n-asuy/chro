@@ -27,7 +27,11 @@ export interface UsePromptEditorResult {
   skillQuery: string;
   setPopover: (v: "at" | "skill" | null) => void;
   addFilePart: (path: string, isFile: boolean) => void;
-  addSessionPart: (taskId: string, branch?: string | null) => void;
+  addSessionPart: (
+    taskId: string,
+    branch: string | null | undefined,
+    title: string,
+  ) => void;
   addSkillPart: (id: string, name: string) => void;
   getText: () => string;
   getContextEntries: () => ContextEntry[];
@@ -79,7 +83,7 @@ export function usePromptEditor(scopeId?: string): UsePromptEditorResult {
     getText: handle.getText,
     getContextEntries: handle.getContextEntries,
     getSkillEntries: handle.getSkillEntries,
-    isComposing: () => handle.isComposingRef.current,
+    isComposing: handle.isComposing,
     clear: handle.clear,
     focus: handle.focus,
     handleInput: handle.handleInput,

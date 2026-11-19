@@ -1,6 +1,8 @@
-use tauri::{AppHandle, Manager, Runtime as TauriRuntime};
+use tauri::{AppHandle, Runtime as TauriRuntime};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tracing::info;
+
+use crate::windows::activate_session;
 
 /// Wire up the `chro://` URL handler so deep-link arrivals while the app is
 /// already running surface the relevant window. The single-instance plugin
@@ -21,14 +23,6 @@ pub fn handle_urls<R: TauriRuntime>(app: &AppHandle<R>, urls: Vec<String>) {
         }
     }
     if !urls.is_empty() {
-        if let Some(window) = primary_window(app) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        activate_session(app, None);
     }
-}
-
-fn primary_window<R: TauriRuntime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
-    app.webview_windows().into_values().next()
 }

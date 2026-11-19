@@ -41,19 +41,20 @@ pub(crate) trait Human {
 }
 
 /// A failed command: the error and the meta of whoever produced it, the
-/// server when it answered, otherwise this CLI.
+/// server when it answered, otherwise this CLI. Boxed, since it is the `Err`
+/// of every client call.
 #[derive(Debug)]
-pub(crate) struct Failure {
-    pub error: ErrorBody,
-    pub meta: Meta,
+pub(crate) struct Failure(Box<(ErrorBody, Meta)>);
+
+impl Failure {
+    pub(crate) fn new(error: ErrorBody, meta: Meta) -> Self {
+        Self(Box::new((error, meta)))
+    }
 }
 
 impl From<ErrorBody> for Failure {
     fn from(error: ErrorBody) -> Self {
-        Self {
-            error,
-            meta: Meta::local(),
-        }
+        Self::new(error, Meta::local())
     }
 }
 
@@ -79,7 +80,7 @@ pub(crate) fn finish<T: Serialize + Human, E: Into<Failure>>(
 }
 
 pub(crate) fn fail(mode: Mode, failure: impl Into<Failure>) -> ExitCode {
-    let Failure { error, meta } = failure.into();
+    let (error, meta) = *failure.into().0;
     let code = ExitCode::from(error.code.exit_code());
     match mode {
         Mode::Human => eprint!("{}", human_error(&error)),

@@ -37,7 +37,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
-  CheckCircle2,
   ChevronDown,
   FolderOpen,
   Loader2,
@@ -45,7 +44,6 @@ import {
   Save,
   Trash2,
   X,
-  XCircle,
 } from "lucide-react";
 import {
   Suspense,
@@ -55,11 +53,13 @@ import {
   useMemo,
   useState,
 } from "react";
+import { AgentList } from "./components/agent-list";
 import { BetaFeaturesSection } from "./components/beta-features-section";
 import { ChroCliInstallControl } from "./components/chro-cli-install-control";
 import { SettingsRow } from "./components/settings-row";
 import { SettingsSection } from "./components/settings-section";
 import { useAgentCliStatus } from "./hooks/use-agent-cli-status";
+import { useAgentLaunchSettings } from "./hooks/use-agent-launch-settings";
 import { useCliInstall } from "./hooks/use-cli-install";
 import { useExecutorProfileSettings } from "./hooks/use-executor-profile-settings";
 import { useMcpSettings } from "./hooks/use-mcp-settings";
@@ -67,6 +67,7 @@ import { useMergeSettings } from "./hooks/use-merge-settings";
 import { usePreferencesSettings } from "./hooks/use-preferences-settings";
 import { useWorktreeSettings } from "./hooks/use-worktree-settings";
 import { AppearancePane } from "./panes/appearance-pane";
+import { MobilePane } from "./panes/mobile-pane";
 import { NotificationsPane } from "./panes/notifications-pane";
 import { PiApiKeysControl } from "./pi-api-keys-control";
 import { useEditorConfigStore } from "./state/editor-config-store";
@@ -93,19 +94,13 @@ const MCP_EXECUTOR_LABEL_KEYS: Record<BaseCodingAgent, TranslationKey> = {
   PI: "mcpExecutorOptionPi",
 };
 
-const AGENT_CLI_ORDER: BaseCodingAgent[] = ["CLAUDE_CODE", "CODEX", "PI"];
-const AGENT_CLI_NAMES: Record<BaseCodingAgent, string> = {
-  CLAUDE_CODE: "claude",
-  CODEX: "codex",
-  PI: "pi",
-};
-
 type SettingsTabKey =
   | "general"
   | "appearance"
   | "workspace"
   | "editor"
   | "notifications"
+  | "mobile"
   | "mcp"
   | "agents"
   | "developer";
@@ -177,6 +172,11 @@ export function SettingsPanel({
     error: agentCliStatusesError,
     reload: reloadAgentCliStatuses,
   } = useAgentCliStatus(activeTab === "agents");
+  const {
+    settings: agentLaunchSettings,
+    loadError: agentLaunchSettingsLoadError,
+    update: updateAgentLaunchSettings,
+  } = useAgentLaunchSettings(activeTab === "agents");
   const chroCli = useCliInstall(activeTab === "agents");
   const {
     configPath,
@@ -356,6 +356,10 @@ export function SettingsPanel({
       {
         key: "notifications" as const,
         label: t("settingsTabsNotifications"),
+      },
+      {
+        key: "mobile" as const,
+        label: t("settingsTabsMobile"),
       },
       {
         key: "mcp" as const,
@@ -878,25 +882,6 @@ export function SettingsPanel({
     </section>
   );
 
-  const agentExecutorOptions = useMemo(() => {
-    const base = availableExecutors.length
-      ? availableExecutors
-      : DEFAULT_MCP_EXECUTORS;
-    const merged = [...base, ...DEFAULT_MCP_EXECUTORS];
-    return Array.from(new Set(merged)) as BaseCodingAgent[];
-  }, [availableExecutors]);
-  const defaultExecutorLabel = useMemo(() => {
-    if (!executorProfileId) {
-      return t("agentProfileUnknown");
-    }
-    return t(MCP_EXECUTOR_LABEL_KEYS[executorProfileId.executor]);
-  }, [executorProfileId, t]);
-  const agentCliStatusByName = useMemo(
-    () =>
-      new Map((agentCliStatuses ?? []).map((status) => [status.name, status])),
-    [agentCliStatuses],
-  );
-
   const agentsSection = (
     <section className="flex flex-col gap-6">
       <div>
@@ -915,152 +900,26 @@ export function SettingsPanel({
         </Alert>
       ) : null}
 
-      {/* Default Agent Selector */}
-      <SettingsSection heading={t("agentsDefaultExecutorTitle")}>
-        <SettingsRow
-          title={t("agentsDefaultExecutorTitle")}
-          description={t("agentsDefaultExecutorDescription")}
-          disabled={executorProfileLoading || profileSaving}
-          control={
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  disabled={executorProfileLoading || profileSaving}
-                  className="font-workspace flex h-9 min-w-[180px] items-center justify-between rounded-lg border border-border/40 bg-custom-background-90 px-3 text-[13px] text-foreground transition hover:border-border/60 hover:bg-custom-background-80 focus-visible:ring-1 focus-visible:ring-primary"
-                >
-                  <span className="truncate">{defaultExecutorLabel}</span>
-                  <ChevronDown className="h-4 w-4 text-current" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                className="w-[220px] rounded-lg border border-border/50 bg-custom-background-100 p-1"
-              >
-                <DropdownMenuLabel className="font-workspace px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {t("agentsDefaultExecutorTitle")}
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator className="mx-1 my-0.5 bg-border/60" />
-                {agentExecutorOptions.map((option) => {
-                  const isActive = executorProfileId?.executor === option;
-                  return (
-                    <DropdownMenuItem
-                      key={option}
-                      onClick={() => {
-                        setUiValue("chro:selected-executor", option);
-                        void handleExecutorSelect(option);
-                      }}
-                      className="font-workspace cursor-pointer rounded px-2 py-1.5 text-[13px] text-foreground"
-                    >
-                      <div className="flex w-full items-center justify-between">
-                        <span>{t(MCP_EXECUTOR_LABEL_KEYS[option])}</span>
-                        {isActive ? <Check className="h-4 w-4" /> : null}
-                      </div>
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          }
-        />
-      </SettingsSection>
+      {agentLaunchSettingsLoadError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{t("agentsLaunchArgsLoadError")}</AlertDescription>
+        </Alert>
+      ) : null}
 
-      <SettingsSection
-        heading={t("agentsCliStatusTitle")}
-        action={
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void reloadAgentCliStatuses()}
-            disabled={agentCliStatusesLoading}
-            className="font-workspace gap-1.5 text-[13px] text-muted-foreground hover:text-foreground"
-          >
-            {agentCliStatusesLoading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCcw className="h-3.5 w-3.5" />
-            )}
-            {t("agentsCliStatusRefresh")}
-          </Button>
-        }
-      >
-        {agentCliStatusesError ? (
-          <div className="px-5 py-4">
-            <Alert
-              variant="destructive"
-              className="border-destructive/40 bg-destructive/10"
-            >
-              <AlertDescription className="text-[12px]">
-                {t("agentsCliStatusLoadError")}
-              </AlertDescription>
-            </Alert>
-          </div>
-        ) : null}
-
-        {agentCliStatuses === null && agentCliStatusesLoading ? (
-          <div className="flex items-center gap-2 px-5 py-4 font-workspace text-[12px] text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            {t("agentsCliStatusLoading")}
-          </div>
-        ) : null}
-
-        {agentCliStatuses !== null
-          ? AGENT_CLI_ORDER.map((executor) => {
-              const status = agentCliStatusByName.get(
-                AGENT_CLI_NAMES[executor],
-              );
-              if (!status) return null;
-
-              return (
-                <SettingsRow
-                  key={executor}
-                  title={t(MCP_EXECUTOR_LABEL_KEYS[executor])}
-                  description={status.found ? undefined : status.install_hint}
-                  control={
-                    <div className="flex items-center gap-1.5 font-workspace text-[12px] tabular-nums text-muted-foreground">
-                      {status.found ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                      ) : (
-                        <XCircle className="h-3.5 w-3.5" />
-                      )}
-                      <span>
-                        {status.version ??
-                          (status.found
-                            ? t("agentsCliVersionUnavailable")
-                            : t("agentsCliNotFound"))}
-                      </span>
-                    </div>
-                  }
-                >
-                  {status.found && (status.path || status.source) ? (
-                    <div className="space-y-1 rounded-md bg-muted/20 px-3 py-2 font-workspace text-[11px] text-muted-foreground">
-                      {status.path ? (
-                        <p className="truncate" title={status.path}>
-                          <span className="text-muted-foreground/70">
-                            {t("agentsCliPathLabel")}:{" "}
-                          </span>
-                          <span className="text-foreground/80">
-                            {status.path}
-                          </span>
-                        </p>
-                      ) : null}
-                      {status.source ? (
-                        <p className="truncate" title={status.source}>
-                          <span className="text-muted-foreground/70">
-                            {t("agentsCliSourceLabel")}:{" "}
-                          </span>
-                          <span className="text-foreground/80">
-                            {status.source}
-                          </span>
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </SettingsRow>
-              );
-            })
-          : null}
-      </SettingsSection>
+      <AgentList
+        statuses={agentCliStatuses}
+        loading={agentCliStatusesLoading}
+        loadError={agentCliStatusesError}
+        onReload={() => void reloadAgentCliStatuses()}
+        defaultExecutor={executorProfileId?.executor ?? null}
+        defaultSaving={executorProfileLoading || profileSaving}
+        onSetDefault={(executor) => {
+          setUiValue("chro:selected-executor", executor);
+          void handleExecutorSelect(executor);
+        }}
+        launchSettings={agentLaunchSettings}
+        onUpdateLaunchSettings={updateAgentLaunchSettings}
+      />
 
       <SettingsSection
         heading={t("chroCliTitle")}
@@ -1448,7 +1307,7 @@ export function SettingsPanel({
             })}
           </div>
         </aside>
-        <div className="flex flex-1 flex-col">
+        <div className="flex min-w-0 flex-1 flex-col">
           {/* Mobile tab navigation */}
           <div className="flex gap-1.5 border-b border-border/60 bg-custom-background-90 px-3 py-2 md:hidden">
             {navItems.map((item) => {
@@ -1476,6 +1335,7 @@ export function SettingsPanel({
             {activeTab === "workspace" ? workspaceSection : null}
             {activeTab === "editor" ? editorSection : null}
             {activeTab === "notifications" ? <NotificationsPane /> : null}
+            {activeTab === "mobile" ? <MobilePane /> : null}
             {activeTab === "mcp" ? mcpSection : null}
             {activeTab === "agents" ? agentsSection : null}
             {activeTab === "developer" ? developerSection : null}

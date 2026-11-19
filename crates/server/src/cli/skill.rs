@@ -1,12 +1,18 @@
 //! `chro skill ...`: put the `chro` skill where agent harnesses find it.
 //!
-//! What `install` writes is an entry point: when to reach for chro, and to
-//! run `chro skill show`, which prints the guide built into this binary. The
-//! installed file therefore never lists commands and never goes stale when chro
-//! updates. It is written once to `~/.agents/skills/chro`, and each harness's
+//! What `install` writes is a skill folder: `SKILL.md` says when to reach for
+//! chro and to run `chro skill show`, which prints the command guide built into
+//! this binary, and `references/` holds the working procedures, one file per
+//! situation, so a harness loads only the one it needs. The installed files
+//! never list commands, so they never teach the wrong ones when chro updates.
+//! The folder is written once to `~/.agents/skills/chro`, and each harness's
 //! skill folder links there, so harnesses never drift apart.
+//! The files live in `skills/chro` at the repository root, the layout skill
+//! installers look for, so the same skill can also be installed from the
+//! repository without this binary. The guide stays out of that folder.
 //! Nothing a person made is deleted: a folder in the way is renamed aside, and
-//! only with `--force`.
+//! only with `--force`. A file an older chro installed and this one no longer
+//! ships stays where it is; nothing links to it any more.
 
 use std::{
     fs, io,
@@ -23,10 +29,32 @@ use super::{
     output::{finish, Human, Mode},
 };
 
-/// What `install` puts in the harness folders: when to use chro, and to load
-/// the guide from the binary.
-pub(crate) const SKILL_MD: &str = include_str!("../../skill/SKILL.md");
-/// The full guide, printed by `chro skill show`. Never installed, so a copy
+/// One file of the skill folder: its path relative to the folder, with `/`
+/// separators, and its content.
+pub(crate) type SkillFile = (&'static str, &'static str);
+
+const ENTRY_FILE: &str = "SKILL.md";
+/// What `install` puts in the harness folders. The entry file comes first.
+pub(crate) const SKILL_FILES: &[SkillFile] = &[
+    (ENTRY_FILE, include_str!("../../../../skills/chro/SKILL.md")),
+    (
+        "references/delegating.md",
+        include_str!("../../../../skills/chro/references/delegating.md"),
+    ),
+    (
+        "references/delegated-session.md",
+        include_str!("../../../../skills/chro/references/delegated-session.md"),
+    ),
+    (
+        "references/model-debate.md",
+        include_str!("../../../../skills/chro/references/model-debate.md"),
+    ),
+    (
+        "references/session-split.md",
+        include_str!("../../../../skills/chro/references/session-split.md"),
+    ),
+];
+/// The command guide, printed by `chro skill show`. Never installed, so a copy
 /// can never outlive the binary it describes.
 pub(crate) const GUIDE_MD: &str = include_str!("../../skill/guide.md");
 const SKILL_NAME: &str = "chro";
@@ -169,14 +197,21 @@ fn io_error(path: &Path, err: io::Error) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, format!("{}: {err}", path.display()))
 }
 
-/// Write the canonical copy.
+/// Whether every file of the skill is on disk under `dir` with this content.
+fn is_current(dir: &Path, files: &[SkillFile]) -> bool {
+    files.iter().all(|(relative, content)| {
+        fs::read_to_string(dir.join(relative)).is_ok_and(|existing| existing == *content)
+    })
+}
+
+/// Write the canonical copy. The entry file decides whose folder it is.
 fn install_canonical(
     dir: &Path,
-    content: &str,
+    files: &[SkillFile],
     dry_run: bool,
     force: bool,
 ) -> Result<TargetReport, ErrorBody> {
-    let file = dir.join("SKILL.md");
+    let file = dir.join(ENTRY_FILE);
     let report = |outcome, detail: Option<String>| TargetReport {
         harness: "agents".into(),
         path: dir.to_path_buf(),
@@ -184,7 +219,7 @@ fn install_canonical(
         detail,
     };
     let outcome = match fs::read_to_string(&file) {
-        Ok(existing) if existing == content => return Ok(report(Outcome::Unchanged, None)),
+        Ok(_) if is_current(dir, files) => return Ok(report(Outcome::Unchanged, None)),
         Ok(_) if !is_ours(&file) && !force => {
             return Ok(report(
                 Outcome::Conflict,
@@ -201,8 +236,12 @@ fn install_canonical(
         if outcome == Outcome::Updated && !is_ours(&file) {
             move_aside(dir)?;
         }
-        fs::create_dir_all(dir).map_err(|err| io_error(dir, err))?;
-        fs::write(&file, content).map_err(|err| io_error(&file, err))?;
+        for (relative, content) in files {
+            let path = dir.join(relative);
+            let parent = path.parent().unwrap_or(dir);
+            fs::create_dir_all(parent).map_err(|err| io_error(parent, err))?;
+            fs::write(&path, content).map_err(|err| io_error(&path, err))?;
+        }
     }
     Ok(report(outcome, None))
 }
@@ -233,7 +272,7 @@ fn install_link(
             Ok(target) if target == canonical => return Ok(report(Outcome::Unchanged, None)),
             // A link elsewhere is replaceable when it points at a chro skill
             // (an older install); removing a link deletes nothing it points to.
-            _ if is_ours(&link.join("SKILL.md")) || force => Outcome::Updated,
+            _ if is_ours(&link.join(ENTRY_FILE)) || force => Outcome::Updated,
             _ => {
                 return Ok(report(
                     Outcome::Conflict,
@@ -316,13 +355,13 @@ fn remove_link(link: &Path) -> Result<(), ErrorBody> {
 
 pub(crate) fn install(
     locations: &Locations,
-    content: &str,
+    files: &[SkillFile],
     dry_run: bool,
     force: bool,
 ) -> Result<InstallReport, ErrorBody> {
     let mut targets = vec![install_canonical(
         &locations.canonical,
-        content,
+        files,
         dry_run,
         force,
     )?];
@@ -355,7 +394,7 @@ pub(crate) fn run(command: SkillCommand, mode: Mode) -> ExitCode {
         SkillCommand::Install { dry_run, force } => finish(
             mode,
             Locations::from_env()
-                .and_then(|locations| install(&locations, SKILL_MD, dry_run, force))
+                .and_then(|locations| install(&locations, SKILL_FILES, dry_run, force))
                 .map(local),
         ),
         SkillCommand::Show => finish(
@@ -371,8 +410,10 @@ pub(crate) fn run(command: SkillCommand, mode: Mode) -> ExitCode {
 mod tests {
     use super::*;
 
-    const V1: &str = "---\nname: chro\n---\nv1\n";
-    const V2: &str = "---\nname: chro\n---\nv2\n";
+    const ENTRY_V1: &str = "---\nname: chro\n---\nv1\n";
+    const ENTRY_V2: &str = "---\nname: chro\n---\nv2\n";
+    const V1: &[SkillFile] = &[(ENTRY_FILE, ENTRY_V1), ("references/a.md", "a1\n")];
+    const V2: &[SkillFile] = &[(ENTRY_FILE, ENTRY_V2), ("references/a.md", "a1\n")];
 
     fn setup() -> (tempfile::TempDir, Locations) {
         let home = tempfile::tempdir().unwrap();
@@ -403,7 +444,39 @@ mod tests {
         );
         let link = locations.harnesses[0].1.join("chro");
         assert_eq!(fs::read_link(&link).unwrap(), locations.canonical);
-        assert_eq!(fs::read_to_string(link.join("SKILL.md")).unwrap(), V1);
+        assert_eq!(fs::read_to_string(link.join("SKILL.md")).unwrap(), ENTRY_V1);
+        assert_eq!(
+            fs::read_to_string(link.join("references").join("a.md")).unwrap(),
+            "a1\n"
+        );
+    }
+
+    #[test]
+    fn a_changed_or_missing_reference_alone_is_an_update() {
+        let (_home, locations) = setup();
+        install(&locations, V1, false, false).unwrap();
+        let reference = locations.canonical.join("references").join("a.md");
+
+        let changed: &[SkillFile] = &[(ENTRY_FILE, ENTRY_V1), ("references/a.md", "a2\n")];
+        let report = install(&locations, changed, false, false).unwrap();
+        assert_eq!(report.targets[0].outcome, Outcome::Updated);
+        assert_eq!(fs::read_to_string(&reference).unwrap(), "a2\n");
+
+        fs::remove_file(&reference).unwrap();
+        let report = install(&locations, changed, false, false).unwrap();
+        assert_eq!(report.targets[0].outcome, Outcome::Updated);
+        assert_eq!(fs::read_to_string(&reference).unwrap(), "a2\n");
+    }
+
+    #[test]
+    fn a_file_this_version_does_not_ship_is_left_alone() {
+        let (_home, locations) = setup();
+        install(&locations, V1, false, false).unwrap();
+        let extra = locations.canonical.join("references").join("mine.md");
+        fs::write(&extra, "kept\n").unwrap();
+
+        install(&locations, V2, false, false).unwrap();
+        assert_eq!(fs::read_to_string(&extra).unwrap(), "kept\n");
     }
 
     #[test]
@@ -418,7 +491,7 @@ mod tests {
         assert_eq!(updated.targets[0].outcome, Outcome::Updated);
         assert_eq!(
             fs::read_to_string(locations.canonical.join("SKILL.md")).unwrap(),
-            V2
+            ENTRY_V2
         );
     }
 
@@ -456,19 +529,55 @@ mod tests {
         assert_eq!(report.targets[0].outcome, Outcome::Installed);
         assert!(!locations.canonical.exists());
     }
-
-    #[test]
-    fn the_shipped_skill_names_itself_chro() {
-        assert!(SKILL_MD.lines().any(|line| line.trim() == "name: chro"));
-    }
 }
 
 #[cfg(test)]
 mod skill_text_tests {
     use clap::Parser;
 
-    use super::{GUIDE_MD, SKILL_MD};
+    use super::{ENTRY_FILE, GUIDE_MD, SKILL_FILES};
     use crate::args::TerminalCli;
+
+    fn entry() -> &'static str {
+        assert_eq!(SKILL_FILES[0].0, ENTRY_FILE, "the entry file comes first");
+        SKILL_FILES[0].1
+    }
+
+    /// The frontmatter lines of the entry file, between the `---` fences.
+    fn frontmatter() -> Vec<&'static str> {
+        let mut lines = entry().lines();
+        assert_eq!(lines.next(), Some("---"), "frontmatter opens the file");
+        lines.take_while(|line| *line != "---").collect()
+    }
+
+    fn field(name: &str) -> &'static str {
+        let prefix = format!("{name}: ");
+        frontmatter()
+            .into_iter()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("frontmatter has no single-line `{name}`"))
+    }
+
+    /// Targets of the relative Markdown links in `markdown`.
+    fn relative_links(markdown: &str) -> Vec<&str> {
+        markdown
+            .split("](")
+            .skip(1)
+            .filter_map(|rest| rest.split(')').next())
+            .filter(|target| !target.contains("://") && !target.starts_with('#'))
+            .collect()
+    }
+
+    /// Guide sections the text cites, written as `guide section "<heading>"`.
+    fn cited_guide_sections(markdown: &str) -> Vec<String> {
+        // Citations may wrap across lines; join them before matching.
+        let flat = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+        flat.split("uide section \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(str::to_string)
+            .collect()
+    }
 
     /// Split a shell line into words, honoring double quotes.
     fn words(line: &str) -> Vec<String> {
@@ -526,11 +635,70 @@ mod skill_text_tests {
     }
 
     #[test]
-    fn the_installed_skill_only_points_at_the_guide_this_binary_prints() {
+    fn the_frontmatter_follows_the_agent_skills_format() {
+        // The name must equal the folder the skill is installed into.
+        assert_eq!(field("name"), super::SKILL_NAME);
+        let description = field("description");
+        assert!(!description.is_empty() && description.chars().count() <= 1024);
+        // A space-separated string, not a YAML list.
+        assert_eq!(field("allowed-tools"), "Bash(chro *)");
+    }
+
+    #[test]
+    fn the_entry_file_stays_small_and_links_every_reference_it_ships() {
+        assert!(entry().lines().count() < 500);
+        let shipped: Vec<&str> = SKILL_FILES.iter().skip(1).map(|(path, _)| *path).collect();
+        assert!(!shipped.is_empty(), "expected the skill to ship procedures");
+        assert_eq!(relative_links(entry()), shipped);
+        for path in shipped {
+            // One level below the entry file, so a harness finds it in one hop.
+            assert!(path.starts_with("references/") && path.matches('/').count() == 1);
+        }
+    }
+
+    #[test]
+    fn links_between_references_resolve_to_shipped_files() {
+        for (path, content) in SKILL_FILES.iter().skip(1) {
+            for target in relative_links(content) {
+                let resolved = format!("references/{target}");
+                assert!(
+                    SKILL_FILES.iter().any(|(shipped, _)| *shipped == resolved),
+                    "{path} links to {target}, which is not shipped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_installed_files_only_point_at_the_guide_this_binary_prints() {
         // What sits in the harness folders never lists commands: a copy left
         // behind by an older or newer chro must not teach the wrong ones.
-        let commands = commands_in(SKILL_MD);
-        assert_eq!(commands, vec![vec!["chro", "skill", "show"]]);
+        assert_eq!(commands_in(entry()), vec![vec!["chro", "skill", "show"]]);
+        for (path, content) in SKILL_FILES.iter().skip(1) {
+            assert!(
+                commands_in(content).is_empty(),
+                "{path} shows commands; cite the guide section instead"
+            );
+            assert!(
+                !content.contains("`chro "),
+                "{path} spells out a command; cite the guide section instead"
+            );
+        }
+    }
+
+    #[test]
+    fn every_guide_section_a_procedure_cites_exists() {
+        let mut cited = 0;
+        for (path, content) in SKILL_FILES.iter().skip(1) {
+            for section in cited_guide_sections(content) {
+                cited += 1;
+                assert!(
+                    GUIDE_MD.lines().any(|line| line == format!("## {section}")),
+                    "{path} cites guide section \"{section}\", which the guide does not have"
+                );
+            }
+        }
+        assert!(cited > 5, "expected the procedures to cite the guide");
     }
 
     #[test]

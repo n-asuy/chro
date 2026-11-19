@@ -34,6 +34,12 @@ interface LayoutState {
    * through what the user actually viewed rather than the tab-strip order.
    */
   focusHistory: string[];
+  /**
+   * The focused pane fills the workspace: both docks and every other pane
+   * are hidden (still mounted). View state only, never persisted, and it
+   * follows focus, so it cannot point at a pane that no longer exists.
+   */
+  paneMaximized: boolean;
 }
 
 interface LayoutActions {
@@ -61,6 +67,7 @@ interface LayoutActions {
 
   setActiveTab: (leafId: string, tabId: string) => void;
   setFocusedPane: (leafId: string) => void;
+  setPaneMaximized: (maximized: boolean) => void;
 
   moveTab: (tabId: string, target: { leafId: string; index?: number }) => void;
 
@@ -243,6 +250,7 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
   projectId: null,
   layout: createInitialLayout(),
   focusHistory: [],
+  paneMaximized: false,
 
   bindProject: (projectId, options = {}) => {
     const state = get();
@@ -257,6 +265,7 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
         ? focusOrInsertTab(nextLayout, options.initialTab, options.freshSession)
         : nextLayout,
       focusHistory: [],
+      paneMaximized: false,
     });
     if (options.initialTab) persist(get());
   },
@@ -266,6 +275,7 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
       projectId: null,
       layout: createInitialLayout(),
       focusHistory: [],
+      paneMaximized: false,
     }),
 
   openTab: (kind, options = {}) => {
@@ -490,6 +500,8 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
     persist(get());
   },
 
+  setPaneMaximized: (paneMaximized) => set({ paneMaximized }),
+
   moveTab: (tabId, target) => {
     const state = get();
     const owner = findLeafContainingTab(state.layout.root, tabId);
@@ -620,6 +632,8 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
         root: nextRoot,
         focusedPaneId: split.newLeafId,
       },
+      // Splitting asks for side-by-side panes, so show them.
+      paneMaximized: false,
     }));
     persist(get());
   },

@@ -66,7 +66,10 @@ mod tests {
         let tokens = SessionTokens::new();
         let (task_id, run_id) = (Uuid::new_v4(), Uuid::new_v4());
         let token = tokens.issue(task_id, run_id);
-        assert_eq!(tokens.resolve(&token), Some(SessionGrant { task_id, run_id }));
+        assert_eq!(
+            tokens.resolve(&token),
+            Some(SessionGrant { task_id, run_id })
+        );
     }
 
     #[test]

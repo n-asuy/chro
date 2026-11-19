@@ -2,11 +2,11 @@ import {
   SessionDirectoryProvider,
   createSessionDirectory,
 } from "@/session/context/session-directory-context";
+import { sessionMentionLabel } from "@/session/lib/session-label";
 import type { StoredTask } from "@/session/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Markdown } from "../markdown";
-import { sessionMentionLabel } from "../session-mention";
 
 /**
  * Static render only: what matters is which text becomes a session reference

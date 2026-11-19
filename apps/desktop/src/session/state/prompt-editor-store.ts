@@ -1,3 +1,4 @@
+import { sessionMentionLabel } from "@/session/lib/session-label";
 import { create } from "zustand";
 import type {
   AnnotationsAttachmentPart,
@@ -127,6 +128,9 @@ export function parseFromDOM(root: HTMLElement): Prompt {
       if (el.dataset.branch) {
         part.branch = el.dataset.branch;
       }
+      if (el.dataset.title) {
+        part.title = el.dataset.title;
+      }
       parts.push(part);
       offset += displayText.length;
       return;
@@ -243,6 +247,7 @@ function createAttachmentPill(
       pill.dataset.type = "session";
       pill.dataset.taskId = part.taskId;
       if (part.branch) pill.dataset.branch = part.branch;
+      if (part.title) pill.dataset.title = part.title;
       break;
     case "skill":
       pill.dataset.type = "skill";
@@ -455,6 +460,9 @@ interface PromptEditorScopeState {
   prompt: Prompt;
   isEmpty: boolean;
   hasText: boolean;
+  /** An IME composition is in progress: the editor holds unconfirmed text
+   * that `prompt` does not necessarily reflect yet. */
+  composing: boolean;
   popover: "at" | "skill" | null;
   atQuery: string;
   skillQuery: string;
@@ -464,6 +472,7 @@ interface PromptEditorActions {
   /** Update prompt from parsed DOM result */
   setPrompt: (scopeId: string, prompt: Prompt) => void;
   setPopover: (scopeId: string, v: "at" | "skill" | null) => void;
+  setComposing: (scopeId: string, composing: boolean) => void;
   setAtQuery: (scopeId: string, q: string) => void;
   setSkillQuery: (scopeId: string, q: string) => void;
   clear: (scopeId: string) => void;
@@ -477,6 +486,7 @@ const EMPTY_SCOPE_STATE: PromptEditorScopeState = {
   prompt: DEFAULT_PROMPT,
   isEmpty: true,
   hasText: false,
+  composing: false,
   popover: null,
   atQuery: "",
   skillQuery: "",
@@ -535,6 +545,11 @@ export const usePromptEditorStore = create<PromptEditorStore>((set) => ({
   setPopover: (scopeId, popover) =>
     set((state) => ({
       scopes: updateScope(state.scopes, scopeId, { popover }),
+    })),
+
+  setComposing: (scopeId, composing) =>
+    set((state) => ({
+      scopes: updateScope(state.scopes, scopeId, { composing }),
     })),
 
   setAtQuery: (scopeId, atQuery) =>
@@ -628,7 +643,7 @@ function deleteSkillTriggerBeforeCursor(range: Range): boolean {
 export interface PromptEditorHandle {
   scopeId: string;
   editorRef: React.MutableRefObject<HTMLDivElement | null>;
-  isComposingRef: React.MutableRefObject<boolean>;
+  isComposing: () => boolean;
   getText: () => string;
   getContextEntries: () => ContextEntry[];
   getSkillEntries: () => SkillEntry[];
@@ -646,7 +661,11 @@ export interface PromptEditorHandle {
   handleCompositionStart: () => void;
   handleCompositionEnd: () => void;
   addFilePart: (path: string, isFile: boolean, branch?: string | null) => void;
-  addSessionPart: (taskId: string, branch?: string | null) => void;
+  addSessionPart: (
+    taskId: string,
+    branch: string | null | undefined,
+    title: string,
+  ) => void;
   addSkillPart: (id: string, name: string) => void;
   /**
    * Append the comments of one annotation pass. Works whether or not the
@@ -693,14 +712,17 @@ export function getPromptEditorHandle(
   const editorRef: React.MutableRefObject<HTMLDivElement | null> = {
     current: null,
   };
-  const isComposingRef: React.MutableRefObject<boolean> = { current: false };
   let snapshotHtml: string | null = null;
   let snapshotPrompt: Prompt | null = null;
 
   const handle: PromptEditorHandle = {
     scopeId,
     editorRef,
-    isComposingRef,
+
+    isComposing: () => {
+      return getPromptEditorScopeState(usePromptEditorStore.getState(), scopeId)
+        .composing;
+    },
 
     getText: () => {
       return getTextFromPrompt(getScopePrompt(scopeId));
@@ -835,11 +857,15 @@ export function getPromptEditorHandle(
 
     handleCompositionStart: () => {
       setActiveScope(scopeId);
-      isComposingRef.current = true;
+      usePromptEditorStore.getState().setComposing(scopeId, true);
     },
 
+    // The confirmed text is already in the DOM; read it back here rather than
+    // waiting on an `input` event whose order relative to compositionend
+    // differs between engines.
     handleCompositionEnd: () => {
-      isComposingRef.current = false;
+      usePromptEditorStore.getState().setComposing(scopeId, false);
+      handle.handleInput();
     },
 
     addFilePart: (path: string, isFile: boolean, branch?: string | null) => {
@@ -855,7 +881,7 @@ export function getPromptEditorHandle(
       insertPill(scopeId, editorRef.current, dataset, displayName);
     },
 
-    addSessionPart: (taskId: string, branch?: string | null) => {
+    addSessionPart: (taskId, branch, title) => {
       const dataset: Record<string, string> = {
         type: "session",
         taskId,
@@ -863,7 +889,16 @@ export function getPromptEditorHandle(
       if (branch) {
         dataset.branch = branch;
       }
-      insertPill(scopeId, editorRef.current, dataset, shortSessionId(taskId));
+      const trimmedTitle = title.trim();
+      if (trimmedTitle) {
+        dataset.title = trimmedTitle;
+      }
+      insertPill(
+        scopeId,
+        editorRef.current,
+        dataset,
+        sessionMentionLabel(trimmedTitle, shortSessionId(taskId)),
+      );
     },
 
     addSkillPart: (id: string, name: string) => {
@@ -961,7 +996,7 @@ export function getActivePromptEditorHandle(): PromptEditorHandle {
   const proxy: PromptEditorHandle = {
     scopeId: "__active__",
     editorRef: createActiveRef((handle) => handle.editorRef),
-    isComposingRef: createActiveRef((handle) => handle.isComposingRef),
+    isComposing: () => activeHandle().isComposing(),
     getText: () => activeHandle().getText(),
     getContextEntries: () => activeHandle().getContextEntries(),
     getSkillEntries: () => activeHandle().getSkillEntries(),
@@ -978,8 +1013,8 @@ export function getActivePromptEditorHandle(): PromptEditorHandle {
     handleCompositionEnd: () => activeHandle().handleCompositionEnd(),
     addFilePart: (path, isFile, branch) =>
       activeHandle().addFilePart(path, isFile, branch),
-    addSessionPart: (taskId, branch) =>
-      activeHandle().addSessionPart(taskId, branch),
+    addSessionPart: (taskId, branch, title) =>
+      activeHandle().addSessionPart(taskId, branch, title),
     addSkillPart: (id, name) => activeHandle().addSkillPart(id, name),
     addAnnotationsPart: (page) => activeHandle().addAnnotationsPart(page),
     removeActiveTrigger: (options) =>

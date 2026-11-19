@@ -1,7 +1,7 @@
 //! Finding the chro server a command should talk to.
 //!
 //! In order:
-//! 1. `CHRO_API_URL` (or the instance `chro cloud up` holds): a server
+//! 1. `CHRO_API_URL`: a server
 //!    reached over the network, authenticated with `CHRO_API_TOKEN`.
 //! 2. `CHRO_RUNTIME_FILE`: set by chro for every agent it starts, so `chro`
 //!    inside a session reaches the server that started it.
@@ -130,11 +130,7 @@ fn remote_url() -> Option<String> {
     if let Some(url) = non_empty(env::var("CHRO_API_URL").ok()) {
         return Some(url.trim_end_matches('/').to_string());
     }
-    #[cfg(feature = "cloud")]
-    {
-        return super::cloud::endpoint_for_tasks().map(|url| url.trim_end_matches('/').to_string());
-    }
-    #[cfg(not(feature = "cloud"))]
+
     None
 }
 

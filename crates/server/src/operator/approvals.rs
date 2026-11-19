@@ -96,7 +96,7 @@ pub(crate) async fn respond(
     Json(body): Json<Respond>,
 ) -> V1Result<Responded> {
     let responded_by = match caller {
-        Caller::User => ApprovalActor::User,
+        Caller::User | Caller::Device { .. } => ApprovalActor::User,
         Caller::Agent { task_id, .. } => {
             if approval_session(&state, &id).await? == Some(task_id) {
                 return Err(V1Error::new(

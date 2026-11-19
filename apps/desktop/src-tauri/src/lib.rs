@@ -47,17 +47,21 @@ pub fn run() {
                 .collect();
             if !urls.is_empty() {
                 deep_link::handle_urls(app, urls);
-            } else if let Some(window) = app.webview_windows().into_values().next() {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+            } else {
+                windows::activate_session(app, None);
             }
         }));
     }
 
     #[allow(unused_mut)]
     let mut builder = builder
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // The edge toolbar sizes and docks itself on every change; restoring a
+        // saved frame (or visibility) for it would fight that.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&[windows::EDGE_WINDOW_LABEL])
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -87,6 +91,19 @@ pub fn run() {
             commands::update_download,
             commands::update_install,
             tray::tray_update,
+            windows::edge::edge_toolbar_set_enabled,
+            windows::edge::edge_toolbar_set_hit_regions,
+            windows::edge_presence::edge_presence,
+            windows::edge_talk::edge_talk_start,
+            windows::edge_talk::edge_talk_stop,
+            windows::edge_talk::edge_log,
+            windows::edge_capture::edge_capture_start,
+            windows::edge_capture::edge_capture_region,
+            windows::edge_capture::edge_capture_close,
+            windows::privacy::edge_privacy_status,
+            windows::privacy::edge_open_privacy_settings,
+            windows::activation::open_session_in_app,
+            windows::activation::open_app_view,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -110,7 +127,9 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| match event {
+        .on_window_event(|window, event| {
+            windows::edge_presence::on_window_event(window, event);
+            match event {
             WindowEvent::Focused(true) => {
                 let label = window.label().to_string();
                 let app = window.app_handle().clone();
@@ -126,6 +145,7 @@ pub fn run() {
                 });
             }
             _ => {}
+            }
         });
 
     // macOS: own the menu bar so ⌘W closes the active tab instead of the

@@ -176,6 +176,10 @@ pub struct Codex {
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
 }
 
+/// Flags chro passes to `codex` itself. Model, sandbox and approvals travel
+/// over the app-server protocol, so only the launch flags are reserved.
+pub(crate) const RESERVED_LAUNCH_FLAGS: &[&str] = &["--oss"];
+
 impl Codex {
     /// Arguments of the one-shot call that titles a session: no saved thread,
     /// no writes, and little reasoning, on the model the person already uses
@@ -558,6 +562,22 @@ fn apply_environment(process: &mut Command, env: &ExecutionEnv) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_flag_chro_passes_is_reserved() {
+        let codex: Codex = serde_json::from_str(r#"{"oss":true}"#).unwrap();
+        let params = codex
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        for flag in params.iter().filter(|p| p.starts_with('-')) {
+            assert!(
+                RESERVED_LAUNCH_FLAGS.contains(&flag.as_str()),
+                "`{flag}` is passed by chro but not reserved"
+            );
+        }
+    }
 
     #[test]
     fn reasoning_effort_uses_the_cli_wire_names() {

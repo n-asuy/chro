@@ -9,11 +9,13 @@ describe("session-dnd", () => {
     const value = serializeSessionDragPayload({
       taskId: "bd7a332a-897c-4f4c-9f4b-b477c9bcf808",
       branch: "feature/auth",
+      title: "Claude Codeが重い理由",
     });
 
     expect(parseSessionDragPayload(value)).toEqual({
       taskId: "bd7a332a-897c-4f4c-9f4b-b477c9bcf808",
       branch: "feature/auth",
+      title: "Claude Codeが重い理由",
     });
   });
 
@@ -23,11 +25,13 @@ describe("session-dnd", () => {
         JSON.stringify({
           taskId: "bd7a332a-897c-4f4c-9f4b-b477c9bcf808",
           branch: 123,
+          title: 456,
         }),
       ),
     ).toEqual({
       taskId: "bd7a332a-897c-4f4c-9f4b-b477c9bcf808",
       branch: null,
+      title: "",
     });
   });
 

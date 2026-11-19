@@ -17,22 +17,18 @@ import {
   Code,
   Eye,
   GitCompareArrows,
-  Maximize2,
-  Minimize2,
   MousePointerClick,
   RefreshCw,
 } from "lucide-react";
 import {
   type ChangeEvent,
   type KeyboardEvent,
-  type SyntheticEvent,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import TextareaAutosize from "react-textarea-autosize";
 import { BaseViewer } from "../../../cbase/components/cbase-viewer";
 import { useProjectId } from "../../context/project-context";
@@ -90,24 +86,6 @@ const BASE_EXTENSIONS = new Set(["cbase"]);
 const HTML_EXTENSIONS = new Set(["html", "htm"]);
 
 const CSV_EXTENSIONS = new Set(["csv", "tsv"]);
-
-const setIframeKeydownListener = (
-  frameWindow: Window | null,
-  listener: (event: globalThis.KeyboardEvent) => void,
-  enabled: boolean,
-): void => {
-  if (!frameWindow) return;
-  try {
-    if (enabled) {
-      frameWindow.addEventListener("keydown", listener, true);
-    } else {
-      frameWindow.removeEventListener("keydown", listener, true);
-    }
-  } catch {
-    // The preview may navigate cross-origin; the parent-window listener still
-    // handles Escape whenever focus returns to the app.
-  }
-};
 
 const formatFileSize = (bytes?: number | null): string => {
   if (!bytes || bytes < 1024) return `${bytes ?? 0} B`;
@@ -196,15 +174,9 @@ type FilesEditorProps = {
    * (container_ref / workspace_path) instead of the project main checkout.
    */
   taskRunId?: string;
-  /** Close the transient file tab after Escape leaves fullscreen preview. */
-  onHtmlFullscreenEscape?: () => void;
 };
 
-export const FilesEditor = ({
-  path,
-  taskRunId,
-  onHtmlFullscreenEscape,
-}: FilesEditorProps) => {
+export const FilesEditor = ({ path, taskRunId }: FilesEditorProps) => {
   const { t } = useLanguage();
   const projectId = useProjectId();
   const {
@@ -300,14 +272,7 @@ export const FilesEditor = ({
   const [htmlViewMode, setHtmlViewMode] = useState<HtmlViewMode>("preview");
   // Bumped manually to force the preview iframe to reload after a save / refresh
   const [htmlPreviewKey, setHtmlPreviewKey] = useState(0);
-  // Expands the HTML preview to fill the entire app window. Exits on Escape,
-  // when switching to raw source, or when the active file changes.
-  const [isHtmlFullscreen, setIsHtmlFullscreen] = useState(false);
   const htmlPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
-  const isHtmlFullscreenRef = useRef(isHtmlFullscreen);
-  const onHtmlFullscreenEscapeRef = useRef(onHtmlFullscreenEscape);
-  isHtmlFullscreenRef.current = isHtmlFullscreen;
-  onHtmlFullscreenEscapeRef.current = onHtmlFullscreenEscape;
 
   // In-editor find bar (Cmd/Ctrl+F). Rendered above the title/frontmatter so
   // it floats at the top of the file view like Obsidian's find panel.
@@ -321,44 +286,7 @@ export const FilesEditor = ({
   // Reset transient view state whenever the active file changes.
   useEffect(() => {
     setIsFindOpen(false);
-    setIsHtmlFullscreen(false);
   }, [editorFilePath]);
-
-  const handleHtmlPreviewKeyDown = useCallback(
-    (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape" || !isHtmlFullscreenRef.current) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setIsHtmlFullscreen(false);
-      onHtmlFullscreenEscapeRef.current?.();
-    },
-    [],
-  );
-
-  const handleHtmlPreviewLoad = useCallback(
-    (event: SyntheticEvent<HTMLIFrameElement>) => {
-      // Keyboard events do not bubble out of an iframe. Register on its Window
-      // as well so Escape works after the user interacts with the preview.
-      const frameWindow = event.currentTarget.contentWindow;
-      setIframeKeydownListener(frameWindow, handleHtmlPreviewKeyDown, false);
-      setIframeKeydownListener(frameWindow, handleHtmlPreviewKeyDown, true);
-    },
-    [handleHtmlPreviewKeyDown],
-  );
-
-  // Allow Escape to leave the fullscreen HTML preview from either the app
-  // window or the preview iframe.
-  useEffect(() => {
-    window.addEventListener("keydown", handleHtmlPreviewKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", handleHtmlPreviewKeyDown, true);
-      setIframeKeydownListener(
-        htmlPreviewFrameRef.current?.contentWindow ?? null,
-        handleHtmlPreviewKeyDown,
-        false,
-      );
-    };
-  }, [handleHtmlPreviewKeyDown]);
 
   const relativePath = useMemo(
     () => relativePathForFile(editorFilePath, currentNode, workspaceRoot),
@@ -1094,17 +1022,10 @@ export const FilesEditor = ({
       fileSizeBytes: loadedFileSize,
       isHtml,
       htmlViewMode,
-      fullscreenRequested: isHtmlFullscreen,
     });
     const { showHtmlPreview } = codeView;
-    const htmlFullscreen = codeView.showHtmlFullscreen;
-    const codeLayout = (
-      <div
-        className={cn(
-          "flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]",
-          htmlFullscreen && "fixed inset-0 z-[200]",
-        )}
-      >
+    return (
+      <div className="flex h-full w-full flex-1 flex-col bg-custom-background-100 font-workspace text-[13px] leading-[1.4]">
         <div
           ref={editorContainerRef}
           className="flex flex-1 flex-col overflow-hidden bg-custom-background-100"
@@ -1151,24 +1072,6 @@ export const FilesEditor = ({
                     >
                       <RefreshCw className="size-3.5" />
                     </Button>
-                    <Button
-                      type="button"
-                      variant={isHtmlFullscreen ? "secondary" : "ghost"}
-                      size="icon"
-                      className="size-6"
-                      onClick={() => setIsHtmlFullscreen((value) => !value)}
-                      title={
-                        isHtmlFullscreen
-                          ? "Exit fullscreen (Esc)"
-                          : "Fullscreen preview"
-                      }
-                    >
-                      {isHtmlFullscreen ? (
-                        <Minimize2 className="size-3.5" />
-                      ) : (
-                        <Maximize2 className="size-3.5" />
-                      )}
-                    </Button>
                   </>
                 )}
                 <Button
@@ -1193,10 +1096,7 @@ export const FilesEditor = ({
                   variant={htmlViewMode === "raw" ? "secondary" : "ghost"}
                   size="sm"
                   className="h-6 gap-1 px-2 text-[11px]"
-                  onClick={() => {
-                    setIsHtmlFullscreen(false);
-                    setHtmlViewMode("raw");
-                  }}
+                  onClick={() => setHtmlViewMode("raw")}
                   title="View raw source"
                 >
                   <Code className="size-3.5" />
@@ -1229,7 +1129,6 @@ export const FilesEditor = ({
                   src={htmlPreviewSrc}
                   sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                   className="h-full min-w-0 flex-1 border-0 bg-white"
-                  onLoad={handleHtmlPreviewLoad}
                 />
                 {(annotations.active || annotations.notes.length > 0) && (
                   <AnnotationTray annotations={annotations} />
@@ -1275,11 +1174,6 @@ export const FilesEditor = ({
         </div>
       </div>
     );
-    // Fullscreen renders through a portal so the preview escapes the editor
-    // pane's stacking context and covers the right dock / sidebars.
-    return htmlFullscreen
-      ? createPortal(codeLayout, document.body)
-      : codeLayout;
   }
 
   if (changesView) {

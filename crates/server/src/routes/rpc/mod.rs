@@ -5,6 +5,7 @@
 //! - `tasks`: Task CRUD and status updates
 //! - `task_runs`: Task execution runs, logs, merges
 //! - `sessions`: Executor sessions
+//! - `session_list`: The paired phone's session list window and lookups
 //! - `workspace`: File system operations
 //! - `approvals`: Approval workflow
 //! - `config`: Preferences and executor configuration
@@ -19,6 +20,7 @@ mod asset_response;
 mod byte_range;
 mod cbase;
 pub(crate) mod cli_status;
+mod cloud;
 mod config;
 mod context_refs;
 mod dev_events;
@@ -33,6 +35,7 @@ mod merges;
 mod path_link;
 mod path_resolve;
 mod projects;
+pub(crate) mod session_list;
 mod sessions;
 mod skills;
 mod task_runs;
@@ -54,10 +57,12 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(tasks::router())
         .merge(task_runs::router())
         .merge(sessions::router())
+        .merge(session_list::router())
         .merge(skills::router())
         .merge(workspace::router())
         .merge(approvals::router())
         .merge(config::router())
+        .merge(cloud::router())
         .merge(events::router())
         .merge(developer::router())
         .merge(directory_map::router())
@@ -70,6 +75,7 @@ pub(crate) fn router() -> Router<AppState> {
         .merge(filesystem::router())
         .merge(cbase::router())
         .merge(dev_events::router())
+        .merge(crate::mobile::routes::router())
 }
 
 pub(crate) fn sessions_router() -> Router<AppState> {

@@ -16,7 +16,6 @@ const codeView = (
     fileSizeBytes: SMALL,
     isHtml: false,
     htmlViewMode: "preview",
-    fullscreenRequested: false,
     ...overrides,
   });
 
@@ -98,23 +97,9 @@ describe("resolveCodeViewState", () => {
     ).toBe(true);
   });
 
-  it("only goes fullscreen while previewing", () => {
-    expect(
-      codeView({ isHtml: true, fullscreenRequested: true }).showHtmlFullscreen,
-    ).toBe(true);
-    expect(
-      codeView({
-        isHtml: true,
-        htmlViewMode: "raw",
-        fullscreenRequested: true,
-      }).showHtmlFullscreen,
-    ).toBe(false);
-  });
-
   it("shows no HTML affordances for a non-HTML file", () => {
     const state = codeView();
     expect(state.showHtmlPreview).toBe(false);
     expect(state.showHtmlToolbar).toBe(false);
-    expect(state.showHtmlFullscreen).toBe(false);
   });
 });

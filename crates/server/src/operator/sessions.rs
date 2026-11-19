@@ -135,7 +135,7 @@ pub(crate) async fn list(
         }
         None => TaskRecord::list_all(pool).await?,
     };
-    tasks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at));
 
     let limit = query.limit.unwrap_or(DEFAULT_SESSION_LIMIT) as usize;
     let mut viewer = SessionViewer::new(&state).await?;

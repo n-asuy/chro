@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 
 use anyhow::{anyhow, Context};
-use axum::{middleware, Router};
+use axum::middleware;
 use db::DBService;
 use fd_lock::RwLock as FileRwLock;
 use local_runtime::LocalRuntime;
@@ -21,12 +21,15 @@ mod cors;
 mod errors;
 mod helpers;
 pub(crate) mod identifiers;
+mod mobile;
 mod operator;
 mod parent_watch;
 mod perf;
 mod routes;
 mod runtime_identity;
 mod shutdown;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) use app_state::AppState;
 pub(crate) use constants::MAX_IMAGE_UPLOAD_BYTES;
@@ -197,16 +200,23 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
     let state = AppState::new(runtime.clone(), identity.clone());
     let state_browser_handle = state.browser().clone();
 
+    // Paired phones get their own listener, key and registry per database.
+    // Without it the server still serves the desktop; `/rpc/mobile/*` then
+    // reports that pairing is unavailable.
+    if let Err(error) = mobile::MobileHub::serve(
+        state.clone(),
+        &log_db_path,
+        mobile::listener::PortChoice::from_arg(args.mobile_port),
+    )
+    .await
+    {
+        tracing::error!(error = %format!("{error:#}"), "phone pairing is unavailable");
+    }
+
     let allowed_origins = cors::AllowedOrigins::load(actual_port)?;
     info!(origins = ?allowed_origins.values(), "configured CORS allowlist");
 
-    let api_routes = Router::new()
-        .merge(routes::health_router())
-        .merge(routes::sessions_router())
-        .merge(operator::router(state.clone()))
-        .nest("/rpc", routes::rpc_router())
-        .nest("/streams", routes::streams_router())
-        .with_state(state)
+    let api_routes = routes::api_router(state)
         .layer(allowed_origins.layer())
         .layer(middleware::from_fn_with_state(
             allowed_origins.clone(),

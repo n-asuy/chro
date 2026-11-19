@@ -36,6 +36,16 @@ describe("matchGlobalShortcut", () => {
     ).toBeNull();
   });
 
+  it("maps ⌘⇧Enter to toggling the focused pane's maximize", () => {
+    expect(
+      matchGlobalShortcut(event({ key: "Enter", metaKey: true, shiftKey: true })),
+    ).toBe("toggle-pane-maximize");
+    expect(
+      matchGlobalShortcut(event({ key: "Enter", ctrlKey: true, shiftKey: true })),
+    ).toBe("toggle-pane-maximize");
+    expect(matchGlobalShortcut(event({ key: "Enter", metaKey: true }))).toBeNull();
+  });
+
   it("maps ⌘N to new chat", () => {
     expect(matchGlobalShortcut(event({ key: "n", metaKey: true }))).toBe(
       "new-chat",

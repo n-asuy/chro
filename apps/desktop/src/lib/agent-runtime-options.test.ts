@@ -23,13 +23,15 @@ describe("agent-runtime-options capability axes", () => {
     expect(all.some((m) => m.executor === "CODEX")).toBe(true);
   });
 
-  it("exposes speed only for Opus, not for other Claude models", () => {
-    expect(values(getModelSpeedOptions("CLAUDE_CODE", "opus"))).toEqual([
-      "standard",
-      "fast",
-    ]);
+  it("exposes speed only on the Claude models whose catalog lists fast mode", () => {
+    for (const model of ["fable", "opus"]) {
+      expect(values(getModelSpeedOptions("CLAUDE_CODE", model))).toEqual([
+        "standard",
+        "fast",
+      ]);
+    }
     expect(getModelSpeedOptions("CLAUDE_CODE", "sonnet")).toEqual([]);
-    expect(getModelSpeedOptions("CLAUDE_CODE", "fable")).toEqual([]);
+    expect(getModelSpeedOptions("CLAUDE_CODE", "haiku")).toEqual([]);
     expect(getModelSpeedOptions("CODEX", "gpt-5.6-terra")).toEqual([]);
   });
 
@@ -82,6 +84,7 @@ describe("agent-runtime-options capability axes", () => {
     expect(values(getModelOptions("CODEX"))).toEqual([
       "gpt-6.1-sol",
       "gpt-6-astra",
+      "gpt-6.1-terra",
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6-sol",
@@ -89,12 +92,21 @@ describe("agent-runtime-options capability axes", () => {
       "gpt-5.6-luna",
     ]);
     expect(getModelLabel("CODEX", "gpt-6.1-sol")).toBe("GPT-6.1 Sol");
+    expect(getModelLabel("CODEX", "gpt-6.1-terra")).toBe("GPT-6.1 Terra");
+    expect(values(getModelReasoningOptions("CODEX", "gpt-6.1-terra"))).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
     expect(getModelSpeedOptions("CODEX", "gpt-6.1-sol")).toEqual([]);
   });
 
   it("labels each Claude alias with the model it currently resolves to", () => {
     expect(getModelOptions("CLAUDE_CODE").map((m) => m.label)).toEqual([
-      "Fable 5.1",
+      "Fable 5.2",
       "Opus 5.5",
       "Sonnet 5.5",
       "Haiku 5.5",

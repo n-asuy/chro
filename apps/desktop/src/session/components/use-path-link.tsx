@@ -28,12 +28,6 @@ export const usePathLinkScope = (): PathLinkScope =>
   useContext(PathLinkScopeContext);
 
 /**
- * Resolve `text` to an existing file or directory, or `null`.
- *
- * Renderers call this to decide whether to decorate the text as a link at all,
- * so a link is never shown for something that cannot be opened.
- */
-/**
  * How long a reference must hold still before it is worth resolving. A message
  * streams in token by token, so `~/notes/report.html` passes through a dozen
  * prefixes that name nothing; waiting for the text to settle spends one probe
@@ -41,34 +35,72 @@ export const usePathLinkScope = (): PathLinkScope =>
  */
 const SETTLE_MS = 150;
 
-export const usePathLink = (text: string | null): PathLinkTarget | null => {
+/** Backoff after a probe that could not be made (server busy or restarting). */
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
+
+const retryDelay = (failures: number): number =>
+  Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS);
+
+type Resolution = { key: string; target: PathLinkTarget | null };
+
+/**
+ * Resolve `text` to an existing file or directory.
+ *
+ * Returns `undefined` while the answer is not known yet, and `null` once the
+ * text is known not to name anything (or there is no text). Renderers that
+ * only decorate text as a link can treat both alike; renderers whose content
+ * *is* the file, such as an image, show the first as loading and only the
+ * second as missing.
+ *
+ * A probe that fails is not an answer: it is retried with backoff rather than
+ * leaving the reference unresolved for as long as it stays on screen.
+ */
+export const usePathLink = (
+  text: string | null,
+): PathLinkTarget | null | undefined => {
   const scope = usePathLinkScope();
-  const [target, setTarget] = useState<PathLinkTarget | null>(null);
+  const [resolution, setResolution] = useState<Resolution | null>(null);
   // The run is deliberately not a dependency: a follow-up starts a new run
   // on the same worktree, and re-resolving every reference in the
   // conversation for it would fire one probe per rendered span on send.
   const { taskId, projectId } = scope;
+  const key = text
+    ? `${taskId ?? ""}\u0000${projectId ?? ""}\u0000${text}`
+    : null;
 
   useEffect(() => {
-    // The previous target belonged to the previous text: drop it rather than
-    // leave a link pointing somewhere the reader is no longer reading.
-    setTarget(null);
-    if (!text) return;
+    if (!key || !text) return;
 
     let active = true;
-    const timer = setTimeout(() => {
-      void resolvePathLink(text, { taskId, projectId }).then((resolved) => {
-        if (active) setTarget(resolved);
-      });
-    }, SETTLE_MS);
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const attempt = (delay: number) => {
+      timer = setTimeout(() => {
+        resolvePathLink(text, { taskId, projectId }).then(
+          (target) => {
+            if (active) setResolution({ key, target });
+          },
+          () => {
+            if (!active) return;
+            failures += 1;
+            attempt(retryDelay(failures));
+          },
+        );
+      }, delay);
+    };
+    attempt(SETTLE_MS);
 
     return () => {
       active = false;
       clearTimeout(timer);
     };
-  }, [text, taskId, projectId]);
+  }, [key, text, taskId, projectId]);
 
-  return target;
+  if (!key) return null;
+  // A resolution for different text belongs to what the reader is no longer
+  // reading; until the current text resolves, its answer is unknown.
+  return resolution?.key === key ? resolution.target : undefined;
 };
 
 /**

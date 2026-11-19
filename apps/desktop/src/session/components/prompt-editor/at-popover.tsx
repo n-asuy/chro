@@ -38,7 +38,12 @@ const DEFAULT_FILE_SUGGESTIONS = 5;
 
 export type AtPopoverSelection =
   | { kind: "file"; path: string; isFile: boolean; branch?: string | null }
-  | { kind: "session"; taskId: string; branch?: string | null }
+  | {
+      kind: "session";
+      taskId: string;
+      branch?: string | null;
+      title: string;
+    }
   | { kind: "skill"; id: string; name: string };
 
 export type RuntimeOption = { value: BaseCodingAgent; label: string };
@@ -459,6 +464,7 @@ export const AtPopover = forwardRef<AtPopoverHandle, AtPopoverProps>(
               kind: "session",
               taskId: item.task.id,
               branch: item.task.branch,
+              title: item.task.title ?? "",
             });
             return;
           case "skill":

@@ -1,9 +1,13 @@
 //! Claude Code agent implementation.
 //!
-//! Claude runs headlessly via `--print --output-format stream-json`. The CLI's
-//! stdout feeds [`ClaudeLogProcessor`] directly, keeping execution suitable for
-//! unattended and parallel runs without an interactive terminal dependency.
+//! Claude runs headlessly via `--print` with stream-json in both directions,
+//! keeping execution suitable for unattended and parallel runs without an
+//! interactive terminal dependency. A [`control::ControlChannel`] owns the
+//! pipes: it sends the prompt, answers the CLI's tool-permission requests
+//! (turning `AskUserQuestion` into a chro question), and mirrors the rest of
+//! stdout into the log stream [`ClaudeLogProcessor`] reads.
 
+mod control;
 mod processor;
 mod session_transcript;
 pub mod types;
@@ -18,10 +22,12 @@ use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use command_group::AsyncCommandGroup;
+use derivative::Derivative;
 use events::MsgStore;
 use log_types::LogEntry;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::{
@@ -36,6 +42,7 @@ use crate::{
     },
     session_title,
     spawn::Invocation,
+    stdout_dup::{LogWriter, create_stdout_pipe_writer},
 };
 
 /// Output speed for the underlying model. `Fast` maps to Claude Code's fast
@@ -49,7 +56,8 @@ pub enum SpeedMode {
 }
 
 /// Claude Code agent configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Derivative, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[derivative(Debug, PartialEq)]
 pub struct ClaudeCode {
     /// Extra text appended to the prompt.
     #[serde(default)]
@@ -67,12 +75,50 @@ pub struct ClaudeCode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<SpeedMode>,
 
+    /// Keep Claude from asking multiple-choice questions (`AskUserQuestion`),
+    /// so a run never waits on the user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_question_tool: bool,
+
     /// Command overrides.
     #[serde(flatten)]
     #[ts(skip)]
     #[schemars(skip)]
     pub cmd: CmdOverrides,
+
+    /// Where questions go for an answer (not serialized).
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    approvals_service: Option<Arc<dyn ExecutorApprovalService>>,
 }
+
+/// Claude Code's built-in multiple-choice question tool.
+pub(crate) const QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// Flags chro passes to `claude` itself, on the first turn, on resume and on
+/// fork. A user launch argument naming one of them is refused.
+pub(crate) const RESERVED_LAUNCH_FLAGS: &[&str] = &[
+    "-p",
+    "--print",
+    "--output-format",
+    "--input-format",
+    "--permission-prompt-tool",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--chrome",
+    "--model",
+    "--effort",
+    "--settings",
+    "-r",
+    "--resume",
+    "--resume-session-at",
+    "--fork-session",
+    "-c",
+    "--continue",
+    "--session-id",
+];
 
 impl ClaudeCode {
     pub fn new() -> Self {
@@ -82,8 +128,14 @@ impl ClaudeCode {
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::for_manifest(&cli_manifest::CLAUDE).extend_params([
             "--print",
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
+            // Tool-permission requests come to chro over stdio. This is also
+            // what makes the CLI offer `AskUserQuestion` in a `--print` run.
+            "--permission-prompt-tool",
+            "stdio",
             "--verbose",
             "--dangerously-skip-permissions",
             // Attaches the browser extension bridge, which the CLI exposes as
@@ -102,10 +154,15 @@ impl ClaudeCode {
         }
 
         // Fast mode has no dedicated flag; the CLI reads it from settings
-        // (`fastMode: true`), gated per model to Opus. `--settings` merges with
+        // (`fastMode: true`) and applies it only to models that have a fast
+        // mode, falling back to standard speed otherwise. `--settings` merges with
         // the user's own settings rather than replacing them.
         if self.speed == Some(SpeedMode::Fast) {
             builder = builder.extend_params(["--settings", r#"{"fastMode":true}"#]);
+        }
+
+        if self.disable_question_tool {
+            builder = builder.extend_params(["--disallowedTools", QUESTION_TOOL]);
         }
 
         apply_overrides(builder, &self.cmd)
@@ -130,11 +187,10 @@ impl ClaudeCode {
             args,
         } = command_parts.into_resolved().await?;
 
-        // The prompt is delivered over stdin rather than as a positional
-        // argument. `claude --print` reads stdin when no prompt is passed, and
-        // keeping free-form text out of argv is what lets the Windows batch-shim
-        // wrapper (`prepare_invocation`) forward a fixed, metacharacter-free
-        // argument list through the command interpreter.
+        // The prompt is delivered over stdin, as a stream-json user message,
+        // rather than as a positional argument: keeping free-form text out of
+        // argv is what lets the Windows batch-shim wrapper (`prepare_invocation`)
+        // forward a fixed, metacharacter-free argument list.
         let prompt = self.append_prompt.combine_prompt(prompt);
 
         tracing::info!(
@@ -157,33 +213,38 @@ impl ClaudeCode {
 
         let mut child = process.group_spawn()?;
 
-        // Feed the prompt over stdin, then close it so the CLI sees EOF and
-        // begins its turn. Done off-task so a large prompt never blocks the
-        // caller; the CLI drains stdin before emitting output, so there is no
-        // deadlock with the stdout reader the container installs next.
-        let mut child_stdin = child.inner().stdin.take().ok_or_else(|| {
+        let child_stdin = child.inner().stdin.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("claude process missing stdin"))
         })?;
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            if let Err(err) = child_stdin.write_all(prompt.as_bytes()).await {
-                tracing::warn!("failed to write prompt to claude stdin: {err}");
-            }
-            // Drop closes the pipe, signalling EOF.
-            drop(child_stdin);
-        });
+        let child_stdout = child.inner().stdout.take().ok_or_else(|| {
+            ExecutorError::Io(std::io::Error::other("claude process missing stdout"))
+        })?;
+        // The container reads a synthetic stdout; the control channel fills it
+        // with everything the CLI prints except control traffic.
+        let log = LogWriter::new(create_stdout_pipe_writer(&mut child)?);
+        let cancel = CancellationToken::new();
+        control::ControlChannel::start(
+            child_stdin,
+            child_stdout,
+            log,
+            self.approvals_service.clone(),
+            cancel.clone(),
+            &prompt,
+        );
 
         Ok(SpawnedChild {
             child: child.into(),
             exit_signal: None,
-            cancel: None,
+            cancel: Some(cancel),
         })
     }
 }
 
 #[async_trait]
 impl StandardCodingAgentExecutor for ClaudeCode {
-    fn use_approvals(&mut self, _approvals: Arc<dyn ExecutorApprovalService>) {}
+    fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
+        self.approvals_service = Some(approvals);
+    }
 
     async fn spawn(
         &self,
@@ -478,6 +539,78 @@ fn build_claude_path_env() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn params(claude: &ClaudeCode) -> Vec<String> {
+        claude
+            .build_command_builder()
+            .unwrap()
+            .params
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn every_flag_chro_passes_is_reserved() {
+        let claude = ClaudeCode {
+            model: Some("opus".to_string()),
+            effort: Some(ReasoningEffort::High),
+            speed: Some(SpeedMode::Fast),
+            disable_question_tool: true,
+            ..Default::default()
+        };
+        for flag in params(&claude).iter().filter(|p| p.starts_with('-')) {
+            if flag == "--disallowedTools" {
+                // Users may disable other tools; only the question tool is
+                // theirs to toggle in settings, and that is refused separately.
+                assert!(
+                    crate::validate_launch_args(
+                        crate::BaseCodingAgent::ClaudeCode,
+                        "--disallowedTools AskUserQuestion"
+                    )
+                    .is_err()
+                );
+                continue;
+            }
+            assert!(
+                RESERVED_LAUNCH_FLAGS.contains(&flag.as_str()),
+                "`{flag}` is passed by chro but not reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn talks_stream_json_with_permission_requests_over_stdio() {
+        let params = params(&ClaudeCode::default());
+        assert!(
+            params
+                .windows(2)
+                .any(|w| w == ["--input-format", "stream-json"])
+        );
+        assert!(
+            params
+                .windows(2)
+                .any(|w| w == ["--output-format", "stream-json"])
+        );
+        assert!(
+            params
+                .windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"]),
+            "AskUserQuestion is only offered with stdio permission prompts: {params:?}"
+        );
+        assert!(!params.iter().any(|p| p == "--disallowedTools"));
+    }
+
+    #[test]
+    fn disabling_the_question_tool_disallows_it() {
+        let claude = ClaudeCode {
+            disable_question_tool: true,
+            ..Default::default()
+        };
+        assert!(
+            params(&claude)
+                .windows(2)
+                .any(|w| w == ["--disallowedTools", QUESTION_TOOL])
+        );
+    }
 
     #[test]
     fn claude_environment_strips_nesting_markers() {

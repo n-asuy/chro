@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.61
+
+- Updated the model picker: Fable now reads Fable 5.2, which is what the `fable` alias resolves to from Claude Code 2.1.322, and offers the Fast speed toggle like Opus. GPT-6.1 Terra joins the Codex models after GPT-6 Astra, as the Codex catalog orders it, and needs Codex CLI 0.153.0 or newer. On an older Claude Code the `fable` alias still runs Fable 5.1, so run `claude update` to get 5.2
+- The `chro` skill now ships working procedures beside its entry file: how to write a delegation brief and review what comes back, how a delegated session finishes and reports, how to cross-check a question with other models, and how to split a session by topic. An agent loads only the procedure that fits. `chro skill install` writes them to `references/` in the skill folder and updates an existing install in place. The command guide still comes from `chro skill show`. The skill now lives in `skills/chro` of the repository, so it can also be installed with `npx skills add n-asuy/chro --skill chro`
+- Added cloud sessions as a beta, off by default: turn on "Cloud sessions" under Settings › Beta features, and a new session's location picker offers Cloud beside This computer. A cloud session signs in through your browser, runs its agent in a machine of its own, streams the conversation and approvals back into chro, and brings the result back as a branch you review and merge as usual. The worktree and base-branch choices for a new session moved into the "…" menu next to the picker
+- Reworked Settings › Agents: installed agents and agents chro could not find are listed separately, with a count, a Set default button, and links to each agent's docs or install guide. Launch settings are behind "Show launch settings". Claude gains an "Ask questions" switch: when on, Claude can confirm with multiple-choice questions and the run waits for your answer
+- Added an edge toolbar as a beta, under Settings › Beta features: a small toolbar at the screen edge for your sessions, shown while chro is in the background
+
 ## 0.1.59
 
 - macOS builds are now signed and notarized by Curino LLC, matching the Windows builds. The first launch after updating may ask again for permissions you had already granted to chro, such as controlling other apps

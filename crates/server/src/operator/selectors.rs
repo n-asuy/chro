@@ -160,7 +160,7 @@ fn canonical(path: &str) -> Result<String, V1Error> {
 async fn own_session(pool: &Pool<Sqlite>, caller: Caller) -> Result<TaskRecord, V1Error> {
     match caller {
         Caller::Agent { task_id, .. } => find_task(pool, task_id).await,
-        Caller::User => Err(V1Error::new(
+        Caller::User | Caller::Device { .. } => Err(V1Error::new(
             ErrorCode::InvalidSelector,
             "self and parent only mean something inside a chro session; name the session instead",
         )

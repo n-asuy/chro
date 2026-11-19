@@ -6,6 +6,7 @@ import { useSessionReadSync } from "@/session/hooks";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { inferKindFromLocation } from "../domain/route-tab-kind";
+import { isDockRevealRequest } from "../lib/dock-reveal";
 import { useCloseTabShortcut } from "../hooks/use-close-tab-shortcut";
 import { useGlobalShortcuts } from "../hooks/use-global-shortcuts";
 import { useLeaderKeyShortcuts } from "../hooks/use-leader-key-shortcuts";
@@ -58,9 +59,28 @@ function LayoutShellInner() {
   const openTab = useLayoutStore((s) => s.openTab);
   const location = useRouterState({ select: (s) => s.location });
   const navigate = useNavigate();
+  const paneMaximized = useLayoutStore((s) => s.paneMaximized);
 
   useEffect(() => {
     ensurePaneItemsRegistered();
+  }, []);
+
+  // A maximized pane steps aside whenever something asks to see a dock
+  // (header toggle, ⌘⇧F, "open source control" links), instead of the
+  // request landing on a hidden dock.
+  useEffect(() => {
+    const restorePanes = () =>
+      useLayoutStore.getState().setPaneMaximized(false);
+    const unsubscribeLeft = useDockStore.subscribe((next, prev) => {
+      if (isDockRevealRequest(prev, next)) restorePanes();
+    });
+    const unsubscribeRight = useRightDockStore.subscribe((next, prev) => {
+      if (isDockRevealRequest(prev, next)) restorePanes();
+    });
+    return () => {
+      unsubscribeLeft();
+      unsubscribeRight();
+    };
   }, []);
 
   useEffect(() => {
@@ -117,7 +137,15 @@ function LayoutShellInner() {
       <ProjectTabsHeader />
       <PaneDndContext>
         <div className="flex min-h-0 flex-1 gap-1.5 px-1.5 pt-1.5 pb-1.5">
-          <LeftDock panel={ProjectsDockPanel} />
+          {/*
+           * A maximized pane hides the docks with `hidden` rather than
+           * unmounting them, so their scroll, selection and running panels
+           * survive the round trip. `contents` keeps the docks as direct
+           * flex children otherwise.
+           */}
+          <div className={paneMaximized ? "hidden" : "contents"}>
+            <LeftDock panel={ProjectsDockPanel} />
+          </div>
           {/*
            * No chrome here: the rounded border/background that used to wrap
            * the whole pane (tab bar included) moved down onto each pane's
@@ -128,12 +156,14 @@ function LayoutShellInner() {
           <div className="min-h-0 min-w-0 flex-1">
             <PaneTreeView />
           </div>
-          <RightDock
-            filetree={FileTreeDockPanel}
-            search={SearchDockPanel}
-            sourceControl={SourceControlDockPanel}
-            agent={DirectoryAgentDockPanel}
-          />
+          <div className={paneMaximized ? "hidden" : "contents"}>
+            <RightDock
+              filetree={FileTreeDockPanel}
+              search={SearchDockPanel}
+              sourceControl={SourceControlDockPanel}
+              agent={DirectoryAgentDockPanel}
+            />
+          </div>
         </div>
       </PaneDndContext>
       {/*

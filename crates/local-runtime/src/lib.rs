@@ -26,10 +26,11 @@ use tracing::info;
 use uuid::Uuid;
 use worktree::WorktreeManager;
 
+pub mod cloud;
 mod container;
 mod housekeeping;
-mod session_processes;
 pub(crate) mod log_writer;
+mod session_processes;
 pub mod session_tokens;
 mod transcript;
 use container::LocalContainerService;
@@ -145,6 +146,20 @@ pub struct LocalRuntime {
 }
 
 impl LocalRuntime {
+    pub async fn cloud_log_page(
+        &self,
+        run_id: Uuid,
+        cursor: u64,
+    ) -> std::io::Result<(Vec<LogEntry>, u64, bool)> {
+        self.container.cloud_log_page(run_id, cursor).await
+    }
+    pub fn cloud_repository_root(&self) -> PathBuf {
+        self.container.cloud_repository_root()
+    }
+    pub async fn cloud_run_active(&self, run_id: Uuid) -> bool {
+        self.container.cloud_run_active(run_id).await
+    }
+
     fn resolve_config_path() -> PathBuf {
         if let Ok(custom_path) = std::env::var("CHRO_CONFIG_PATH") {
             let mut resolved = PathBuf::from(custom_path);

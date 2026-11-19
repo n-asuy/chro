@@ -63,10 +63,15 @@ const CACHE_MAX_ENTRIES = 2048;
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<PathLinkTarget | null>>();
 
+type Waiter = {
+  resolve: (target: PathLinkTarget | null) => void;
+  reject: (error: unknown) => void;
+};
+
 type PendingBatch = {
   scope: PathLinkScope;
-  /** Raw reference text → the resolvers waiting on it. */
-  requests: Map<string, ((target: PathLinkTarget | null) => void)[]>;
+  /** Raw reference text → the callers waiting on it. */
+  requests: Map<string, Waiter[]>;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -121,27 +126,28 @@ const toTarget = (probe: PathProbe | undefined): PathLinkTarget | null => {
 const runBatch = async (key: string, batch: PendingBatch): Promise<void> => {
   pendingBatches.delete(key);
   const texts = [...batch.requests.keys()];
-  let probes: PathProbe[] = [];
+  const settle = (text: string, finish: (waiter: Waiter) => void): void => {
+    inFlight.delete(cacheKey(key, text));
+    for (const waiter of batch.requests.get(text) ?? []) finish(waiter);
+  };
+
+  let probes: PathProbe[];
   try {
     probes = batch.scope.taskId
       ? await probeTaskPaths(batch.scope.taskId, texts)
       : await probeProjectPaths(batch.scope.projectId ?? "", texts);
   } catch (error) {
-    // A failed probe must not poison the cache: the reference simply stays
-    // plain text and the next render retries.
+    // A failed probe says nothing about whether the paths exist: it is neither
+    // cached nor reported as a miss, so callers can tell it apart and retry.
     console.error("[path-link] probe failed:", error);
+    for (const text of texts) settle(text, (waiter) => waiter.reject(error));
+    return;
   }
 
   texts.forEach((text, index) => {
     const target = toTarget(probes[index]);
-    const entryKey = cacheKey(key, text);
-    if (probes.length > 0) {
-      writeCache(entryKey, target);
-    }
-    inFlight.delete(entryKey);
-    for (const resolve of batch.requests.get(text) ?? []) {
-      resolve(target);
-    }
+    writeCache(cacheKey(key, text), target);
+    settle(text, (waiter) => waiter.resolve(target));
   });
 };
 
@@ -150,7 +156,7 @@ const enqueue = (
   key: string,
   text: string,
 ): Promise<PathLinkTarget | null> =>
-  new Promise((resolve) => {
+  new Promise((resolve, reject) => {
     const existing = pendingBatches.get(key);
     const batch: PendingBatch = existing ?? {
       scope,
@@ -161,16 +167,17 @@ const enqueue = (
       }, 0),
     };
     const waiting = batch.requests.get(text) ?? [];
-    waiting.push(resolve);
+    waiting.push({ resolve, reject });
     batch.requests.set(text, waiting);
     pendingBatches.set(key, batch);
   });
 
 /**
- * Resolve `text` to something that exists, or `null`.
+ * Resolve `text` to something that exists, or `null` when it names nothing.
  *
  * Returns `null` synchronously-cheaply for non-candidates and for scopes that
- * cannot be resolved against (no task, no project).
+ * cannot be resolved against (no task, no project). Rejects when the server
+ * could not be asked, which is not an answer and must not read as a miss.
  */
 export const resolvePathLink = async (
   text: string,

@@ -27,22 +27,39 @@ pub async fn create_renderer_window<R: TauriRuntime>(
     options: RendererWindowOptions,
 ) -> Result<WebviewWindow<R>> {
     let label = format!("window-{}", Uuid::new_v4().simple());
+    let window = build_session_window(app, runtime, &label, &options)?;
+
+    let pool = app.state::<WindowPool>();
+    pool.register(WindowMeta {
+        label: label.clone(),
+        runtime_id: runtime.id.clone(),
+        workspace_path: options.workspace_path.clone(),
+        workspace_key: options
+            .workspace_path
+            .as_deref()
+            .and_then(crate::runtime::pool::normalize_workspace_path_for_key),
+    })
+    .await;
+
+    Ok(window)
+}
+
+/// Build and show the window. Kept synchronous so the window builder (which
+/// is not `Send` for every runtime) never lives across an `.await`, which lets
+/// [`create_renderer_window`] run on a spawned task.
+fn build_session_window<R: TauriRuntime>(
+    app: &AppHandle<R>,
+    runtime: &RuntimeContext,
+    label: &str,
+    options: &RendererWindowOptions,
+) -> Result<WebviewWindow<R>> {
     let route = normalize_route_path(options.route_path.as_deref());
     let preset = WindowPreset::SESSION;
 
-    let runtime_info = json!({
-        "runtimeId": runtime.id,
-        "backendUrl": runtime.base_url,
-        "workspacePath": options.workspace_path,
-        "platform": platform_string(),
-    });
-    let init_script = format!(
-        "(()=>{{try{{Object.defineProperty(window,'__CHRO_RUNTIME__',{{value:{info},writable:false,configurable:false}});}}catch(e){{window.__CHRO_RUNTIME__={info};}}}})();",
-        info = runtime_info,
-    );
+    let init_script = runtime_init_script(runtime, options.workspace_path.as_deref());
 
     let url = WebviewUrl::App(route.trim_start_matches('/').into());
-    let mut builder = WebviewWindowBuilder::new(app, label.clone(), url)
+    let mut builder = WebviewWindowBuilder::new(app, label, url)
         .title("Chro")
         .visible(false)
         .resizable(true)
@@ -83,20 +100,23 @@ pub async fn create_renderer_window<R: TauriRuntime>(
     // doesn't flash an empty frame.
     window.show().ok();
     window.set_focus().ok();
-
-    let pool = app.state::<WindowPool>();
-    pool.register(WindowMeta {
-        label: label.clone(),
-        runtime_id: runtime.id.clone(),
-        workspace_path: options.workspace_path.clone(),
-        workspace_key: options
-            .workspace_path
-            .as_deref()
-            .and_then(crate::runtime::pool::normalize_workspace_path_for_key),
-    })
-    .await;
-
     Ok(window)
+}
+
+/// Script that publishes the backend connection as `window.__CHRO_RUNTIME__`
+/// before any renderer code runs, so every window of the app (session windows
+/// and the edge toolbar alike) talks to the same `chro-server`.
+pub(crate) fn runtime_init_script(runtime: &RuntimeContext, workspace_path: Option<&str>) -> String {
+    let runtime_info = json!({
+        "runtimeId": runtime.id,
+        "backendUrl": runtime.base_url,
+        "workspacePath": workspace_path,
+        "platform": platform_string(),
+    });
+    format!(
+        "(()=>{{try{{Object.defineProperty(window,'__CHRO_RUNTIME__',{{value:{info},writable:false,configurable:false}});}}catch(e){{window.__CHRO_RUNTIME__={info};}}}})();",
+        info = runtime_info,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useCommandPaletteStore } from "../state/command-palette-store";
+import { useLayoutStore } from "../state/layout-store";
 import { useRightDockStore } from "../state/right-dock-store";
 import { useNewChat } from "./use-new-chat";
 
@@ -8,8 +9,13 @@ import { useNewChat } from "./use-new-chat";
  * - `palette`     — session-search command palette (⌘K / ⌘P)
  * - `file-search` — right-dock file search panel (⌘⇧F)
  * - `new-chat`    — open a new general-purpose chat (⌘N)
+ * - `toggle-pane-maximize` — focused pane fills the workspace (⌘⇧Enter)
  */
-export type GlobalShortcutAction = "palette" | "file-search" | "new-chat";
+export type GlobalShortcutAction =
+  | "palette"
+  | "file-search"
+  | "new-chat"
+  | "toggle-pane-maximize";
 
 type ShortcutKeyEvent = Pick<
   KeyboardEvent,
@@ -26,6 +32,7 @@ type ShortcutKeyEvent = Pick<
  * - ⌘K / ⌘P → session-search command palette
  * - ⌘⇧F     → file-search dock panel
  * - ⌘N      → new chat
+ * - ⌘⇧Enter → maximize / restore the focused pane
  */
 export function matchGlobalShortcut(
   event: ShortcutKeyEvent,
@@ -35,7 +42,9 @@ export function matchGlobalShortcut(
   const key = event.key.toLowerCase();
 
   if (event.shiftKey) {
-    return key === "f" ? "file-search" : null;
+    if (key === "f") return "file-search";
+    if (key === "enter") return "toggle-pane-maximize";
+    return null;
   }
   if (key === "k" || key === "p") return "palette";
   if (key === "n") return "new-chat";
@@ -44,13 +53,15 @@ export function matchGlobalShortcut(
 
 /**
  * Shell-level keyboard commands. ⌘K / ⌘P open the session-search palette, ⌘⇧F
- * focuses file search, and ⌘N opens a new chat. Session search and file search
- * are deliberately distinct surfaces bound to distinct shortcuts.
+ * focuses file search, ⌘N opens a new chat, and ⌘⇧Enter maximizes the focused
+ * pane. Session search and file search are deliberately distinct surfaces
+ * bound to distinct shortcuts.
  */
 export function useGlobalShortcuts() {
   const openPalette = useCommandPaletteStore((s) => s.openPalette);
   const focusSearchPanel = useRightDockStore((s) => s.focusSearchPanel);
   const newChat = useNewChat();
+  const setPaneMaximized = useLayoutStore((s) => s.setPaneMaximized);
 
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
@@ -61,6 +72,8 @@ export function useGlobalShortcuts() {
         openPalette();
       } else if (action === "file-search") {
         focusSearchPanel();
+      } else if (action === "toggle-pane-maximize") {
+        setPaneMaximized(!useLayoutStore.getState().paneMaximized);
       } else {
         void newChat();
       }
@@ -68,5 +81,5 @@ export function useGlobalShortcuts() {
 
     window.addEventListener("keydown", handleKeydown);
     return () => window.removeEventListener("keydown", handleKeydown);
-  }, [openPalette, focusSearchPanel, newChat]);
+  }, [openPalette, focusSearchPanel, newChat, setPaneMaximized]);
 }

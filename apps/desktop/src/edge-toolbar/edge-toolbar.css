@@ -1,0 +1,962 @@
+/*
+ * Edge toolbar surfaces in one fixed palette: warm charcoal glass, a warm grey
+ * hairline with a black outer ring and a short dark drop shadow, soft grey
+ * ink and a grass-green accent. The window ignores chro's light/dark setting:
+ * it sits on top of any desktop and reads the same on all of them.
+ *
+ * Two layers:
+ * - chro's own theme tokens are re-pointed for the whole edge document, so
+ *   the session components the panel reuses (conversation, question and
+ *   approval cards, composer) render in this palette without being forked.
+ *   The document is pinned to chro's dark theme (see `EdgeRootLayout`), so
+ *   `dark:` variants apply and these values only refine it.
+ * - `--edge-*` values style the tab, toolbar, badge, pager header and panel.
+ *
+ * Every selector is scoped to the edge document or to `edge-*` classes, so
+ * this file changes nothing in the session windows.
+ * Units are points (1 CSS px = 1 pt).
+ */
+
+:root[data-surface="edge"],
+:root[data-surface="edge"][data-theme] {
+  color-scheme: dark;
+
+  /* Surfaces: panel, raised rows, controls. */
+  --color-background-100: 38, 38, 38;
+  --color-background-90: 49, 49, 48;
+  --color-background-80: 54, 54, 53;
+
+  /* Ink: primary, secondary, tertiary, placeholder. */
+  --color-text-100: 252, 252, 248;
+  --color-text-200: 158, 158, 153;
+  --color-text-300: 129, 129, 121;
+  --color-text-400: 129, 129, 121;
+
+  /* Hairlines: subtle to strong. */
+  --color-border-100: 49, 49, 48;
+  --color-border-200: 56, 56, 55;
+  --color-border-300: 78, 77, 75;
+  --color-border-400: 114, 114, 110;
+  --color-scrollbar: 78, 77, 75;
+
+  /* Accent: grass green, stepped from the panel colour up to light tints. */
+  --color-primary-10: 47, 56, 33;
+  --color-primary-20: 54, 68, 30;
+  --color-primary-30: 63, 86, 26;
+  --color-primary-40: 73, 106, 21;
+  --color-primary-50: 85, 129, 15;
+  --color-primary-60: 94, 147, 11;
+  --color-primary-70: 104, 165, 6;
+  --color-primary-80: 110, 177, 3;
+  --color-primary-90: 114, 184, 1;
+  --color-primary-100: 116, 189, 0;
+  --color-primary-200: 127, 194, 20;
+  --color-primary-300: 138, 200, 41;
+  --color-primary-400: 152, 206, 66;
+  --color-primary-500: 166, 213, 92;
+  --color-primary-600: 180, 219, 117;
+  --color-primary-700: 194, 226, 143;
+  --color-primary-800: 208, 233, 168;
+  --color-primary-900: 222, 239, 194;
+
+  /* The hsl tokens of the shared UI package. */
+  --background: 0 0% 14.9%;
+  --foreground: 60 40% 98%;
+  --card: 60 1% 19%;
+  --card-foreground: 60 40% 98%;
+  --popover: 60 1% 19%;
+  --popover-foreground: 60 40% 98%;
+  --primary: 83.2 100% 37.1%;
+  --primary-foreground: 0 0% 12.9%;
+  --secondary: 60 1% 19%;
+  --secondary-foreground: 60 40% 98%;
+  --muted: 60 1% 19%;
+  --muted-foreground: 60 2.5% 61%;
+  --accent: 60 0.9% 21%;
+  --accent-foreground: 60 40% 98%;
+  --border: 60 0.9% 21.8%;
+  --input: 60 0.9% 21.8%;
+  --ring: 83.2 100% 37.1%;
+}
+
+.edge-root {
+  --edge-blue: #4691e2;
+  --edge-green: #74bd00;
+  --edge-amber: #febe29;
+  --edge-amber-dim: #8b4e23;
+  --edge-idle: #818179;
+  --edge-raised: #313130;
+  --edge-text-2: #9e9e99;
+  --edge-hair: rgba(255, 255, 255, 0.08);
+  --edge-list-w: 343px;
+  --edge-preview-w: 300px;
+  --edge-usage-w: 320px;
+
+  --edge-dock-w: 34px;
+  --edge-dock-gap: 7.5px;
+  /* The mock docks at 5 pt and lets the badge overhang onto the bezel; a real
+     screen has no bezel, so 8 pt keeps the badge inside the window. */
+  --edge-dock-edge: 8px;
+  --edge-dot-pitch: 15px;
+  --edge-tab-w: 12.5px;
+  --edge-card-gap: 23.5px;
+  --edge-panel-w: 390px;
+
+  --edge-surface: rgba(38, 38, 38, 0.95);
+  --edge-surface-edge:
+    0 0 0 1px rgba(114, 114, 110, 0.95),
+    0 0 0 1.75px rgba(0, 0, 0, 0.8),
+    0 2px 4px -1px rgba(0, 0, 0, 0.7);
+  --edge-tool-ink: rgba(252, 252, 248, 0.8);
+  --edge-text: #fcfcf8;
+  --edge-text-3: #818179;
+  --edge-control: #363635;
+  --edge-control-dim: #313130;
+  --edge-chip: #4e4d4b;
+  --edge-key: #4e4d4b;
+  --edge-key-dim: #363635;
+  --edge-key-text: #d5d5d2;
+  --edge-pager-dot: #4e4d4b;
+
+  /*
+   * Motion, copied verbatim from the mock (`css/tokens.css`, `toolbar.css`,
+   * `card.css`, `base.css`, `views/toolbar.js`). The spring is a measured
+   * linear() curve. The renderer reads the panel exit and dot grow durations
+   * from here too, so these are the only copies.
+   */
+  --edge-spring: linear(0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017 19.9%, 1.041 23.1%, 1.039 26.2%, 1.014 33.4%, 0.999 41.5%, 0.996 50%, 1);
+  --edge-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Toolbar parts folding in and out (.chrome). */
+  --edge-chrome-move: 420ms;
+  --edge-chrome-fade: 220ms;
+  --edge-chrome-morph: 300ms;
+  --edge-chrome-height: 160ms;
+  /* Expand order: capsule, then inbox (the mock's tools 0, capsule 30, inbox 60). */
+  --edge-capsule-delay: 30ms;
+  --edge-inbox-delay: 60ms;
+  --edge-more-delay: 90ms;
+  /* Press to talk and point at it (the mock's talk pill and region picker). */
+  --edge-bar-step: 50ms;
+  --edge-talk-open-fade: 90ms;
+  --edge-talk-open-grow: 380ms;
+  --edge-talk-open-delay: 60ms;
+  --edge-talk-close-fade: 120ms;
+  --edge-talk-close-shrink: 260ms;
+  --edge-word-in: 360ms;
+  --edge-receipt-in: 220ms;
+  --edge-live-pulse: 1.2s;
+  --edge-ask-fade: 60ms;
+  --edge-ask-leave: 100ms;
+  --edge-more-dots-fade: 90ms;
+  --edge-more-items-fade: 120ms;
+  --edge-more-items-delay: 30ms;
+  --edge-flare-fade: 200ms;
+  --edge-badge-pop: 360ms;
+  --edge-badge-tint: 300ms;
+  /* Session dots. */
+  --edge-dot-scale: 320ms;
+  --edge-dot-tint: 240ms;
+  --edge-spinner-fade: 160ms;
+  --edge-spinner-shrink: 200ms;
+  --edge-spin: 900ms;
+  --edge-spin-stagger: 170ms;
+  --edge-breathe: 1.3s;
+  --edge-dot-grow: 320ms;
+  /* Panels. */
+  --edge-panel-fade: 110ms;
+  --edge-panel-move: 320ms;
+  /* Panels opened by pointing (the list, its preview): the mock's .quick. */
+  --edge-panel-quick-fade: 60ms;
+  --edge-panel-quick-move: 160ms;
+  --edge-hint-fade: 90ms;
+  --edge-row-fade: 380ms;
+  --edge-row-hover: 80ms;
+  --edge-card-in: 170ms;
+  --edge-pager-width: 260ms;
+  --edge-pager-tint: 200ms;
+
+  position: fixed;
+  inset: 0;
+  /* The frame is larger than what it shows: only the surfaces take the
+     pointer (the shell lets clicks through the rest of the window). */
+  pointer-events: none;
+}
+.edge-root [data-edge-hit] { pointer-events: auto; }
+
+/* Stepped aside while chro's own window is in front: every chrome leaves
+   toward the screen edge as the mock's hidden surface does (40 pt, faded,
+   with the chrome's own timing), then the whole frame is hidden and takes
+   no pointer. Coming back, it is the collapsed tab again. */
+.edge-root[data-presence="hidden"] {
+  visibility: hidden;
+  transition: visibility 0s linear var(--edge-chrome-move);
+}
+.edge-root[data-presence="hidden"] .edge-chrome,
+.edge-root[data-presence="hidden"] [data-edge-hit] {
+  opacity: 0;
+  transform: translateX(40px);
+  pointer-events: none;
+  transition-delay: 0ms;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────── */
+
+/* Anchored on the capsule's centre, so the tab and the capsule it unfolds
+   into share one centre and the dots stay in place. */
+.edge-toolbar {
+  position: absolute;
+  inset-inline-end: var(--edge-dock-edge);
+  top: calc(50% - var(--edge-capsule-center, 0px));
+  width: var(--edge-dock-w);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--edge-dock-gap);
+}
+
+/* The strip between the toolbar and the screen edge belongs to it: the
+   pointer that brought the toolbar out is still there, where the tab was. */
+.edge-toolbar[data-surface="expanded"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: 100%;
+  width: var(--edge-dock-edge);
+}
+
+/* Scoped under the root to outrank the app's base rule for buttons and
+   [role="button"] (150 ms colour transitions), which would otherwise replace
+   this list when the capsule becomes the tab's button. */
+.edge-root .edge-chrome {
+  position: relative;
+  width: var(--edge-dock-w);
+  color: var(--edge-tool-ink);
+  background: var(--edge-surface);
+  border-radius: 999px;
+  box-shadow: var(--edge-surface-edge);
+  transition:
+    transform var(--edge-chrome-move) var(--edge-spring),
+    opacity var(--edge-chrome-fade) var(--edge-ease-out),
+    background var(--edge-chrome-morph) var(--edge-ease-out),
+    border-radius var(--edge-chrome-morph) var(--edge-ease-out),
+    box-shadow var(--edge-chrome-morph) var(--edge-ease-out),
+    width var(--edge-chrome-morph) var(--edge-ease-out),
+    margin var(--edge-chrome-morph) var(--edge-ease-out),
+    height var(--edge-chrome-height) var(--edge-ease-out);
+}
+.edge-chrome.edge-round {
+  height: var(--edge-dock-w);
+  display: grid;
+  place-items: center;
+}
+.edge-chrome .edge-glyph {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.6;
+}
+
+/* Collapsed: everything but the capsule folds toward the edge (no delay);
+   expanded: it unfolds in order. */
+.edge-root .edge-toolbar[data-surface="collapsed"] .edge-chrome:not(.edge-capsule) {
+  opacity: 0;
+  transform: translateX(14px) scale(0.8);
+  pointer-events: none;
+  transition-delay: 0ms;
+}
+.edge-root .edge-toolbar[data-surface="expanded"] .edge-tools { transition-delay: 0ms; }
+.edge-root .edge-toolbar[data-surface="expanded"] .edge-capsule { transition-delay: var(--edge-capsule-delay); }
+.edge-root .edge-toolbar[data-surface="expanded"] .edge-inbox { transition-delay: var(--edge-inbox-delay); }
+.edge-root .edge-toolbar[data-surface="expanded"] .edge-more { transition-delay: var(--edge-more-delay); }
+
+/* "…" opens into a column of items while pointed at (the mock's .more).
+   Closed, the three dots are the button; open, they fade and the items
+   beneath take the pointer. */
+.edge-chrome.edge-more { overflow: hidden; place-items: start center; }
+.edge-more-dots {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  transition: opacity var(--edge-more-dots-fade);
+}
+.edge-more-dots .edge-glyph,
+.edge-more-item .edge-glyph { width: 18px; height: 18px; }
+.edge-more-items {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--edge-more-items-fade) var(--edge-more-items-delay);
+}
+.edge-more-item {
+  width: var(--edge-dock-w);
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: inherit;
+  border-radius: 50%;
+}
+.edge-more-item .edge-glyph { opacity: 0.92; }
+.edge-more-item:hover .edge-glyph { opacity: 1; }
+.edge-more-item[data-selected] {
+  background: radial-gradient(circle, var(--edge-chip) 13px, transparent 13.5px);
+}
+.edge-chrome.edge-more[data-open] { height: calc(32px * var(--edge-more-items) + 8px); }
+.edge-more[data-open] .edge-more-dots { opacity: 0; pointer-events: none; }
+.edge-more[data-open] .edge-more-items { opacity: 1; pointer-events: auto; }
+
+.edge-badge {
+  position: absolute;
+  top: -5px;
+  inset-inline-end: -6px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--edge-green);
+  box-shadow: 0 0 0 2px #262626;
+  transform: scale(0);
+  transition:
+    transform var(--edge-badge-pop) var(--edge-spring),
+    background var(--edge-badge-tint);
+}
+.edge-badge[data-on] { transform: scale(1); }
+.edge-badge[data-status="waiting"] { background: var(--edge-amber); }
+
+/* ── Capsule, which is also the collapsed tab ────────────────────────── */
+
+.edge-capsule {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4.5px 0;
+}
+.edge-root .edge-toolbar[data-surface="collapsed"] .edge-capsule {
+  width: var(--edge-tab-w);
+  /* Out to the screen edge, keeping the column's width. */
+  margin-inline-end: calc(-1 * var(--edge-dock-edge) - 0.5px);
+  margin-inline-start: calc(var(--edge-dock-w) - var(--edge-tab-w) + var(--edge-dock-edge) + 0.5px);
+  padding: 9.5px 0;
+  border-radius: 6px 0 0 6px;
+  box-shadow: none;
+}
+/* The tab keeps the height of four dots (the reference's empty tab): with
+   no sessions it is the same black tab, empty, and dots pop into it; it only
+   grows from the fifth dot on. */
+.edge-root .edge-toolbar[data-surface="collapsed"] .edge-capsule {
+  min-height: calc(4 * var(--edge-dot-pitch) + 19px);
+}
+
+/* The corners where the tab meets the edge curve inward. */
+.edge-flare {
+  position: absolute;
+  inset-inline-end: 0;
+  width: 6px;
+  height: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--edge-flare-fade);
+}
+.edge-flare[data-side="top"] {
+  top: -6px;
+  background: radial-gradient(circle at 0 0, transparent 5.6px, var(--edge-surface) 6px);
+}
+.edge-flare[data-side="bottom"] {
+  bottom: -6px;
+  background: radial-gradient(circle at 0 100%, transparent 5.6px, var(--edge-surface) 6px);
+}
+.edge-toolbar[data-surface="collapsed"] .edge-flare { opacity: 1; }
+
+.edge-dot-slot {
+  width: 15px;
+  height: var(--edge-dot-pitch);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  flex: none;
+}
+button.edge-dot-slot { cursor: default; }
+/* No focus ring on the dots, as in the mock (a click never leaves one either:
+   the dots do not take focus on mouse down). */
+button.edge-dot-slot:focus,
+button.edge-dot-slot:focus-visible { outline: none; }
+
+.edge-status {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  display: grid;
+  place-items: center;
+}
+/* Filled dot: done, waiting. */
+.edge-status::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--edge-green);
+  transform: scale(0);
+  transition:
+    transform var(--edge-dot-scale) var(--edge-spring),
+    background var(--edge-dot-tint);
+}
+/* Running: a spinning arc; each dot's arc starts a step further round. */
+.edge-status svg {
+  position: absolute;
+  inset: 0;
+  width: 10px;
+  height: 10px;
+  color: var(--edge-blue);
+  animation: edge-spin var(--edge-spin) linear infinite;
+  animation-delay: calc(-1 * var(--edge-dot-index, 0) * var(--edge-spin-stagger));
+  transition:
+    opacity var(--edge-spinner-fade),
+    transform var(--edge-spinner-shrink);
+}
+.edge-status:not([data-status="running"])::before { transform: scale(1); }
+.edge-status[data-status="idle"]::before {
+  width: 7px;
+  height: 7px;
+  background: var(--edge-idle);
+}
+.edge-status:not([data-status="running"]) svg { opacity: 0; transform: scale(0.4); }
+.edge-status[data-status="waiting"]::before {
+  background: var(--edge-amber);
+  animation: edge-breathe var(--edge-breathe) ease-in-out infinite;
+}
+@keyframes edge-breathe { 50% { background: var(--edge-amber-dim); } }
+@keyframes edge-spin { to { rotate: 360deg; } }
+
+.edge-overflow {
+  height: 12px;
+  margin-top: 1px;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 12px;
+  letter-spacing: -0.3px;
+  font-variant-numeric: tabular-nums;
+  color: #8e8e93;
+}
+
+/* ── Panel ───────────────────────────────────────────────────────────── */
+
+/* Static box the panel animates inside; it is the panel's hit region, so
+   the pointer never follows a transform. */
+.edge-panel-slot {
+  position: absolute;
+  inset-inline-end: calc(var(--edge-dock-edge) + var(--edge-dock-w) + var(--edge-card-gap));
+  width: var(--edge-panel-w);
+}
+.edge-panel-slot[data-slot="list"] { --edge-panel-w: var(--edge-list-w); }
+.edge-panel-slot[data-slot="usage"] { --edge-panel-w: var(--edge-usage-w); }
+/* The preview sits 8 pt beside the list, toward the screen centre. */
+.edge-panel-slot[data-slot="preview"] {
+  --edge-panel-w: var(--edge-preview-w);
+  inset-inline-end: calc(var(--edge-dock-edge) + var(--edge-dock-w) + var(--edge-card-gap) + var(--edge-list-w) + 8px);
+}
+
+.edge-panel {
+  width: var(--edge-panel-w);
+  border-radius: 16px;
+  overflow: hidden;
+  /* Opaque, unlike the 0.95 glass of the toolbar: the conversation it hosts
+     paints opaque blocks (the sticky request) in the same colour, which would
+     show as darker bands over a light desktop. */
+  background: rgb(var(--color-background-100));
+  color: var(--edge-text);
+  box-shadow: var(--edge-surface-edge), 0 12px 28px rgba(0, 0, 0, 0.25);
+  transform-origin: 100% 0;
+  opacity: 0;
+  scale: 0.97;
+  translate: 6px 0;
+  pointer-events: none;
+  transition:
+    opacity var(--edge-panel-fade) var(--edge-ease-out),
+    scale var(--edge-panel-move) var(--edge-spring),
+    translate var(--edge-panel-move) var(--edge-spring);
+}
+.edge-panel[data-timing="quick"] {
+  transition:
+    opacity var(--edge-panel-quick-fade) linear,
+    scale var(--edge-panel-quick-move) var(--edge-ease-out),
+    translate var(--edge-panel-quick-move) var(--edge-ease-out);
+}
+.edge-panel[data-on] {
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+  pointer-events: auto;
+}
+
+/* Moving to another item in the pager: a short blurred crossfade. */
+.edge-card-enter { animation: edge-card-in var(--edge-card-in) var(--edge-ease-out); }
+@keyframes edge-card-in { from { opacity: 0.15; filter: blur(5px); } }
+
+.edge-pager {
+  display: flex;
+  align-items: center;
+  gap: 5.5px;
+  flex: none;
+}
+.edge-pager i {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--edge-pager-dot);
+  transition:
+    width var(--edge-pager-width) var(--edge-spring),
+    background var(--edge-pager-tint);
+}
+.edge-pager i[data-on] {
+  width: 16px;
+  background: var(--edge-blue);
+}
+
+.edge-hpill {
+  height: 24px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 2px 0 7px;
+  border-radius: 12px;
+  background: var(--edge-control);
+  color: var(--edge-text);
+}
+.edge-hpill[data-kind="nav"] { width: 49px; }
+.edge-hpill[data-kind="close"] { width: 59px; padding-left: 8px; }
+.edge-hpill:disabled { background: var(--edge-control-dim); color: var(--edge-text-3); opacity: 1; }
+.edge-hpill:disabled .edge-key { background: var(--edge-key-dim); color: var(--edge-text-3); }
+.edge-hpill > svg { width: 15px; height: 15px; stroke-width: 1.8; }
+
+.edge-hcircle {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--edge-chip);
+  color: var(--edge-text);
+  display: grid;
+  place-items: center;
+}
+.edge-hcircle[aria-pressed="true"] { background: var(--edge-green); color: #212121; }
+.edge-hcircle > svg { width: 15px; height: 15px; stroke-width: 2.3; }
+
+.edge-key {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: var(--edge-key);
+  color: var(--edge-key-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+.edge-key[data-word] { padding: 0 7px; }
+
+/* The status dot on the agent's mark in the panel's status line. */
+.edge-state-dot { background: var(--edge-green); }
+.edge-state-dot[data-status="waiting"] { background: var(--edge-amber); }
+.edge-state-dot[data-status="running"] { background: var(--edge-blue); }
+
+/* The mock's pills, keycaps and dot buttons change state at once; the app's
+   base rule would give every button a 150 ms colour fade. */
+.edge-root .edge-hpill,
+.edge-root .edge-hcircle,
+.edge-root .edge-dot-slot {
+  transition: none;
+}
+
+.edge-help dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  margin: 0;
+  align-items: center;
+}
+.edge-help dt { display: flex; gap: 4px; }
+.edge-help dd { margin: 0; }
+
+/* ── Tab hint (the mock's "⌥ x2 to open" pill) ───────────────────────── */
+
+.edge-hint {
+  position: absolute;
+  /* 21 pt from the screen edge, as the mock places it beside the tab. */
+  inset-inline-end: calc(21px - var(--edge-dock-edge));
+  top: var(--edge-capsule-center, 0px);
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--edge-surface);
+  box-shadow: var(--edge-surface-edge);
+  color: var(--edge-text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  translate: 0 -50%;
+  opacity: 0;
+  transition: opacity var(--edge-hint-fade);
+  pointer-events: none;
+}
+.edge-hint[data-on] { opacity: 1; }
+
+/* ── Session list (the mock's agents panel) ──────────────────────────── */
+
+.edge-agents {
+  padding: 11.5px 6px 9.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+.edge-agroup-block { display: flex; flex-direction: column; gap: 1px; }
+.edge-agroup-block + .edge-agroup-block { margin-top: 7.8px; }
+.edge-agroup {
+  padding: 0 9px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #808080;
+}
+.edge-agroup + .edge-arow { margin-top: -1px; }
+.edge-root .edge-arow {
+  position: relative;
+  width: 100%;
+  height: 32px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6.2px;
+  padding: 0 13px 0 7.6px;
+  border-radius: 8px;
+  font-size: 13px;
+  letter-spacing: -0.06px;
+  color: var(--edge-text);
+  text-align: left;
+  transition: background var(--edge-row-fade) var(--edge-ease-out);
+}
+.edge-root .edge-arow:hover,
+.edge-root .edge-arow[data-previewed] {
+  background: var(--edge-raised);
+  transition-duration: var(--edge-row-hover);
+}
+.edge-arow .edge-status { flex: none; }
+.edge-agent-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--edge-text-2);
+}
+.edge-aname {
+  flex: 1;
+  min-width: 0;
+  margin-left: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Hover preview beside the list (the mock's preview thread panel) ── */
+
+.edge-tp-head { display: flex; align-items: center; gap: 9px; padding: 11px 12px 9px 14px; }
+.edge-tp-titles { flex: 1; min-width: 0; }
+.edge-tp-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edge-tp-sub { margin-top: 2px; font-size: 11px; color: var(--edge-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edge-tp-log {
+  max-height: 260px;
+  padding: 2px 12px 8px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.edge-su-user { padding: 8px 12px; border-radius: 6px; background: var(--edge-raised); font-size: 12.5px; color: var(--edge-text); }
+.edge-su-ran { margin-top: 2px; font-size: 11.5px; color: var(--edge-text-2); }
+.edge-su-ran b { margin-left: 3px; font-weight: 500; color: var(--edge-text); opacity: 0.85; }
+.edge-su-tool { font-size: 12px; color: var(--edge-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edge-su-reply {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--edge-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.edge-su-status { display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 12px; color: var(--edge-text-2); }
+.edge-su-spin {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--edge-blue);
+  border-right-color: transparent;
+  animation: edge-spin var(--edge-spin) linear infinite;
+}
+.edge-tp-foot { padding: 0 14px 9px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--edge-text-2); }
+.edge-tp-foot span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edge-tp-foot svg { width: 11px; height: 11px; flex: none; }
+.edge-tp-sep { width: 1px; height: 10px; flex: none; background: var(--edge-hair); }
+
+/* ── Usage ("…" → Usage, the mock's usage panel) ─────────────────────── */
+
+.edge-usage { padding: 14px 16px; color: var(--edge-text); }
+.edge-usage-prov {
+  display: flex;
+  justify-content: space-between;
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.edge-usage-prov span { font-size: 13px; font-weight: 500; color: var(--edge-text-2); }
+.edge-usage-block + .edge-usage-block { margin-top: 18px; }
+.edge-usage-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+}
+.edge-usage-line span { font-weight: 500; color: var(--edge-text-2); font-variant-numeric: tabular-nums; }
+.edge-usage-empty { margin: 0; font-size: 13px; color: var(--edge-text-2); }
+
+/* ── Tools: microphone and camera (the mock's .tools) ────────────────── */
+
+.edge-chrome.edge-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 3px 0;
+}
+.edge-tool {
+  width: var(--edge-dock-w);
+  height: 27px;
+  display: grid;
+  place-items: center;
+  color: inherit;
+}
+.edge-tool .edge-glyph { width: 19px; height: 19px; stroke-width: 1.6; }
+.edge-tool .edge-bars { display: none; gap: 2.5px; align-items: center; height: 14px; }
+/* A live level meter: white bars whose heights follow the microphone (the
+   mock's are red and only animated). Heights are set per level; this only
+   eases between them. */
+.edge-tool .edge-bars i {
+  width: 3px;
+  height: 3px;
+  border-radius: 2px;
+  background: #fff;
+  transition: height var(--edge-bar-step) linear;
+}
+.edge-tool[data-recording] .edge-glyph { display: none; }
+.edge-tool[data-recording] .edge-bars { display: flex; }
+
+/* ── Talk pill (the mock's .talk) ────────────────────────────────────── */
+
+/* Opens as a circle at the toolbar and grows toward the screen centre. */
+.edge-talk {
+  position: absolute;
+  inset-inline-end: calc(var(--edge-dock-edge) + var(--edge-dock-w) + var(--edge-card-gap));
+  top: var(--edge-mic-center, 50%);
+  height: 48px;
+  width: 48px;
+  padding: 0 18px;
+  border-radius: 15px;
+  background: var(--edge-surface);
+  box-shadow: var(--edge-surface-edge);
+  color: var(--edge-text);
+  font-size: 14px;
+  letter-spacing: -0.2px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  translate: 0 -50%;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--edge-talk-close-fade) var(--edge-ease-out),
+    width var(--edge-talk-close-shrink) var(--edge-ease-out);
+}
+.edge-talk[data-on] {
+  opacity: 1;
+  width: 312px;
+  transition:
+    opacity var(--edge-talk-open-fade) var(--edge-ease-out),
+    width var(--edge-talk-open-grow) var(--edge-talk-open-delay) var(--edge-spring);
+}
+/* Overflowing, it is scrolled to its end (the newest words). */
+.edge-talk-text { flex: 1; min-width: 0; overflow: hidden; }
+.edge-talk-to { color: #8e8e93; }
+.edge-talk-word { animation: edge-word-in var(--edge-word-in) var(--edge-ease-out) both; }
+@keyframes edge-word-in { from { opacity: 0; color: #777; } }
+.edge-talk-sent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  color: #d9d9d9;
+  overflow: hidden;
+  animation: edge-receipt-in var(--edge-receipt-in) var(--edge-ease-out);
+}
+/* The session title gives way: "Sent to" and the place stay whole. */
+.edge-talk-sent-line { display: flex; min-width: 0; }
+.edge-talk-sent-line > span { flex: none; }
+.edge-talk-sent b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #fff;
+  font-weight: 600;
+}
+.edge-talk-sent .edge-glyph { width: 15px; height: 15px; stroke-width: 2.2; flex: none; }
+.edge-talk-live {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--edge-blue);
+  animation: edge-live var(--edge-live-pulse) ease-in-out infinite;
+}
+@keyframes edge-live { 50% { opacity: 0.45; } }
+@keyframes edge-receipt-in { from { opacity: 0; } }
+/* A note in the pill's place: one line, and the button that helps. */
+.edge-talk[data-phase="notice"] { padding: 0 8px 0 16px; font-size: 13px; }
+/* Wide enough for the note and its button on one line. */
+.edge-talk[data-phase="notice"][data-on] { width: 408px; }
+.edge-talk[data-phase="notice"][data-edge-hit] { pointer-events: auto; }
+.edge-talk-notice { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.edge-talk-notice-text { flex: 1; overflow: hidden; text-overflow: ellipsis; color: #d9d9d9; }
+.edge-talk-settings {
+  flex: none;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: var(--edge-raised);
+  color: var(--edge-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.edge-talk-settings:hover { background: var(--edge-chip); }
+
+/* ── Point at it: the capture window (the mock's .point-layer and .ask) ── */
+
+.edge-capture-layer {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  pointer-events: auto;
+}
+.edge-capture-shade { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.18); }
+.edge-capture-rect {
+  position: absolute;
+  border: 1.5px solid #fff;
+  border-radius: 4px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.edge-capture-size {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  translate: -50% 0;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.edge-capture-help {
+  position: absolute;
+  left: 50%;
+  top: 40px;
+  translate: -50% 0;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: rgba(13, 13, 13, 0.9);
+  color: #fff;
+  font-size: 13px;
+}
+.edge-capture-layer[data-asking] { cursor: default; }
+.edge-capture-layer[data-asking] .edge-capture-shade,
+.edge-capture-layer[data-asking] .edge-capture-help { display: none; }
+
+.edge-ask {
+  position: fixed;
+  width: 330px;
+  padding: 10px;
+  border-radius: 16px;
+  background: var(--edge-surface);
+  box-shadow: var(--edge-surface-edge);
+  color: var(--edge-text);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--edge-ask-fade) linear, filter var(--edge-ask-leave);
+}
+.edge-ask[data-on] { opacity: 1; pointer-events: auto; }
+.edge-ask[data-leaving] {
+  opacity: 0;
+  filter: blur(6px);
+  transition: opacity var(--edge-ask-leave), filter var(--edge-ask-leave);
+}
+.edge-ask-row { display: flex; align-items: center; gap: 7px; }
+.edge-ask-field {
+  flex: 1;
+  min-height: 36px;
+  border-radius: 14px;
+  background: var(--edge-raised);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 8px;
+}
+.edge-ask-field textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 120px;
+  padding: 9px 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  field-sizing: content;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 18px;
+  color: #fff;
+}
+.edge-ask-field textarea::placeholder { color: #aeaeb2; }
+.edge-ask-mic { display: grid; place-items: center; color: #c7c7cc; }
+.edge-ask-mic[data-recording] { color: var(--edge-green); }
+.edge-ask-mic .edge-glyph { width: 15px; height: 15px; stroke-width: 1.5; }
+.edge-ask-send {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--edge-raised);
+  color: #8e8e93;
+  display: grid;
+  place-items: center;
+}
+.edge-ask-send[data-on] { color: #fff; }
+.edge-ask-send .edge-glyph { width: 15px; height: 15px; stroke-width: 2; }
+.edge-ask-hint { margin: 7px 4px 0; font-size: 12px; color: #aeaeb2; }
+

@@ -30,7 +30,7 @@ use tokio::process::Command;
 use ts_rs::TS;
 
 use self::{
-    client::{ExitSignalSender, LogWriter, PiClient},
+    client::{ExitSignalSender, PiClient},
     normalize_logs::PiError,
 };
 use crate::{
@@ -43,7 +43,7 @@ use crate::{
         SpawnedChild, StandardCodingAgentExecutor,
     },
     spawn::Invocation,
-    stdout_dup::create_stdout_pipe_writer,
+    stdout_dup::{LogWriter, create_stdout_pipe_writer},
 };
 
 /// Returns the pi config home directory (`PI_CODING_AGENT_DIR`, else `~/.pi/agent`).
@@ -101,6 +101,18 @@ pub struct Pi {
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     approvals_service: Option<Arc<dyn ExecutorApprovalService>>,
 }
+
+/// Flags chro passes to `pi` itself. A user launch argument naming one of
+/// them is refused.
+pub(crate) const RESERVED_LAUNCH_FLAGS: &[&str] = &[
+    "--mode",
+    "--provider",
+    "--model",
+    "--thinking",
+    "--system-prompt",
+    "--append-system-prompt",
+    "--session-id",
+];
 
 impl Pi {
     /// Whether tool execution runs unattended (no approval gating).
@@ -316,6 +328,29 @@ fn pi_logged_in_timestamp(auth_path: &Path) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_flag_chro_passes_is_reserved() {
+        let pi = Pi {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude".to_string()),
+            thinking_level: Some(ThinkingLevel::High),
+            system_prompt: Some("system".to_string()),
+            append_system_prompt: Some("append".to_string()),
+            ..Pi::default()
+        };
+        let params = pi
+            .build_command_builder(Some("session"))
+            .unwrap()
+            .params
+            .unwrap_or_default();
+        for flag in params.iter().filter(|p| p.starts_with('-')) {
+            assert!(
+                RESERVED_LAUNCH_FLAGS.contains(&flag.as_str()),
+                "`{flag}` is passed by chro but not reserved"
+            );
+        }
+    }
 
     #[test]
     fn default_runs_unattended() {

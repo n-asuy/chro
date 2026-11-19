@@ -143,30 +143,18 @@ import { useComposerFileDrag } from "./hooks/use-composer-file-drag";
 import { useConversationFind } from "./hooks/use-conversation-find";
 import { useImageUploads } from "./hooks/use-image-uploads";
 import { usePromptEditorHandle } from "./hooks/use-prompt-editor";
+import { useSessionApprovals } from "./hooks/use-session-approvals";
 import type { PreparedPromptPayload } from "./hooks/use-single-session-controller";
+import { parseExecutorProfileId } from "./lib/executor-profile";
+import { preparePromptPayload } from "./lib/prompt-payload";
 import { composerSubmitIntent } from "./lib/session-queue";
 import {
   getPromptEditorScopeState,
   usePromptEditorStore,
 } from "./state/prompt-editor-store";
 import { useTaskTitleOverridesStore } from "./state/task-title-overrides-store";
-import {
-  QUESTIONS_SKIPPED_MESSAGE,
-  type UserQuestion,
-  useUserQuestionStore,
-} from "./state/user-question-store";
 import type { StoredTask } from "./types";
-import {
-  contextEntriesToRefs,
-  formatContextForPrompt,
-  formatSkillContextForPrompt,
-} from "./types/context";
 import { AbortControllerRegistry } from "./utils/abort-controller-registry";
-import {
-  type McpApprovalDecision,
-  findPendingMcpApproval,
-  mcpApprovalResponseBody,
-} from "./utils/mcp-approval-mapping";
 import {
   SESSION_DRAG_DATA_TYPE,
   parseSessionDragPayload,
@@ -210,25 +198,6 @@ const createPerfRequestId = (): string => {
 
 const normalizeSessionErrorMessage = (message: string): string =>
   message.replace(/^bad request:\s*/i, "").trim();
-
-const parseExecutorProfileId = (
-  value: string | null | undefined,
-): ExecutorProfileId | null => {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as ExecutorProfileId;
-    if (!parsed || !parsed.executor) return null;
-    return {
-      executor: parsed.executor,
-      variant: parsed.variant ?? null,
-      model: parsed.model ?? null,
-      reasoning_effort: parsed.reasoning_effort ?? null,
-    };
-  } catch (error) {
-    console.warn("[session] Failed to parse executor profile", error);
-    return null;
-  }
-};
 
 type SingleAgentSessionViewProps = {
   sidebarCollapsed?: boolean;
@@ -359,6 +328,14 @@ export function SingleAgentSessionView({
     },
     [editor, setPromptPopover],
   );
+  const cloudEnabled = useFlag("cloud_sessions");
+  const [cloudSignInPending, setCloudSignInPending] = useState(false);
+  const [executionLocation, setExecutionLocation] = useState<
+    "computer" | "cloud"
+  >("computer");
+  useEffect(() => {
+    if (!routeTaskSlug) setExecutionLocation("computer");
+  }, [routeTaskSlug, routeProjectId]);
   const referencesPopoverEnabled = useFlag("session_references_popover");
   const [isAbortingConflicts, setIsAbortingConflicts] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
@@ -665,15 +642,6 @@ export function SingleAgentSessionView({
 
   const taskRunId = pendingSubmission?.runId ?? activeRunRecord?.id ?? null;
 
-  // User question state from store
-  const pendingQuestionsMap = useUserQuestionStore((s) => s.pendingQuestions);
-  const setPendingQuestions = useUserQuestionStore(
-    (s) => s.setPendingQuestions,
-  );
-  const setQuestionResult = useUserQuestionStore((s) => s.setResult);
-  const pendingQuestions = taskRunId
-    ? pendingQuestionsMap.get(taskRunId) ?? null
-    : null;
   useDocumentTitle(activeTask?.title ?? null);
 
   // The log protocol's `finished` marker is the authoritative end of a turn.
@@ -731,7 +699,10 @@ export function SingleAgentSessionView({
   // follow-up rebuilds the worktree from it, so the composer stays open and
   // only says what sending will do.
   const isWorktreeCleanedUp = Boolean(activeRunRecord?.worktree_deleted);
-  const canSend = Boolean(activeStreamTaskId || workspace) && !isSending;
+  const canSend =
+    Boolean(activeStreamTaskId || workspace) &&
+    !isSending &&
+    !cloudSignInPending;
   // The runtime (Claude↔Codex↔Pi) can't change mid-session because resume
   // ids are executor-specific. Model overrides are applied to the next run;
   // Codex carries them through thread/fork and Pi/Claude pass them on resume.
@@ -1184,6 +1155,7 @@ export function SingleAgentSessionView({
     activeTaskId: activeStreamTaskId,
     taskRunId,
     forceNewAttempt: shouldForceNewAttempt,
+    executionLocation: cloudEnabled ? executionLocation : "computer",
     useWorktree,
     baseBranch,
     sessionExecutorSelection,
@@ -1223,27 +1195,14 @@ export function SingleAgentSessionView({
     ],
   );
 
-  const buildPromptPayload = useCallback((): PreparedPromptPayload | null => {
-    const contextEntries = editor.getContextEntries();
-    const contextPrefix = formatContextForPrompt(contextEntries);
-    const skillEntries = editor.getSkillEntries();
-    const skillPrefix = formatSkillContextForPrompt(skillEntries);
-    const imagesMarkdown = getImagesMarkdown();
-    const text = editor.getText().trim();
-    const prompt = [contextPrefix, skillPrefix, imagesMarkdown, text]
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-    if (!prompt) {
-      return null;
-    }
-    return {
-      prompt,
-      contextRefs: contextEntriesToRefs(contextEntries),
-      imageIds: getImageIds(),
-      selectedSkillIds: skillEntries.map((skill) => skill.id),
-    };
-  }, [editor, getImageIds, getImagesMarkdown]);
+  const buildPromptPayload = useCallback(
+    (): PreparedPromptPayload | null =>
+      preparePromptPayload(editor, {
+        markdown: getImagesMarkdown(),
+        ids: getImageIds(),
+      }),
+    [editor, getImageIds, getImagesMarkdown],
+  );
 
   // Send handler
   const handleSend = useCallback(async () => {
@@ -1256,7 +1215,7 @@ export function SingleAgentSessionView({
       return;
     }
 
-    if (isUploading) return;
+    if (isUploading || cloudSignInPending) return;
 
     const payload = buildPromptPayload();
     if (!payload) {
@@ -1312,6 +1271,7 @@ export function SingleAgentSessionView({
     addErrorMessage,
     t,
     isUploading,
+    cloudSignInPending,
     buildPromptPayload,
     isSending,
     queuedMessages.length,
@@ -1401,134 +1361,18 @@ export function SingleAgentSessionView({
     [handleRetryMalformedToolCall, handleRetryApiError],
   );
 
-  // User question handlers
-  const handleQuestionAnswer = useCallback(
-    async (answers: Record<string, string>) => {
-      if (!pendingQuestions || !taskRunId) return;
-
-      const { toolUseId } = pendingQuestions;
-
-      try {
-        // Store result immediately for real-time UI update
-        setQuestionResult(toolUseId, answers);
-
-        // Respond via approval API
-        await desktopFetch(
-          `/rpc/approvals/${encodeURIComponent(toolUseId)}/respond`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              status: { status: "approved" },
-              answers,
-            }),
-          },
-        );
-
-        // Clear pending question
-        setPendingQuestions(taskRunId, null);
-      } catch (error) {
-        console.error("[handleQuestionAnswer] Failed to submit answer", error);
-      }
-    },
-    [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions],
-  );
-
-  const handleQuestionSkip = useCallback(async () => {
-    if (!pendingQuestions || !taskRunId) return;
-
-    const { toolUseId } = pendingQuestions;
-
-    try {
-      // Store skipped result
-      setQuestionResult(toolUseId, { error: QUESTIONS_SKIPPED_MESSAGE });
-
-      // Respond via approval API with denied status
-      await desktopFetch(
-        `/rpc/approvals/${encodeURIComponent(toolUseId)}/respond`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            status: { status: "denied", reason: QUESTIONS_SKIPPED_MESSAGE },
-          }),
-        },
-      );
-
-      // Clear pending question
-      setPendingQuestions(taskRunId, null);
-    } catch (error) {
-      console.error("[handleQuestionSkip] Failed to skip question", error);
-    }
-  }, [pendingQuestions, taskRunId, setQuestionResult, setPendingQuestions]);
-
-  // Surface pending AskUserQuestion approvals from the active stream as the
-  // interactive question panel, and drop the panel once the approval resolves
-  // (answered, denied, or timed out).
-  useEffect(() => {
-    if (!taskRunId) return;
-
-    const pendingApproval = Object.values(approvals).find(
-      (approval) =>
-        approval.task_run_id === taskRunId &&
-        approval.tool_name === "AskUserQuestion" &&
-        approval.status.status === "pending",
-    );
-    const questions = pendingApproval
-      ? (pendingApproval.tool_input as { questions?: UserQuestion[] } | null)
-          ?.questions ?? []
-      : [];
-
-    const store = useUserQuestionStore.getState();
-    // An approval with a locally recorded result was already answered or
-    // skipped — its stream record just hasn't flipped from "pending" yet.
-    if (
-      pendingApproval &&
-      questions.length > 0 &&
-      !store.results.has(pendingApproval.id)
-    ) {
-      const existing = store.pendingQuestions.get(taskRunId);
-      if (existing?.toolUseId !== pendingApproval.id) {
-        store.setPendingQuestions(taskRunId, {
-          taskRunId,
-          toolUseId: pendingApproval.id,
-          questions,
-        });
-      }
-    } else {
-      store.clearPendingQuestions(taskRunId);
-    }
-  }, [approvals, taskRunId]);
-
-  // MCP tool approvals need no store: the approval record in the active stream
-  // is already the source of truth, and it clears itself once resolved.
-  const pendingMcpApproval = useMemo(
-    () => findPendingMcpApproval(approvals, taskRunId ?? null),
-    [approvals, taskRunId],
-  );
-
-  const handleMcpApprovalDecision = useCallback(
-    async (decision: McpApprovalDecision) => {
-      if (!pendingMcpApproval) return;
-      const { approvalId } = pendingMcpApproval;
-      try {
-        await desktopFetch(
-          `/rpc/approvals/${encodeURIComponent(approvalId)}/respond`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(mcpApprovalResponseBody(decision)),
-          },
-        );
-      } catch (error) {
-        console.error(
-          "[handleMcpApprovalDecision] Failed to submit decision",
-          error,
-        );
-      }
-    },
-    [pendingMcpApproval],
-  );
+  // What the agent is blocked on (a question set or an MCP tool approval),
+  // and how to answer it.
+  const {
+    pendingQuestions,
+    answerQuestions: handleQuestionAnswer,
+    skipQuestions: handleQuestionSkip,
+    pendingMcpApproval,
+    decideMcpApproval: handleMcpApprovalDecision,
+  } = useSessionApprovals({
+    approvals,
+    taskRunId: streamingRunId ?? taskRunId,
+  });
 
   // Find-in-conversation (Cmd/Ctrl+F), mirroring the file editor's find UX.
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
@@ -1678,7 +1522,11 @@ export function SingleAgentSessionView({
         const dropX = event.clientX;
         const dropY = event.clientY;
         editor.setCursorFromPoint(dropX, dropY);
-        editor.addSessionPart(sessionPayload.taskId, sessionPayload.branch);
+        editor.addSessionPart(
+          sessionPayload.taskId,
+          sessionPayload.branch,
+          sessionPayload.title,
+        );
         return;
       }
 
@@ -1804,11 +1652,8 @@ export function SingleAgentSessionView({
   );
   const showSessionListLoading = isSessionsLoading && sortedTasks.length === 0;
 
-  // A not-yet-started session: surface the "From" branch and Worktree/Local
-  // pickers beneath the prompt so they're chosen before the run begins. Once a
-  // run exists these move into the header environment popover, so the inline
-  // footer hides itself. Scratch and non-Git projects have no worktree/branch
-  // choice to make, so it stays hidden there too.
+  // Location, branch and checkout mode are chosen before the first run.
+  // Scratch and non-Git chats have no repository execution options.
   const showNewSessionExecutionControls =
     !isScratch && !activeTaskId && !pendingSubmission && isGitRepository;
 
@@ -1833,11 +1678,27 @@ export function SingleAgentSessionView({
         onChange={(event) => handleFiles(event.target.files)}
       />
 
-      {/* Wrapper doubles as the stacking context so the new-session tray can
-          tuck behind the card (card z-10 over tray z-0). */}
+      {/* One-time execution controls sit above the new-session composer. */}
       <div
         className={cn("relative w-full px-4 pb-4 pt-3", inputWrapperClassName)}
       >
+        {/* Execution location is chosen once, above a new session's composer. */}
+        {showNewSessionExecutionControls && (
+          <NewSessionExecutionControls
+            cloudEnabled={cloudEnabled}
+            executionLocation={executionLocation}
+            onExecutionLocationChange={setExecutionLocation}
+            onCloudSignInPendingChange={setCloudSignInPending}
+            className="relative z-20 mb-2 min-h-8 px-1"
+            useWorktree={useWorktree}
+            onUseWorktreeChange={setUseWorktree}
+            baseBranch={baseBranch}
+            baseBranchSearch={baseBranchSearch}
+            onBaseBranchSearchChange={setBaseBranchSearch}
+            filteredBaseBranches={filteredBaseBranches}
+            onBaseBranchSelect={setBaseBranch}
+          />
+        )}
         <div
           className={cn(
             "relative z-10 flex flex-col gap-3 rounded-2xl border bg-background p-4 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:shadow-md",
@@ -2245,21 +2106,6 @@ export function SingleAgentSessionView({
             </div>
           </div>
         </div>
-
-        {/* Tray tucked behind the card bottom: From-branch + Worktree/Local
-            pickers for a not-yet-started session. */}
-        {showNewSessionExecutionControls && (
-          <NewSessionExecutionControls
-            className="relative z-0 mx-0.5 -mt-4 h-[58px] rounded-b-2xl bg-muted/60 px-2 pt-4"
-            useWorktree={useWorktree}
-            onUseWorktreeChange={setUseWorktree}
-            baseBranch={baseBranch}
-            baseBranchSearch={baseBranchSearch}
-            onBaseBranchSearchChange={setBaseBranchSearch}
-            filteredBaseBranches={filteredBaseBranches}
-            onBaseBranchSelect={setBaseBranch}
-          />
-        )}
       </div>
     </div>
   );

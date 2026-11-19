@@ -101,7 +101,12 @@ async fn session_on_branch() -> Fixture {
 async fn merge_replays_a_branch_that_fell_behind_its_target() {
     let _env = SANDBOX_ENV.lock().await;
     let fixture = session_on_branch().await;
-    commit_file(&fixture.repo, "other.md", "another session\n", "other session landed");
+    commit_file(
+        &fixture.repo,
+        "other.md",
+        "another session\n",
+        "other session landed",
+    );
 
     let outcome = TaskService::new(&fixture.runtime)
         .merge_task_run(fixture.run.id, None)
@@ -109,7 +114,10 @@ async fn merge_replays_a_branch_that_fell_behind_its_target() {
         .expect("a branch that is only behind must merge without a manual rebase");
 
     assert_eq!(outcome.target_branch, "main");
-    assert_eq!(git(&fixture.repo, &["rev-parse", "main"]), outcome.merge_commit);
+    assert_eq!(
+        git(&fixture.repo, &["rev-parse", "main"]),
+        outcome.merge_commit
+    );
     assert_eq!(
         std::fs::read_to_string(fixture.repo.join("session.md")).unwrap(),
         "session work\n"
@@ -125,7 +133,12 @@ async fn merge_replays_a_branch_that_fell_behind_its_target() {
 async fn merge_replays_uncommitted_work_too() {
     let _env = SANDBOX_ENV.lock().await;
     let fixture = session_on_branch().await;
-    commit_file(&fixture.repo, "other.md", "another session\n", "other session landed");
+    commit_file(
+        &fixture.repo,
+        "other.md",
+        "another session\n",
+        "other session landed",
+    );
     std::fs::write(fixture.worktree.join("draft.md"), "not yet committed\n").unwrap();
 
     TaskService::new(&fixture.runtime)
@@ -143,7 +156,12 @@ async fn merge_replays_uncommitted_work_too() {
 async fn merge_stops_on_a_conflict_and_leaves_the_target_untouched() {
     let _env = SANDBOX_ENV.lock().await;
     let fixture = session_on_branch().await;
-    commit_file(&fixture.worktree, "shared.md", "session edit\n", "session edit");
+    commit_file(
+        &fixture.worktree,
+        "shared.md",
+        "session edit\n",
+        "session edit",
+    );
     commit_file(&fixture.repo, "shared.md", "target edit\n", "target edit");
     let target_before = git(&fixture.repo, &["rev-parse", "main"]);
 

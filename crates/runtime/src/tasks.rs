@@ -137,6 +137,7 @@ fn home_dir_from_refs(context_refs: &[TaskContextRefInput]) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub struct StartExecutionSessionParams {
+    pub execution_location: Option<String>,
     pub prompt: Option<String>,
     pub workspace_path: PathBuf,
     pub resume_session_id: Option<String>,
@@ -191,6 +192,8 @@ pub struct SendTaskMessageParams {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MessageOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_location: Option<String>,
     pub mode: TaskMessageMode,
     pub executor_profile_id: Option<ExecutorProfileId>,
     pub image_ids: Option<Vec<Uuid>>,
@@ -765,6 +768,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
         let start = self
             .start_execution_session(StartExecutionSessionParams {
+                execution_location: None,
                 prompt: Some(prompt),
                 workspace_path: PathBuf::from(&project.git_repo_path),
                 resume_session_id: None,
@@ -1273,6 +1277,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         params: StartExecutionSessionParams,
     ) -> Result<ExecutionSessionStart, RuntimeError> {
         let StartExecutionSessionParams {
+            execution_location,
             prompt,
             workspace_path,
             resume_session_id,
@@ -1331,7 +1336,47 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                     RuntimeError::Other(anyhow::anyhow!("git is-repository task failed: {e}"))
                 })?
         };
-        let use_worktree = resolve_use_worktree_mode(is_git_repository, use_worktree);
+        if let Some(location) = execution_location.as_deref() {
+            if !matches!(location, "computer" | "cloud") {
+                return Err(RuntimeError::BadRequest("invalid execution location"));
+            }
+            if location == "cloud"
+                && (!is_git_repository || image_ids.as_ref().is_some_and(|ids| !ids.is_empty()))
+            {
+                return Err(RuntimeError::BadRequest(
+                    "Cloud requires a Git repository; image attachments are not supported yet",
+                ));
+            }
+        }
+        let stored_location: Option<String> = if let Some(id) = task_id {
+            sqlx::query_scalar("SELECT location FROM session_execution_locations WHERE task_id = ?")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await?
+        } else {
+            None
+        };
+        if stored_location
+            .as_deref()
+            .zip(execution_location.as_deref())
+            .is_some_and(|(old, new)| old != new)
+        {
+            return Err(RuntimeError::BadRequest(
+                "execution location cannot change after a session starts",
+            ));
+        }
+        let location = stored_location
+            .as_deref()
+            .or(execution_location.as_deref())
+            .unwrap_or("computer");
+        let use_worktree = resolve_use_worktree_mode(
+            is_git_repository,
+            if location == "cloud" {
+                Some(true)
+            } else {
+                use_worktree
+            },
+        );
 
         let repo_path = workspace_path.clone();
         let repo_path_str = repo_path.to_string_lossy().into_owned();
@@ -1404,6 +1449,14 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             run.insert(self.pool()).await?;
             (task, run, false)
         };
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO session_execution_locations (task_id, location) VALUES (?, ?)",
+        )
+        .bind(task.id)
+        .bind(location)
+        .execute(self.pool())
+        .await?;
 
         // Cache the agent this task ran with so the session tab can show its
         // logo. Stored as the bare agent kind ("CLAUDE_CODE" / "CODEX").
@@ -2127,6 +2180,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             prompt,
             options:
                 MessageOptions {
+                    execution_location,
                     mode,
                     executor_profile_id,
                     image_ids,
@@ -2137,10 +2191,40 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 },
         } = params;
 
+        if let Some(requested) = execution_location.as_deref() {
+            let stored: Option<String> = sqlx::query_scalar(
+                "SELECT location FROM session_execution_locations WHERE task_id = ?",
+            )
+            .bind(task_id)
+            .fetch_optional(self.pool())
+            .await?;
+            if stored
+                .as_deref()
+                .is_some_and(|location| location != requested)
+            {
+                return Err(RuntimeError::BadRequest(
+                    "execution location cannot change after a session starts",
+                ));
+            }
+        }
+        let cloud: Option<String> = sqlx::query_scalar(
+            "SELECT location FROM session_execution_locations WHERE task_id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await?;
+        if cloud.as_deref() == Some("cloud")
+            && image_ids.as_ref().is_some_and(|ids| !ids.is_empty())
+        {
+            return Err(RuntimeError::BadRequest(
+                "Cloud image attachments are not supported yet",
+            ));
+        }
         match mode {
             TaskMessageMode::New => {
                 let execution = self
                     .start_execution_session(StartExecutionSessionParams {
+                        execution_location: execution_location.clone(),
                         prompt: Some(prompt),
                         workspace_path: self.workspace_path_for_task(task_id).await?,
                         resume_session_id: None,
@@ -2183,6 +2267,7 @@ impl<'a, R: Runtime> TaskService<'a, R> {
 
                 let execution = self
                     .start_execution_session(StartExecutionSessionParams {
+                        execution_location: execution_location.clone(),
                         prompt: Some(prompt),
                         workspace_path: self.workspace_path_for_task(task_id).await?,
                         resume_session_id: None,
@@ -2331,7 +2416,9 @@ impl<'a, R: Runtime> TaskService<'a, R> {
                 git.get_branch_status(Path::new(&repo_path), &branch, &target)
             })
             .await
-            .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git branch status task failed: {e}")))?
+            .map_err(|e| {
+                RuntimeError::Other(anyhow::anyhow!("git branch status task failed: {e}"))
+            })?
             .map_err(RuntimeError::from)?
         };
 
@@ -2440,7 +2527,13 @@ impl<'a, R: Runtime> TaskService<'a, R> {
             let git = self.runtime().git().clone();
             let new_base = new_base_branch.clone();
             tokio::task::spawn_blocking(move || {
-                git.rebase_branch(&repo_path, &worktree_path, &new_base, &old_base, &branch_name)
+                git.rebase_branch(
+                    &repo_path,
+                    &worktree_path,
+                    &new_base,
+                    &old_base,
+                    &branch_name,
+                )
             })
             .await
             .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git rebase task failed: {e}")))?

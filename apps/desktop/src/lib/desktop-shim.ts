@@ -88,7 +88,7 @@ function installDesktopBridge() {
       title: string;
       body?: string;
       // When set, clicking the notification focuses the window and navigates to
-      // this session. The Rust shell echoes it back via `notification:activate`.
+      // this session. The Rust shell echoes it back via `session:activate`.
       target?: { projectId: string; taskId: string };
     }) => invoke<void>("show_notification", { payload }),
     openExternalUrl: (url: string) =>

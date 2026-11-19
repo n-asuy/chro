@@ -90,6 +90,8 @@ pub enum ExecutorError {
     derive(
         EnumString,
         Hash,
+        PartialOrd,
+        Ord,
         strum_macros::Display,
         Serialize,
         Deserialize,

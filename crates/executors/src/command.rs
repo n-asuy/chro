@@ -242,7 +242,7 @@ impl CommandBuilder {
     }
 }
 
-fn split_command_line(input: &str) -> Result<Vec<String>, CommandBuildError> {
+pub(crate) fn split_command_line(input: &str) -> Result<Vec<String>, CommandBuildError> {
     #[cfg(windows)]
     {
         let parts = winsplit::split(input);

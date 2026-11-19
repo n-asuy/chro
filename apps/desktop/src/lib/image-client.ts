@@ -1,6 +1,6 @@
 import { desktopFetch } from "@/lib/backend-client";
 
-type ImageResponse = {
+export type ImageResponse = {
   id: string;
   file_path: string;
   original_name: string;

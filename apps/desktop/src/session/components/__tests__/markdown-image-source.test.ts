@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  absoluteImageTarget,
   attachedImagePath,
   localImageSource,
   remoteImageSource,
@@ -63,6 +64,29 @@ describe("localImageSource", () => {
   });
 });
 
+// An absolute path names its file outright, so the image request itself is the
+// existence check: no probe, and no waiting behind other references' probes.
+describe("absoluteImageTarget", () => {
+  it("targets a POSIX or Windows absolute path directly", () => {
+    expect(absoluteImageTarget("/tmp/shots/before.png")).toEqual(
+      file("/tmp/shots/before.png"),
+    );
+    expect(absoluteImageTarget("C:\\Users\\alice\\shot.png")).toEqual(
+      file("C:\\Users\\alice\\shot.png"),
+    );
+    expect(absoluteImageTarget("D:/shots/after.png")).toEqual(
+      file("D:/shots/after.png"),
+    );
+  });
+
+  it("leaves relative and home-relative paths to resolution", () => {
+    expect(absoluteImageTarget("docs/figure.svg")).toBeNull();
+    expect(absoluteImageTarget("./figure.svg")).toBeNull();
+    expect(absoluteImageTarget("~/shots/before.png")).toBeNull();
+    expect(absoluteImageTarget("//cdn.example.com/a.png")).toBeNull();
+  });
+});
+
 // The prompt handed to the agent CLI carries attachments as absolute worktree
 // paths, and the CLI echoes that back as the user message, so both spellings
 // must resolve to the same attachment.
@@ -75,7 +99,9 @@ describe("attachedImagePath", () => {
 
   it("recovers the attachment from an absolute worktree path", () => {
     expect(
-      attachedImagePath("/var/folders/T/worktrees/ch/f8dd-task/.chro-context/abc.png"),
+      attachedImagePath(
+        "/var/folders/T/worktrees/ch/f8dd-task/.chro-context/abc.png",
+      ),
     ).toBe(".chro-context/abc.png");
     expect(attachedImagePath("C:/wt/task/.chro-context/abc.png")).toBe(
       ".chro-context/abc.png",
@@ -86,6 +112,8 @@ describe("attachedImagePath", () => {
     expect(attachedImagePath("/tmp/shots/before.png")).toBeNull();
     expect(attachedImagePath("/wt/.chro-context/nested/abc.png")).toBeNull();
     expect(attachedImagePath("/wt/my.chro-context/abc.png")).toBeNull();
-    expect(attachedImagePath("https://example.com/.chro-context/abc.png")).toBeNull();
+    expect(
+      attachedImagePath("https://example.com/.chro-context/abc.png"),
+    ).toBeNull();
   });
 });

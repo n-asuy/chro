@@ -3215,3 +3215,13 @@ body {
 ::highlight(chro-find-match-current) {
   background-color: hsl(var(--primary) / 0.5);
 }
+
+/*
+ * The edge toolbar window is transparent: only its tab, toolbar and panels
+ * paint. Everything around them shows the desktop through.
+ */
+html[data-surface="edge"],
+html[data-surface="edge"] body,
+html[data-surface="edge"] #root {
+  background: transparent !important;
+}

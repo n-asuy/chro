@@ -224,6 +224,7 @@ function SessionRow({
           serializeSessionDragPayload({
             taskId: task.id,
             branch: task.branch ?? null,
+            title: task.title ?? "",
           }),
         );
         event.dataTransfer.setData(

@@ -25,6 +25,7 @@ function resetStore() {
     projectId: null,
     layout: createInitialLayout(),
     focusHistory: [],
+    paneMaximized: false,
   });
 }
 
@@ -241,5 +242,46 @@ describe("useLayoutStore", () => {
     useLayoutStore.getState().closeTab(b);
 
     expect(focusedTabId()).toBe(c);
+  });
+  describe("pane maximize", () => {
+    it("maximizes and restores the focused pane", () => {
+      expect(useLayoutStore.getState().paneMaximized).toBe(false);
+      useLayoutStore.getState().setPaneMaximized(true);
+      expect(useLayoutStore.getState().paneMaximized).toBe(true);
+      useLayoutStore.getState().setPaneMaximized(false);
+      expect(useLayoutStore.getState().paneMaximized).toBe(false);
+    });
+
+    it("restores the split view when a tab is split off", () => {
+      const store = useLayoutStore.getState();
+      store.openTab({ type: "session", taskId: "task-a" });
+      const file = store.openTab({ type: "file", path: "notes.md" });
+      const leafId = useLayoutStore.getState().layout.focusedPaneId;
+      useLayoutStore.getState().setPaneMaximized(true);
+
+      useLayoutStore.getState().splitWithTab(file, leafId, "right");
+
+      expect(useLayoutStore.getState().paneMaximized).toBe(false);
+    });
+
+    it("does not carry the maximized pane into another project", () => {
+      const store = useLayoutStore.getState();
+      store.bindProject("project-a");
+      useLayoutStore.getState().setPaneMaximized(true);
+
+      useLayoutStore.getState().bindProject("project-b");
+
+      expect(useLayoutStore.getState().paneMaximized).toBe(false);
+    });
+
+    it("is view state and never written into the persisted layout", () => {
+      const store = useLayoutStore.getState();
+      store.bindProject("project-a");
+      persistenceMock.saveLayout.mockClear();
+
+      useLayoutStore.getState().setPaneMaximized(true);
+
+      expect(persistenceMock.saveLayout).not.toHaveBeenCalled();
+    });
   });
 });

@@ -30,7 +30,7 @@ impl TaskMerge {
     pub fn merge_commit(&self) -> Option<&str> {
         self.merge_commit
             .as_deref()
-            .or_else(|| self.pr_merge_commit_sha.as_deref())
+            .or(self.pr_merge_commit_sha.as_deref())
     }
     /// Create a direct merge record (e.g. squash merge performed locally).
     pub async fn create_direct(

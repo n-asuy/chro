@@ -158,8 +158,14 @@ async fn turn_without_run_or_reply_has_no_assistant() {
     let runtime = bootstrap_runtime(&temp).await;
     let task_id = insert_task(&runtime).await;
 
-    let unlinked = insert_session(&runtime, task_id, None, "queued prompt", Duration::minutes(2))
-        .await;
+    let unlinked = insert_session(
+        &runtime,
+        task_id,
+        None,
+        "queued prompt",
+        Duration::minutes(2),
+    )
+    .await;
     let silent_run = insert_run(&runtime, task_id).await;
     let silent = insert_session(
         &runtime,

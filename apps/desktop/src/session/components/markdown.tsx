@@ -20,6 +20,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { normalizeFilePathHref } from "./file-path-utils";
 import {
+  absoluteImageTarget,
   attachedImagePath,
   localImageSource,
   remoteImageSource,
@@ -443,10 +444,28 @@ type MarkdownImageProps = {
   localImages?: LocalImageMetadata[];
 };
 
-const ImagePlaceholder = ({ label }: { label: string }) => (
-  <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
+/**
+ * Stand-in for an image that cannot be shown (yet): a spinner while it is
+ * being located, a "?" once it is known not to exist.
+ */
+const ImageChip = ({
+  state,
+  label,
+}: {
+  state: "loading" | "missing";
+  label: string;
+}) => (
+  <span
+    data-image-state={state}
+    aria-busy={state === "loading" || undefined}
+    className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom"
+  >
     <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
-      <HelpCircle className="h-5 w-5 text-muted-foreground" />
+      {state === "loading" ? (
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      ) : (
+        <HelpCircle className="h-5 w-5 text-muted-foreground" />
+      )}
     </span>
     <span className="flex min-w-0 flex-col">
       <span className="max-w-[120px] truncate text-xs text-muted-foreground">
@@ -469,18 +488,7 @@ const AttachedImage = ({
   const { data: metadata, isLoading } = useImageMetadata(src, localImages);
 
   if (isLoading) {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded border border-border bg-muted px-1.5 py-1 align-bottom">
-        <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded bg-muted">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-        </span>
-        <span className="flex min-w-0 flex-col">
-          <span className="max-w-[120px] truncate text-xs text-muted-foreground">
-            {truncatePath(alt || src)}
-          </span>
-        </span>
-      </span>
-    );
+    return <ImageChip state="loading" label={alt || src} />;
   }
 
   if (metadata?.exists && metadata.proxy_url) {
@@ -506,7 +514,7 @@ const AttachedImage = ({
     );
   }
 
-  return <ImagePlaceholder label={alt || src} />;
+  return <ImageChip state="missing" label={alt || src} />;
 };
 
 /**
@@ -514,16 +522,26 @@ const AttachedImage = ({
  * produced (`![before / after](/tmp/compare.png)`). Shown at reading size, since
  * it is the content rather than a reference to it. A local file opens in the
  * editor on click.
+ *
+ * An absolute path loads at once. Only a relative path waits on resolution,
+ * and shows as loading, not missing, until it resolves.
  */
 const AgentImage = ({ src, alt }: { src: string; alt?: string }) => {
   const remote = remoteImageSource(src);
-  const target = usePathLink(remote ? null : normalizeFilePathHref(src));
+  const path = remote ? null : normalizeFilePathHref(src);
+  const direct = path ? absoluteImageTarget(path) : null;
+  const resolved = usePathLink(direct ? null : path);
+  const target = direct ?? resolved;
   const openPathLink = useOpenPathLink();
-  const url = remote ?? localImageSource(target);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
 
+  if (!remote && target === undefined) {
+    return <ImageChip state="loading" label={alt || src} />;
+  }
+
+  const url = remote ?? localImageSource(target ?? null);
   if (!url || failedUrl === url) {
-    return <ImagePlaceholder label={alt || src} />;
+    return <ImageChip state="missing" label={alt || src} />;
   }
 
   const image = (
@@ -552,7 +570,7 @@ const AgentImage = ({ src, alt }: { src: string; alt?: string }) => {
 };
 
 const MarkdownImage = ({ src, alt, localImages }: MarkdownImageProps) => {
-  if (!src) return <ImagePlaceholder label={alt || "image"} />;
+  if (!src) return <ImageChip state="missing" label={alt || "image"} />;
   if (attachedImagePath(src)) {
     return <AttachedImage src={src} alt={alt} localImages={localImages} />;
   }

@@ -1,4 +1,5 @@
 mod msg_store;
+mod session_list;
 
 pub use msg_store::MsgStore;
 

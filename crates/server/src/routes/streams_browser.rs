@@ -170,7 +170,7 @@ async fn handle_browser_ws(socket: WebSocket, state: AppState, params: BrowserQu
         session_id: session_id.to_string(),
     })
     .unwrap_or_else(|_| r#"{"type":"error","message":"serialize failed"}"#.to_string());
-    if sender.send(Message::Text(ready.into())).await.is_err() {
+    if sender.send(Message::Text(ready)).await.is_err() {
         let _ = state.browser().close(session_id).await;
         return;
     }
@@ -180,7 +180,7 @@ async fn handle_browser_ws(socket: WebSocket, state: AppState, params: BrowserQu
     if let Ok(state_msg) = session.page_state().await {
         let frame = OutboundFrame::State { state: state_msg };
         if let Ok(json) = serde_json::to_string(&frame) {
-            let _ = sender.send(Message::Text(json.into())).await;
+            let _ = sender.send(Message::Text(json)).await;
         }
     }
 
@@ -200,7 +200,7 @@ async fn handle_browser_ws(socket: WebSocket, state: AppState, params: BrowserQu
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    if sender.send(Message::Text(json.into())).await.is_err() {
+                    if sender.send(Message::Text(json)).await.is_err() {
                         break;
                     }
                 }
@@ -313,7 +313,7 @@ fn profile_base_dir() -> PathBuf {
 async fn send_error_and_close(mut socket: WebSocket, message: &str) {
     let frame = OutboundFrame::Error { message };
     if let Ok(json) = serde_json::to_string(&frame) {
-        let _ = socket.send(Message::Text(json.into())).await;
+        let _ = socket.send(Message::Text(json)).await;
     }
     let _ = SinkExt::close(&mut socket).await;
 }

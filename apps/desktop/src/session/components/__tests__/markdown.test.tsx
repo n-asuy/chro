@@ -127,10 +127,11 @@ describe("Markdown images", () => {
     expect(markup).toContain('alt="before and after"');
   });
 
-  it("keeps an unresolved local image as its label until the file is found", () => {
-    const markup = render("![before and after](/tmp/shots/kp2.png)");
+  it("keeps a relative local image as a loading label until it resolves", () => {
+    const markup = render("![before and after](shots/kp2.png)");
 
     expect(markup).not.toContain("<img");
+    expect(markup).toContain('data-image-state="loading"');
     expect(markup).toContain("before and after");
   });
 });

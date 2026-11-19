@@ -12,7 +12,16 @@ vi.mock("./flags-client", () => ({
 // Two synthetic flags stand in for the generated registry so these tests keep
 // passing as real flags come and go.
 vi.mock("./flags.generated", () => ({
-  FLAG_DEFAULTS: { flag_on_by_default: true, flag_off_by_default: false },
+  FLAG_DEFAULTS: {
+    flag_on_by_default: true,
+    flag_off_by_default: false,
+    flag_opt_in: true,
+  },
+  FLAG_OPT_IN: {
+    flag_on_by_default: false,
+    flag_off_by_default: false,
+    flag_opt_in: true,
+  },
 }));
 
 const storage = (() => {
@@ -34,6 +43,7 @@ const storage = (() => {
 vi.stubGlobal("window", { localStorage: storage });
 
 import {
+  BETA_OPT_INS_STORAGE_KEY,
   BETA_OPT_OUTS_STORAGE_KEY,
   DEV_FLAG_OVERRIDES_STORAGE_KEY,
   readPersistedDevOverrides,
@@ -56,6 +66,7 @@ describe("useFeatureFlagStore", () => {
     useFeatureFlagStore.setState({
       resolved: { flag_on_by_default: true, flag_off_by_default: false },
       optedOut: [],
+      optedIn: [],
       devOverrides: {},
       loaded: false,
       loading: false,
@@ -219,6 +230,7 @@ describe("dev overrides (dev builds only)", () => {
     useFeatureFlagStore.setState({
       resolved: { flag_on_by_default: true, flag_off_by_default: false },
       optedOut: [],
+      optedIn: [],
       devOverrides: {},
     });
   });
@@ -268,5 +280,59 @@ describe("dev overrides (dev builds only)", () => {
     );
 
     expect(readPersistedDevOverrides()).toEqual({ good: false });
+  });
+});
+
+describe("opt-in beta features", () => {
+  beforeEach(() => {
+    storage.clear();
+    useFeatureFlagStore.setState({
+      resolved: {
+        flag_on_by_default: true,
+        flag_off_by_default: false,
+        flag_opt_in: true,
+      },
+      optedOut: [],
+      optedIn: [],
+      devOverrides: {},
+    });
+  });
+
+  it("is off while offered until the user switches it on", () => {
+    expect(flag("flag_opt_in")).toBe(false);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_opt_in", true);
+    expect(flag("flag_opt_in")).toBe(true);
+    expect(
+      JSON.parse(storage.getItem(BETA_OPT_INS_STORAGE_KEY) ?? "[]"),
+    ).toEqual(["flag_opt_in"]);
+  });
+
+  it("switches back off, and forgets the opt-in", () => {
+    const store = useFeatureFlagStore.getState();
+    store.setBetaEnabled("flag_opt_in", true);
+    store.setBetaEnabled("flag_opt_in", false);
+    expect(flag("flag_opt_in")).toBe(false);
+    expect(
+      JSON.parse(storage.getItem(BETA_OPT_INS_STORAGE_KEY) ?? "[]"),
+    ).toEqual([]);
+  });
+
+  it("cannot be turned on while not offered (the kill switch wins)", () => {
+    useFeatureFlagStore.setState({
+      resolved: {
+        flag_on_by_default: true,
+        flag_off_by_default: false,
+        flag_opt_in: false,
+      },
+    });
+    useFeatureFlagStore.getState().setBetaEnabled("flag_opt_in", true);
+    expect(flag("flag_opt_in")).toBe(false);
+  });
+
+  it("leaves opt-out features as they were", () => {
+    expect(flag("flag_on_by_default")).toBe(true);
+    useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", false);
+    expect(flag("flag_on_by_default")).toBe(false);
+    expect(useFeatureFlagStore.getState().optedIn).toEqual([]);
   });
 });

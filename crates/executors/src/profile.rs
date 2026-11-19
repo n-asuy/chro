@@ -689,16 +689,37 @@ async fn detect_installed_version(resolved_path: &Path) -> Option<String> {
     extract_detected_version(&output.stdout, &output.stderr)
 }
 
+/// The version number in the first non-empty line of `--version` output
+/// (stdout, else stderr): `git version 2.43.0` reports `2.43.0`. `None`
+/// when that line holds no dotted version number.
 fn extract_detected_version(stdout: &[u8], stderr: &[u8]) -> Option<String> {
-    for candidate in [stdout, stderr] {
+    let text = [stdout, stderr].into_iter().find_map(|candidate| {
         let text = String::from_utf8_lossy(candidate);
-        let version = text.lines().map(str::trim).find(|line| !line.is_empty());
-        if let Some(version) = version {
-            return Some(version.to_string());
-        }
-    }
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+    })?;
+    text.split_whitespace().find_map(version_number)
+}
 
-    None
+/// `1.2.3`, `v1.2.3`, `1.2.3-beta.1` or `1.2.3+build`: at least two numeric
+/// components, then an optional pre-release or build suffix.
+fn version_number(word: &str) -> Option<String> {
+    let word = word.strip_prefix('v').unwrap_or(word);
+    let (core, suffix) = match word.find(['-', '+']) {
+        Some(at) => (&word[..at], Some(&word[at + 1..])),
+        None => (word, None),
+    };
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let core_ok = core.split('.').count() >= 2 && core.split('.').all(numeric);
+    let suffix_ok = suffix.is_none_or(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+    });
+    (core_ok && suffix_ok).then(|| word.to_string())
 }
 
 /// Query install status for all executors.
@@ -758,15 +779,45 @@ mod tests {
 
     #[test]
     fn extract_detected_version_prefers_stdout() {
-        let version = extract_detected_version(b"claude 1.0.72\n", b"warning");
+        let version = extract_detected_version(b"claude 1.0.72\n", b"warning 9.9.9");
 
-        assert_eq!(version.as_deref(), Some("claude 1.0.72"));
+        assert_eq!(version.as_deref(), Some("1.0.72"));
     }
 
     #[test]
     fn extract_detected_version_falls_back_to_stderr() {
         let version = extract_detected_version(b"", b"codex 0.1.0\n");
 
-        assert_eq!(version.as_deref(), Some("codex 0.1.0"));
+        assert_eq!(version.as_deref(), Some("0.1.0"));
+    }
+
+    /// The UI renders `v{version}`, so only the version number is reported,
+    /// never the CLI's own wording around it.
+    #[test]
+    fn extract_detected_version_keeps_only_the_version_number() {
+        for (output, expected) in [
+            ("git version 2.43.0", "2.43.0"),
+            ("git version 2.39.5 (Apple Git-154)", "2.39.5"),
+            ("codex-cli 0.162.1", "0.162.1"),
+            ("2.0.14 (Claude Code)", "2.0.14"),
+            ("v0.8.3", "0.8.3"),
+            ("pi 1.2.0-beta.3", "1.2.0-beta.3"),
+            ("tool 1.4.0+build.7", "1.4.0+build.7"),
+        ] {
+            assert_eq!(
+                extract_detected_version(output.as_bytes(), b"").as_deref(),
+                Some(expected),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_detected_version_without_a_version_number_is_none() {
+        assert_eq!(
+            extract_detected_version(b"usage: tool [options]\n", b""),
+            None
+        );
+        assert_eq!(extract_detected_version(b"\n  \n", b""), None);
     }
 }

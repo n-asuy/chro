@@ -12,6 +12,9 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// How long an uploaded image may stay unlinked before cleanup removes it.
+pub const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 const DEFAULT_MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
 pub const WORKTREE_IMAGES_DIR: &str = ".chro-context";
 
@@ -172,8 +175,11 @@ impl ImageService {
         }
     }
 
+    /// Delete images no task links to, once they are older than
+    /// [`ORPHAN_GRACE`]: a fresh upload is unlinked until the message it was
+    /// attached to is sent.
     pub async fn delete_orphaned_images(&self) -> Result<u64, ImageError> {
-        let orphaned = AssetImage::find_orphaned_images(&self.pool).await?;
+        let orphaned = AssetImage::find_orphaned_images(&self.pool, ORPHAN_GRACE).await?;
         if orphaned.is_empty() {
             return Ok(0);
         }
@@ -387,6 +393,24 @@ mod tests {
 
         let copied = worktree.join(WORKTREE_IMAGES_DIR).join(&image.file_path);
         assert!(copied.exists());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_unlinked_upload_survives_cleanup_until_the_grace_period_ends() {
+        let (service, _tmp, db) = service_with_temp_cache().await;
+        let image = service.store_image(&[3u8; 24], "draft.png").await.unwrap();
+        let cached = service.get_cached_path(&image);
+
+        assert_eq!(service.delete_orphaned_images().await.unwrap(), 0);
+        assert!(cached.exists(), "an upload waiting for its message is kept");
+
+        sqlx::query("UPDATE asset_images SET created_at = datetime('now', '-2 days') WHERE id = ?")
+            .bind(image.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(service.delete_orphaned_images().await.unwrap(), 1);
+        assert!(!cached.exists());
     }
 
     #[tokio::test]

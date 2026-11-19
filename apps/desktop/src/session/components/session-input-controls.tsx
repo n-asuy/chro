@@ -131,7 +131,11 @@ export function PromptEditorWithPopover({
               selection.branch,
             );
           } else if (selection.kind === "session") {
-            editorHandle.addSessionPart(selection.taskId, selection.branch);
+            editorHandle.addSessionPart(
+              selection.taskId,
+              selection.branch,
+              selection.title,
+            );
           } else {
             editorHandle.addSkillPart(selection.id, selection.name);
           }

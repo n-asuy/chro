@@ -13,7 +13,8 @@ export type ReasoningEffort =
   | "ultra";
 
 // Output speed (matches SpeedMode enum in Rust). `fast` maps to Claude Code's
-// fast mode (`speed: "fast"`), currently Opus-only; `standard` is the default.
+// fast mode on the models that have one (Fable and Opus); `standard` is the
+// default.
 export type SpeedMode = "standard" | "fast";
 
 // Current executor profile selection
@@ -57,6 +58,81 @@ export const updateExecutorProfile = async (
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+};
+
+/** Per-agent extra launch arguments, one shell-style string each. */
+export type AgentLaunchArgs = Partial<Record<BaseCodingAgent, string>>;
+
+/** Mirrors `AgentLaunchSettingsEnvelope` in crates/server/src/routes/rpc/config.rs. */
+export type AgentLaunchSettings = {
+  launch_args: AgentLaunchArgs;
+  /** Agents that have a question tool chro can turn off. */
+  question_tool_agents: BaseCodingAgent[];
+  /** Agents whose question tool is off. */
+  question_tool_disabled: BaseCodingAgent[];
+};
+
+/** Fields left out stay as they are. */
+export type AgentLaunchSettingsChange = {
+  args?: string;
+  question_tool?: boolean;
+};
+
+/** Why the server refused a change; worded by the client. */
+export type LaunchArgsRejection =
+  | { code: "unparseable" }
+  | { code: "reserved_flag"; flag: string }
+  | { code: "question_tool_flag" };
+
+export class LaunchArgsRejectedError extends Error {
+  constructor(readonly rejection: LaunchArgsRejection) {
+    super(`launch arguments rejected: ${rejection.code}`);
+    this.name = "LaunchArgsRejectedError";
+  }
+}
+
+/** Read a `{error: {code, flag?}}` refusal out of a failed request's body. */
+export function parseLaunchArgsRejection(
+  body: string,
+): LaunchArgsRejection | null {
+  try {
+    const error = JSON.parse(body)?.error;
+    if (error?.code === "unparseable") return { code: "unparseable" };
+    if (error?.code === "question_tool_flag") {
+      return { code: "question_tool_flag" };
+    }
+    if (error?.code === "reserved_flag" && typeof error.flag === "string") {
+      return { code: "reserved_flag", flag: error.flag };
+    }
+  } catch {
+    // Not a structured refusal.
+  }
+  return null;
+}
+
+const LAUNCH_SETTINGS_PATH = "/rpc/executor/launch-settings";
+
+export const fetchAgentLaunchSettings =
+  async (): Promise<AgentLaunchSettings> =>
+    desktopFetch<AgentLaunchSettings>(LAUNCH_SETTINGS_PATH);
+
+/** Change one agent's launch settings; an empty `args` clears them. */
+export const updateAgentLaunchSettings = async (
+  executor: BaseCodingAgent,
+  change: AgentLaunchSettingsChange,
+): Promise<AgentLaunchSettings> => {
+  try {
+    return await desktopFetch<AgentLaunchSettings>(LAUNCH_SETTINGS_PATH, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ executor, ...change }),
+    });
+  } catch (error) {
+    const rejection =
+      error instanceof Error ? parseLaunchArgsRejection(error.message) : null;
+    if (rejection) throw new LaunchArgsRejectedError(rejection);
+    throw error;
+  }
 };
 
 // MCP status check types

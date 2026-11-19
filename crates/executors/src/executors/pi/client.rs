@@ -18,7 +18,7 @@ use std::{
 use approvals::ApprovalStatus;
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout},
     sync::{Mutex, oneshot},
 };
@@ -29,6 +29,7 @@ use super::protocol::{InboundFrame, PiEvent};
 use crate::{
     approvals::ExecutorApprovalService,
     executors::{ExecutorError, ExecutorExitResult},
+    stdout_dup::LogWriter,
 };
 
 /// Sends the run's terminal exit result exactly once.
@@ -48,32 +49,6 @@ impl ExitSignalSender {
         if let Some(sender) = self.inner.lock().await.take() {
             let _ = sender.send(result);
         }
-    }
-}
-
-/// Async writer that mirrors raw protocol lines into the synthetic stdout pipe
-/// consumed by the log normalizer.
-#[derive(Clone)]
-pub struct LogWriter {
-    writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
-}
-
-impl LogWriter {
-    pub fn new(writer: impl AsyncWrite + Send + Unpin + 'static) -> Self {
-        Self {
-            writer: Arc::new(Mutex::new(BufWriter::new(Box::new(writer)))),
-        }
-    }
-
-    pub async fn log_raw(&self, raw: &str) -> Result<(), ExecutorError> {
-        let mut guard = self.writer.lock().await;
-        guard
-            .write_all(raw.as_bytes())
-            .await
-            .map_err(ExecutorError::Io)?;
-        guard.write_all(b"\n").await.map_err(ExecutorError::Io)?;
-        guard.flush().await.map_err(ExecutorError::Io)?;
-        Ok(())
     }
 }
 

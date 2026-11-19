@@ -1,5 +1,6 @@
 import type { TranslationFunction } from "@/i18n";
 import { desktopFetch } from "@/lib/backend-client";
+import { localizeCloudMessage } from "@/lib/cloud-messages";
 import type { ExecutorProfileId } from "@/lib/executor-client";
 import { recordPerfEvent, startPerfTimer } from "@/perf/recorder";
 import { useCallback } from "react";
@@ -33,6 +34,7 @@ type UseSingleSessionControllerArgs = {
   activeTaskId: string | null;
   taskRunId: string | null;
   forceNewAttempt: boolean;
+  executionLocation?: "computer" | "cloud";
   useWorktree: boolean;
   baseBranch: string | null;
   sessionExecutorSelection: ExecutorProfileId | null;
@@ -55,6 +57,7 @@ export function useSingleSessionController({
   activeTaskId,
   taskRunId,
   forceNewAttempt,
+  executionLocation = "computer",
   useWorktree,
   baseBranch,
   sessionExecutorSelection,
@@ -123,6 +126,7 @@ export function useSingleSessionController({
               imageIds: payload.imageIds,
               contextRefs: payload.contextRefs,
               selectedSkillIds: payload.selectedSkillIds,
+              executionLocation: taskRunId ? undefined : executionLocation,
               useWorktree,
               targetBranch: baseBranch,
               signal: abortController.signal,
@@ -140,6 +144,7 @@ export function useSingleSessionController({
                 force_new_attempt: forceNewAttempt,
                 task_id: undefined,
                 use_worktree: useWorktree,
+                execution_location: executionLocation,
                 executor_profile_id: executorProfilePayload ?? undefined,
                 image_ids: payload.imageIds ?? undefined,
                 context_refs: payload.contextRefs,
@@ -217,7 +222,7 @@ export function useSingleSessionController({
         });
         const fallback =
           error instanceof Error
-            ? error.message
+            ? localizeCloudMessage(error.message, t)
             : t("commandFailedError", { message: t("claudeCliHint") });
         addErrorMessage(fallback);
         if (options?.restoreOnError) {
@@ -275,7 +280,7 @@ export function useSingleSessionController({
         console.error("[queuePrompt] Failed to queue message", error);
         addErrorMessage(
           error instanceof Error
-            ? error.message
+            ? localizeCloudMessage(error.message, t)
             : t("commandFailedError", { message: t("claudeCliHint") }),
         );
         editor.restore();
@@ -288,6 +293,7 @@ export function useSingleSessionController({
       sessionExecutorSelection,
       executorProfileId,
       useWorktree,
+      executionLocation,
       baseBranch,
       addErrorMessage,
       t,

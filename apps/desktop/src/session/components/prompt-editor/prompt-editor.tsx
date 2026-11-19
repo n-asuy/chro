@@ -6,6 +6,7 @@ import {
   getPromptEditorScopeState,
   usePromptEditorStore,
 } from "../../state/prompt-editor-store";
+import { useSessionPillPreview } from "../session-preview-trigger";
 
 interface PromptEditorProps {
   handle: PromptEditorHandle;
@@ -36,9 +37,12 @@ export function PromptEditor({
   const popover = usePromptEditorStore(
     (s) => getPromptEditorScopeState(s, handle.scopeId).popover,
   );
-  const isEmpty = usePromptEditorStore(
-    (s) => getPromptEditorScopeState(s, handle.scopeId).isEmpty,
-  );
+  const showPlaceholder = usePromptEditorStore((s) => {
+    const scope = getPromptEditorScopeState(s, handle.scopeId);
+    return scope.isEmpty && !scope.composing;
+  });
+
+  const sessionPillPreview = useSessionPillPreview();
 
   const setEditorNode = useCallback(
     (node: HTMLDivElement | null) => {
@@ -53,7 +57,7 @@ export function PromptEditor({
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       // 1. IME composing: pass through all keys
-      if (handle.isComposingRef.current) return;
+      if (handle.isComposing()) return;
 
       // 2. Popover open: delegate to parent
       // Read popover from store imperatively to avoid stale closure
@@ -98,7 +102,7 @@ export function PromptEditor({
 
   return (
     <div className="relative">
-      {isEmpty && (
+      {showPlaceholder && (
         <div
           aria-hidden="true"
           className={cn(
@@ -139,6 +143,7 @@ export function PromptEditor({
         onDrop={onDrop}
         onPaste={onPaste}
         onDragOver={(e) => e.preventDefault()}
+        {...sessionPillPreview}
       />
     </div>
   );

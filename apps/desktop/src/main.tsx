@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
+import { isEdgeSurface } from "./edge-toolbar/edge-surface";
 import { capture, identify, initAnalytics } from "./lib/analytics";
 import { loadUiState } from "./lib/ui-state-client";
 import { routeTree } from "./routeTree.gen";
@@ -44,7 +45,8 @@ import("./lib/preferences-client").then(({ fetchPreferences }) =>
     .then((res) => {
       initAnalytics({ enabled: res.preferences.analytics_enabled });
       identify(res.preferences.telemetry_id);
-      capture("app_opened");
+      // The edge toolbar is a second window of the same app, not an opening.
+      if (!isEdgeSurface(window.location.pathname)) capture("app_opened");
     })
     .catch(() => {
       initAnalytics({ enabled: false });

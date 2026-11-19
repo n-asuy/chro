@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Chro listens while you talk to a session from the edge toolbar.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Chro turns what you say into text on this Mac, without sending audio anywhere.</string>
+</dict>
+</plist>

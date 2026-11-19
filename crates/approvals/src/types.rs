@@ -64,7 +64,9 @@ impl ApprovalStatus {
 pub enum ApprovalActor {
     User,
     /// An agent answering from a chro session.
-    Agent { session: Uuid },
+    Agent {
+        session: Uuid,
+    },
 }
 
 impl Default for ApprovalActor {

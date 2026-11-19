@@ -28,6 +28,12 @@ Long briefs read from stdin with `--prompt -`:
 chro session delegate --prompt - < brief.md
 ```
 
+Pick the agent that does the work with `--agent`, as for `session new`:
+
+```bash
+chro session delegate --prompt "Review the retry logic in crates/runtime; read only" --agent codex
+```
+
 If a delegated session stops on an approval, you are woken with the approval id. Inspect it and answer it, or leave it for the user when it is outside what you were asked to oversee. You cannot answer approvals of your own session.
 
 ```bash
@@ -78,6 +84,12 @@ Update your note at checkpoints: after a repro, a fix, a test run, a handoff, or
 
 ```bash
 chro session set self --note "fix implemented; running integration tests"
+```
+
+## Rename a session
+
+```bash
+chro session set <session> --title "Login redirect tests"
 ```
 
 ## Start and land sessions from a terminal

@@ -43,6 +43,10 @@ pub(crate) enum Caller {
     User,
     /// The agent of one running turn.
     Agent { task_id: Uuid, run_id: Uuid },
+    /// The machine's user on a paired phone. Only reachable in-process from
+    /// the device dispatcher, which admits the device over its end-to-end
+    /// encrypted link and limits it to the device allowlist.
+    Device { device_id: Uuid },
 }
 
 impl Caller {
@@ -51,8 +55,21 @@ impl Caller {
         match self {
             Caller::User => "user".to_string(),
             Caller::Agent { run_id, .. } => format!("agent:{run_id}"),
+            Caller::Device { device_id } => format!("device:{device_id}"),
         }
     }
+}
+
+/// Marks a request the device dispatcher admitted for a paired device.
+///
+/// Request extensions cannot be set from the network, so only in-process
+/// dispatch can carry this. A request carrying it acts as
+/// [`Caller::Device`] without a bearer token, and skips the contract
+/// revision check: devices negotiate compatibility once per connection with
+/// their API generation instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeviceAdmission {
+    pub device_id: Uuid,
 }
 
 /// Decide the caller from the `Authorization` header alone.
@@ -108,6 +125,12 @@ fn check_contract(headers: &HeaderMap) -> Result<(), V1Error> {
 }
 
 async fn admit(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    if let Some(admission) = request.extensions().get::<DeviceAdmission>().copied() {
+        request.extensions_mut().insert(Caller::Device {
+            device_id: admission.device_id,
+        });
+        return next.run(request).await;
+    }
     let caller = match resolve_caller(request.headers(), &state.identity().owner_token, |token| {
         state.runtime().session_tokens().resolve(token)
     }) {

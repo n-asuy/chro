@@ -2,36 +2,36 @@
 //!
 //! Route organization:
 //! - `rpc/`: Domain-split RPC endpoints (projects, tasks, task_runs, sessions, etc.)
-//! - `streams`: SSE streams for real-time data (JSON Patch)
+//! - `stream_sources`: message sources shared by the WebSocket routes and paired devices
+//! - `streams`: WebSocket streams for real-time data (JSON Patch)
 //! - `health`: Health check endpoint
 
 use axum::{routing::get, Json, Router};
 use serde_json::json;
 
-use crate::AppState;
+use crate::{operator, AppState};
 
 pub(crate) mod frontend;
 pub(crate) mod rpc;
+pub(crate) mod stream_sources;
 pub(crate) mod streams;
 pub(crate) mod streams_browser;
-pub(crate) mod streams_repo;
 
-pub(crate) fn rpc_router() -> Router<AppState> {
-    rpc::router()
-}
-
-pub(crate) fn sessions_router() -> Router<AppState> {
-    rpc::sessions_router()
-}
-
-pub(crate) fn health_router() -> Router<AppState> {
-    Router::<AppState>::new().route("/health", get(health))
-}
-
-pub(crate) fn streams_router() -> Router<AppState> {
-    streams::router()
-        .merge(streams_browser::router())
-        .merge(streams_repo::router())
+/// Every API endpoint the server answers, bound to `state`: the operator API
+/// (`/v1`), the app's `/rpc` and `/streams`, and `/health`. The HTTP listener
+/// adds its origin checks around this; paired devices are dispatched into the
+/// same router in-process.
+pub(crate) fn api_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .merge(rpc::sessions_router())
+        .merge(operator::router(state.clone()))
+        .nest("/rpc", rpc::router())
+        .nest(
+            "/streams",
+            streams::router().merge(streams_browser::router()),
+        )
+        .with_state(state)
 }
 
 async fn health() -> Json<serde_json::Value> {

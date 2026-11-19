@@ -50,6 +50,7 @@ async fn failed_provisioning_marks_run_and_task_failed() {
     // provisioning, after the task and run rows have been created.
     let result = TaskService::new(&runtime)
         .start_execution_session(StartExecutionSessionParams {
+            execution_location: None,
             prompt: Some("do something".into()),
             workspace_path: repo.clone(),
             resume_session_id: None,
@@ -86,4 +87,36 @@ async fn failed_provisioning_marks_run_and_task_failed() {
     assert_eq!(task.status, TaskStatus::Failed);
     assert_eq!(task.active_session_id, None);
     assert!(!task.awaiting_input);
+
+    // Choosing a location is permanent even if provisioning failed. A retry
+    // must not silently move a conversation from this computer into Cloud.
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let moved = TaskService::new(&runtime)
+        .start_execution_session(StartExecutionSessionParams {
+            execution_location: Some("cloud".into()),
+            prompt: Some("retry elsewhere".into()),
+            workspace_path: repo,
+            resume_session_id: None,
+            force_new_attempt: Some(true),
+            task_id: Some(task.id),
+            executor_profile_id: None,
+            image_ids: None,
+            use_worktree: Some(false),
+            target_branch: Some("main".into()),
+            selected_skill_ids: vec![],
+            context_refs: vec![],
+        })
+        .await;
+    assert!(moved
+        .unwrap_err()
+        .to_string()
+        .contains("execution location cannot change"));
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
 }

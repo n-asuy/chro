@@ -3,12 +3,13 @@ mod assets;
 pub use assets::{asset_dir, chats_dir, config_path, profiles_path};
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
-use executors::ExecutorProfileId;
+use executors::{BaseCodingAgent, ExecutorProfileId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -19,38 +20,28 @@ const CURRENT_VERSION: u32 = 20;
 pub const DEFAULT_MERGE_COMMIT_TEMPLATE: &str =
     "{{title}} (chro {{task_short_id}}){{description_block}}";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LanguagePreference {
+    #[default]
     En,
     Ja,
 }
 
-impl Default for LanguagePreference {
-    fn default() -> Self {
-        LanguagePreference::En
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AppTheme {
     Light,
     Dark,
     /// Follow the operating system's light/dark preference. Resolved to a
     /// concrete light/dark value by the renderer.
+    #[default]
     System,
-}
-
-impl Default for AppTheme {
-    fn default() -> Self {
-        AppTheme::System
-    }
 }
 
 /// Application-wide appearance settings. Distinct from `EditorConfig`: the
 /// theme here drives the whole app chrome, not just the code editor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     #[serde(default)]
     pub theme: AppTheme,
@@ -59,15 +50,6 @@ pub struct AppearanceConfig {
     /// derivation time in the renderer, not on this stored seed.
     #[serde(default)]
     pub accent: Option<String>,
-}
-
-impl Default for AppearanceConfig {
-    fn default() -> Self {
-        Self {
-            theme: AppTheme::default(),
-            accent: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +159,27 @@ pub struct Config {
     /// Opaque JSON blob for frontend UI state (panel widths, sidebar collapsed, etc.).
     #[serde(default)]
     pub ui_state: serde_json::Map<String, Value>,
+    #[serde(default)]
+    pub mobile_pairing: MobilePairingConfig,
+    /// Extra launch arguments per agent CLI, one shell-style string each,
+    /// validated by `executors::validate_launch_args` before they are stored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_launch_args: BTreeMap<BaseCodingAgent, String>,
+    /// Agents whose question tool is turned off; it is on for every other one.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub question_tool_disabled: BTreeSet<BaseCodingAgent>,
+}
+
+/// Addresses the user typed for phone pairing, beside the detected ones.
+/// The server validates them before they are stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePairingConfig {
+    /// Saved custom addresses, in the order they were added.
+    #[serde(default)]
+    pub custom_addresses: Vec<String>,
+    /// The custom address pairing codes advertise; `None` uses a detected one.
+    #[serde(default)]
+    pub selected_custom_address: Option<String>,
 }
 
 fn default_telemetry_id() -> String {
@@ -201,6 +204,9 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             merge_commit_template: None,
             ui_state: serde_json::Map::new(),
+            mobile_pairing: MobilePairingConfig::default(),
+            agent_launch_args: BTreeMap::new(),
+            question_tool_disabled: BTreeSet::new(),
         }
     }
 }
@@ -252,10 +258,27 @@ impl ConfigService {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        fs::create_dir_all(parent)?;
-        fs::write(&self.location, serde_json::to_vec_pretty(&config)?)?;
+        fs::create_dir_all(&parent)?;
+        write_replacing(&parent, &self.location, &serde_json::to_vec_pretty(&config)?)?;
         Ok(())
     }
+}
+
+/// Replace `path` with `bytes` in one step: write a sibling temporary file and
+/// rename it over `path`, so a concurrent reader sees the old file or the new
+/// one, never a partial write.
+fn write_replacing(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map_or_else(|| "config".into(), |name| name.to_string_lossy());
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = dir.join(format!(".{name}.{}.{unique}.tmp", std::process::id()));
+    let written = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Render a merge commit message from a template string.
@@ -593,17 +616,52 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("chro.json");
         let service = ConfigService::new(&path);
-        let mut config = Config::default();
-        config.analytics_enabled = true;
-        config.language = LanguagePreference::En;
+        let config = Config {
+            analytics_enabled: true,
+            language: LanguagePreference::En,
+            ..Config::default()
+        };
         service.save(config.clone()).unwrap();
         let loaded = service.load().unwrap();
-        assert_eq!(loaded.analytics_enabled, true);
+        assert!(loaded.analytics_enabled);
         assert_eq!(
             loaded.executor_profile.executor,
             config.executor_profile.executor
         );
         assert_eq!(loaded.language, LanguagePreference::En);
+    }
+
+    #[test]
+    fn a_load_during_saves_never_reads_a_partial_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        let service = ConfigService::new(&path);
+        service.save(Config::default()).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writers: Vec<_> = (0..2)
+            .map(|_| {
+                let service = ConfigService::new(&path);
+                let stop = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        service.save(Config::default()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..500 {
+            service.load().expect("a complete file");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "chro.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
     }
 
     #[test]
@@ -628,6 +686,37 @@ mod tests {
             BaseCodingAgent::ClaudeCode
         );
         assert_eq!(config.language, LanguagePreference::default());
+    }
+
+    #[test]
+    fn agent_launch_args_roundtrip_and_default_to_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        let service = ConfigService::new(&path);
+
+        service.save(Config::default()).unwrap();
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            raw.get("agent_launch_args").is_none(),
+            "empty map is not written"
+        );
+        assert!(service.load().unwrap().agent_launch_args.is_empty());
+
+        let mut config = Config::default();
+        config.agent_launch_args.insert(
+            BaseCodingAgent::ClaudeCode,
+            "--append-system-prompt \"Ask first.\"".to_string(),
+        );
+        service.save(config).unwrap();
+        assert_eq!(
+            service
+                .load()
+                .unwrap()
+                .agent_launch_args
+                .get(&BaseCodingAgent::ClaudeCode)
+                .map(String::as_str),
+            Some("--append-system-prompt \"Ask first.\"")
+        );
     }
 
     #[test]

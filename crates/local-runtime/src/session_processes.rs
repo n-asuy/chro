@@ -88,7 +88,8 @@ pub(crate) fn session_of(environ: &[OsString], runtime_file: &OsStr) -> Option<S
 /// its own environment names, else the one of its nearest ancestor that
 /// names one.
 pub(crate) fn claim(entries: &[ProcessEntry], server: Pid) -> Vec<SessionProcess> {
-    let by_pid: HashMap<Pid, &ProcessEntry> = entries.iter().map(|entry| (entry.pid, entry)).collect();
+    let by_pid: HashMap<Pid, &ProcessEntry> =
+        entries.iter().map(|entry| (entry.pid, entry)).collect();
     entries
         .iter()
         .filter_map(|entry| {
@@ -105,7 +106,9 @@ pub(crate) fn claim(entries: &[ProcessEntry], server: Pid) -> Vec<SessionProcess
                 if session.is_none() {
                     session = process.session.clone();
                 }
-                current = process.parent.and_then(|parent| by_pid.get(&parent).copied());
+                current = process
+                    .parent
+                    .and_then(|parent| by_pid.get(&parent).copied());
             }
             Some(SessionProcess {
                 pid: entry.pid,
@@ -172,9 +175,7 @@ pub(crate) fn stop_processes(system: &mut System, processes: &[SessionProcess], 
             if process.start_time() != target.start_time {
                 continue;
             }
-            let delivered = process
-                .kill_with(signal)
-                .unwrap_or_else(|| process.kill());
+            let delivered = process.kill_with(signal).unwrap_or_else(|| process.kill());
             if delivered {
                 signalled += 1;
             }
@@ -199,9 +200,8 @@ async fn sweep(db: &DBService, system: &mut System) -> anyhow::Result<usize> {
         return Ok(0);
     };
     let server = Pid::from_u32(std::process::id());
-    let found = tokio::task::block_in_place(|| {
-        find_session_processes(system, &runtime_file, server)
-    });
+    let found =
+        tokio::task::block_in_place(|| find_session_processes(system, &runtime_file, server));
     if found.is_empty() {
         return Ok(0);
     }
@@ -264,14 +264,21 @@ mod tests {
         let runtime_file = OsStr::new(OURS);
         assert_eq!(
             session_of(
-                &environ(&["PATH=/bin", "CHRO_SESSION=fix-login", "CHRO_RUNTIME_FILE=/data/chro/runtime.json"]),
+                &environ(&[
+                    "PATH=/bin",
+                    "CHRO_SESSION=fix-login",
+                    "CHRO_RUNTIME_FILE=/data/chro/runtime.json"
+                ]),
                 runtime_file
             ),
             Some("fix-login".to_string())
         );
         assert_eq!(
             session_of(
-                &environ(&["CHRO_SESSION=fix-login", "CHRO_RUNTIME_FILE=/other/runtime.json"]),
+                &environ(&[
+                    "CHRO_SESSION=fix-login",
+                    "CHRO_RUNTIME_FILE=/other/runtime.json"
+                ]),
                 runtime_file
             ),
             None,
@@ -283,7 +290,10 @@ mod tests {
             "no server named"
         );
         assert_eq!(
-            session_of(&environ(&["CHRO_RUNTIME_FILE=/data/chro/runtime.json"]), runtime_file),
+            session_of(
+                &environ(&["CHRO_RUNTIME_FILE=/data/chro/runtime.json"]),
+                runtime_file
+            ),
             None,
             "a server child that no session started"
         );
@@ -440,7 +450,10 @@ mod tests {
         }
 
         fn unique_runtime_file() -> String {
-            format!("/tmp/chro-session-processes-{}/runtime.json", uuid::Uuid::new_v4())
+            format!(
+                "/tmp/chro-session-processes-{}/runtime.json",
+                uuid::Uuid::new_v4()
+            )
         }
 
         /// Stands in for a server the test process is not a child of.
@@ -492,7 +505,10 @@ mod tests {
 
             let status = child.0.wait().expect("wait stand-in");
             use std::os::unix::process::ExitStatusExt;
-            assert_eq!(status.signal(), Some(nix::sys::signal::Signal::SIGTERM as i32));
+            assert_eq!(
+                status.signal(),
+                Some(nix::sys::signal::Signal::SIGTERM as i32)
+            );
         }
 
         #[test]
@@ -507,7 +523,10 @@ mod tests {
 
             stop_processes(&mut system, &found, Duration::from_millis(200));
 
-            assert!(child.0.try_wait().unwrap().is_none(), "the process must survive");
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "the process must survive"
+            );
         }
     }
 }

@@ -153,13 +153,14 @@ describe("resolvePathLink", () => {
     expect((await fromProject)?.absolutePath).toBe("/project/a.ts");
   });
 
-  it("does not cache a failed probe, so the next render retries", async () => {
+  it("rejects a failed probe instead of reporting a miss, and does not cache it", async () => {
     probeTaskPaths.mockRejectedValue(new Error("offline"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const failed = resolvePathLink("src/a.ts", TASK);
+    const outcome = expect(failed).rejects.toThrow("offline");
     await settle();
-    expect(await failed).toBeNull();
+    await outcome;
 
     probeTaskPaths.mockResolvedValue([hit("/w/a.ts")]);
     const retry = resolvePathLink("src/a.ts", TASK);

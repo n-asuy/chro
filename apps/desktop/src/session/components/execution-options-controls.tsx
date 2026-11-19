@@ -1,18 +1,23 @@
 import { useLanguage } from "@/i18n";
+import { desktopFetch } from "@/lib/backend-client";
+import { localizeCloudMessage } from "@/lib/cloud-messages";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@chro/ui/dropdown-menu";
 import {
   Check,
+  Cloud,
   GitBranch as GitBranchIcon,
   Laptop,
+  MoreHorizontal,
   Search,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
 const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
@@ -106,7 +111,7 @@ export function BaseBranchDropdown({
 }
 
 /**
- * Worktree vs Local execution toggle. The caller supplies the trigger for the
+ * Worktree vs current-checkout execution toggle. The caller supplies the trigger for the
  * same reason as {@link BaseBranchDropdown}.
  */
 export function WorktreeModeDropdown({
@@ -153,7 +158,7 @@ const CHIP_CLASS =
 
 /**
  * Inline execution controls shown beneath the prompt for a not-yet-started
- * session: a "From" base-branch picker and the Worktree/Local toggle. Once a
+ * session: a "From" base-branch picker and the worktree/current-checkout toggle. Once a
  * session starts these live in the header environment popover instead.
  *
  * The caller styles the surrounding tray via {@link className}; this renders the
@@ -161,6 +166,10 @@ const CHIP_CLASS =
  */
 export function NewSessionExecutionControls({
   className,
+  cloudEnabled = false,
+  executionLocation = "computer",
+  onExecutionLocationChange,
+  onCloudSignInPendingChange,
   useWorktree,
   onUseWorktreeChange,
   baseBranch,
@@ -170,6 +179,10 @@ export function NewSessionExecutionControls({
   onBaseBranchSelect,
 }: {
   className?: string;
+  cloudEnabled?: boolean;
+  executionLocation?: "computer" | "cloud";
+  onExecutionLocationChange?: (location: "computer" | "cloud") => void;
+  onCloudSignInPendingChange?: (pending: boolean) => void;
   useWorktree: boolean;
   onUseWorktreeChange: (next: boolean) => void;
   baseBranch: string | null;
@@ -179,42 +192,141 @@ export function NewSessionExecutionControls({
   onBaseBranchSelect: (name: string) => void;
 }) {
   const { t } = useLanguage();
+  const [signingIn, setSigningIn] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const selectCloud = async () => {
+    setError(null);
+    setSigningIn(true);
+    onCloudSignInPendingChange?.(true);
+    try {
+      const status = await desktopFetch<{ signed_in: boolean }>(
+        "/rpc/cloud/status",
+      );
+      if (!status.signed_in) {
+        await desktopFetch("/rpc/cloud/login", { method: "POST" });
+      }
+      onExecutionLocationChange?.("cloud");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSigningIn(false);
+      onCloudSignInPendingChange?.(false);
+    }
+  };
 
   return (
     <div className={cn("flex items-center gap-1", className)}>
-      <BaseBranchDropdown
-        align="start"
-        baseBranch={baseBranch}
-        baseBranchSearch={baseBranchSearch}
-        onBaseBranchSearchChange={onBaseBranchSearchChange}
-        filteredBaseBranches={filteredBaseBranches}
-        onBaseBranchSelect={onBaseBranchSelect}
-        trigger={
+      {cloudEnabled && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className={CHIP_CLASS}
+              disabled={signingIn}
+              aria-label={
+                executionLocation === "cloud"
+                  ? t("cloudLocationCloud")
+                  : t("cloudLocationComputer")
+              }
+            >
+              {executionLocation === "cloud" ? (
+                <Cloud className="h-3.5 w-3.5" />
+              ) : (
+                <Laptop className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {signingIn
+                  ? t("cloudSigningIn")
+                  : executionLocation === "cloud"
+                    ? t("cloudLocationCloud")
+                    : t("cloudLocationComputer")}
+              </span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-72">
+            <DropdownMenuLabel>{t("cloudWorkIn")}</DropdownMenuLabel>
+            <DropdownMenuItem
+              role="menuitemradio"
+              aria-checked={executionLocation === "computer"}
+              onSelect={() => onExecutionLocationChange?.("computer")}
+              className="gap-2"
+            >
+              <Laptop className="h-4 w-4" />
+              <span className="flex-1">{t("cloudLocationComputer")}</span>
+              {executionLocation === "computer" && (
+                <Check className="h-4 w-4" />
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              role="menuitemradio"
+              aria-checked={executionLocation === "cloud"}
+              onSelect={() => void selectCloud()}
+              className="gap-2"
+            >
+              <Cloud className="h-4 w-4" />
+              <span>{t("cloudLocationCloud")}</span>
+              <span className="ml-auto text-muted-foreground">
+                {t("cloudDefaultEnvironment")} ›
+              </span>
+              {executionLocation === "cloud" && <Check className="h-4 w-4" />}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {error && (
+        <span role="alert" className="max-w-sm text-xs text-destructive">
+          {localizeCloudMessage(error, t, "cloudSignInFailed")}
+        </span>
+      )}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
           <button
             type="button"
             className={CHIP_CLASS}
-            aria-label={t("environmentFromLabel")}
+            aria-label={t("cloudSessionOptions")}
           >
-            <GitBranchIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 truncate">{baseBranch ?? "main"}</span>
+            <MoreHorizontal className="h-4 w-4" />
           </button>
-        }
-      />
-      <WorktreeModeDropdown
-        align="start"
-        useWorktree={useWorktree}
-        onUseWorktreeChange={onUseWorktreeChange}
-        trigger={
-          <button type="button" className={CHIP_CLASS}>
-            <Laptop className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 truncate">
-              {useWorktree
-                ? t("environmentWorktreeLabel")
-                : t("environmentLocalLabel")}
-            </span>
-          </button>
-        }
-      />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          className="flex flex-col items-start gap-1 p-2"
+        >
+          <BaseBranchDropdown
+            align="start"
+            baseBranch={baseBranch}
+            baseBranchSearch={baseBranchSearch}
+            onBaseBranchSearchChange={onBaseBranchSearchChange}
+            filteredBaseBranches={filteredBaseBranches}
+            onBaseBranchSelect={onBaseBranchSelect}
+            trigger={
+              <button
+                type="button"
+                className={CHIP_CLASS}
+                aria-label={t("environmentFromLabel")}
+              >
+                <GitBranchIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate">{baseBranch ?? "main"}</span>
+              </button>
+            }
+          />
+          <WorktreeModeDropdown
+            align="start"
+            useWorktree={useWorktree}
+            onUseWorktreeChange={onUseWorktreeChange}
+            trigger={
+              <button type="button" className={CHIP_CLASS}>
+                <Laptop className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate">
+                  {useWorktree
+                    ? t("environmentWorktreeLabel")
+                    : t("environmentLocalLabel")}
+                </span>
+              </button>
+            }
+          />
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

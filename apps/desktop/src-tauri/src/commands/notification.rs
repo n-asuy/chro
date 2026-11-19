@@ -1,28 +1,15 @@
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::{AppHandle, Runtime as TauriRuntime};
 
 use crate::error::DesktopResult;
+use crate::windows::SessionTarget;
 
 /// App icon embedded at compile time and materialized to a temp file on first
 /// use. The macOS notification API takes an icon by file path (not by handle),
 /// so we stage the PNG on disk once and reuse the path for every notification.
 const NOTIFICATION_ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
-
-/// Event emitted to the renderer when a notification is clicked. The renderer
-/// listens for this and navigates to the session, mirroring how `deep-link:url`
-/// is consumed.
-pub const NOTIFICATION_ACTIVATE_EVENT: &str = "notification:activate";
-
-/// Routing context carried by a notification so a click can reopen the exact
-/// session that produced it. Echoed back to the renderer verbatim on click.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationTarget {
-    pub project_id: String,
-    pub task_id: String,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +18,7 @@ pub struct NotificationPayload {
     pub body: Option<String>,
     /// When present, clicking the notification focuses the window and navigates
     /// to this session. Absent for purely informational notifications.
-    pub target: Option<NotificationTarget>,
+    pub target: Option<SessionTarget>,
 }
 
 #[tauri::command]
@@ -59,26 +46,10 @@ fn icon_path() -> Option<&'static str> {
     .as_deref()
 }
 
-/// Focus the primary window and tell the renderer which session to open. Shared
-/// across platforms so the navigation contract stays identical.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn activate<R: TauriRuntime>(app: &AppHandle<R>, target: Option<NotificationTarget>) {
-    use tauri::Manager;
-    if let Some(window) = app.webview_windows().into_values().next() {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-    if let Some(target) = target {
-        if let Err(err) = tauri::Emitter::emit(app, NOTIFICATION_ACTIVATE_EVENT, target) {
-            tracing::warn!("[notification] activate emit failed: {err}");
-        }
-    }
-}
-
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{activate, icon_path, NotificationPayload};
+    use super::{icon_path, NotificationPayload};
+    use crate::windows::activate_session;
     use objc2::rc::Retained;
     use objc2_foundation::{NSDefaultRunLoopMode, NSPort, NSRunLoop};
     use tauri::{AppHandle, Runtime as TauriRuntime};
@@ -133,7 +104,7 @@ mod platform {
 
                 match notification.send() {
                     Ok(mac_notification_sys::NotificationResponse::Click) => {
-                        activate(&app, target);
+                        activate_session(&app, target);
                     }
                     Ok(_) => {}
                     Err(err) => tracing::warn!("[notification] send failed: {err}"),
@@ -220,7 +191,7 @@ mod tests {
 
     #[test]
     fn target_serializes_to_camel_case() {
-        let target = NotificationTarget {
+        let target = SessionTarget {
             project_id: "p".into(),
             task_id: "t".into(),
         };

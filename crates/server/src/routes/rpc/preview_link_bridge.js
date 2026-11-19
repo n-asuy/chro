@@ -11,11 +11,18 @@
  *
  * The server appends it only to asset responses that opt in, so documents
  * fetched as sub-resources (nested frames, imports) stay untouched.
+ *
+ * "Local" means served by the same asset endpoint as the previewed document:
+ * the same scheme and host. The desktop serves it over http from the local
+ * server; the phone serves it through an app-registered URL scheme, which is
+ * why a local link is forwarded whatever its scheme, while a link elsewhere
+ * is forwarded only when the system can open it.
  */
 (function () {
   var MESSAGE_TYPE = "chro:preview-link";
-  // Everything else (javascript:, blob:, data:) acts on the document itself and
-  // is left to the frame.
+  // Schemes of links elsewhere that are forwarded. Everything else
+  // (javascript:, blob:, data:) acts on the document itself and is left to
+  // the frame.
   var FORWARDED_PROTOCOLS = ["http:", "https:", "mailto:"];
 
   if (window.parent === window) return;
@@ -41,7 +48,12 @@
       } catch (error) {
         return;
       }
-      if (FORWARDED_PROTOCOLS.indexOf(resolved.protocol) < 0) return;
+      // Compared by scheme and host rather than `origin`: a URL with an
+      // app-registered scheme has an opaque origin ("null") by the URL spec.
+      var local =
+        resolved.protocol === window.location.protocol &&
+        resolved.host === window.location.host;
+      if (!local && FORWARDED_PROTOCOLS.indexOf(resolved.protocol) < 0) return;
 
       // Modifier clicks are forwarded too: their default here is the broken
       // in-frame navigation, not a useful new-tab gesture.
@@ -51,9 +63,9 @@
           type: MESSAGE_TYPE,
           href: href,
           url: resolved.href,
-          // Same origin means the target is served by the asset endpoint, so it
-          // names a file in the workspace rather than a site on the web.
-          local: resolved.origin === window.location.origin,
+          // Served by the asset endpoint, so it names a file in the workspace
+          // rather than a site on the web.
+          local: local,
         },
         // The receiver is the app window itself, whose origin differs between
         // the packaged webview and the dev server. The payload carries nothing

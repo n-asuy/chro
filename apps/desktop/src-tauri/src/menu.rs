@@ -126,7 +126,10 @@ pub fn handle_menu_event<R: TauriRuntime>(app: &AppHandle<R>, id: &str) -> bool 
             true
         }
         CLOSE_WINDOW_ID => {
-            if let Some(window) = focused_window(app) {
+            // The edge toolbar comes and goes with its feature flag, not ⌘⇧W.
+            if let Some(window) = focused_window(app)
+                .filter(|window| !crate::windows::is_edge_window(window.label()))
+            {
                 let _ = window.close();
             }
             true

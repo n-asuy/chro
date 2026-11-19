@@ -89,6 +89,18 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
         Ok((request, rx))
     }
 
+    /// Mirror an authenticated remote request without changing its identity or
+    /// deadline. Executor log entries refer to this ID, so generating a new ID
+    /// would disconnect the desktop approval card from its response controls.
+    pub async fn forward_with_waiter(
+        &self,
+        request: ApprovalRequest,
+    ) -> Result<(ApprovalRequest, ApprovalWaiter), ApprovalError> {
+        let (tx, rx) = oneshot::channel();
+        let request = self.register_pending(request, Some(tx)).await?;
+        Ok((request, rx))
+    }
+
     pub async fn create(
         &self,
         payload: CreateApprovalRequest,
@@ -103,10 +115,13 @@ impl<S: LogEntryPusher + 'static> Approvals<S> {
         waiter: Option<oneshot::Sender<ApprovalResolvedData>>,
     ) -> Result<ApprovalRequest, ApprovalError> {
         let id = request.id.clone();
-        self.pending
-            .write()
-            .await
-            .insert(id.clone(), PendingApproval::new(request.clone(), waiter));
+        {
+            let mut pending = self.pending.write().await;
+            if pending.contains_key(&id) || self.completed.read().await.contains_key(&id) {
+                return Err(ApprovalError::AlreadyCompleted);
+            }
+            pending.insert(id.clone(), PendingApproval::new(request.clone(), waiter));
+        }
         self.push_patch(&request, &ApprovalStatus::Pending, PatchOp::Add, None)
             .await;
         self.spawn_timeout_watcher(id).await;
@@ -393,5 +408,41 @@ mod tests {
         let responded_by = &patch[0]["value"]["responded_by"];
         assert_eq!(responded_by["kind"], "agent");
         assert_eq!(responded_by["session"], parent_session.to_string());
+    }
+    #[tokio::test]
+    async fn forwarded_request_keeps_the_log_id_deadline_and_answer_waiter() {
+        let approvals = Approvals::<CapturingPusher>::new(Arc::new(RwLock::new(HashMap::new())));
+        let mut original = ApprovalRequest::new(CreateApprovalRequest {
+            task_run_id: Uuid::new_v4(),
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "pwd"}),
+        });
+        original.timeout_at = Utc::now() + chrono::Duration::minutes(5);
+        let (forwarded, waiter) = approvals
+            .forward_with_waiter(original.clone())
+            .await
+            .unwrap();
+        assert_eq!(forwarded.id, original.id);
+        assert_eq!(forwarded.timeout_at, original.timeout_at);
+        assert!(approvals
+            .forward_with_waiter(original.clone())
+            .await
+            .is_err());
+        approvals
+            .respond(
+                &original.id,
+                ApprovalResponse {
+                    status: ApprovalStatus::Approved,
+                    answers: None,
+                    responded_by: ApprovalActor::User,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            waiter.await.unwrap().status,
+            ApprovalStatus::Approved
+        ));
+        assert!(approvals.forward_with_waiter(original).await.is_err());
     }
 }

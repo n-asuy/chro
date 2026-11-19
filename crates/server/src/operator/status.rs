@@ -15,7 +15,8 @@ pub(crate) async fn show(
     Extension(caller): Extension<Caller>,
 ) -> V1Result<StatusView> {
     let caller = match caller {
-        Caller::User => CallerView::User,
+        // A paired phone acts as the machine's user.
+        Caller::User | Caller::Device { .. } => CallerView::User,
         Caller::Agent { task_id, .. } => CallerView::Agent {
             session: session_ref(&TaskRecord::get(state.pool(), task_id).await?),
         },

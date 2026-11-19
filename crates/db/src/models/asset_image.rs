@@ -168,14 +168,21 @@ impl AssetImage {
         Ok(())
     }
 
-    /// List images that do not have any associated task.
-    pub async fn find_orphaned_images(pool: &Pool<Sqlite>) -> Result<Vec<Self>, sqlx::Error> {
+    /// List images that do not have any associated task and are at least
+    /// `min_age` old. Younger ones may still be on their way into a message.
+    pub async fn find_orphaned_images(
+        pool: &Pool<Sqlite>,
+        min_age: std::time::Duration,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        const SECONDS_PER_DAY: f64 = 86_400.0;
         sqlx::query_as::<_, AssetImage>(
             "SELECT ai.id, ai.file_path, ai.original_name, ai.mime_type, ai.size_bytes, ai.hash, ai.created_at, ai.updated_at
              FROM asset_images ai
              LEFT JOIN task_image_links til ON ai.id = til.image_id
-             WHERE til.image_id IS NULL",
+             WHERE til.image_id IS NULL
+               AND julianday(ai.created_at) <= julianday('now') - ?",
         )
+        .bind(min_age.as_secs_f64() / SECONDS_PER_DAY)
         .fetch_all(pool)
         .await
     }
@@ -280,6 +287,8 @@ impl TaskImageLink {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::DBService;
 
@@ -424,9 +433,34 @@ mod tests {
             .await
             .unwrap();
 
-        let orphans = AssetImage::find_orphaned_images(service.pool())
+        let orphans = AssetImage::find_orphaned_images(service.pool(), Duration::ZERO)
             .await
             .unwrap();
         assert_eq!(orphans.len(), 2);
+
+        let orphans =
+            AssetImage::find_orphaned_images(service.pool(), Duration::from_secs(60 * 60))
+                .await
+                .unwrap();
+        assert!(
+            orphans.is_empty(),
+            "images younger than the minimum age are kept"
+        );
+
+        sqlx::query(
+            "UPDATE asset_images SET created_at = datetime('now', '-2 hours') WHERE id = ?",
+        )
+        .bind(first.id)
+        .execute(service.pool())
+        .await
+        .unwrap();
+        let orphans =
+            AssetImage::find_orphaned_images(service.pool(), Duration::from_secs(60 * 60))
+                .await
+                .unwrap();
+        assert_eq!(
+            orphans.iter().map(|image| image.id).collect::<Vec<_>>(),
+            vec![first.id]
+        );
     }
 }

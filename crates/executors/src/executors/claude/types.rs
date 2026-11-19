@@ -72,6 +72,10 @@ pub enum ClaudeJson {
     User {
         message: ClaudeMessage,
         session_id: Option<String>,
+        /// The CLI's structured result of the tool this message answers, e.g.
+        /// `{questions, answers}` for `AskUserQuestion`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_result: Option<Value>,
     },
     #[serde(rename = "tool_use")]
     ToolUse {

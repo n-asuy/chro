@@ -3,10 +3,7 @@
 use std::{path::PathBuf, time::Instant};
 
 use axum::{
-    extract::{
-        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
-    },
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -19,7 +16,6 @@ use db::{
 };
 use executors::ExecutorProfileId;
 use filesystem::WorkspaceEntryDetail;
-use futures::{SinkExt, StreamExt};
 use log_types::LogEntry;
 use runtime::{
     ForkWorkspace, MessageOptions, ProjectFileService, Runtime, RuntimeError, SendOutcome,
@@ -37,6 +33,7 @@ use super::path_resolve::{
     read_binary_resolving, read_text_resolving, require_internal, stream_binary_response,
 };
 use super::workspace::handle_file_events_ws;
+use crate::routes::stream_sources::StreamSource;
 use crate::{
     identifiers::{resolve_project_id, resolve_task_id, resolve_task_run_id},
     perf, ApiError, AppState, MAX_IMAGE_UPLOAD_BYTES,
@@ -204,6 +201,7 @@ struct StartExecutionProcessRequest {
 
 #[derive(Debug, Deserialize)]
 struct StartExecutionSessionRequest {
+    execution_location: Option<String>,
     prompt: String,
     workspace_path: String,
     resume_session_id: Option<String>,
@@ -253,6 +251,7 @@ impl From<TaskMessageRequestMode> for TaskMessageMode {
 
 #[derive(Debug, Deserialize)]
 struct SendTaskMessageRequest {
+    execution_location: Option<String>,
     prompt: String,
     #[serde(default)]
     mode: TaskMessageRequestMode,
@@ -354,6 +353,7 @@ async fn start_execution_session(
         resolve_context_refs(state.pool(), &payload.prompt, &payload.context_refs).await?;
     let runtime = state.runtime().clone();
     let params = StartExecutionSessionParams {
+        execution_location: payload.execution_location.clone(),
         prompt: Some(payload.prompt.clone()),
         workspace_path: PathBuf::from(&payload.workspace_path),
         resume_session_id: payload.resume_session_id.clone(),
@@ -800,6 +800,7 @@ async fn message_params(
         task_id,
         prompt: payload.prompt.clone(),
         options: MessageOptions {
+            execution_location: payload.execution_location.clone(),
             mode: payload.mode.into(),
             executor_profile_id: payload.executor_profile_id.clone(),
             image_ids: payload.image_ids.clone(),
@@ -940,57 +941,9 @@ async fn stream_task_run_diff(
     Path(id): Path<String>,
     Query(params): Query<DiffStreamQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let id = resolve_task_run_id(state.pool(), &id).await?;
-    let stats_only = params.stats_only.unwrap_or(false);
-    Ok(ws.on_upgrade(move |socket| handle_task_run_diff_ws(socket, state, id, stats_only)))
-}
-
-async fn handle_task_run_diff_ws(
-    socket: WebSocket,
-    state: AppState,
-    task_run_id: Uuid,
-    stats_only: bool,
-) {
-    let (mut sender, mut ws_receiver) = socket.split();
-
-    // Nothing is expected inbound; drain so the client's close frame is read.
-    let drain = tokio::spawn(async move { while let Some(Ok(_)) = ws_receiver.next().await {} });
-
-    match state.runtime().stream_diff(task_run_id, stats_only).await {
-        Ok(mut stream) => {
-            while let Some(result) = stream.next().await {
-                let msg = match result {
-                    Ok(entry) => entry.to_ws_message_unchecked(),
-                    Err(err) => {
-                        let error_json = serde_json::json!({"error": err.to_string()}).to_string();
-                        Message::Text(error_json.into())
-                    }
-                };
-                if sender.send(msg).await.is_err() {
-                    drain.abort();
-                    return;
-                }
-            }
-        }
-        Err(err) => {
-            tracing::warn!(%task_run_id, error = %err, "[handle_task_run_diff_ws] failed to create diff stream");
-            let error_json = serde_json::json!({"error": err.to_string()}).to_string();
-            let _ = sender.send(Message::Text(error_json.into())).await;
-        }
-    }
-
-    // The stream is over: it finished (merged run) or could not be created at
-    // all (e.g. the worktree is gone). Close with a normal-closure frame so the
-    // client treats the outcome as terminal instead of reconnecting into it.
-    // Returning without this left the socket half-open behind the drain task,
-    // and the client waited on it forever.
-    let _ = sender
-        .send(Message::Close(Some(CloseFrame {
-            code: close_code::NORMAL,
-            reason: "diff stream ended".into(),
-        })))
-        .await;
-    drain.abort();
+    let source =
+        StreamSource::task_run_diff(&state, &id, params.stats_only.unwrap_or(false)).await?;
+    Ok(crate::routes::streams::upgrade(ws, state, source))
 }
 
 async fn mark_worktree_deleted(

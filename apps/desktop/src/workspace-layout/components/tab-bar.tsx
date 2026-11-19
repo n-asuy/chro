@@ -14,7 +14,15 @@ import {
   ContextMenuTrigger,
 } from "@chro/ui/context-menu";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
-import { Loader2, MessagesSquare, PinIcon, Plus, X } from "lucide-react";
+import {
+  Loader2,
+  Maximize2,
+  MessagesSquare,
+  Minimize2,
+  PinIcon,
+  Plus,
+  X,
+} from "lucide-react";
 import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -38,18 +46,17 @@ export function TabBar({ leaf, isFocused }: TabBarProps) {
   return (
     <div
       data-tab-bar-leaf-id={leaf.id}
-      className={cn(
-        // Transparent strip sitting on the muted backdrop. `z-10` keeps the
-        // active tab (and its flared feet) above the content card so it can
-        // paint over the card's top border and merge into it. `pl-4` (16px)
-        // keeps the first tab's 8px left foot clear of the card's 8px
-        // rounded corner, so it always lands on the card's flat top edge.
-        "relative z-10 flex h-9 shrink-0 items-stretch gap-1.5 overflow-x-auto pl-4",
-        "scrollbar-thin",
-      )}
+      // Transparent strip sitting on the muted backdrop. `z-10` keeps the
+      // active tab (and its flared feet) above the content card so it can
+      // paint over the card's top border and merge into it. `pl-4` (16px)
+      // keeps the first tab's 8px left foot clear of the card's 8px rounded
+      // corner, so it always lands on the card's flat top edge.
+      className="relative z-10 flex h-9 shrink-0 items-stretch pl-4"
       onMouseDown={() => setFocusedPane(leaf.id)}
     >
-      {leaf.tabs.map((tab) => (
+      {/* Only the tabs scroll; the pane actions stay pinned to the right. */}
+      <div className="scrollbar-thin flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto">
+        {leaf.tabs.map((tab) => (
         <TabBarItem
           key={tab.id}
           tab={tab}
@@ -60,9 +67,36 @@ export function TabBar({ leaf, isFocused }: TabBarProps) {
           onClose={() => closeTab(tab.id)}
         />
       ))}
-      <NewTabButton leafId={leaf.id} />
-      <TabBarTrailingDropZone leafId={leaf.id} />
+        <NewTabButton leafId={leaf.id} />
+        <TabBarTrailingDropZone leafId={leaf.id} />
+      </div>
+      <MaximizePaneButton />
     </div>
+  );
+}
+
+/**
+ * Lets the focused pane take the whole workspace (docks and sibling panes
+ * hidden) without leaving the window. The tab strip's mousedown focuses this
+ * pane first, so the click always maximizes the pane it sits in.
+ */
+function MaximizePaneButton() {
+  const maximized = useLayoutStore((s) => s.paneMaximized);
+  const setPaneMaximized = useLayoutStore((s) => s.setPaneMaximized);
+  const label = maximized ? "Restore pane (⌘⇧Enter)" : "Maximize pane (⌘⇧Enter)";
+  const Icon = maximized ? Minimize2 : Maximize2;
+
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={maximized}
+      onClick={() => setPaneMaximized(!maximized)}
+      className="mx-1 inline-flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground hover:text-foreground"
+    >
+      <Icon className="h-3.5 w-3.5" />
+    </button>
   );
 }
 

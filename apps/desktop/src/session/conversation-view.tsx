@@ -1,4 +1,5 @@
-import { useLanguage } from "@/i18n";
+import { type TranslationFunction, useLanguage } from "@/i18n";
+import { localizeCloudMessage } from "@/lib/cloud-messages";
 import { cn } from "@/lib/cn";
 import {
   Tooltip,
@@ -33,19 +34,27 @@ import type {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentAskUserQuestionTool } from "./components/agent-ask-user-question-tool";
 import { BrailleSpinner } from "./components/braille-spinner";
+import {
+  USER_MESSAGE_TWO_LINES_HEIGHT,
+  useCollapsibleOverflow,
+} from "./components/collapsible-message";
 import { Markdown } from "./components/markdown";
 import { PageAnnotationsCard } from "./components/page-annotations-card";
 import RawLogText from "./components/raw-log-text";
+import { useSessionPreviewTrigger } from "./components/session-preview-trigger";
 import { TextShimmer } from "./components/text-shimmer";
 import { ThinkingStep, ThinkingSteps } from "./components/thinking-steps";
 import { useOpenPathLink, usePathLink } from "./components/use-path-link";
+import { useSessionById } from "./context/session-directory-context";
 import { useConversationActions } from "./conversation-actions";
 import { useImageMetadata } from "./hooks/use-image-metadata";
+import { sessionMentionLabel } from "./lib/session-label";
 import type {
   CommandRunResult,
   DisplayEntry,
   FileChange,
   NormalizedEntry,
+  StoredTask,
   ToolStatus,
 } from "./types";
 import {
@@ -64,10 +73,10 @@ import { SESSION_SELECT_TEXT_ATTR } from "./utils/session-select-all";
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-// Two lines of prompt text (text-sm, leading-relaxed) plus the bubble's top
-// padding: the user message stays pinned while its response scrolls, so a long
-// prompt must not eat the reading space.
-const COLLAPSED_HEIGHT = 52;
+// Two lines of prompt text plus the bubble's top padding (py-1) and a sliver
+// of slack: the user message stays pinned while its response scrolls, so a
+// long prompt must not eat the reading space.
+const COLLAPSED_HEIGHT = USER_MESSAGE_TWO_LINES_HEIGHT + 6;
 
 interface ExpandableUserMessageProps {
   children: ReactNode;
@@ -84,24 +93,8 @@ const ExpandableUserMessage = ({
   dataUserMessageId,
   footer,
 }: ExpandableUserMessageProps) => {
-  const [expanded, setExpanded] = useState(false);
-  const [needsExpansion, setNeedsExpansion] = useState(false);
-  const contentRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const el = contentRef.current;
-    if (!el) return;
-
-    const checkHeight = () => {
-      setNeedsExpansion(el.scrollHeight > COLLAPSED_HEIGHT);
-    };
-
-    checkHeight();
-
-    const observer = new ResizeObserver(checkHeight);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+  const { contentRef, expanded, setExpanded, needsExpansion } =
+    useCollapsibleOverflow(COLLAPSED_HEIGHT);
 
   return (
     <div
@@ -343,6 +336,7 @@ const renderStructuredValue = (value: unknown): ReactNode => {
       <div className="flex flex-col gap-1">
         {value.map((item, index) => (
           <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: Values in a recorded tool payload have fixed positions.
             key={index}
             className="rounded border border-border/40 bg-background/60 px-2 py-1"
           >
@@ -355,7 +349,7 @@ const renderStructuredValue = (value: unknown): ReactNode => {
   if (isPlainObject(value)) {
     const entries = Object.entries(value);
     if (entries.length === 0) {
-      return <span className="text-muted-foreground">{`{}`}</span>;
+      return <span className="text-muted-foreground">{"{}"}</span>;
     }
     return (
       <div className="flex flex-col gap-1">
@@ -401,6 +395,17 @@ const MessageCard = ({
     <div
       className={cn(variant === "system" ? systemTheme : errorTheme)}
       onClick={onToggle}
+      onKeyDown={
+        onToggle
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onToggle();
+              }
+            }
+          : undefined
+      }
+      tabIndex={onToggle ? 0 : undefined}
       role={onToggle ? "button" : undefined}
     >
       <div className="min-w-0 flex-1 overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
@@ -746,6 +751,7 @@ const UnifiedDiffView = ({ diff }: UnifiedDiffViewProps) => {
   return (
     <div className="max-h-64 overflow-auto rounded bg-muted/30 py-2 text-xs font-mono">
       {lines.map((line, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: Lines are immutable within this recorded diff.
         <DiffLine key={i} line={line} />
       ))}
     </div>
@@ -891,7 +897,6 @@ const toolStatusTone = (status: ToolStatus): string => {
       return "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950/50 dark:text-blue-300 dark:border-blue-800";
     case "timed_out":
       return "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800";
-    case "created":
     default:
       return "bg-muted text-muted-foreground border-border";
   }
@@ -1198,6 +1203,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
       return (
         <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-border/50">
           {sections.map((section, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: Recorded command sections retain their order.
             <div key={`command-section-${index}`}>{section}</div>
           ))}
         </div>
@@ -1229,6 +1235,7 @@ const ToolCallEntryContent = ({ entry }: ToolCallEntryContentProps) => {
           <ul className="divide-y divide-border border-t border-border">
             {action.todos.map((todo, index) => (
               <li
+                // biome-ignore lint/suspicious/noArrayIndexKey: This is an immutable recorded todo snapshot.
                 key={index}
                 className="flex items-center gap-2 px-3 py-1.5 text-xs"
               >
@@ -1391,6 +1398,47 @@ const ImagePill = ({ name, path }: ImageEntry) => {
   );
 };
 
+const SESSION_PILL_CLASS =
+  "inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400";
+
+/**
+ * A referenced session, read as its title the way a mention in prose is, with
+ * the session preview on hover. A session the app does not know keeps its id.
+ */
+const SessionReferencePill = ({ taskId }: { taskId: string }) => {
+  const task = useSessionById(taskId);
+  if (!task) {
+    return (
+      <span
+        data-session-reference={taskId}
+        className={SESSION_PILL_CLASS}
+        title={`Session ${taskId}`}
+      >
+        <MessageSquare className="h-3 w-3 shrink-0" />
+        {shortSessionId(taskId)}
+      </span>
+    );
+  }
+  return <ResolvedSessionReferencePill task={task} />;
+};
+
+const ResolvedSessionReferencePill = ({ task }: { task: StoredTask }) => {
+  const preview = useSessionPreviewTrigger(task, "below");
+  return (
+    <span
+      ref={preview.setAnchor}
+      data-session-reference={task.id}
+      className={SESSION_PILL_CLASS}
+      onPointerEnter={preview.hoverProps.onPointerEnter}
+      onPointerLeave={preview.hoverProps.onPointerLeave}
+      onPointerDown={preview.hoverProps.onPointerDown}
+    >
+      <MessageSquare className="h-3 w-3 shrink-0" />
+      {sessionMentionLabel(task.title, shortSessionId(task.id))}
+    </span>
+  );
+};
+
 export const UserMessageContent = ({ content }: { content: string }) => {
   const { contextEntries, skillEntries, imageEntries, text } =
     parseContextFromContent(content);
@@ -1414,14 +1462,10 @@ export const UserMessageContent = ({ content }: { content: string }) => {
             switch (entry.kind) {
               case "session":
                 return (
-                  <span
+                  <SessionReferencePill
                     key={`session-${entry.taskId}`}
-                    className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-400"
-                    title={`Session ${entry.taskId}`}
-                  >
-                    <MessageSquare className="h-3 w-3 shrink-0" />
-                    {shortSessionId(entry.taskId)}
-                  </span>
+                    taskId={entry.taskId}
+                  />
                 );
               case "file": {
                 const displayName = entry.path.split("/").pop() || entry.path;
@@ -1478,6 +1522,7 @@ export const UserMessageContent = ({ content }: { content: string }) => {
 
 const renderEntryBody = (
   entry: NormalizedEntry,
+  t: TranslationFunction,
   onWikilinkClick?: (path: string, subpath?: string) => void,
 ) => {
   switch (entry.entry_type.type) {
@@ -1510,7 +1555,11 @@ const renderEntryBody = (
         );
       }
       return (
-        <CollapsibleEntry content={entry.content} markdown variant="system" />
+        <CollapsibleEntry
+          content={localizeCloudMessage(entry.content, t)}
+          markdown
+          variant="system"
+        />
       );
     }
     case "error_message":
@@ -1521,7 +1570,11 @@ const renderEntryBody = (
         return <ApiErrorEntry content={entry.content} />;
       }
       return (
-        <CollapsibleEntry content={entry.content} markdown variant="error" />
+        <CollapsibleEntry
+          content={localizeCloudMessage(entry.content, t)}
+          markdown
+          variant="error"
+        />
       );
     case "user_feedback":
       return (
@@ -2051,6 +2104,7 @@ const EntryRenderer = memo(
     showActions,
     onFork,
   }: EntryRendererProps) => {
+    const { t } = useLanguage();
     if (displayEntry.type === "STDOUT") {
       return (
         <RawLogText
@@ -2063,7 +2117,7 @@ const EntryRenderer = memo(
     if (displayEntry.type === "STDERR") {
       return (
         <RawLogText
-          content={displayEntry.content}
+          content={localizeCloudMessage(displayEntry.content, t)}
           channel="stderr"
           className="text-sm px-4 py-1"
         />
@@ -2090,7 +2144,7 @@ const EntryRenderer = memo(
       >
         <div className="flex items-start gap-3">
           <div className="flex-1 space-y-2">
-            {renderEntryBody(entry, onWikilinkClick)}
+            {renderEntryBody(entry, t, onWikilinkClick)}
             {showAssistantActions && (
               <MessageActions
                 copyText={entry.content}

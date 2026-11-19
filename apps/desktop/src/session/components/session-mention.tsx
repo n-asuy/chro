@@ -3,21 +3,10 @@ import {
   useOpenSessionFromDirectory,
   useSessionBySlug,
 } from "@/session/context/session-directory-context";
+import { sessionMentionLabel } from "@/session/lib/session-label";
 import type { StoredTask } from "@/session/types";
 import type { ReactNode } from "react";
 import { useSessionPreviewTrigger } from "./session-preview-trigger";
-
-/** Long enough to tell sessions apart, short enough to sit inside a sentence. */
-const LABEL_MAX_CHARS = 24;
-
-/** The opening of the session's title; its slug when it has none. */
-export function sessionMentionLabel(title: string, slug: string): string {
-  const trimmed = title.trim();
-  if (!trimmed) return slug;
-  const chars = Array.from(trimmed);
-  if (chars.length <= LABEL_MAX_CHARS) return trimmed;
-  return `${chars.slice(0, LABEL_MAX_CHARS).join("").trimEnd()}…`;
-}
 
 /**
  * A slug the agent wrote, shown as the session it names: the title's opening

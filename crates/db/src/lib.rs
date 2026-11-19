@@ -152,10 +152,9 @@ impl DBService {
 
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create database directory: {}", e),
-                ))
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to create database directory: {e}"
+                )))
             })?;
         }
 

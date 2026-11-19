@@ -6,6 +6,7 @@ import type { ContextRefPayload } from "../types/context";
 type TaskMessageMode = "auto" | "new";
 
 type SendTaskMessageOptions = {
+  executionLocation?: "computer" | "cloud";
   prompt: string;
   mode: TaskMessageMode;
   requestId?: string;
@@ -90,6 +91,7 @@ function taskMessageRequest(options: SendTaskMessageOptions): RequestInit {
       context_refs: options.contextRefs ?? [],
       selected_skill_ids: options.selectedSkillIds ?? [],
       use_worktree: options.useWorktree,
+      execution_location: options.executionLocation,
       target_branch: options.targetBranch ?? undefined,
     }),
   };

@@ -1,9 +1,13 @@
 //! Preferences and executor configuration endpoints.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use axum::{
     extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, put},
-    Json, Router,
+    Extension, Json, Router,
 };
 use config::{
     AppTheme, AppearanceConfig, EditorConfig, LanguagePreference, NotificationConfig,
@@ -11,14 +15,15 @@ use config::{
 };
 use executors::{
     check_mcp_status, delete_pi_credential, get_install_status_all, list_pi_credentials,
-    list_pi_models, load_mcp_config, save_mcp_config, set_pi_api_key, BaseCodingAgent,
-    ExecutorConfigs, ExecutorInstallStatusResult, ExecutorProfileId, LoadedMcpConfig,
-    McpConfigPayload, McpStatusResult, PiCredentialInfo, PiModelOption, SavedMcpConfig,
+    list_pi_models, load_mcp_config, save_mcp_config, set_pi_api_key, supports_question_tool,
+    validate_launch_args, BaseCodingAgent, ExecutorConfigs, ExecutorInstallStatusResult,
+    ExecutorProfileId, LaunchArgsError, LoadedMcpConfig, McpConfigPayload, McpStatusResult,
+    PiCredentialInfo, PiModelOption, SavedMcpConfig,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::{ApiError, AppState};
+use crate::{mobile::mcp_redaction, operator::DeviceAdmission, ApiError, AppState};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -55,6 +60,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/executor/profile",
             get(get_executor_profile).put(update_executor_profile),
+        )
+        .route(
+            "/executor/launch-settings",
+            get(get_agent_launch_settings).put(update_agent_launch_settings),
         )
 }
 
@@ -410,6 +419,133 @@ async fn update_executor_profile(
     }))
 }
 
+#[derive(Debug, Serialize)]
+struct AgentLaunchSettingsEnvelope {
+    /// Extra launch arguments per agent.
+    launch_args: BTreeMap<BaseCodingAgent, String>,
+    /// Agents that have a question tool chro can turn off.
+    question_tool_agents: Vec<BaseCodingAgent>,
+    /// Agents whose question tool is off.
+    question_tool_disabled: BTreeSet<BaseCodingAgent>,
+}
+
+impl AgentLaunchSettingsEnvelope {
+    fn of(config: config::Config) -> Self {
+        Self {
+            launch_args: config.agent_launch_args,
+            question_tool_agents: [
+                BaseCodingAgent::ClaudeCode,
+                BaseCodingAgent::Codex,
+                BaseCodingAgent::Pi,
+            ]
+            .into_iter()
+            .filter(|agent| supports_question_tool(*agent))
+            .collect(),
+            question_tool_disabled: config.question_tool_disabled,
+        }
+    }
+}
+
+/// Change one agent's launch settings; absent fields stay as they are.
+#[derive(Debug, Deserialize)]
+struct UpdateAgentLaunchSettingsRequest {
+    executor: BaseCodingAgent,
+    /// Shell-style argument string; empty clears the agent's arguments.
+    #[serde(default)]
+    args: Option<String>,
+    /// Whether the agent may ask multiple-choice questions.
+    #[serde(default)]
+    question_tool: Option<bool>,
+}
+
+/// Why an update was refused. Rejections answer
+/// `{error: {code, message, flag?}}` so the client can word them itself.
+enum LaunchSettingsError {
+    Rejected(LaunchArgsError),
+    QuestionToolUnsupported,
+    Api(ApiError),
+}
+
+impl From<runtime::RuntimeError> for LaunchSettingsError {
+    fn from(err: runtime::RuntimeError) -> Self {
+        Self::Api(err.into())
+    }
+}
+
+impl IntoResponse for LaunchSettingsError {
+    fn into_response(self) -> Response {
+        let body = match self {
+            Self::Api(err) => return err.into_response(),
+            Self::QuestionToolUnsupported => json!({ "error": {
+                "code": "question_tool_unsupported",
+                "message": "this agent has no question tool to turn off",
+            }}),
+            Self::Rejected(err) => {
+                let message = err.to_string();
+                match err {
+                    LaunchArgsError::Unparseable => {
+                        json!({ "error": { "code": "unparseable", "message": message } })
+                    }
+                    LaunchArgsError::ReservedFlag { flag } => json!({
+                        "error": { "code": "reserved_flag", "message": message, "flag": flag }
+                    }),
+                    LaunchArgsError::QuestionToolFlag => {
+                        json!({ "error": { "code": "question_tool_flag", "message": message } })
+                    }
+                }
+            }
+        };
+        (StatusCode::BAD_REQUEST, Json(body)).into_response()
+    }
+}
+
+async fn get_agent_launch_settings(
+    State(state): State<AppState>,
+) -> Result<Json<AgentLaunchSettingsEnvelope>, ApiError> {
+    Ok(Json(AgentLaunchSettingsEnvelope::of(
+        state.runtime().current_config().await,
+    )))
+}
+
+async fn update_agent_launch_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateAgentLaunchSettingsRequest>,
+) -> Result<Json<AgentLaunchSettingsEnvelope>, LaunchSettingsError> {
+    let executor = payload.executor;
+    let args = payload
+        .args
+        .map(|raw| validate_launch_args(executor, &raw))
+        .transpose()
+        .map_err(LaunchSettingsError::Rejected)?;
+    if payload.question_tool.is_some() && !supports_question_tool(executor) {
+        return Err(LaunchSettingsError::QuestionToolUnsupported);
+    }
+    let updated = state
+        .runtime()
+        .update_config(|config| {
+            match args {
+                Some(args) if args.is_empty() => {
+                    config.agent_launch_args.remove(&executor);
+                }
+                Some(args) => {
+                    config.agent_launch_args.insert(executor, args);
+                }
+                None => {}
+            }
+            match payload.question_tool {
+                Some(true) => {
+                    config.question_tool_disabled.remove(&executor);
+                }
+                Some(false) => {
+                    config.question_tool_disabled.insert(executor);
+                }
+                None => {}
+            }
+        })
+        .await?;
+    Ok(Json(AgentLaunchSettingsEnvelope::of(updated)))
+}
+
 #[derive(Debug, Deserialize)]
 struct McpConfigQuery {
     #[serde(default)]
@@ -440,19 +576,36 @@ struct McpConfigSaveResponse {
     servers_count: usize,
 }
 
+/// A paired device's request: its MCP views hide credentials.
+type DeviceCaller = Option<Extension<DeviceAdmission>>;
+
 async fn get_mcp_config_handler(
+    device: DeviceCaller,
     Query(query): Query<McpConfigQuery>,
 ) -> Result<Json<McpConfigResponse>, ApiError> {
     let executor = query.executor.unwrap_or(BaseCodingAgent::ClaudeCode);
     let LoadedMcpConfig {
         config_path,
         exists,
-        mcp_config,
+        mut mcp_config,
         servers_count,
         parse_error,
         raw_content,
     } = load_mcp_config(executor, None).await?;
 
+    if device.is_some() {
+        // The file's raw text and the parser's message (which can quote a
+        // line of it) stay on the computer.
+        mcp_config.servers = mcp_redaction::redact_servers(&mcp_config.servers);
+        return Ok(Json(McpConfigResponse {
+            config_path: config_path.to_string_lossy().into_owned(),
+            exists,
+            mcp_config,
+            servers_count,
+            parse_error: parse_error.map(|_| UNPARSEABLE_FOR_DEVICE.to_string()),
+            raw_content: None,
+        }));
+    }
     Ok(Json(McpConfigResponse {
         config_path: config_path.to_string_lossy().into_owned(),
         exists,
@@ -463,7 +616,11 @@ async fn get_mcp_config_handler(
     }))
 }
 
+const UNPARSEABLE_FOR_DEVICE: &str =
+    "The MCP configuration file on the computer could not be parsed. Fix it on the computer.";
+
 async fn update_mcp_config_handler(
+    device: DeviceCaller,
     Query(query): Query<McpConfigQuery>,
     Json(payload): Json<SaveMcpConfigRequest>,
 ) -> Result<Json<McpConfigSaveResponse>, ApiError> {
@@ -471,12 +628,28 @@ async fn update_mcp_config_handler(
         .executor
         .or(query.executor)
         .unwrap_or(BaseCodingAgent::ClaudeCode);
+    let servers = if device.is_some() {
+        // A device edits the redacted view: put the hidden values back. A
+        // file that does not parse would be replaced wholesale by a save, so
+        // a device may not save over it.
+        let current = load_mcp_config(executor, None).await?;
+        if current.parse_error.is_some() {
+            return Err(ApiError::BadRequest(UNPARSEABLE_FOR_DEVICE.to_string()));
+        }
+        mcp_redaction::restore_servers(payload.servers, &current.mcp_config.servers)
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?
+    } else {
+        payload.servers
+    };
     let SavedMcpConfig {
         config_path,
-        mcp_config,
+        mut mcp_config,
         servers_count,
-    } = save_mcp_config(executor, payload.servers, None).await?;
+    } = save_mcp_config(executor, servers, None).await?;
 
+    if device.is_some() {
+        mcp_config.servers = mcp_redaction::redact_servers(&mcp_config.servers);
+    }
     Ok(Json(McpConfigSaveResponse {
         config_path: config_path.to_string_lossy().into_owned(),
         mcp_config,
@@ -490,10 +663,20 @@ struct CheckMcpStatusQuery {
 }
 
 async fn check_mcp_status_handler(
+    device: DeviceCaller,
     Query(query): Query<CheckMcpStatusQuery>,
 ) -> Json<McpStatusResult> {
     let executor = query.executor.unwrap_or(BaseCodingAgent::ClaudeCode);
-    Json(check_mcp_status(executor).await)
+    let mut status = check_mcp_status(executor).await;
+    if device.is_some() {
+        // The CLI reports each server's command line, URLs included.
+        for server in &mut status.servers {
+            server.command = mcp_redaction::redact_text(&server.command);
+        }
+        status.error = status.error.as_deref().map(mcp_redaction::redact_text);
+        status.message = status.message.as_deref().map(mcp_redaction::redact_text);
+    }
+    Json(status)
 }
 
 /// Configured pi models for the runtime picker. Empty when pi is unconfigured or
@@ -596,6 +779,152 @@ async fn update_ui_state(
     }))
 }
 
+#[cfg(test)]
+mod launch_settings_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    type Rejection = (StatusCode, Value);
+
+    async fn put(
+        state: &AppState,
+        executor: BaseCodingAgent,
+        args: Option<&str>,
+        question_tool: Option<bool>,
+    ) -> Result<AgentLaunchSettingsEnvelope, Rejection> {
+        let request = UpdateAgentLaunchSettingsRequest {
+            executor,
+            args: args.map(str::to_string),
+            question_tool,
+        };
+        match update_agent_launch_settings(State(state.clone()), Json(request)).await {
+            Ok(Json(envelope)) => Ok(envelope),
+            Err(err) => {
+                let response = err.into_response();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                Err((status, serde_json::from_slice(&bytes).unwrap()))
+            }
+        }
+    }
+
+    async fn read(state: &AppState) -> AgentLaunchSettingsEnvelope {
+        let Json(envelope) = get_agent_launch_settings(State(state.clone()))
+            .await
+            .unwrap();
+        envelope
+    }
+
+    #[tokio::test]
+    async fn stores_trims_and_clears_launch_args_per_agent() {
+        let app = crate::test_support::app().await;
+        let saved = put(
+            &app.state,
+            BaseCodingAgent::ClaudeCode,
+            Some("  --append-system-prompt \"Ask first.\"  "),
+            None,
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(
+            saved
+                .launch_args
+                .get(&BaseCodingAgent::ClaudeCode)
+                .map(String::as_str),
+            Some("--append-system-prompt \"Ask first.\"")
+        );
+        assert_eq!(read(&app.state).await.launch_args, saved.launch_args);
+
+        let cleared = put(&app.state, BaseCodingAgent::ClaudeCode, Some("   "), None)
+            .await
+            .expect("accepted");
+        assert!(!cleared
+            .launch_args
+            .contains_key(&BaseCodingAgent::ClaudeCode));
+    }
+
+    #[tokio::test]
+    async fn refuses_reserved_flags_with_a_coded_error_and_keeps_the_old_value() {
+        let app = crate::test_support::app().await;
+        put(
+            &app.state,
+            BaseCodingAgent::Pi,
+            Some("--verbose-tools"),
+            None,
+        )
+        .await
+        .expect("accepted");
+
+        let (status, body) = put(&app.state, BaseCodingAgent::Pi, Some("--model x"), None)
+            .await
+            .expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "reserved_flag");
+        assert_eq!(body["error"]["flag"], "--model");
+        assert_eq!(
+            read(&app.state)
+                .await
+                .launch_args
+                .get(&BaseCodingAgent::Pi)
+                .map(String::as_str),
+            Some("--verbose-tools")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn refuses_unparseable_arguments() {
+        let app = crate::test_support::app().await;
+        let (status, body) = put(&app.state, BaseCodingAgent::Codex, Some("-c \"open"), None)
+            .await
+            .expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "unparseable");
+    }
+
+    #[tokio::test]
+    async fn toggles_the_question_tool_for_agents_that_have_one() {
+        let app = crate::test_support::app().await;
+        let initial = read(&app.state).await;
+        assert_eq!(
+            initial.question_tool_agents,
+            vec![BaseCodingAgent::ClaudeCode]
+        );
+        assert!(initial.question_tool_disabled.is_empty(), "on by default");
+
+        let off = put(&app.state, BaseCodingAgent::ClaudeCode, None, Some(false))
+            .await
+            .expect("accepted");
+        assert!(off
+            .question_tool_disabled
+            .contains(&BaseCodingAgent::ClaudeCode));
+
+        let on = put(&app.state, BaseCodingAgent::ClaudeCode, None, Some(true))
+            .await
+            .expect("accepted");
+        assert!(on.question_tool_disabled.is_empty());
+
+        let (status, body) = put(&app.state, BaseCodingAgent::Codex, None, Some(false))
+            .await
+            .expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "question_tool_unsupported");
+    }
+
+    #[tokio::test]
+    async fn sends_question_tool_flags_to_the_setting() {
+        let app = crate::test_support::app().await;
+        let (_, body) = put(
+            &app.state,
+            BaseCodingAgent::ClaudeCode,
+            Some("--disallowedTools AskUserQuestion"),
+            None,
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(body["error"]["code"], "question_tool_flag");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::normalize_accent_hex;

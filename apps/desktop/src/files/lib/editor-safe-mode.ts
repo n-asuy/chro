@@ -35,16 +35,14 @@ export type CodeViewInput = {
   fileSizeBytes: number | null | undefined;
   isHtml: boolean;
   htmlViewMode: HtmlViewMode;
-  fullscreenRequested: boolean;
 };
 
 export type CodeViewState = {
   /** Text is rendered undecorated because the document is large. */
   largeTextSafeMode: boolean;
   showHtmlPreview: boolean;
-  /** Preview/Raw switch and the preview-only refresh + fullscreen buttons. */
+  /** Preview/Raw switch and the preview-only refresh + annotate buttons. */
   showHtmlToolbar: boolean;
-  showHtmlFullscreen: boolean;
   /** The banner only makes sense while the degraded text view is on screen. */
   showSafeModeNotice: boolean;
   syntaxHighlighting: boolean;
@@ -60,7 +58,6 @@ export const resolveCodeViewState = ({
   fileSizeBytes,
   isHtml,
   htmlViewMode,
-  fullscreenRequested,
 }: CodeViewInput): CodeViewState => {
   const largeTextSafeMode = isLargeTextSafeMode(fileSizeBytes);
   const showHtmlPreview = isHtml && htmlViewMode === "preview";
@@ -68,7 +65,6 @@ export const resolveCodeViewState = ({
     largeTextSafeMode,
     showHtmlPreview,
     showHtmlToolbar: isHtml,
-    showHtmlFullscreen: showHtmlPreview && fullscreenRequested,
     showSafeModeNotice: largeTextSafeMode && !showHtmlPreview,
     syntaxHighlighting: !largeTextSafeMode,
     lineWrapping: !largeTextSafeMode,

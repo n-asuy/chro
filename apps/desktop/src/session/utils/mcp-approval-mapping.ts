@@ -1,3 +1,4 @@
+import type { TranslationFunction } from "@/i18n";
 import type { ApprovalRecord } from "../types/api";
 
 /**
@@ -115,5 +116,39 @@ export function mcpApprovalResponseBody(decision: McpApprovalDecision): {
       ? { status: "approved" }
       : { status: "denied" },
     answers: { [DECISION_KEY]: decision },
+  };
+}
+
+/** Command and file approvals use the same decision panel as MCP calls. */
+export function findPendingToolApproval(
+  approvals: Record<string, ApprovalRecord>,
+  taskRunId: string | null,
+  t: TranslationFunction,
+): { approvalId: string; prompt: McpApprovalPrompt } | null {
+  if (!taskRunId) return null;
+  const approval = Object.values(approvals).find(
+    (item) =>
+      item.task_run_id === taskRunId &&
+      item.status.status === "pending" &&
+      item.tool_name !== MCP_APPROVAL_TOOL_NAME &&
+      item.tool_name !== "AskUserQuestion",
+  );
+  if (!approval) return null;
+  const input = approval.tool_input;
+  const params =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? Object.entries(input).map(([label, value]) => ({
+          label,
+          value: typeof value === "string" ? value : JSON.stringify(value),
+        }))
+      : [];
+  return {
+    approvalId: approval.id,
+    prompt: {
+      server: approval.tool_name,
+      message: t("cloudAllowTool", { tool: approval.tool_name }),
+      params,
+      options: ["allow", "deny"],
+    },
   };
 }

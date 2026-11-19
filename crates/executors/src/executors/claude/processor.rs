@@ -758,7 +758,11 @@ impl ClaudeLogProcessor {
                     }
                 }
             }
-            ClaudeJson::User { message, .. } => {
+            ClaudeJson::User {
+                message,
+                tool_use_result,
+                ..
+            } => {
                 if matches!(self.strategy, HistoryStrategy::AmpResume)
                     && message
                         .content
@@ -859,6 +863,45 @@ impl ClaudeLogProcessor {
                                             worktree_path,
                                         ),
                                         status,
+                                    },
+                                    content: info.content.clone(),
+                                    metadata: None,
+                                };
+                                patches.push(ConversationPatch::replace(info.entry_index, entry));
+                            } else if matches!(
+                                info.tool_data,
+                                ClaudeToolData::AskUserQuestion { .. }
+                            ) {
+                                // Answered: the structured `{questions, answers}`
+                                // the history card renders. Refused (skipped,
+                                // timed out): the CLI's message, as an error.
+                                let failed = is_error.unwrap_or(false);
+                                let result = match tool_use_result {
+                                    Some(structured) if !failed => ToolResult {
+                                        result_type: ToolResultValueType::Json,
+                                        value: structured.clone(),
+                                    },
+                                    _ => {
+                                        let (result_type, value) =
+                                            Self::normalize_claude_tool_result_value(content);
+                                        ToolResult { result_type, value }
+                                    }
+                                };
+                                let mut action_type =
+                                    Self::extract_action_type(&info.tool_data, worktree_path);
+                                if let ActionType::Tool { result: slot, .. } = &mut action_type {
+                                    *slot = Some(result);
+                                }
+                                let entry = NormalizedEntry {
+                                    timestamp: None,
+                                    entry_type: NormalizedEntryType::ToolUse {
+                                        tool_name: info.tool_name.clone(),
+                                        action_type,
+                                        status: if failed {
+                                            ToolStatus::Failed
+                                        } else {
+                                            ToolStatus::Success
+                                        },
                                     },
                                     content: info.content.clone(),
                                     metadata: None,
@@ -1387,6 +1430,70 @@ mod tests {
             .filter_map(extract_normalized_entry_from_patch)
             .map(|(_, e)| e)
             .collect()
+    }
+
+    fn ask_user_question_entries(result_line: &str) -> Vec<NormalizedEntry> {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::new();
+        let call: ClaudeJson = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_q","name":"AskUserQuestion","input":{"questions":[{"question":"Which name?","header":"Name","options":[{"label":"todo.md","description":""},{"label":"notes.md","description":""}],"multiSelect":false}]}}]}}"#,
+        )
+        .unwrap();
+        let mut patches = processor.normalize_entries(&call, "/tmp", &provider);
+        let answer: ClaudeJson = serde_json::from_str(result_line).unwrap();
+        patches.extend(processor.normalize_entries(&answer, "/tmp", &provider));
+        patches_to_entries(&patches)
+    }
+
+    fn tool_entry(entries: &[NormalizedEntry]) -> (&ActionType, &ToolStatus) {
+        match &entries.last().expect("an entry").entry_type {
+            NormalizedEntryType::ToolUse {
+                action_type,
+                status,
+                ..
+            } => (action_type, status),
+            other => panic!("not a tool entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn answered_question_carries_the_structured_answers() {
+        let entries = ask_user_question_entries(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_q","content":"Your questions have been answered"}]},"tool_use_result":{"questions":[],"answers":{"Which name?":"todo.md"}}}"#,
+        );
+        let (action, status) = tool_entry(&entries);
+        assert_eq!(*status, ToolStatus::Success);
+        let ActionType::Tool {
+            tool_name,
+            result: Some(result),
+            ..
+        } = action
+        else {
+            panic!("question entry without a result: {action:?}")
+        };
+        assert_eq!(tool_name, "AskUserQuestion");
+        assert_eq!(result.result_type, ToolResultValueType::Json);
+        assert_eq!(result.value["answers"]["Which name?"], "todo.md");
+    }
+
+    #[test]
+    fn refused_question_is_a_failed_entry_with_the_message() {
+        let entries = ask_user_question_entries(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_q","content":"User skipped questions - proceed with defaults","is_error":true}]}}"#,
+        );
+        let (action, status) = tool_entry(&entries);
+        assert_eq!(*status, ToolStatus::Failed);
+        let ActionType::Tool {
+            result: Some(result),
+            ..
+        } = action
+        else {
+            panic!("question entry without a result: {action:?}")
+        };
+        assert_eq!(
+            result.value,
+            Value::String("User skipped questions - proceed with defaults".to_string())
+        );
     }
 
     #[test]

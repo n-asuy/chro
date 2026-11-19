@@ -1,0 +1,100 @@
+# Generate the Xcode project with `xcodegen generate` in apps/ios (the .xcodeproj is not committed).
+name: ChroMobile
+options:
+  bundleIdPrefix: com.chro-ai
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  ChroKit:
+    path: ChroKit
+targets:
+  ChroMobile:
+    type: application
+    platform: iOS
+    sources:
+      - ChroMobile/Sources
+      - path: ChroMobile/Resources
+        optional: true
+      # The scripts the server appends to the HTML preview's document, so the fixture
+      # services answer the asset endpoint as the server does (PreviewBridgeScripts).
+      - path: ../../crates/server/src/routes/rpc/preview_link_bridge.js
+        buildPhase: resources
+      - path: ../../crates/server/src/routes/rpc/preview_annotation_overlay.js
+        buildPhase: resources
+    dependencies:
+      - package: ChroKit
+        product: ChroAPI
+      - package: ChroKit
+        product: ChroDomain
+      - package: ChroKit
+        product: ChroLink
+      - package: ChroKit
+        product: ChroServices
+    # The release notes screen and the version chip read the repo's CHANGELOG.md and the
+    # desktop's release version from the bundle; refresh them before every build.
+    preBuildScripts:
+      - name: Bundle changelog
+        script: "\"$SRCROOT/scripts/bundle-changelog.sh\""
+        inputFiles:
+          - $(SRCROOT)/../../CHANGELOG.md
+          - $(SRCROOT)/../desktop/package.json
+        outputFiles:
+          - $(SRCROOT)/ChroMobile/Resources/Release/CHANGELOG.md
+          - $(SRCROOT)/ChroMobile/Resources/Release/chro-release.json
+    # Keys the build settings cannot express; merged with the generated Info.plist.
+    # No App Transport Security keys: the link dials plain ws:// (E2EE v2 protects
+    # the content) through Network.framework, which ATS does not govern, so any
+    # LAN or tailnet address, MagicDNS *.ts.net name or custom port is reachable.
+    info:
+      path: ChroMobile/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleURLTypes:
+          - CFBundleURLName: com.chro-ai.ios.pair
+            CFBundleURLSchemes: [chro]
+        # The link uses only standard, published algorithms (X25519, HKDF-SHA256,
+        # XSalsa20-Poly1305), which is exempt from export documentation.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chro-ai.ios
+        PRODUCT_NAME: Chro
+        # Curino LLC; release builds are signed by Xcode's automatic signing (scripts/testflight.sh).
+        DEVELOPMENT_TEAM: BG439TZ56H
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_CFBundleDisplayName: Chro
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Chro connects to chro on your computer over your local network or tailnet.
+        INFOPLIST_KEY_NSCameraUsageDescription: Allow Chro to use the camera for QR code scanning.
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: Attach photos from your library to a prompt.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+  ChroMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - ChroMobile/UITests
+    dependencies:
+      - target: ChroMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chro-ai.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        TEST_TARGET_NAME: ChroMobile
+schemes:
+  ChroMobile:
+    build:
+      targets:
+        ChroMobile: all
+        ChroMobileUITests: [test]
+    test:
+      targets:
+        - ChroMobileUITests

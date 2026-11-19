@@ -82,7 +82,10 @@ impl LocalRuntime {
         session_id: Uuid,
     ) -> Result<Option<runtime::LastExchange>, RuntimeError> {
         let sessions = db::models::TaskSession::list_by_task_id(self.db.pool(), task_id).await?;
-        let Some(session) = sessions.into_iter().find(|session| session.id == session_id) else {
+        let Some(session) = sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+        else {
             return Ok(None);
         };
 

@@ -134,10 +134,9 @@ impl Client {
             ))
         })?;
         let meta = envelope.meta.clone();
-        let result = envelope.into_result().map_err(|error| Failure {
-            error,
-            meta: meta.clone(),
-        })?;
+        let result = envelope
+            .into_result()
+            .map_err(|error| Failure::new(error, meta.clone()))?;
         if meta.contract_rev != CONTRACT_REV {
             return Err(ErrorBody::new(
                 ErrorCode::ContractMismatch,

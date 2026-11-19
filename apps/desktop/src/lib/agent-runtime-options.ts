@@ -54,16 +54,18 @@ const ULTRA_EFFORT_LEVELS: ReasoningEffort[] = [...MAX_EFFORT_LEVELS, "ultra"];
 
 // `value` is passed to the Claude Code CLI via `--model`. The short aliases
 // (`fable`/`opus`/`sonnet`/`haiku`) are resolved by the CLI to the current
-// model snapshot, so `label` carries the human-facing generation (Fable 5.1 /
+// model snapshot, so `label` carries the human-facing generation (Fable 5.2 /
 // Opus 5.5 / Sonnet 5.5 / Haiku 5.5) so the selector shows which model the
-// alias points at.
+// alias points at. `speedModes` follows the `fast_mode` capability in the
+// CLI's model catalog: only Fable and Opus have a fast mode.
 const CLAUDE_MODELS: ModelOption[] = [
   {
     value: "fable",
-    label: "Fable 5.1",
+    label: "Fable 5.2",
     executor: "CLAUDE_CODE",
     description: "Most capable model for demanding, long-horizon work.",
     effortLevels: MAX_EFFORT_LEVELS,
+    speedModes: ["standard", "fast"],
   },
   {
     value: "opus",
@@ -71,7 +73,6 @@ const CLAUDE_MODELS: ModelOption[] = [
     executor: "CLAUDE_CODE",
     description: "Highly capable model for complex agentic coding.",
     effortLevels: MAX_EFFORT_LEVELS,
-    // Fast mode is Opus-only; other Claude models have no speed toggle.
     speedModes: ["standard", "fast"],
   },
   {
@@ -91,9 +92,10 @@ const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 // Ordered as the Codex model catalog orders them (`priority`). The model
-// catalog gates each model on a minimum Codex CLI version (GPT-6.1 Sol and
-// GPT-6 Astra need 0.153.0, GPT-6 Sol and GPT-6 Luna need 0.155.0); an older
-// CLI rejects the turn with a 400 API error, so the user runs `codex update`.
+// catalog gates each model on a minimum Codex CLI version (GPT-6.1 Sol,
+// GPT-6 Astra and GPT-6.1 Terra need 0.153.0, GPT-6 Sol and GPT-6 Luna need
+// 0.155.0); an older CLI rejects the turn with a 400 API error, so the user
+// runs `codex update`.
 const CODEX_MODELS: ModelOption[] = [
   {
     value: "gpt-6.1-sol",
@@ -107,6 +109,13 @@ const CODEX_MODELS: ModelOption[] = [
     label: "GPT-6 Astra",
     executor: "CODEX",
     description: "Frontier intelligence for the most demanding work.",
+    effortLevels: ULTRA_EFFORT_LEVELS,
+  },
+  {
+    value: "gpt-6.1-terra",
+    label: "GPT-6.1 Terra",
+    executor: "CODEX",
+    description: "Balanced model for straightforward work.",
     effortLevels: ULTRA_EFFORT_LEVELS,
   },
   {
