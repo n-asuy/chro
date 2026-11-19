@@ -32,7 +32,7 @@ sysinfo = "0.32"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
 crypto_box = { version = "0.9", features = ["std"] }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 open = "5"
 tempfile = "3"
 

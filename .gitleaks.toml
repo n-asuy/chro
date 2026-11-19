@@ -10,6 +10,11 @@ paths = [
   # Generated license inventories: JSON "key" fields hold SPDX ids, not credentials.
   '''(^|/)reports/licenses/.*\.json$''',
   '''(^|/)artifacts/licenses/.*\.json$''',
+  # Cargo lockfiles: package names and registry checksums, never credentials.
+  '''(^|/)Cargo\.lock$''',
+  # Fixed test vectors for the phone link's handshake: keys derived from
+  # constant inputs (0x01.., 0x02..) so both platforms can check each other.
+  '''^crates/mobile-link/testdata/.*\.json$''',
 ]
 regexes = [
   # PostHog project key shipped in the desktop client (publishable analytics key).
@@ -23,4 +28,6 @@ regexes = [
 # decoded form is not flagged as a generic secret.
 stopwords = [
   "8729ED81F534BCDB",
+  # GitHub's documented example token, used by redaction tests.
+  "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
 ]

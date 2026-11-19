@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.62
+
+- Fixed the command-line tool and server of 0.1.61, which failed to build for every platform because the Linux build could not link the system keychain library. Sign-in for cloud sessions now keeps its token in the kernel keyring on Linux, which needs no system library, and the macOS Keychain and Windows Credential Manager as before
+
 ## 0.1.61
 
 - Updated the model picker: Fable now reads Fable 5.2, which is what the `fable` alias resolves to from Claude Code 2.1.322, and offers the Fast speed toggle like Opus. GPT-6.1 Terra joins the Codex models after GPT-6 Astra, as the Codex catalog orders it, and needs Codex CLI 0.153.0 or newer. On an older Claude Code the `fable` alias still runs Fable 5.1, so run `claude update` to get 5.2
