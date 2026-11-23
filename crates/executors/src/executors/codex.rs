@@ -501,11 +501,11 @@ impl StandardCodingAgentExecutor for Codex {
         codex_home().map(|home| home.join("config.toml"))
     }
 
-    async fn generate_session_title(
+    async fn generate_session_name(
         &self,
         request: &str,
         env: &ExecutionEnv,
-    ) -> Result<Option<String>, ExecutorError> {
+    ) -> Result<Option<session_title::SessionName>, ExecutorError> {
         let Invocation { program, args } = CommandBuilder::for_manifest(&cli_manifest::CODEX)
             .extend_params(self.title_params())
             .build_initial()?

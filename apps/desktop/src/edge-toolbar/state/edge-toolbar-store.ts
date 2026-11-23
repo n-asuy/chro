@@ -17,8 +17,14 @@ export type EdgePanel =
   | { kind: "unread" }
   | { kind: "session"; taskId: string }
   | { kind: "list" }
+  /** A tile under the pointer: that session's preview beside the tile. */
+  | { kind: "peek"; taskId: string }
   | { kind: "usage" }
+  | { kind: "settings" }
   | null;
+
+/** A sub-page of the edge settings, shown in the flyout beside the menu. */
+export type SettingsPage = "look" | "language";
 
 interface UnreadPagerState {
   order: string[];
@@ -53,6 +59,14 @@ interface EdgeToolbarState {
   talk: TalkState;
   /** Stepped aside: chro's own window is in front. */
   hidden: boolean;
+  /** The settings flyout's open sub-page, if any. */
+  settingsPage: SettingsPage | null;
+  /** The session whose compact panel shows the icon picker. */
+  iconPicker: string | null;
+  /** The toolbar is being dragged (the whole frame takes the pointer). */
+  dragging: boolean;
+  /** The pointer is on the toolbar or on one of its panels. */
+  pointerInside: boolean;
   expand: () => void;
   collapse: () => void;
   /** A click on the collapsed tab: the toolbar comes out with Unread. */
@@ -65,6 +79,25 @@ interface EdgeToolbarState {
   setMoreOpen: (on: boolean) => void;
   /** "…" → Usage: open or close the usage panel. */
   toggleUsage: () => void;
+  /** "…" → Settings: open or close the edge settings. */
+  toggleSettings: () => void;
+  /** Show a settings sub-page beside the menu (null closes it). */
+  setSettingsPage: (page: SettingsPage | null) => void;
+  /**
+   * A capsule tile under the pointer: that session's preview opens beside
+   * the tile, or the open preview swaps to it. It replaces nothing pinned
+   * (a session panel, Unread, Usage, Settings), only the list or a preview.
+   * Pointing never marks the session read.
+   */
+  peekSession: (taskId: string) => void;
+  /** The pointer has left the tile and its preview: the preview closes. */
+  endPeek: () => void;
+  /** Show or hide the icon picker in the card showing `taskId`. */
+  toggleIconPicker: (taskId: string) => void;
+  /** A session row's context menu: its compact panel with the icon picker. */
+  pickIcon: (taskId: string) => void;
+  setDragging: (dragging: boolean) => void;
+  setPointerInside: (inside: boolean) => void;
   openUnread: () => void;
   openSession: (taskId: string) => void;
   closePanel: () => void;
@@ -121,6 +154,10 @@ export const useEdgeToolbarStore = create<EdgeToolbarState>()((set, get) => ({
   unread: CLOSED_PAGER,
   talk: TALK_IDLE,
   hidden: false,
+  settingsPage: null,
+  iconPicker: null,
+  dragging: false,
+  pointerInside: false,
 
   expand: () => {
     if (!get().expanded) set({ expanded: true });
@@ -143,6 +180,7 @@ export const useEdgeToolbarStore = create<EdgeToolbarState>()((set, get) => ({
     set({
       expanded: true,
       panel: { kind: "session", taskId },
+      iconPicker: get().iconPicker === taskId ? taskId : null,
       help: false,
       preview: null,
       hint: false,
@@ -152,11 +190,18 @@ export const useEdgeToolbarStore = create<EdgeToolbarState>()((set, get) => ({
   // The pager and help stay as they were, so the closing panel keeps its
   // content while its exit transition plays; the next open starts afresh
   // (that is when a session read in the pager leaves the list).
-  closePanel: () => set({ panel: null, preview: null, moreOpen: false }),
+  closePanel: () =>
+    set({
+      panel: null,
+      preview: null,
+      moreOpen: false,
+      settingsPage: null,
+      iconPicker: null,
+    }),
   setMoreOpen: (on) => {
     const { expanded, panel, moreOpen } = get();
     if (on && !expanded && !panel) return;
-    if (!on && panel?.kind === "usage") return;
+    if (!on && (panel?.kind === "usage" || panel?.kind === "settings")) return;
     if (on !== moreOpen) set({ moreOpen: on });
   },
   toggleUsage: () => {
@@ -171,6 +216,56 @@ export const useEdgeToolbarStore = create<EdgeToolbarState>()((set, get) => ({
       hint: false,
       moreOpen: true,
     });
+  },
+  toggleSettings: () => {
+    if (get().panel?.kind === "settings") {
+      set({ panel: null, settingsPage: null });
+      return;
+    }
+    set({
+      expanded: true,
+      panel: { kind: "settings" },
+      settingsPage: null,
+      preview: null,
+      hint: false,
+      moreOpen: true,
+    });
+  },
+  setSettingsPage: (page) => {
+    if (get().panel?.kind !== "settings" || get().settingsPage === page) return;
+    set({ settingsPage: page });
+  },
+  peekSession: (taskId) => {
+    const { panel, expanded, hidden } = get();
+    if (hidden || !expanded) return;
+    if (panel && panel.kind !== "list" && panel.kind !== "peek") return;
+    if (panel?.kind === "peek" && panel.taskId === taskId) return;
+    set({ panel: { kind: "peek", taskId }, preview: null, hint: false });
+  },
+  endPeek: () => {
+    if (get().panel?.kind === "peek") set({ panel: null });
+  },
+  toggleIconPicker: (taskId) => {
+    const { panel, iconPicker, unread } = get();
+    // The card shows the session: its own panel, or Unread's current one.
+    const shown =
+      panel?.kind === "session"
+        ? panel.taskId
+        : panel?.kind === "unread"
+          ? unread.cursorId
+          : null;
+    if (shown !== taskId) return;
+    set({ iconPicker: iconPicker === taskId ? null : taskId });
+  },
+  pickIcon: (taskId) => {
+    get().openSession(taskId);
+    set({ iconPicker: taskId });
+  },
+  setDragging: (dragging) => {
+    if (get().dragging !== dragging) set({ dragging });
+  },
+  setPointerInside: (pointerInside) => {
+    if (get().pointerInside !== pointerInside) set({ pointerInside });
   },
   summon: () => get().openUnread(),
   openList: () => {
@@ -251,6 +346,8 @@ export const useEdgeToolbarStore = create<EdgeToolbarState>()((set, get) => ({
       hint: false,
       moreOpen: false,
       talk: TALK_IDLE,
+      settingsPage: null,
+      iconPicker: null,
     });
   },
 }));

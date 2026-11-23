@@ -18,14 +18,14 @@ struct LiveSettingsTests {
     }
 
     @Test func preferencesRoundTrip() async throws {
-        desktop.reply("GET /rpc/preferences", ["preferences": ["language": "ja", "show_hidden_entries": false, "analytics_enabled": true, "telemetry_id": "t"]])
-        desktop.reply("PUT /rpc/preferences", ["preferences": ["language": "en", "show_hidden_entries": true, "analytics_enabled": false, "telemetry_id": "t"]])
+        desktop.reply("GET /rpc/preferences", ["preferences": ["language": "ja", "show_hidden_entries": false]])
+        desktop.reply("PUT /rpc/preferences", ["preferences": ["language": "en", "show_hidden_entries": true]])
         let (settings, _) = try await service()
-        #expect(try await settings.preferences() == SharedPreferences(language: .ja, showHiddenEntries: false, analyticsEnabled: true))
-        let saved = try await settings.savePreferences(SharedPreferences(language: .en, showHiddenEntries: true, analyticsEnabled: false))
-        #expect(saved == SharedPreferences(language: .en, showHiddenEntries: true, analyticsEnabled: false))
+        #expect(try await settings.preferences() == SharedPreferences(language: .ja, showHiddenEntries: false))
+        let saved = try await settings.savePreferences(SharedPreferences(language: .en, showHiddenEntries: true))
+        #expect(saved == SharedPreferences(language: .en, showHiddenEntries: true))
         #expect(desktop.requests("PUT", "/rpc/preferences").first?.bodyObject as? NSDictionary
-            == ["language": "en", "show_hidden_entries": true, "analytics_enabled": false] as NSDictionary)
+            == ["language": "en", "show_hidden_entries": true] as NSDictionary)
     }
 
     @Test func mergeTemplateEditorAndAccent() async throws {

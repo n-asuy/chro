@@ -40,10 +40,6 @@
     "khroma@2.1.0": {
       "license": "MIT",
       "reason": "Upstream package omits the SPDX field, but ships an MIT LICENSE file."
-    },
-    "posthog-js@1.360.0": {
-      "license": "Apache-2.0",
-      "reason": "package.json uses SEE LICENSE IN LICENSE; shipped LICENSE file is Apache-2.0."
     }
   }
 }

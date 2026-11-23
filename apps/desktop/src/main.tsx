@@ -2,8 +2,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
-import { isEdgeSurface } from "./edge-toolbar/edge-surface";
-import { capture, identify, initAnalytics } from "./lib/analytics";
 import { loadUiState } from "./lib/ui-state-client";
 import { routeTree } from "./routeTree.gen";
 import { RootErrorBoundary, RouteErrorBoundary } from "./system/error-boundary";
@@ -26,32 +24,22 @@ declare module "@tanstack/react-router" {
   }
 }
 
-// Load persisted UI state and analytics config from backend
+// Load persisted UI state from backend
 loadUiState().catch(() => {});
 
-// Resolve feature flags at startup so `useFlag` reads real values, then keep
-// them fresh: this window may stay open for days, and a flag flipped remotely
-// (e.g. a kill switch) has to reach it without a restart.
+// Load local feature defaults and user switches.
 import("./lib/feature-flags-store").then(async ({ useFeatureFlagStore }) => {
   await useFeatureFlagStore.getState().load();
-  const { startFlagRefresh } = await import("./lib/flag-refresh");
-  startFlagRefresh({
-    refresh: () => void useFeatureFlagStore.getState().load(),
-  });
 });
 
-import("./lib/preferences-client").then(({ fetchPreferences }) =>
-  fetchPreferences()
-    .then((res) => {
-      initAnalytics({ enabled: res.preferences.analytics_enabled });
-      identify(res.preferences.telemetry_id);
-      // The edge toolbar is a second window of the same app, not an opening.
-      if (!isEdgeSurface(window.location.pathname)) capture("app_opened");
-    })
-    .catch(() => {
-      initAnalytics({ enabled: false });
-    }),
-);
+// Refresh Access state on startup, foregrounding and while the window is open.
+import("./lib/cloud-access-store").then(({ useCloudAccessStore }) => {
+  const refresh = () => void useCloudAccessStore.getState().refresh();
+  refresh();
+  window.setInterval(refresh, 15_000);
+  window.addEventListener("focus", refresh);
+  document.addEventListener("visibilitychange", refresh);
+});
 
 // Local activity recording: instruments the UI at the document level and
 // Console access to feature flags (`chroFlags.force(...)`), dev builds only.

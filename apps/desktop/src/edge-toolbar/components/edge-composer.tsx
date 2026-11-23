@@ -16,15 +16,6 @@ import {
 import { Plus } from "lucide-react";
 import { type ReactNode, useCallback, useState } from "react";
 
-/** Longest session title the one-line placeholder carries before "…". */
-const PLACEHOLDER_TITLE_CHARS = 24;
-
-function shortTitle(title: string): string {
-  return title.length > PLACEHOLDER_TITLE_CHARS
-    ? `${title.slice(0, PLACEHOLDER_TITLE_CHARS - 1)}…`
-    : title;
-}
-
 interface EdgeComposerProps {
   task: StoredTask;
   /** The run a follow-up continues: its runtime and model are kept. */
@@ -174,8 +165,11 @@ export function EdgeComposer({
           <PromptEditor
             handle={editor}
             placeholder={t("edgeToolbarReplyPlaceholder", {
-              title: shortTitle(task.title || t("sessionUnresolved")),
+              title: task.title || t("sessionUnresolved"),
             })}
+            // One line, cut with an ellipsis at whatever width the row
+            // leaves beside its buttons.
+            placeholderClassName="right-0 truncate"
             onSubmit={() => void handleSend()}
           />
         </div>

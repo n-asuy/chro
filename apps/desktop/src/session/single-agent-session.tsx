@@ -22,6 +22,7 @@ import {
   retainSupportedOverrides,
 } from "@/lib/agent-runtime-options";
 import { desktopFetch, getBackendBaseUrl } from "@/lib/backend-client";
+import { useCloudSessions } from "@/lib/cloud-access-store";
 import { cn } from "@/lib/cn";
 import {
   type BaseCodingAgent,
@@ -328,7 +329,7 @@ export function SingleAgentSessionView({
     },
     [editor, setPromptPopover],
   );
-  const cloudEnabled = useFlag("cloud_sessions");
+  const cloudEnabled = useCloudSessions();
   const [cloudSignInPending, setCloudSignInPending] = useState(false);
   const [executionLocation, setExecutionLocation] = useState<
     "computer" | "cloud"
@@ -1678,18 +1679,18 @@ export function SingleAgentSessionView({
         onChange={(event) => handleFiles(event.target.files)}
       />
 
-      {/* One-time execution controls sit above the new-session composer. */}
+      {/* Stacking context: the new-session tray (z-0) tucks its lower edge
+          behind the composer card (z-10). */}
       <div
         className={cn("relative w-full px-4 pb-4 pt-3", inputWrapperClassName)}
       >
-        {/* Execution location is chosen once, above a new session's composer. */}
         {showNewSessionExecutionControls && (
           <NewSessionExecutionControls
             cloudEnabled={cloudEnabled}
             executionLocation={executionLocation}
             onExecutionLocationChange={setExecutionLocation}
             onCloudSignInPendingChange={setCloudSignInPending}
-            className="relative z-20 mb-2 min-h-8 px-1"
+            className="relative z-0 mx-3 -mb-4 rounded-t-[20px] bg-muted/60 px-2.5 pb-5 pt-1"
             useWorktree={useWorktree}
             onUseWorktreeChange={setUseWorktree}
             baseBranch={baseBranch}

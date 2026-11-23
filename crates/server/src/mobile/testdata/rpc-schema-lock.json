@@ -62,10 +62,8 @@
   },
   "GET /rpc/preferences": {
     "preferences": {
-      "analytics_enabled": "boolean",
       "language": "string",
-      "show_hidden_entries": "boolean",
-      "telemetry_id": "string"
+      "show_hidden_entries": "boolean"
     }
   },
   "GET /rpc/preferences/appearance": {

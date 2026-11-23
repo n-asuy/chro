@@ -3,8 +3,7 @@
  *
  * Buffers activity and flushes it to the backend's dev-events endpoint, which
  * appends it to a JSONL file on this machine. Nothing recorded here is ever
- * transmitted to PostHog: `capture()` in `analytics.ts` owns that path and
- * gates it on a separate egress allowlist.
+ * transmitted to an external service.
  *
  * Enabled in dev builds, and in any build made with `CHRO_DEV_EVENTS=1`.
  */

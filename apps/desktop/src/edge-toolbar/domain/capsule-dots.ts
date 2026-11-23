@@ -2,16 +2,13 @@ import { deriveTaskStatusDot } from "@/session/domain/task-read-state";
 import type { StoredTask } from "@/session/types";
 
 /**
- * The capsule's dots: one per session that still exists. Separate from
- * Unread (see `edge-sessions.ts`): reading a session changes its dot's
- * colour, never removes it; only archiving does.
+ * Each session's state as a dot: one per session that still exists.
+ * Separate from Unread (see `edge-sessions.ts`): reading a session changes
+ * its dot's colour, never removes it; only archiving does.
  */
 
 /** Archived tasks are stored with this status. */
 const ARCHIVED_STATUS = "cancelled";
-
-/** Dots on the capsule before the rest collapse into "+N". */
-export const CAPSULE_DOT_CAP = 8;
 
 /**
  * The mock's four dot states: a blue spinner while running, amber (breathing)
@@ -23,6 +20,8 @@ export type CapsuleDotStatus = "running" | "waiting" | "done" | "idle";
 export interface CapsuleDot {
   task: StoredTask;
   status: CapsuleDotStatus;
+  /** When the user last opened it here; null when they never did. */
+  viewedAt: string | null;
 }
 
 /**
@@ -46,30 +45,21 @@ export function capsuleDotStatus(
 
 const byCreation = (a: CapsuleDot, b: CapsuleDot) =>
   a.task.created_at.localeCompare(b.task.created_at);
-const byRecentActivity = (a: CapsuleDot, b: CapsuleDot) =>
-  b.task.updated_at.localeCompare(a.task.updated_at);
 
 /**
- * The dots the capsule shows: sessions that need the user are always shown;
- * the remaining places go to the most recently active sessions. They are
- * displayed in creation order, so a dot never moves when its session updates
- * and a new session joins at the end. `hidden` counts the rest ("+N").
+ * Every session that still exists with its state, in creation order (the
+ * session list's order within a project; the capsule keeps its own
+ * order, see `capsule-slots.ts`).
  */
-export function capsuleDots(
+export function sessionDots(
   tasks: readonly StoredTask[],
   viewedAt: Readonly<Record<string, string>>,
-  cap: number,
-): { shown: CapsuleDot[]; hidden: number } {
+): CapsuleDot[] {
   const all: CapsuleDot[] = [];
   for (const task of tasks) {
-    const status = capsuleDotStatus(task, viewedAt[task.id]);
-    if (status) all.push({ task, status });
+    const viewed = viewedAt[task.id] ?? null;
+    const status = capsuleDotStatus(task, viewed);
+    if (status) all.push({ task, status, viewedAt: viewed });
   }
-  const urgent = all.filter((dot) => dot.status === "waiting");
-  const rest = all
-    .filter((dot) => dot.status !== "waiting")
-    .sort(byRecentActivity)
-    .slice(0, Math.max(0, cap - urgent.length));
-  const shown = [...urgent, ...rest].sort(byCreation);
-  return { shown, hidden: all.length - shown.length };
+  return all.sort(byCreation);
 }

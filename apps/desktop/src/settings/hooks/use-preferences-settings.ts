@@ -1,18 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { SupportedLanguage, TranslationFunction } from "@/i18n";
 import {
   fetchPreferences,
   savePreferences as savePreferencesRequest,
 } from "@/lib/preferences-client";
-import { setAnalyticsEnabled } from "@/lib/analytics";
 import { dispatchWorkspaceRefreshEvent } from "@/lib/preferences-events";
-import type { SupportedLanguage, TranslationFunction } from "@/i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type LanguageOption = SupportedLanguage;
 
 type PreferencesState = {
   language: LanguageOption;
   showHiddenEntries: boolean;
-  analyticsEnabled: boolean;
   preferencesLoading: boolean;
   preferencesError: string | null;
   preferencesParseWarning: string | null;
@@ -21,7 +19,6 @@ type PreferencesState = {
   preferencesDirty: boolean;
   handleLanguageSelect: (value: string) => void;
   handleHiddenToggle: (checked: boolean) => void;
-  handleAnalyticsToggle: (checked: boolean) => void;
 };
 
 type PreferencesSettingsArgs = {
@@ -52,7 +49,6 @@ export function usePreferencesSettings({
   const [showHiddenEntries, setShowHiddenEntries] = useState(false);
   const [initialShowHiddenEntries, setInitialShowHiddenEntries] =
     useState(false);
-  const [analyticsEnabled, setAnalyticsEnabledState] = useState(true);
   const hasLoadedPreferencesRef = useRef(false);
 
   const preferencesDirty =
@@ -76,13 +72,11 @@ export function usePreferencesSettings({
         const nextLanguage: LanguageOption =
           response.preferences.language === "ja" ? "ja" : "en";
         const nextHidden = Boolean(response.preferences.show_hidden_entries);
-        const nextAnalytics = response.preferences.analytics_enabled !== false;
         setLanguage(nextLanguage);
         setInitialLanguage(nextLanguage);
         setAppLanguage(nextLanguage);
         setShowHiddenEntries(nextHidden);
         setInitialShowHiddenEntries(nextHidden);
-        setAnalyticsEnabledState(nextAnalytics);
         setPreferencesParseWarning(null);
       } catch (error) {
         setPreferencesError(
@@ -191,41 +185,9 @@ export function usePreferencesSettings({
     [language, loadPreferences, setAppLanguage, t],
   );
 
-  const handleAnalyticsToggle = useCallback(
-    (checked: boolean) => {
-      const nextValue = Boolean(checked);
-      setAnalyticsEnabledState(nextValue);
-      setAnalyticsEnabled(nextValue);
-      setPreferencesSaveState("saving");
-      setPreferencesSaveError(null);
-
-      void (async () => {
-        try {
-          await savePreferencesRequest({
-            language,
-            analytics_enabled: nextValue,
-          });
-          setPreferencesSaveState("success");
-          setTimeout(() => setPreferencesSaveState("idle"), 2000);
-        } catch (error) {
-          console.error("[settings] failed to persist analytics toggle", error);
-          setPreferencesSaveState("error");
-          setPreferencesSaveError(
-            error instanceof Error
-              ? error.message
-              : t("preferencesSaveErrorDescription"),
-          );
-          void loadPreferences({ force: true });
-        }
-      })();
-    },
-    [language, loadPreferences, t],
-  );
-
   return {
     language,
     showHiddenEntries,
-    analyticsEnabled,
     preferencesLoading,
     preferencesError,
     preferencesParseWarning,
@@ -234,6 +196,5 @@ export function usePreferencesSettings({
     preferencesDirty,
     handleLanguageSelect,
     handleHiddenToggle,
-    handleAnalyticsToggle,
   };
 }

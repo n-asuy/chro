@@ -12,12 +12,10 @@ public struct SharedPreferences: Equatable, Sendable {
 
     public var language: Language
     public var showHiddenEntries: Bool
-    public var analyticsEnabled: Bool
 
-    public init(language: Language = .en, showHiddenEntries: Bool = false, analyticsEnabled: Bool = true) {
+    public init(language: Language = .en, showHiddenEntries: Bool = false) {
         self.language = language
         self.showHiddenEntries = showHiddenEntries
-        self.analyticsEnabled = analyticsEnabled
     }
 }
 

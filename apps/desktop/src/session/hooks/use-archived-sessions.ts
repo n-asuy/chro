@@ -7,6 +7,7 @@ const ARCHIVED_STATUS = "cancelled";
 
 export interface ArchivedSession {
   id: string;
+  slug?: string | null;
   title: string | null;
   archivedAt: string;
 }
@@ -29,15 +30,15 @@ export interface ArchiveTaskApi {
  * mid-turn) keeps `active_session_id` set and its run row stuck on "running",
  * which would otherwise hide the archive control forever. Cancel its run first
  * so the run reaches a terminal status and `active_session_id` is cleared, then
- * archive. The cancel is best-effort — when there is nothing live to cancel it
- * is a harmless no-op, and archiving must still proceed regardless.
+ * archive. A run that is already gone resolves the cancel; a stop that fails
+ * rejects, and the session stays in the list rather than running out of sight.
  */
 export async function archiveTask(
   task: Pick<StoredTask, "id" | "active_session_id">,
   api: ArchiveTaskApi,
 ): Promise<void> {
   if (task.active_session_id) {
-    await api.cancel(task.id).catch(() => {});
+    await api.cancel(task.id);
   }
   await api.updateStatus(task.id, ARCHIVED_STATUS);
 }

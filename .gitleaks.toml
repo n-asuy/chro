@@ -17,7 +17,8 @@ paths = [
   '''^crates/mobile-link/testdata/.*\.json$''',
 ]
 regexes = [
-  # PostHog project key shipped in the desktop client (publishable analytics key).
+  # Publishable analytics project key of the removed client telemetry. The code is gone,
+  # but the scan covers the whole history and old commits still carry the line.
   '''POSTHOG_KEY\s*=\s*"phc_[A-Za-z0-9]+"''',
   # Tauri updater public key: embedded in every client to verify release signatures.
   # The private signing key lives only in CI secrets, never in the repo.

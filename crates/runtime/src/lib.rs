@@ -36,7 +36,7 @@ pub use execution::{ExecutionEvent, ExecutionStartParams};
 pub use session_turns::{SendOutcome, WhenBusy};
 pub use tasks::{
     ExecutionSessionStart, ForkOutcome, ForkWorkspace, MergeOutcome, MessageOptions, RebaseOutcome,
-    SendTaskMessageParams, StartExecutionProcessParams, StartExecutionSessionParams,
+    SendTaskMessageParams, SessionDeletePlan, StartExecutionProcessParams, StartExecutionSessionParams,
     TaskMessageMode, TaskMessageStart, TaskRunBranchStatus, TaskRunTaskProject, TaskRunWithTask,
     TaskService,
 };
@@ -187,11 +187,10 @@ pub trait Runtime: Clone + Send + Sync + 'static {
             .map_err(RuntimeError::from)
     }
 
-    async fn cleanup_task_run_artifacts(&self, task_run_id: Uuid) -> Result<(), RuntimeError> {
-        self.container()
-            .cleanup_task_run_artifacts(task_run_id)
-            .await
-            .map_err(RuntimeError::from)
+    /// Drop the in-memory state of a run whose session was deleted. The run's
+    /// log file stays on disk.
+    async fn release_task_run(&self, task_run_id: Uuid) {
+        self.container().release_task_run(task_run_id).await;
     }
 
     async fn execution_event_stream(

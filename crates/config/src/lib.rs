@@ -13,7 +13,6 @@ use executors::{BaseCodingAgent, ExecutorProfileId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use uuid::Uuid;
 
 const CURRENT_VERSION: u32 = 20;
 
@@ -141,9 +140,6 @@ pub struct Config {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub executor_profile: ExecutorProfileId,
-    pub analytics_enabled: bool,
-    #[serde(default = "default_telemetry_id")]
-    pub telemetry_id: String,
     pub github_token: Option<String>,
     pub language: LanguagePreference,
     #[serde(default)]
@@ -182,10 +178,6 @@ pub struct MobilePairingConfig {
     pub selected_custom_address: Option<String>,
 }
 
-fn default_telemetry_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
 impl Default for Config {
     fn default() -> Self {
         let now = Utc::now();
@@ -194,8 +186,6 @@ impl Default for Config {
             created_at: now,
             updated_at: now,
             executor_profile: ExecutorProfileId::default(),
-            analytics_enabled: true,
-            telemetry_id: default_telemetry_id(),
             github_token: None,
             language: LanguagePreference::default(),
             show_hidden_entries: false,
@@ -259,7 +249,11 @@ impl ConfigService {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         fs::create_dir_all(&parent)?;
-        write_replacing(&parent, &self.location, &serde_json::to_vec_pretty(&config)?)?;
+        write_replacing(
+            &parent,
+            &self.location,
+            &serde_json::to_vec_pretty(&config)?,
+        )?;
         Ok(())
     }
 }
@@ -334,7 +328,6 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
                 "max_tokens": 4000
             });
         }
-        json["analytics_enabled"] = Value::Bool(true);
         json["version"] = Value::from(2);
     }
 
@@ -492,7 +485,6 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
         .unwrap_or(12)
         < 13
     {
-        json["analytics_enabled"] = Value::Bool(true);
         json["version"] = Value::from(13);
     }
 
@@ -503,9 +495,6 @@ fn migrate_config(json: &mut Value) -> Result<(), ConfigError> {
         .unwrap_or(13)
         < 14
     {
-        if json.get("telemetry_id").is_none() {
-            json["telemetry_id"] = Value::String(Uuid::new_v4().to_string());
-        }
         json["version"] = Value::from(14);
     }
 
@@ -612,18 +601,32 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn legacy_telemetry_fields_are_ignored_and_not_saved() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chro.json");
+        let service = ConfigService::new(&path);
+        let mut legacy = serde_json::to_value(Config::default()).unwrap();
+        legacy["analytics_enabled"] = Value::Bool(true);
+        legacy["telemetry_id"] = Value::String("old-installation".into());
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let loaded = service.load().expect("old configuration remains readable");
+        service.save(loaded).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(saved.get("analytics_enabled").is_none());
+        assert!(saved.get("telemetry_id").is_none());
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("chro.json");
         let service = ConfigService::new(&path);
         let config = Config {
-            analytics_enabled: true,
             language: LanguagePreference::En,
             ..Config::default()
         };
         service.save(config.clone()).unwrap();
         let loaded = service.load().unwrap();
-        assert!(loaded.analytics_enabled);
         assert_eq!(
             loaded.executor_profile.executor,
             config.executor_profile.executor

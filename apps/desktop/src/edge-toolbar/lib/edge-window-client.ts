@@ -112,6 +112,14 @@ export function onEdgePresence(handler: (hidden: boolean) => void): () => void {
   );
 }
 
+/** Dock the window against the left or right screen edge. */
+export async function setEdgeSide(side: "left" | "right"): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("edge_toolbar_set_side", { side }).catch((error) =>
+    report("edge_toolbar_set_side", error),
+  );
+}
+
 /** A view of the app window the "…" menu opens. */
 export type AppView = "settings" | "feedback";
 

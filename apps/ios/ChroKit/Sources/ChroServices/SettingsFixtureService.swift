@@ -6,7 +6,7 @@ import Foundation
 /// the Codex and pi MCP files and every MCP connection-check result.
 final class SettingsFixtureService: SettingsService, @unchecked Sendable {
     private let lock = NSLock()
-    private var shared = SharedPreferences(language: .en, showHiddenEntries: true, analyticsEnabled: true)
+    private var shared = SharedPreferences(language: .en, showHiddenEntries: true)
     private var template: String?
     private var lineHeight = EditorChoices.defaultLineHeight
     private var accentHex: String?

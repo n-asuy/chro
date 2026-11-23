@@ -64,7 +64,7 @@ pub struct TaskRecord {
     pub last_summary: Option<String>,
     /// True once a person chose the title (rename). An unpinned title is the
     /// first line of the prompt and is replaced by a title generated from the
-    /// opening request when the first run starts; see `adopt_session_title`.
+    /// opening request when the first run starts; see `adopt_session_name`.
     pub title_pinned: bool,
     /// Title of the session this one was forked from, snapshotted at fork time.
     ///
@@ -93,6 +93,10 @@ pub struct TaskRecord {
     /// Short status line the session's agent or a person set ("fix
     /// implemented; running tests"). `None` until someone sets it.
     pub note: Option<String>,
+    /// Name of the session's icon (one of the desktop's line icons), picked
+    /// by the call that titles the session or chosen by a person. `None`
+    /// until either happens; the desktop then draws a neutral default.
+    pub icon: Option<String>,
 }
 
 /// Selects every task column plus the fork and delegate edges' snapshot
@@ -149,6 +153,7 @@ impl TaskRecord {
             delegated_from_id: None,
             home_dir: None,
             note: None,
+            icon: None,
         }
     }
 
@@ -458,6 +463,10 @@ impl TaskRecord {
     /// none of the sessions that recorded it or ran in it is running or has
     /// been active within the window. A session's activity is its latest run
     /// completion, or its `updated_at` when it has never completed a run.
+    ///
+    /// A worktree any archived session uses never expires: archiving promises
+    /// the session comes back as it was, and uncommitted files in the worktree
+    /// exist nowhere else. Deleting the session is how that space is reclaimed.
     pub async fn find_expired_worktrees(
         pool: &Pool<Sqlite>,
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
@@ -476,7 +485,8 @@ impl TaskRecord {
             task_activity AS (
                 SELECT t.id AS task_id,
                     COALESCE(MAX(datetime(run.completed_at)), datetime(t.updated_at)) AS last_active,
-                    MAX(run.completed_at IS NULL AND run.started_at IS NOT NULL) AS running
+                    MAX(run.completed_at IS NULL AND run.started_at IS NOT NULL) AS running,
+                    MAX(t.status = 'cancelled') AS archived
                 FROM task_records t
                 LEFT JOIN task_runs run ON run.task_id = t.id
                 GROUP BY t.id
@@ -491,10 +501,41 @@ impl TaskRecord {
             )
             GROUP BY s.path
             HAVING COALESCE(MAX(a.running), 0) = 0
+                AND MAX(a.archived) = 0
                 AND datetime('now', '-72 hours') > MAX(a.last_active)
             ORDER BY MAX(a.last_active) ASC
             "#,
         )
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Worktrees this session works in that no other session uses: the path on
+    /// its record and every path its runs executed in, minus any path another
+    /// session recorded or ran in. Deleting the session removes exactly these;
+    /// a shared worktree stays for the sessions still working there.
+    pub async fn exclusive_worktree_paths(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            WITH uses AS (
+                SELECT worktree_path AS path, id AS task_id
+                FROM task_records
+                WHERE worktree_path IS NOT NULL AND worktree_deleted = 0
+                UNION
+                SELECT container_ref, task_id FROM task_runs WHERE container_ref IS NOT NULL
+                UNION
+                SELECT workspace_path, task_id FROM task_runs WHERE workspace_path IS NOT NULL
+            )
+            SELECT path FROM uses
+            GROUP BY path
+            HAVING MAX(task_id = ?1) = 1 AND MIN(task_id = ?1) = 1
+            ORDER BY path
+            "#,
+        )
+        .bind(task_id)
         .fetch_all(pool)
         .await
     }
@@ -597,15 +638,17 @@ impl TaskRecord {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Replace an unpinned title with the one generated for the session.
-    /// Returns whether the title changed; a pinned or already-matching title
-    /// is left alone.
-    pub async fn adopt_session_title(
+    /// Adopt the name generated for the session: replace an unpinned title
+    /// with `title`, and give the session `icon` unless it already has one
+    /// (a person's choice, or an earlier run's). Returns whether anything
+    /// changed; a pinned or already-matching title is left alone.
+    pub async fn adopt_session_name(
         pool: &Pool<Sqlite>,
         task_id: Uuid,
         title: &str,
+        icon: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
+        let titled = sqlx::query(
             "UPDATE task_records
              SET title = ?, updated_at = datetime('now')
              WHERE id = ? AND title_pinned = 0 AND title != ?",
@@ -614,8 +657,37 @@ impl TaskRecord {
         .bind(task_id)
         .bind(title)
         .execute(pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        .await?
+        .rows_affected();
+        let iconed = match icon {
+            // An icon is not activity: `updated_at` (the session's order and
+            // its read state) stays as it is.
+            Some(icon) => sqlx::query("UPDATE task_records SET icon = ? WHERE id = ? AND icon IS NULL")
+            .bind(icon)
+            .bind(task_id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+            None => 0,
+        };
+        Ok(titled + iconed > 0)
+    }
+
+    /// Set or clear the session's icon (a person's choice). Callers must
+    /// pass a known icon name; `None` returns the session to the default.
+    /// Not activity: `updated_at` (the session's order and read state) is
+    /// left alone.
+    pub async fn set_icon(
+        pool: &Pool<Sqlite>,
+        task_id: Uuid,
+        icon: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE task_records SET icon = ? WHERE id = ?")
+            .bind(icon)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 
     /// Batch-update sort_order for a list of task IDs.
@@ -1139,12 +1211,12 @@ mod tests {
         assert!(!task.title_pinned);
 
         assert!(
-            TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+            TaskRecord::adopt_session_name(&pool, task.id, "Login bug fix", None)
                 .await
                 .unwrap()
         );
         assert!(
-            !TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+            !TaskRecord::adopt_session_name(&pool, task.id, "Login bug fix", None)
                 .await
                 .unwrap(),
             "re-adopting the same title is a no-op"
@@ -1152,6 +1224,72 @@ mod tests {
         let stored = TaskRecord::get(&pool, task.id).await.unwrap();
         assert_eq!(stored.title, "Login bug fix");
         assert!(!stored.title_pinned, "adoption is not a person's choice");
+    }
+
+    #[tokio::test]
+    async fn the_generated_icon_is_adopted_only_while_the_session_has_none() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "fix the bug", Some("fix the bug")).await;
+        assert!(task.icon.is_none());
+
+        assert!(TaskRecord::adopt_session_name(&pool, task.id, "Login bug fix", Some("bug"))
+            .await
+            .unwrap());
+        assert_eq!(TaskRecord::get(&pool, task.id).await.unwrap().icon.as_deref(), Some("bug"));
+
+        // A person's choice is never replaced by a later run's name.
+        TaskRecord::set_icon(&pool, task.id, Some("rocket")).await.unwrap();
+        TaskRecord::adopt_session_name(&pool, task.id, "Login bug fix", Some("key"))
+            .await
+            .unwrap();
+        assert_eq!(TaskRecord::get(&pool, task.id).await.unwrap().icon.as_deref(), Some("rocket"));
+
+        // Clearing returns the session to the default.
+        TaskRecord::set_icon(&pool, task.id, None).await.unwrap();
+        assert!(TaskRecord::get(&pool, task.id).await.unwrap().icon.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_icon_is_not_activity() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "fix the bug", Some("fix the bug")).await;
+        sqlx::query("UPDATE task_records SET updated_at = '2026-01-01T00:00:00Z' WHERE id = ?")
+            .bind(task.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = TaskRecord::get(&pool, task.id).await.unwrap().updated_at;
+
+        TaskRecord::set_icon(&pool, task.id, Some("leaf")).await.unwrap();
+        // The title is pinned to the same value, so only the icon changes.
+        TaskRecord::adopt_session_name(&pool, task.id, "fix the bug", Some("bug"))
+            .await
+            .unwrap();
+        TaskRecord::set_icon(&pool, task.id, None).await.unwrap();
+        TaskRecord::adopt_session_name(&pool, task.id, "fix the bug", Some("bug"))
+            .await
+            .unwrap();
+
+        let after = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(after.icon.as_deref(), Some("bug"));
+        assert_eq!(after.updated_at, before);
+    }
+
+    #[tokio::test]
+    async fn a_pinned_title_still_takes_the_generated_icon() {
+        let pool = migrated_pool().await;
+        let project = crate::models::ProjectRecord::ensure_with_name_hint(&pool, "/tmp/repo", None)
+            .await
+            .unwrap();
+        let mut task = TaskRecord::new_with_prompt(project.id, "Chosen name", None, None);
+        task.title_pinned = true;
+        task.insert(&pool).await.unwrap();
+        assert!(TaskRecord::adopt_session_name(&pool, task.id, "Other", Some("leaf"))
+            .await
+            .unwrap());
+        let stored = TaskRecord::get(&pool, task.id).await.unwrap();
+        assert_eq!(stored.title, "Chosen name");
+        assert_eq!(stored.icon.as_deref(), Some("leaf"));
     }
 
     #[tokio::test]
@@ -1165,7 +1303,7 @@ mod tests {
         task.insert(&pool).await.unwrap();
 
         assert!(
-            !TaskRecord::adopt_session_title(&pool, task.id, "Inherited from source")
+            !TaskRecord::adopt_session_name(&pool, task.id, "Inherited from source", None)
                 .await
                 .unwrap()
         );
@@ -1220,7 +1358,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            TaskRecord::adopt_session_title(&pool, task.id, "Cache path experiment")
+            TaskRecord::adopt_session_name(&pool, task.id, "Cache path experiment", None)
                 .await
                 .unwrap()
         );
@@ -1277,7 +1415,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !TaskRecord::adopt_session_title(&pool, task.id, "Login bug fix")
+            !TaskRecord::adopt_session_name(&pool, task.id, "Login bug fix", None)
                 .await
                 .unwrap()
         );
@@ -1670,6 +1808,75 @@ mod tests {
         assert_eq!(
             expired_paths(&pool).await,
             vec![SHARED_WORKTREE.to_string()]
+        );
+    }
+
+    async fn archive(pool: &Pool<Sqlite>, task_id: Uuid) {
+        TaskRecord::update_status(pool, task_id, TaskStatus::Cancelled)
+            .await
+            .unwrap();
+    }
+
+    /// Archiving promises the session can be restored as it was, and the
+    /// worktree's uncommitted files exist nowhere else.
+    #[tokio::test]
+    async fn an_archived_sessions_worktree_never_expires() {
+        let pool = migrated_pool().await;
+        let task = task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+        archive(&pool, task).await;
+
+        assert!(expired_paths(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shared_worktree_stays_while_any_session_on_it_is_archived() {
+        let pool = migrated_pool().await;
+        task_in_worktree(&pool, SHARED_WORKTREE, Some(90)).await;
+        let archived = task_in_worktree(&pool, SHARED_WORKTREE, Some(80)).await;
+        archive(&pool, archived).await;
+
+        assert!(expired_paths(&pool).await.is_empty());
+    }
+
+    const OWN_WORKTREE: &str = "/tmp/worktrees/ch/own";
+
+    #[tokio::test]
+    async fn exclusive_worktrees_are_those_no_other_session_uses() {
+        let pool = migrated_pool().await;
+        let task = task_in_worktree(&pool, OWN_WORKTREE, Some(1)).await;
+
+        assert_eq!(
+            TaskRecord::exclusive_worktree_paths(&pool, task).await.unwrap(),
+            vec![OWN_WORKTREE.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worktree_another_session_ran_in_is_not_exclusive() {
+        let pool = migrated_pool().await;
+        let task = task_in_worktree(&pool, SHARED_WORKTREE, Some(1)).await;
+        let visitor = task_in_worktree(&pool, SHARED_WORKTREE, Some(1)).await;
+        TaskRecord::update_worktree_state(&pool, visitor, None, false, false)
+            .await
+            .unwrap();
+
+        assert!(TaskRecord::exclusive_worktree_paths(&pool, task)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_worktree_recorded_before_any_run_is_exclusive() {
+        let pool = migrated_pool().await;
+        let task = inserted_task(&pool, "fresh", None).await;
+        TaskRecord::update_worktree_state(&pool, task.id, Some(OWN_WORKTREE.to_string()), false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            TaskRecord::exclusive_worktree_paths(&pool, task.id).await.unwrap(),
+            vec![OWN_WORKTREE.to_string()]
         );
     }
 

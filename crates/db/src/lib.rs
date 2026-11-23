@@ -94,6 +94,20 @@ impl DBService {
         })
     }
 
+    /// Id of this database, made on first use and kept with it, for values
+    /// stored outside it that mean something only in one database.
+    pub async fn database_id(&self) -> Result<String, Error> {
+        const READ: &str = "SELECT value FROM app_meta WHERE key = 'database_id'";
+        if let Some(id) = sqlx::query_scalar(READ).fetch_optional(&self.pool).await? {
+            return Ok(id);
+        }
+        sqlx::query("INSERT OR IGNORE INTO app_meta(key, value) VALUES ('database_id', ?)")
+            .bind(Uuid::new_v4().to_string())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query_scalar(READ).fetch_one(&self.pool).await
+    }
+
     /// Get default database path
     ///
     /// Returns path to db.sqlite in the application data directory.
@@ -522,6 +536,25 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_database_keeps_its_id_and_shares_it_with_no_other() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("one.sqlite");
+        let db = DBService::new_with_path(&path).await.unwrap();
+        let id = db.database_id().await.unwrap();
+        assert!(!id.is_empty());
+        assert_eq!(db.database_id().await.unwrap(), id);
+        drop(db);
+
+        let reopened = DBService::new_with_path(&path).await.unwrap();
+        assert_eq!(reopened.database_id().await.unwrap(), id);
+
+        let other = DBService::new_with_path(temp_dir.path().join("two.sqlite"))
+            .await
+            .unwrap();
+        assert_ne!(other.database_id().await.unwrap(), id);
     }
 
     #[tokio::test]

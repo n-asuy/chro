@@ -402,16 +402,6 @@ async fn start_execution_session(
         }),
     );
 
-    analytics::capture_nonblocking(
-        "execution_started",
-        serde_json::json!({
-            "is_follow_up": false,
-            "prompt_chars": payload.prompt.chars().count(),
-            "image_count": image_count,
-            "use_worktree": payload.use_worktree.unwrap_or(true),
-        }),
-    );
-
     Ok(Json(start_execution_response(&result)))
 }
 
@@ -430,22 +420,6 @@ async fn update_execution_status(
     let run = TaskService::new(state.runtime())
         .update_execution_status(id, payload.status, payload.exit_code)
         .await?;
-
-    match payload.status {
-        RunStatus::Completed => {
-            analytics::capture_nonblocking(
-                "execution_completed",
-                serde_json::json!({ "exit_code": payload.exit_code }),
-            );
-        }
-        RunStatus::Failed => {
-            analytics::capture_nonblocking(
-                "execution_failed",
-                serde_json::json!({ "exit_code": payload.exit_code }),
-            );
-        }
-        _ => {}
-    }
 
     Ok(Json(ExecutionEnvelope {
         execution: ExecutionProcessRecord::from_run(&run, id),
@@ -772,17 +746,6 @@ async fn send_task_message(
             "continued_existing_run": result.continued_existing_run,
             "previous_task_run_id": result.previous_task_run_id,
             "duration_ms": perf::elapsed_ms(request_started_at),
-        }),
-    );
-
-    analytics::capture_nonblocking(
-        "execution_started",
-        serde_json::json!({
-            "is_follow_up": result.continued_existing_run,
-            "requested_mode": requested_mode,
-            "prompt_chars": payload.prompt.chars().count(),
-            "image_count": image_count,
-            "use_worktree": payload.use_worktree.unwrap_or(true),
         }),
     );
 

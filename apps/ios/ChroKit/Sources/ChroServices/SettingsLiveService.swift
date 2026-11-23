@@ -18,8 +18,7 @@ final class SettingsLiveService: SettingsService, @unchecked Sendable {
     func preferences() async throws -> SharedPreferences { try await Self.fetchPreferences(calls) }
 
     func savePreferences(_ preferences: SharedPreferences) async throws -> SharedPreferences {
-        let body: [String: Any] = ["language": preferences.language.rawValue, "show_hidden_entries": preferences.showHiddenEntries,
-                                   "analytics_enabled": preferences.analyticsEnabled]
+        let body: [String: Any] = ["language": preferences.language.rawValue, "show_hidden_entries": preferences.showHiddenEntries]
         return try calls.decode(PreferencesEnvelope.self, try await calls.body(.put, ["rpc", "preferences"], body: body)).preferences.shared
     }
 
@@ -109,15 +108,14 @@ final class SettingsLiveService: SettingsService, @unchecked Sendable {
         struct Preferences: Decodable {
             let language: String
             let showHiddenEntries: Bool
-            let analyticsEnabled: Bool
 
             enum CodingKeys: String, CodingKey {
-                case language, showHiddenEntries = "show_hidden_entries", analyticsEnabled = "analytics_enabled"
+                case language, showHiddenEntries = "show_hidden_entries"
             }
 
             var shared: SharedPreferences {
                 SharedPreferences(language: SharedPreferences.Language(rawValue: language) ?? .en,
-                                  showHiddenEntries: showHiddenEntries, analyticsEnabled: analyticsEnabled)
+                                  showHiddenEntries: showHiddenEntries)
             }
         }
 

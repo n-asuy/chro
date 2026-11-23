@@ -71,16 +71,11 @@ export function cardEnters(
  * `seen` is null before the first render.
  */
 export function dotsToGrow(
-  seen: ReadonlySet<string> | null,
+  before: readonly string[] | null,
   ids: readonly string[],
 ): string[] {
-  if (seen === null) return [];
-  return ids.filter((id) => !seen.has(id));
-}
-
-/** The Unread badge pops in on the expanded toolbar only. */
-export function badgeShown(surface: ToolbarSurface, pending: boolean): boolean {
-  return surface === "expanded" && pending;
+  if (before === null) return [];
+  return ids.filter((id, i) => i >= before.length && !before.includes(id));
 }
 
 /** Margin between a panel and the top or bottom of the window frame. */
@@ -101,6 +96,29 @@ export function panelTop({
 }): number {
   const lowest = frameHeight - height - FRAME_INSET;
   return Math.max(FRAME_INSET, Math.min(lowest, anchor));
+}
+
+/**
+ * Whether the pointer's place keeps a tile's preview open: a tile (moving
+ * from tile to tile swaps it), the card and the bridge over the gap to it,
+ * and the capsule between tiles. Anywhere else it closes after a delay.
+ */
+export function keepsPeekOpen(id: string | null): boolean {
+  return id === "peek" || id === "capsule" || Boolean(id?.startsWith("tile:"));
+}
+
+/** Half the preview header's height: the header's centre meets the tile's. */
+const PEEK_HEAD_CENTER = 22;
+
+/** Where a tile's preview wants its top (before the frame clamp). */
+export function peekAnchor({
+  tileTop,
+  tileHeight,
+}: {
+  tileTop: number;
+  tileHeight: number;
+}): number {
+  return tileTop + tileHeight / 2 - PEEK_HEAD_CENTER;
 }
 
 /**
@@ -154,4 +172,36 @@ export function keyboardSummon(
   if (panel?.kind === "unread") return "close";
   if (needsYou) return "unread";
   return panel?.kind === "list" ? "close" : "list";
+}
+
+/**
+ * Option twice while chro's own window is in front: the session to open in
+ * that window. The first that needs the person (in Unread's order), then on
+ * each press the one after the last opened, around to the first again;
+ * `null` when nothing needs the person.
+ */
+export function nextNeedsYou(
+  order: readonly string[],
+  lastOpened: string | null,
+): string | null {
+  if (order.length === 0) return null;
+  const at = lastOpened ? order.indexOf(lastOpened) : -1;
+  return order[(at + 1) % order.length] ?? null;
+}
+
+/**
+ * The horizontal span a hit region covers. A `to-edge` surface (the expanded
+ * toolbar) also owns the strip out to the screen edge: the frame's right
+ * edge when docked right, its left edge (0) when docked left.
+ */
+export function hitSpan(
+  box: { left: number; right: number },
+  frameWidth: number,
+  toEdge: boolean,
+  side: "left" | "right",
+): { left: number; right: number } {
+  const left = Math.floor(box.left);
+  const right = Math.ceil(box.right);
+  if (!toEdge) return { left, right };
+  return side === "right" ? { left, right: frameWidth } : { left: 0, right };
 }

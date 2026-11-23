@@ -470,13 +470,9 @@ impl Runtime for LocalRuntime {
             .map_err(RuntimeError::from)
     }
 
-    async fn cleanup_task_run_artifacts(&self, task_run_id: Uuid) -> Result<(), RuntimeError> {
-        self.container
-            .cleanup_task_run_artifacts(task_run_id)
-            .await
-            .map_err(RuntimeError::from)?;
+    async fn release_task_run(&self, task_run_id: Uuid) {
+        self.container.release_task_run(task_run_id).await;
         self.normalized_log_cache.write().await.remove(&task_run_id);
-        Ok(())
     }
 
     async fn stream_logs(

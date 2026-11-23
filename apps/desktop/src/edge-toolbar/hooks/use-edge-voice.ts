@@ -27,6 +27,7 @@ import {
 import { type EdgeMessage, sendEdgeMessage } from "../lib/edge-send";
 import { playEdgeSound } from "../lib/edge-sounds";
 import { focusEdgeWindow, subscribe } from "../lib/edge-window-client";
+import { savedEdgePrefs } from "../state/edge-prefs";
 import { useEdgeToolbarStore } from "../state/edge-toolbar-store";
 
 /** How long a note (permission off, send failed) stays. */
@@ -43,9 +44,10 @@ export type CaptureDone =
 /**
  * The toolbar's voice input and region capture: press to talk (the
  * microphone button, or Option held), and the camera, whose ask arrives from
- * the capture window. Both go to the target taken when they started (the
- * open card's session, else a new chat), through chro's send path, and show
- * where they went in the talk pill.
+ * the capture window. Both go to the target taken when they started: the
+ * session a control belongs to (a session row's microphone, the compact
+ * panel's microphone and camera), else the open card's session, else a new
+ * chat; through chro's send path, and show where they went in the talk pill.
  */
 export function useEdgeVoice({
   tasksById,
@@ -110,28 +112,34 @@ export function useEdgeVoice({
     [cancelCollapse, setTalk, showFor, titleOf],
   );
 
-  const beginTalking = useCallback(async () => {
-    const store = useEdgeToolbarStore.getState();
-    if (isTalking(store.talk)) return;
-    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    cancelCollapse();
-    store.startTalking(talkTarget(store.panel, store.unread.cursorId));
-    // Esc reaches the window only while it has the keyboard.
-    focusEdgeWindow();
-    const outcome = await startTalking("toolbar");
-    edgeLog(`talk start outcome=${outcome.outcome}`);
-    const now = useEdgeToolbarStore.getState().talk;
-    if (now.phase !== "starting") {
-      // Ended while the shell was starting (a short hold, Esc).
-      if (outcome.outcome === "started") void stopTalking();
-      return;
-    }
-    const next = talkStarted(now, outcome);
-    setTalk(next);
-    if (next.phase === "listening") playEdgeSound("record-start");
-    else if (next.phase === "notice") showFor(NOTICE_SHOWN_MS);
-    else scheduleCollapse();
-  }, [cancelCollapse, setTalk, showFor, scheduleCollapse]);
+  const beginTalking = useCallback(
+    async (to?: TalkTarget) => {
+      const store = useEdgeToolbarStore.getState();
+      if (isTalking(store.talk)) return;
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+      cancelCollapse();
+      store.startTalking(to ?? talkTarget(store.panel, store.unread.cursorId));
+      // Esc reaches the window only while it has the keyboard.
+      focusEdgeWindow();
+      const outcome = await startTalking(
+        "toolbar",
+        savedEdgePrefs().talkLanguage,
+      );
+      edgeLog(`talk start outcome=${outcome.outcome}`);
+      const now = useEdgeToolbarStore.getState().talk;
+      if (now.phase !== "starting") {
+        // Ended while the shell was starting (a short hold, Esc).
+        if (outcome.outcome === "started") void stopTalking();
+        return;
+      }
+      const next = talkStarted(now, outcome);
+      setTalk(next);
+      if (next.phase === "listening") playEdgeSound("record-start");
+      else if (next.phase === "notice") showFor(NOTICE_SHOWN_MS);
+      else scheduleCollapse();
+    },
+    [cancelCollapse, setTalk, showFor, scheduleCollapse],
+  );
 
   // Released: the audio closes and the recognizer's final result is awaited
   // (the pill keeps showing the words meanwhile), then that is sent.
@@ -171,32 +179,39 @@ export function useEdgeVoice({
     return true;
   }, [setTalk, scheduleCollapse]);
 
-  const toggleMic = useCallback(() => {
-    if (isTalking(useEdgeToolbarStore.getState().talk)) finishTalking();
-    else void beginTalking();
-  }, [beginTalking, finishTalking]);
+  const toggleMic = useCallback(
+    (to?: TalkTarget) => {
+      if (isTalking(useEdgeToolbarStore.getState().talk)) finishTalking();
+      else void beginTalking(to);
+    },
+    [beginTalking, finishTalking],
+  );
 
-  const beginCapture = useCallback(async () => {
-    const store = useEdgeToolbarStore.getState();
-    if (isTalking(store.talk)) return;
-    captureTarget.current = talkTarget(store.panel, store.unread.cursorId);
-    cancelCollapse();
-    store.setMoreOpen(false);
-    const outcome = await startCapture();
-    if (outcome.outcome === "blocked") {
-      setTalk({
-        phase: "notice",
-        notice: { kind: "blocked", privacy: outcome.privacy },
-      });
-      showFor(NOTICE_SHOWN_MS);
-    } else if (outcome.outcome === "unavailable") {
-      setTalk({
-        phase: "notice",
-        notice: { kind: "unavailable", reason: outcome.reason },
-      });
-      showFor(NOTICE_SHOWN_MS);
-    }
-  }, [cancelCollapse, setTalk, showFor]);
+  const beginCapture = useCallback(
+    async (to?: TalkTarget) => {
+      const store = useEdgeToolbarStore.getState();
+      if (isTalking(store.talk)) return;
+      captureTarget.current =
+        to ?? talkTarget(store.panel, store.unread.cursorId);
+      cancelCollapse();
+      store.setMoreOpen(false);
+      const outcome = await startCapture();
+      if (outcome.outcome === "blocked") {
+        setTalk({
+          phase: "notice",
+          notice: { kind: "blocked", privacy: outcome.privacy },
+        });
+        showFor(NOTICE_SHOWN_MS);
+      } else if (outcome.outcome === "unavailable") {
+        setTalk({
+          phase: "notice",
+          notice: { kind: "unavailable", reason: outcome.reason },
+        });
+        showFor(NOTICE_SHOWN_MS);
+      }
+    },
+    [cancelCollapse, setTalk, showFor],
+  );
 
   const openSettings = useCallback(
     (privacy: Privacy) => {

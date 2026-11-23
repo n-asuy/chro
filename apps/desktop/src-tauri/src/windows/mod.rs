@@ -4,6 +4,7 @@ pub mod edge;
 pub mod edge_capture;
 pub mod edge_presence;
 pub mod edge_talk;
+pub mod main_window;
 pub mod option_tap;
 pub mod presets;
 pub mod privacy;

@@ -4,8 +4,6 @@ type PreferencesResponse = {
   preferences: {
     language: "en" | "ja";
     show_hidden_entries: boolean;
-    analytics_enabled: boolean;
-    telemetry_id: string;
   };
 };
 
@@ -68,7 +66,6 @@ export const fetchPreferences = async (): Promise<PreferencesResponse> => {
 export const savePreferences = async (payload: {
   language: "en" | "ja";
   show_hidden_entries?: boolean;
-  analytics_enabled?: boolean;
 }): Promise<PreferencesResponse> => {
   return desktopFetch<PreferencesResponse>("/rpc/preferences", {
     method: "PUT",

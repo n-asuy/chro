@@ -7,7 +7,10 @@
 //! Nothing leaves the Mac: recognition is required to run on the device.
 //!
 //! The newer speech API of macOS 26 is Swift-only, so this uses the
-//! Objective-C recognizer with on-device recognition required.
+//! Objective-C recognizer with on-device recognition required. The language
+//! is the one chosen in the edge settings, else Japanese when Japanese is
+//! among the system's languages, else the system's language
+//! ([`talk_locale`]).
 //!
 //! Diagnostics: with `CHRO_EDGE_TALK_AUDIO_FILE` set to an audio file, the
 //! same pipeline is fed from that file (at its own pace, as a microphone
@@ -171,31 +174,51 @@ pub fn audio_source() -> AudioSource {
     }
 }
 
-/// The recognizer locale for talking. Speech is heard in the primary
-/// language of the current keyboard input source (the language the person is
-/// writing in, as the system's own dictation falls back to), when the
-/// recognizer supports it: the region comes from the person's preferred
-/// languages (ja + ja-JP), else the language's own region (ja-JP, de-DE).
-/// Only the primary language counts: a Latin layout also lists every
-/// language it can type. `None` keeps the system's default (its language,
-/// which is what an English keyboard gets too).
-pub fn choose_locale(input_languages: &[String], preferred: &[String], supported: &[String]) -> Option<String> {
-    let norm = |s: &str| s.replace('_', "-");
-    let supported: Vec<String> = supported.iter().map(|s| norm(s)).collect();
-    let is_supported = |id: &str| supported.iter().find(|s| s.eq_ignore_ascii_case(id)).cloned();
-    let lang = input_languages.first()?.split(['-', '_']).next()?.to_lowercase();
-    if lang.is_empty() {
-        return None;
-    }
-    for wanted in preferred.iter().map(|p| norm(p)) {
-        let same_language = wanted.split('-').next().is_some_and(|l| l.eq_ignore_ascii_case(&lang));
-        if same_language {
-            if let Some(id) = is_supported(&wanted) {
-                return Some(id);
-            }
+/// A locale identifier in one spelling (ja_JP and ja-JP are the same).
+fn norm_locale(id: &str) -> String {
+    id.replace('_', "-")
+}
+
+fn find_locale(supported: &[String], id: &str) -> Option<String> {
+    let id = norm_locale(id);
+    supported.iter().map(|s| norm_locale(s)).find(|s| s.eq_ignore_ascii_case(&id))
+}
+
+/// The talk language when the person has not chosen one: Japanese when
+/// Japanese is among the system's preferred languages, otherwise the first
+/// preferred language the recognizer supports on the device (its own region
+/// when the preferred one has none, ja-JP, de-DE). `None` leaves it to the
+/// system's default recognizer.
+pub fn default_talk_locale(preferred: &[String], supported: &[String]) -> Option<String> {
+    let language = |id: &str| norm_locale(id).split('-').next().unwrap_or_default().to_lowercase();
+    if preferred.iter().any(|p| language(p) == "ja") {
+        if let Some(ja) = find_locale(supported, "ja-JP") {
+            return Some(ja);
         }
     }
-    is_supported(&format!("{lang}-{}", lang.to_uppercase()))
+    preferred.iter().find_map(|p| {
+        find_locale(supported, p).or_else(|| {
+            let lang = language(p);
+            find_locale(supported, &format!("{lang}-{}", lang.to_uppercase()))
+        })
+    })
+}
+
+/// The talk language: the person's choice when the device can recognize it,
+/// otherwise the default (see [`default_talk_locale`]).
+pub fn talk_locale(chosen: Option<&str>, preferred: &[String], supported: &[String]) -> Option<String> {
+    chosen
+        .and_then(|id| find_locale(supported, id))
+        .or_else(|| default_talk_locale(preferred, supported))
+}
+
+/// The languages the settings offer: the locales with an on-device
+/// recognizer, and what "automatic" resolves to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TalkLanguages {
+    pub automatic: Option<String>,
+    pub locales: Vec<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -219,7 +242,7 @@ mod platform {
 
     use super::super::talk_level::{LevelMeter, CHUNK_MS};
     use super::{
-        choose_locale, describe_error, update_heard, AudioSource, TalkError, TalkLevels, TalkOwner, TalkStart,
+        describe_error, talk_locale, update_heard, AudioSource, TalkError, TalkLevels, TalkOwner, TalkStart,
         TalkUpdate, ERROR_EVENT, GENERATION, LEVEL_EVENT, TALK_EVENT,
     };
 
@@ -235,55 +258,40 @@ mod platform {
         static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
     }
 
-    #[link(name = "Carbon", kind = "framework")]
-    extern "C" {
-        fn TISCopyCurrentKeyboardInputSource() -> *mut std::ffi::c_void;
-        fn TISGetInputSourceProperty(
-            source: *mut std::ffi::c_void,
-            key: *const std::ffi::c_void,
-        ) -> *const std::ffi::c_void;
-        static kTISPropertyInputSourceLanguages: *const std::ffi::c_void;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFRelease(cf: *const std::ffi::c_void);
-    }
-
-    /// The languages of the current keyboard input source. Main thread.
-    fn input_languages() -> Vec<String> {
-        // SAFETY: the copied source is released below; its language list is
-        // a CFArray of CFString (toll-free bridged to NSArray<NSString>)
-        // owned by the source.
-        unsafe {
-            let source = TISCopyCurrentKeyboardInputSource();
-            if source.is_null() {
-                return Vec::new();
-            }
-            let list = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
-            let languages = if list.is_null() {
-                Vec::new()
-            } else {
-                let array = &*list.cast::<objc2_foundation::NSArray<objc2_foundation::NSString>>();
-                array.iter().map(|s| s.to_string()).collect()
-            };
-            CFRelease(source);
-            languages
-        }
-    }
-
-    /// The recognizer for talking (see `choose_locale`), and how it was
-    /// chosen. Main thread.
-    fn recognizer() -> Option<(Retained<SFSpeechRecognizer>, String)> {
-        let input = input_languages();
+    /// The system's preferred languages and the recognizer's locales with
+    /// on-device recognition. Main thread.
+    fn languages() -> (Vec<String>, Vec<String>) {
         let preferred: Vec<String> =
             objc2_foundation::NSLocale::preferredLanguages().iter().map(|s| s.to_string()).collect();
-        let supported: Vec<String> = unsafe { SFSpeechRecognizer::supportedLocales() }
+        let on_device: Vec<String> = unsafe { SFSpeechRecognizer::supportedLocales() }
             .iter()
+            .filter(|locale| {
+                unsafe { SFSpeechRecognizer::initWithLocale(SFSpeechRecognizer::alloc(), locale) }
+                    .is_some_and(|r| unsafe { r.supportsOnDeviceRecognition() })
+            })
             .map(|locale| locale.localeIdentifier().to_string())
             .collect();
-        let chosen = choose_locale(&input, &preferred, &supported);
-        let recognizer = match &chosen {
+        (preferred, on_device)
+    }
+
+    /// The locales the settings offer and what "automatic" resolves to. Main thread.
+    pub fn talk_languages() -> super::TalkLanguages {
+        if !super::super::privacy::load_framework("Speech")
+            || objc2::runtime::AnyClass::get(c"SFSpeechRecognizer").is_none()
+        {
+            return super::TalkLanguages { automatic: None, locales: Vec::new() };
+        }
+        let (preferred, mut locales) = languages();
+        locales.sort();
+        super::TalkLanguages { automatic: super::default_talk_locale(&preferred, &locales), locales }
+    }
+
+    /// The recognizer for talking in `chosen` (see `talk_locale`), and how it
+    /// was chosen. Main thread.
+    fn recognizer(chosen: Option<&str>) -> Option<(Retained<SFSpeechRecognizer>, String)> {
+        let (preferred, on_device) = languages();
+        let locale = talk_locale(chosen, &preferred, &on_device);
+        let recognizer = match &locale {
             Some(id) => unsafe {
                 let locale = objc2_foundation::NSLocale::localeWithLocaleIdentifier(
                     &objc2_foundation::NSString::from_str(id),
@@ -292,7 +300,7 @@ mod platform {
             },
             None => unsafe { SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()) },
         }?;
-        let how = format!("input={:?} preferred={preferred:?} chosen={chosen:?}", input.first());
+        let how = format!("chosen={chosen:?} preferred={preferred:?} locale={locale:?}");
         Some((recognizer, how))
     }
 
@@ -351,6 +359,7 @@ mod platform {
         owner: TalkOwner,
         generation: u64,
         source: AudioSource,
+        language: Option<String>,
     ) -> TalkStart {
         stop();
         if GENERATION.load(Ordering::SeqCst) != generation {
@@ -362,7 +371,7 @@ mod platform {
         {
             return unavailable("This version of macOS cannot listen.");
         }
-        let Some((recognizer, how)) = recognizer() else {
+        let Some((recognizer, how)) = recognizer(language.as_deref()) else {
             return unavailable("Speech recognition does not support this language.");
         };
         let locale = unsafe { recognizer.locale().localeIdentifier() }.to_string();
@@ -523,7 +532,7 @@ mod platform {
         {
             return "no recognizer on this system".into();
         }
-        match recognizer() {
+        match recognizer(None) {
             Some((recognizer, how)) => unsafe {
                 format!(
                     "locale={} on_device={} available={} ({how})",
@@ -580,6 +589,7 @@ mod platform {
         _owner: TalkOwner,
         _generation: u64,
         _source: AudioSource,
+        _language: Option<String>,
     ) -> TalkStart {
         TalkStart::Unavailable { reason: "Talking is available on macOS only.".into() }
     }
@@ -590,6 +600,10 @@ mod platform {
 
     pub fn describe_recognizer() -> String {
         "no recognizer on this system".into()
+    }
+
+    pub fn talk_languages() -> super::TalkLanguages {
+        super::TalkLanguages { automatic: None, locales: Vec::new() }
     }
 }
 
@@ -602,12 +616,13 @@ async fn start_session<R: TauriRuntime>(
     app: &AppHandle<R>,
     owner: TalkOwner,
     generation: u64,
+    language: Option<String>,
 ) -> DesktopResult<TalkStart> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     let source = audio_source();
     app.run_on_main_thread(move || {
-        let _ = tx.send(platform::start(handle, owner, generation, source));
+        let _ = tx.send(platform::start(handle, owner, generation, source, language));
     })
     .map_err(|err| main_thread_error("start listening", err))?;
     let outcome = rx.await.map_err(|_| main_thread_error("start listening", "no answer"))?;
@@ -653,6 +668,7 @@ async fn end_session<R: TauriRuntime>(app: &AppHandle<R>, finish: bool) -> Deskt
 pub async fn edge_talk_start<R: TauriRuntime>(
     app: AppHandle<R>,
     owner: TalkOwner,
+    language: Option<String>,
 ) -> DesktopResult<TalkStart> {
     // Taken first, so a stop during a permission dialog cancels this start.
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -660,7 +676,19 @@ pub async fn edge_talk_start<R: TauriRuntime>(
         debug!("[edge] talk start blocked by {privacy:?}");
         return Ok(TalkStart::Blocked { privacy });
     }
-    start_session(&app, owner, generation).await
+    start_session(&app, owner, generation, language).await
+}
+
+/// The talk languages the settings offer (locales recognized on the device)
+/// and what "automatic" resolves to.
+#[tauri::command]
+pub async fn edge_talk_languages<R: TauriRuntime>(app: AppHandle<R>) -> DesktopResult<TalkLanguages> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(platform::talk_languages());
+    })
+    .map_err(|err| main_thread_error("talk languages", err))?;
+    rx.await.map_err(|_| main_thread_error("talk languages", "no answer"))
 }
 
 /// Stop listening. With `finish` (a send), the recognizer's final result is
@@ -698,7 +726,7 @@ pub fn spawn_probe<R: TauriRuntime>(app: AppHandle<R>) {
         }
         debug!("[edge] talk probe start {}", path.display());
         let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-        match start_session(&app, TalkOwner::Toolbar, generation).await {
+        match start_session(&app, TalkOwner::Toolbar, generation, None).await {
             Ok(TalkStart::Started) => {}
             other => {
                 debug!("[edge] talk probe did not start: {other:?}");
@@ -777,32 +805,39 @@ mod tests {
     }
 
     #[test]
-    fn a_japanese_keyboard_listens_in_japanese_with_the_preferred_region() {
-        let supported = strings(&["en-US", "en_GB", "ja-JP", "de-DE"]);
-        let preferred = strings(&["en-JP", "ja-JP"]);
-        assert_eq!(choose_locale(&strings(&["ja"]), &preferred, &supported), Some("ja-JP".into()));
+    fn japanese_in_the_system_languages_makes_japanese_the_default() {
+        let supported = strings(&["en-US", "en_GB", "ja_JP", "de-DE"]);
+        // English first, Japanese second (this Mac): still Japanese.
+        assert_eq!(default_talk_locale(&strings(&["en-JP", "ja-JP"]), &supported), Some("ja-JP".into()));
     }
 
     #[test]
-    fn an_english_keyboard_keeps_the_system_default() {
-        let supported = strings(&["en-US", "en-GB", "ja-JP", "de-DE"]);
-        // A Latin layout lists every language it can type after its own;
-        // en-JP is not a recognizer locale, and there is no "en-EN".
-        let british = strings(&["en", "af", "da", "de", "fr", "ja"]);
-        assert_eq!(choose_locale(&british, &strings(&["en-JP", "ja-JP"]), &supported), None);
+    fn otherwise_the_first_system_language_the_device_recognizes() {
+        let supported = strings(&["en-US", "en-GB", "de_DE"]);
+        assert_eq!(default_talk_locale(&strings(&["en-GB", "de-DE"]), &supported), Some("en-GB".into()));
+        // German without a region takes its own (de-DE).
+        assert_eq!(default_talk_locale(&strings(&["de"]), &supported), Some("de-DE".into()));
+        // en-JP is no recognizer locale and there is no "en-EN": the next
+        // language, German, in its own region.
+        assert_eq!(default_talk_locale(&strings(&["en-JP", "de-AT"]), &supported), Some("de-DE".into()));
+        // Nothing the device recognizes: the system's default recognizer.
+        assert_eq!(default_talk_locale(&strings(&["ko-KR"]), &supported), None);
     }
 
     #[test]
-    fn a_language_without_a_preferred_region_takes_its_own() {
-        let supported = strings(&["de_DE", "en-US"]);
-        assert_eq!(choose_locale(&strings(&["de"]), &strings(&["en-US"]), &supported), Some("de-DE".into()));
-    }
-
-    #[test]
-    fn an_unsupported_or_unknown_keyboard_keeps_the_system_default() {
+    fn japanese_without_a_recognizer_falls_back_to_the_rest() {
         let supported = strings(&["en-US"]);
-        assert_eq!(choose_locale(&strings(&["tlh"]), &strings(&["en-US"]), &supported), None);
-        assert_eq!(choose_locale(&[], &strings(&["ja-JP"]), &supported), None);
+        assert_eq!(default_talk_locale(&strings(&["ja-JP", "en-US"]), &supported), Some("en-US".into()));
+    }
+
+    #[test]
+    fn a_chosen_language_wins_when_the_device_recognizes_it() {
+        let supported = strings(&["en-US", "ja-JP", "fr-FR"]);
+        let preferred = strings(&["en-JP", "ja-JP"]);
+        assert_eq!(talk_locale(Some("fr_FR"), &preferred, &supported), Some("fr-FR".into()));
+        // No longer recognized on the device: back to the default.
+        assert_eq!(talk_locale(Some("ko-KR"), &preferred, &supported), Some("ja-JP".into()));
+        assert_eq!(talk_locale(None, &preferred, &supported), Some("ja-JP".into()));
     }
 
     #[test]

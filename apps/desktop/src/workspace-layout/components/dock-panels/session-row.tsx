@@ -29,6 +29,7 @@ import {
   Hourglass,
   Pin,
   PinOff,
+  Trash2,
 } from "lucide-react";
 
 /** One session in the left panel (Pinned, a project section, or Chats). */
@@ -49,6 +50,7 @@ export interface SessionRowContainerProps {
   isRelated: boolean;
   onOpen: () => void;
   onArchive: () => void;
+  onDelete: () => void;
   onFork: (workspace?: ForkWorkspace) => void;
   /** Scratch chats have no repo, so there is no worktree to choose between and
    * the menu collapses to a single item. */
@@ -57,8 +59,8 @@ export interface SessionRowContainerProps {
 }
 
 /**
- * Wraps a session row with its right-click menu (pin/unpin, archive). Open,
- * archive and active-state are resolved once per section by the caller and
+ * Wraps a session row with its right-click menu (pin/unpin, archive, delete).
+ * Open, archive, delete and active-state are resolved once per section by the caller and
  * passed in, so this stays a pure presentational wrapper.
  *
  * The trigger wraps `SessionRow` in a plain `<div>` rather than using
@@ -85,6 +87,7 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
             onToggleNested={props.onToggleNested}
             onOpen={props.onOpen}
             onArchive={props.onArchive}
+            onDelete={props.onDelete}
             t={props.t}
           />
         </div>
@@ -144,6 +147,13 @@ export function SessionRowContainer(props: SessionRowContainerProps) {
           <Archive className="h-3.5 w-3.5 shrink-0" />
           <span>{props.t("archive")}</span>
         </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={props.onDelete}
+          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-custom-text-200 focus:bg-red-50 focus:text-red-600"
+        >
+          <Trash2 className="h-3.5 w-3.5 shrink-0" />
+          <span>{props.t("delete")}</span>
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -162,6 +172,7 @@ interface SessionRowProps {
   onToggleNested: () => void;
   onOpen: () => void;
   onArchive: () => void;
+  onDelete: () => void;
   t: TranslationFunction;
 }
 
@@ -183,6 +194,7 @@ function SessionRow({
   onToggleNested,
   onOpen,
   onArchive,
+  onDelete,
   t,
 }: SessionRowProps) {
   const { task } = row;
@@ -345,7 +357,8 @@ function SessionRow({
           </button>
           <button
             type="button"
-            aria-label="Archive session"
+            aria-label={t("archive")}
+            title={t("archive")}
             onClick={(event) => {
               event.stopPropagation();
               onArchive();
@@ -353,6 +366,18 @@ function SessionRow({
             className="flex items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100"
           >
             <Archive className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label={t("delete")}
+            title={t("delete")}
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete();
+            }}
+            className="flex items-center justify-center rounded p-0.5 text-custom-sidebar-text-300 hover:bg-custom-sidebar-background-100 hover:text-custom-sidebar-text-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </span>
       </span>

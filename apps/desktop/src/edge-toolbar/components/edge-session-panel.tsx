@@ -10,7 +10,7 @@ import { useMarkViewedWhenActive } from "@/session/hooks/use-session-read-state"
 import { useSessionRunController } from "@/session/hooks/use-session-run-controller";
 import type { StoredTask } from "@/session/types";
 import { useAllProjects } from "@/workspace-layout/hooks/use-all-projects";
-import { ExternalLink, GitBranch } from "lucide-react";
+import { Camera, ExternalLink, GitBranch, Mic } from "lucide-react";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { conversationTail } from "../domain/conversation-tail";
 import {
@@ -18,13 +18,17 @@ import {
   edgeDotStatus,
   panelSessionState,
 } from "../domain/edge-sessions";
+import { taskIcon } from "../domain/task-icons";
+import { useEdgeVoiceActions } from "../hooks/edge-voice-actions";
 import { useEdgeConversation } from "../hooks/use-edge-conversation";
 import { openSessionInApp } from "../lib/edge-window-client";
 import { useEdgeToolbarStore } from "../state/edge-toolbar-store";
 import { EdgeComposer } from "./edge-composer";
+import { EdgeIconPicker } from "./edge-icon-picker";
 import { EdgeKeyboardHelp } from "./edge-keyboard-help";
 import { type EdgePagerControls, EdgePanelHeader } from "./edge-panel-header";
 import { usePanelReady } from "./edge-panel-ready";
+import { EdgeTaskIcon } from "./edge-task-icon";
 
 /** Turns of the conversation the compact panel shows. */
 const TAIL_TURNS = 3;
@@ -118,6 +122,11 @@ export function EdgeSessionPanel({
 
   const help = useEdgeToolbarStore((s) => s.help);
   const toggleHelp = useEdgeToolbarStore((s) => s.toggleHelp);
+  const picking = useEdgeToolbarStore((s) => s.iconPicker === taskId);
+  const toggleIconPicker = useEdgeToolbarStore((s) => s.toggleIconPicker);
+  const voice = useEdgeVoiceActions();
+  // The picker and the help take the body's place; the draft stays.
+  const covered = help || picking;
   const projects = useAllProjects(true);
   const projectName = projects[task.project_id]?.name;
 
@@ -135,6 +144,18 @@ export function EdgeSessionPanel({
         help={help}
         onToggleHelp={toggleHelp}
         onClose={onClose}
+        leading={
+          <button
+            type="button"
+            title={t("edgeToolbarChangeIcon")}
+            aria-label={t("edgeToolbarChangeIcon")}
+            aria-pressed={picking}
+            onClick={() => toggleIconPicker(taskId)}
+            className="edge-hicon"
+          >
+            <EdgeTaskIcon name={taskIcon(task.icon)} />
+          </button>
+        }
       >
         <SessionStatusLine
           state={panelSessionState(task)}
@@ -153,12 +174,13 @@ export function EdgeSessionPanel({
 
       {help ? (
         <EdgeKeyboardHelp paging={(pager?.order.length ?? 0) > 1} />
+      ) : picking ? (
+        <EdgeIconPicker task={task} />
       ) : null}
-      {/* Hidden, not unmounted, under the help: the draft and scroll stay. */}
+      {/* Hidden, not unmounted, under the help or the picker: the draft and
+          scroll stay. */}
       <div
-        className={
-          help ? "hidden" : "mt-1.5 flex min-h-0 flex-1 flex-col text-[13px]"
-        }
+        className={covered ? "hidden" : "mt-1.5 flex min-h-0 flex-1 flex-col"}
       >
         <TaskConversation
           entries={tail}
@@ -166,10 +188,13 @@ export function EdgeSessionPanel({
           error={error}
           isStreaming={isStreaming}
           scrollCacheKey={`edge:${taskId}`}
+          density="compact"
         />
       </div>
 
-      <div className={help ? "hidden" : "flex flex-col gap-1 px-3 pb-3 pt-1"}>
+      <div
+        className={covered ? "hidden" : "flex flex-col gap-1 px-3 pb-3 pt-1"}
+      >
         {pendingQuestions ? (
           <AgentUserQuestion
             pendingQuestions={pendingQuestions}
@@ -191,19 +216,57 @@ export function EdgeSessionPanel({
           isStopping={isStopping}
           onCancel={() => void handleCancel()}
           accessory={
-            <button
-              type="button"
-              title={t("edgeToolbarOpenInApp")}
-              aria-label={t("edgeToolbarOpenInApp")}
-              onClick={openInApp}
-              className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
-            >
-              <ExternalLink className="size-4" />
-            </button>
+            <>
+              <ComposerButton
+                label={t("edgeToolbarTalkToSession")}
+                onClick={() => voice.talkTo(taskId)}
+                data-edge-talk-to={taskId}
+              >
+                <Mic className="size-4" />
+              </ComposerButton>
+              <ComposerButton
+                label={t("edgeToolbarCaptureFor")}
+                onClick={() => voice.captureFor(taskId)}
+                data-edge-capture-for={taskId}
+              >
+                <Camera className="size-4" />
+              </ComposerButton>
+              <ComposerButton
+                label={t("edgeToolbarOpenInApp")}
+                onClick={openInApp}
+              >
+                <ExternalLink className="size-4" />
+              </ComposerButton>
+            </>
           }
         />
       </div>
     </EdgePanelContent>
+  );
+}
+
+/** A round icon button in the composer row, beside send (chro's style). */
+function ComposerButton({
+  label,
+  onClick,
+  children,
+  ...data
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+} & { [key: `data-${string}`]: string }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      {...data}
+      className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
+    >
+      {children}
+    </button>
   );
 }
 

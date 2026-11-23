@@ -46,6 +46,7 @@ import {
   BETA_OPT_INS_STORAGE_KEY,
   BETA_OPT_OUTS_STORAGE_KEY,
   DEV_FLAG_OVERRIDES_STORAGE_KEY,
+  followStorageChange,
   readPersistedDevOverrides,
   readPersistedOptOuts,
   selectFlag,
@@ -334,5 +335,36 @@ describe("opt-in beta features", () => {
     useFeatureFlagStore.getState().setBetaEnabled("flag_on_by_default", false);
     expect(flag("flag_on_by_default")).toBe(false);
     expect(useFeatureFlagStore.getState().optedIn).toEqual([]);
+  });
+});
+
+describe("following another window's change", () => {
+  beforeEach(() => {
+    storage.clear();
+    useFeatureFlagStore.setState({
+      resolved: {
+        flag_on_by_default: true,
+        flag_off_by_default: false,
+        flag_opt_in: true,
+      },
+      optedOut: [],
+      optedIn: ["flag_opt_in"],
+      devOverrides: { flag_opt_in: true },
+    });
+  });
+
+  it("drops a developer force cleared elsewhere, so the switch decides again", () => {
+    // The edge toolbar's "Turn off": the force is cleared, then the switch.
+    storage.setItem(DEV_FLAG_OVERRIDES_STORAGE_KEY, "{}");
+    followStorageChange(DEV_FLAG_OVERRIDES_STORAGE_KEY);
+    storage.setItem(BETA_OPT_INS_STORAGE_KEY, "[]");
+    followStorageChange(BETA_OPT_INS_STORAGE_KEY);
+    expect(flag("flag_opt_in")).toBe(false);
+  });
+
+  it("ignores keys it does not own", () => {
+    followStorageChange("chro:edge-prefs");
+    followStorageChange(null);
+    expect(flag("flag_opt_in")).toBe(true);
   });
 });

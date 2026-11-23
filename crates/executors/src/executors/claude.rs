@@ -326,11 +326,11 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         dirs::home_dir().map(|home| home.join(".claude.json"))
     }
 
-    async fn generate_session_title(
+    async fn generate_session_name(
         &self,
         request: &str,
         env: &ExecutionEnv,
-    ) -> Result<Option<String>, ExecutorError> {
+    ) -> Result<Option<session_title::SessionName>, ExecutorError> {
         let Invocation { program, args } = CommandBuilder::for_manifest(&cli_manifest::CLAUDE)
             .extend_params(TITLE_PARAMS)
             .build_initial()?

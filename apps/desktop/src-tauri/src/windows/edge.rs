@@ -110,12 +110,35 @@ pub fn is_edge_window(label: &str) -> bool {
     label == EDGE_WINDOW_LABEL || label == super::edge_capture::CAPTURE_WINDOW_LABEL
 }
 
-/// The window's frame: `width` physical pixels against the right edge of
+/// Which screen edge the toolbar sits on (the edge settings' "Edge position").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Side {
+    Left,
+    #[default]
+    Right,
+}
+
+/// The chosen side; the renderer reports it on load and whenever it changes.
+static SIDE: Mutex<Side> = Mutex::new(Side::Right);
+
+/// Set when the side changed, so the next poll re-docks at once.
+static REDOCK: AtomicBool = AtomicBool::new(false);
+
+fn current_side() -> Side {
+    SIDE.lock().map(|side| *side).unwrap_or_default()
+}
+
+/// The window's frame: `width` physical pixels against the `side` edge of
 /// `work_area`, the work area's full height.
-pub fn docked_frame(work_area: Frame, width: u32) -> Frame {
+pub fn docked_frame(work_area: Frame, width: u32, side: Side) -> Frame {
     let width = width.clamp(1, work_area.width.max(1));
+    let x = match side {
+        Side::Right => work_area.x + (work_area.width - width) as i32,
+        Side::Left => work_area.x,
+    };
     Frame {
-        x: work_area.x + (work_area.width - width) as i32,
+        x,
         y: work_area.y,
         width,
         height: work_area.height.max(1),
@@ -129,6 +152,30 @@ fn contains(r: &HitRegion, x: f64, y: f64) -> bool {
 /// Whether a point (logical pixels, window-local) lies on a hit region.
 pub fn hits(regions: &[HitRegion], x: f64, y: f64) -> bool {
     regions.iter().any(|r| contains(r, x, y))
+}
+
+/// A press of the left button that began on one of the window's surfaces:
+/// the window keeps taking the pointer until it is released, so a drag that
+/// leaves the surface (or the window) still reaches it.
+#[derive(Debug, Default)]
+pub struct PointerPress {
+    held: bool,
+    was_down: bool,
+}
+
+impl PointerPress {
+    /// Feed the button state and whether the pointer is on a surface; true
+    /// while a press that began on a surface is held.
+    pub fn update(&mut self, down: bool, inside: bool) -> bool {
+        if down && !self.was_down {
+            self.held = inside;
+        }
+        if !down {
+            self.held = false;
+        }
+        self.was_down = down;
+        self.held
+    }
 }
 
 /// The pointer's state at a point: on a surface or not, and which named
@@ -159,7 +206,12 @@ pub async fn set_enabled<R: TauriRuntime>(app: &AppHandle<R>, enabled: bool) -> 
     let existing = app.get_webview_window(EDGE_WINDOW_LABEL);
     match (enabled, existing) {
         (true, Some(_)) | (false, None) => Ok(()),
-        (false, Some(window)) => window.destroy().context("close edge window"),
+        (false, Some(window)) => {
+            window.destroy().context("close edge window")?;
+            // A main window hidden behind the edge must come back.
+            super::main_window::after_edge_closed(app);
+            Ok(())
+        }
         (true, None) => build(app).await,
     }
 }
@@ -245,7 +297,7 @@ fn current_frame<R: TauriRuntime>(window: &WebviewWindow<R>) -> Result<Frame> {
         height: area.size.height,
     };
     let width = (FRAME_WIDTH * monitor.scale_factor()).round() as u32;
-    Ok(docked_frame(work_area, width))
+    Ok(docked_frame(work_area, width, current_side()))
 }
 
 /// Place the window on its frame.
@@ -270,6 +322,8 @@ pub fn frame_origin_points(frame: Frame, scale: f64) -> (f64, f64) {
 struct InputSample {
     cursor: (f64, f64),
     keys: super::option_tap::KeyState,
+    /// The left mouse button is down.
+    button_down: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -280,6 +334,7 @@ fn input_sample() -> Option<InputSample> {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     }
     /// `kCGEventSourceStateCombinedSessionState` and `kCGEventKeyDown`.
     const COMBINED_SESSION_STATE: i32 = 0;
@@ -294,7 +349,10 @@ fn input_sample() -> Option<InputSample> {
         | CGEventFlags::CGEventFlagCommand;
     // SAFETY: a pure query of the window server's event counters.
     let key_downs = unsafe { CGEventSourceCounterForEventType(COMBINED_SESSION_STATE, KEY_DOWN) };
+    // SAFETY: a pure query of the window server's button state (left = 0).
+    let button_down = unsafe { CGEventSourceButtonState(COMBINED_SESSION_STATE, 0) };
     Some(InputSample {
+        button_down,
         cursor: (point.x, point.y),
         keys: super::option_tap::KeyState {
             option: flags.contains(CGEventFlags::CGEventFlagAlternate),
@@ -314,6 +372,9 @@ fn spawn_pointer_poll<R: TauriRuntime>(app: AppHandle<R>) {
     thread::spawn(move || {
         debug!("[edge] pointer poll started");
         let mut last: Option<PointerState> = None;
+        // Whether the window takes the pointer, as last set.
+        let mut taking: Option<bool> = None;
+        let mut press = PointerPress::default();
         #[cfg(target_os = "macos")]
         let mut gestures = super::option_tap::OptionGestures::default();
         let started = std::time::Instant::now();
@@ -321,7 +382,7 @@ fn spawn_pointer_poll<R: TauriRuntime>(app: AppHandle<R>) {
         let mut origin: Option<(f64, f64)> = None;
         let mut tick: u32 = 0;
         while let Some(window) = app.get_webview_window(EDGE_WINDOW_LABEL) {
-            if tick % REDOCK_EVERY == 0 {
+            if tick % REDOCK_EVERY == 0 || REDOCK.swap(false, Ordering::SeqCst) {
                 match current_frame(&window) {
                     Ok(frame) if docked != Some(frame) => {
                         if let Err(err) = dock(&window) {
@@ -345,11 +406,15 @@ fn spawn_pointer_poll<R: TauriRuntime>(app: AppHandle<R>) {
             if let Some(sample) = &sample {
                 let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let listening = super::edge_talk::listening();
-                // Sampled always (so a press is tracked across the change),
-                // acted on only while the toolbar is shown: with chro's own
-                // window in front the gestures have nothing to do here.
+                // Sampled always (so a press is tracked across the change).
+                // With chro's own window in front only Option twice goes on
+                // (the toolbar opens the next session that needs the person
+                // in that window); talking stays off.
                 let gesture = gestures.sample(now_ms, sample.keys, listening);
-                if let Some(gesture) = gesture.filter(|_| !super::edge_presence::edge_hidden()) {
+                let hidden = super::edge_presence::edge_hidden();
+                if let Some(gesture) =
+                    gesture.filter(|g| super::edge_presence::forward_gesture(hidden, *g))
+                {
                     debug!("[edge] option gesture {gesture:?}");
                     let target = app
                         .get_webview_window(super::edge_capture::CAPTURE_WINDOW_LABEL)
@@ -360,21 +425,30 @@ fn spawn_pointer_poll<R: TauriRuntime>(app: AppHandle<R>) {
                 }
             }
             #[cfg(target_os = "macos")]
-            let cursor = sample.map(|s| s.cursor);
+            let cursor = sample.as_ref().map(|s| s.cursor);
             #[cfg(not(target_os = "macos"))]
             let cursor = None;
             #[cfg(not(target_os = "macos"))]
             let _ = started;
 
             if let Some(now) = pointer_at(&app, &window, origin, cursor) {
+                // A press that began on a surface keeps the window taking the
+                // pointer until the button is released (a drag of the toolbar
+                // leaves the surface at once).
+                #[cfg(target_os = "macos")]
+                let button_down = sample.as_ref().is_some_and(|s| s.button_down);
+                #[cfg(not(target_os = "macos"))]
+                let button_down = false;
+                let held = press.update(button_down, now.inside);
+                let take = now.inside || held;
+                if taking != Some(take) {
+                    if let Err(err) = window.set_ignore_cursor_events(!take) {
+                        warn!("[edge] click-through toggle failed: {err:#}");
+                    }
+                    taking = Some(take);
+                }
                 if last.as_ref() != Some(&now) {
                     debug!("[edge] pointer inside={} id={:?}", now.inside, now.id);
-                    let inside_changed = last.as_ref().map(|s| s.inside) != Some(now.inside);
-                    if inside_changed {
-                        if let Err(err) = window.set_ignore_cursor_events(!now.inside) {
-                            warn!("[edge] click-through toggle failed: {err:#}");
-                        }
-                    }
                     if let Err(err) = window.emit(POINTER_EVENT, &now) {
                         warn!("[edge] pointer event failed: {err:#}");
                     }
@@ -442,6 +516,21 @@ pub async fn edge_toolbar_set_enabled<R: TauriRuntime>(
     set_enabled(&app, enabled).await.map_err(DesktopError::from)
 }
 
+/// Reported by the edge window on load and when "Edge position" changes:
+/// dock the window against that edge now.
+#[tauri::command]
+pub fn edge_toolbar_set_side<R: TauriRuntime>(app: AppHandle<R>, side: Side) -> DesktopResult<()> {
+    if let Ok(mut current) = SIDE.lock() {
+        *current = side;
+    }
+    REDOCK.store(true, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window(EDGE_WINDOW_LABEL) {
+        dock(&window).map_err(DesktopError::from)?;
+    }
+    debug!("[edge] side {side:?}");
+    Ok(())
+}
+
 /// Reported by the edge window whenever its visible surfaces change.
 #[tauri::command]
 pub fn edge_toolbar_set_hit_regions<R: TauriRuntime>(
@@ -470,7 +559,7 @@ mod tests {
 
     #[test]
     fn docks_against_the_right_edge_at_full_work_area_height() {
-        let frame = docked_frame(SCREEN, 1000);
+        let frame = docked_frame(SCREEN, 1000, Side::Right);
         assert_eq!(frame.x + frame.width as i32, 1440);
         assert_eq!((frame.y, frame.height), (25, 875));
         assert_eq!(frame.width, 1000);
@@ -478,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_frame_wider_than_the_screen_is_clamped_inside_it() {
-        let frame = docked_frame(SCREEN, 4000);
+        let frame = docked_frame(SCREEN, 4000, Side::Right);
         assert_eq!((frame.x, frame.width), (0, 1440));
     }
 
@@ -490,9 +579,45 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let frame = docked_frame(left, 1000);
+        let frame = docked_frame(left, 1000, Side::Right);
         assert_eq!(frame.x, -1000);
         assert_eq!(frame.height, 1080);
+    }
+
+    #[test]
+    fn a_press_on_a_surface_holds_the_pointer_until_released() {
+        let mut press = PointerPress::default();
+        assert!(!press.update(false, true));
+        assert!(press.update(true, true)); // pressed on the tab
+        assert!(press.update(true, false)); // dragged off it
+        assert!(!press.update(false, false)); // released
+    }
+
+    #[test]
+    fn a_press_that_began_elsewhere_never_holds() {
+        let mut press = PointerPress::default();
+        assert!(!press.update(true, false)); // pressed on another app
+        assert!(!press.update(true, true)); // dragged across the toolbar
+        assert!(!press.update(false, true));
+    }
+
+    #[test]
+    fn docks_against_the_left_edge_at_full_work_area_height() {
+        let frame = docked_frame(SCREEN, 1000, Side::Left);
+        assert_eq!(frame.x, 0);
+        assert_eq!((frame.y, frame.height, frame.width), (25, 875, 1000));
+    }
+
+    #[test]
+    fn the_left_edge_of_a_secondary_screen_is_its_own() {
+        let left = Frame { x: -1920, y: 0, width: 1920, height: 1080 };
+        assert_eq!(docked_frame(left, 1000, Side::Left).x, -1920);
+    }
+
+    #[test]
+    fn the_side_travels_as_a_camel_case_name() {
+        assert_eq!(serde_json::from_str::<Side>(r#""left""#).unwrap(), Side::Left);
+        assert_eq!(serde_json::to_string(&Side::Right).unwrap(), r#""right""#);
     }
 
     #[test]

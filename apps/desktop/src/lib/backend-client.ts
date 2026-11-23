@@ -22,6 +22,18 @@ export const backendUrl = (path: string): string =>
     ? path
     : `${resolveBackendBaseUrl().replace(/\/$/, "")}${path}`;
 
+/** A backend response outside 2xx, carrying its status for callers that
+ * treat some statuses (a 404 for "nothing to act on") as an answer. */
+export class BackendError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "BackendError";
+  }
+}
+
 export const desktopFetch = async <T>(
   path: string,
   init?: RequestInit,
@@ -29,7 +41,10 @@ export const desktopFetch = async <T>(
   const response = await fetch(backendUrl(path), init);
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed with status ${response.status}`);
+    throw new BackendError(
+      body || `Request failed with status ${response.status}`,
+      response.status,
+    );
   }
   if (response.status === 204) {
     return {} as T;

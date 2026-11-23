@@ -61,6 +61,20 @@ describe("useLayoutStore", () => {
     expect(focusedTab?.kind).toEqual({ type: "session", taskId: "task-1" });
   });
 
+  it("closes every tab of a deleted session, by id or slug", () => {
+    const store = useLayoutStore.getState();
+    store.openTab({ type: "session", taskId: "ab12cd34" });
+    const other = store.openTab({ type: "session", taskId: "task-2" });
+    store.openTab({ type: "session", taskId: "0f9e-uuid" });
+
+    useLayoutStore.getState().closeSessionTabs(["0f9e-uuid", "ab12cd34"]);
+
+    const tabs = allLeaves(useLayoutStore.getState().layout.root).flatMap(
+      (leaf) => leaf.tabs.map((tab) => tab.id),
+    );
+    expect(tabs).toEqual([other]);
+  });
+
   it("restores the previously focused tab when a refocused tab closes", () => {
     const store = useLayoutStore.getState();
     const sessionId = store.openTab({ type: "session", taskId: "task-1" });

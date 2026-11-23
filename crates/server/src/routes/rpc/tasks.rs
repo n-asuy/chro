@@ -10,7 +10,7 @@ use db::{
     models::{TaskContextRef, TaskRecord},
     types::TaskStatus,
 };
-use runtime::{Runtime, TaskService};
+use runtime::{Runtime, SessionDeletePlan, TaskService};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,8 +25,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/tasks/:id/context-refs", get(list_task_context_refs))
         .route("/tasks/:id/referenced-by", get(list_task_referenced_by))
         .route("/tasks/:id", delete(delete_task))
+        .route("/tasks/:id/delete-plan", get(get_task_delete_plan))
         .route("/tasks/:id/status", patch(update_task_status))
         .route("/tasks/:id/title", patch(update_task_title))
+        .route("/tasks/:id/icon", post(set_task_icon))
         .route("/tasks/:id/last-message", get(get_task_last_message))
         .route("/tasks/:id/exchanges", get(list_task_exchanges))
         .route(
@@ -115,15 +117,30 @@ async fn list_task_referenced_by(
     Ok(Json(TaskContextRefsEnvelope { refs }))
 }
 
+/// Responds once the delete has finished, worktree removal included. The
+/// work runs on its own task, so a client that stops waiting (a reload, a
+/// closed window) cannot leave the delete half done.
 async fn delete_task(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let task_id = resolve_task_id(state.pool(), &identifier).await?;
-    TaskService::new(state.runtime())
-        .delete_task(task_id)
-        .await?;
+    tokio::spawn(async move { TaskService::new(state.runtime()).delete_task(task_id).await })
+        .await
+        .map_err(|err| ApiError::Internal(format!("session delete task failed: {err}")))??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What deleting the session would remove, read by the confirmation dialog.
+async fn get_task_delete_plan(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> Result<Json<SessionDeletePlan>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    let plan = TaskService::new(state.runtime())
+        .delete_plan(task_id)
+        .await?;
+    Ok(Json(plan))
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +305,33 @@ async fn update_task_title(
 }
 
 #[derive(Debug, Deserialize)]
+struct SetTaskIconRequest {
+    /// One of the session icons (`executors::session_title::TASK_ICONS`);
+    /// `null` returns the session to the default.
+    icon: Option<String>,
+}
+
+/// A person chooses the session's icon (or clears it). Names outside the
+/// icon set are refused rather than stored.
+async fn set_task_icon(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+    Json(payload): Json<SetTaskIconRequest>,
+) -> Result<Json<TaskEnvelope>, ApiError> {
+    let task_id = resolve_task_id(state.pool(), &identifier).await?;
+    if let Some(icon) = payload.icon.as_deref() {
+        if !executors::session_title::is_task_icon(icon) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown session icon: {icon:?}"
+            )));
+        }
+    }
+    TaskRecord::set_icon(state.pool(), task_id, payload.icon.as_deref()).await?;
+    let task = TaskRecord::get(state.pool(), task_id).await?;
+    Ok(Json(TaskEnvelope { task }))
+}
+
+#[derive(Debug, Deserialize)]
 struct ReorderEntry {
     id: Uuid,
     sort_order: i32,
@@ -311,4 +355,78 @@ async fn reorder_tasks(
         .reorder_tasks(&updates)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use axum::{body::Body, http::Request};
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    use super::{StatusCode, TaskRecord};
+    use crate::{routes::api_router, test_support};
+
+    async fn post_icon(
+        app: &test_support::TestApp,
+        task: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = api_router(app.state.clone())
+            .oneshot(
+                Request::post(format!("/rpc/tasks/{task}/icon"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_person_sets_and_clears_a_session_icon() {
+        let app = test_support::app().await;
+        let project = app.project("repo").await;
+        let task = app.task(&project, "Fix the login bug").await;
+
+        let (status, body) = post_icon(&app, &task.id.to_string(), json!({"icon": "bug"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["task"]["icon"], "bug");
+        let stored = TaskRecord::get(app.pool(), task.id).await.unwrap();
+        assert_eq!(stored.icon.as_deref(), Some("bug"));
+
+        let (status, body) = post_icon(&app, &task.id.to_string(), json!({"icon": null})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["task"]["icon"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_icon_or_session_is_refused() {
+        let app = test_support::app().await;
+        let project = app.project("repo").await;
+        let task = app.task(&project, "Fix the login bug").await;
+
+        let (status, _) = post_icon(&app, &task.id.to_string(), json!({"icon": "spaceship"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(TaskRecord::get(app.pool(), task.id)
+            .await
+            .unwrap()
+            .icon
+            .is_none());
+
+        let (status, _) = post_icon(
+            &app,
+            &uuid::Uuid::new_v4().to_string(),
+            json!({"icon": "leaf"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

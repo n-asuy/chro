@@ -19,6 +19,8 @@ pub(super) fn router() -> Router<AppState> {
             get(|| async { Json(cloud::status().await) }),
         )
         .route("/cloud/login", post(login))
+        .route("/cloud/logout", post(logout))
+        .route("/cloud/cancel", post(cancel))
         .route(
             "/cloud/repositories/:id",
             post(upload).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
@@ -30,10 +32,29 @@ pub(super) fn router() -> Router<AppState> {
 }
 
 async fn login() -> Result<Json<Value>, ApiError> {
-    cloud::sign_in()
+    // An unsuccessful attempt must not retain a previous account credential.
+    cloud::sign_out()
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!({"signed_in": true})))
+    cloud::begin_sign_in()
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"started": true})))
+}
+
+async fn cancel() -> Result<Json<Value>, ApiError> {
+    cloud::sign_out()
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    cloud::cancel_sign_in().await;
+    Ok(Json(json!({})))
+}
+
+async fn logout() -> Result<Json<Value>, ApiError> {
+    cloud::sign_out()
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"signed_in": false})))
 }
 
 fn repository_path(state: &AppState, id: Uuid) -> std::path::PathBuf {

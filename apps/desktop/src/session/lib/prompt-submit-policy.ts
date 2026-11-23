@@ -15,6 +15,16 @@ export interface PromptKeystroke {
 const IME_KEY_CODE = 229;
 
 /**
+ * Whether an IME conversion owns this keystroke, so no shortcut may act on it.
+ * `isComposing` alone is not enough: WebKit — which is what the desktop app
+ * renders in — ends composition *before* the confirming keydown, leaving only
+ * the legacy keyCode to identify it.
+ */
+export const isImeKeystroke = (
+  e: Pick<PromptKeystroke, "isComposing" | "keyCode">,
+): boolean => e.isComposing || e.keyCode === IME_KEY_CODE;
+
+/**
  * Cmd/Ctrl+Return submits the prompt; a bare Return inserts a newline.
  *
  * The composer holds multi-line prompts, so Return has to stay a newline: this
@@ -28,9 +38,7 @@ export const shouldSubmitPrompt = (e: PromptKeystroke): boolean => {
   if (e.key !== "Enter") return false;
   if (!e.metaKey && !e.ctrlKey) return false;
   // A Return that belongs to an IME conversion is never a submit, modifier or
-  // not. `isComposing` alone is not enough: WebKit — which is what the desktop
-  // app renders in — ends composition *before* the confirming keydown, leaving
-  // only the legacy keyCode to identify it.
-  if (e.isComposing || e.keyCode === IME_KEY_CODE) return false;
+  // not.
+  if (isImeKeystroke(e)) return false;
   return !e.shiftKey && !e.altKey;
 };

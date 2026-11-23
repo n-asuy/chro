@@ -13,6 +13,8 @@ permissions:
   contents: write
 
 env:
+  CHRO_CLOUD_CONTROL_PLANE_URL: ${{ vars.CHRO_CLOUD_CONTROL_PLANE_URL }}
+  CHRO_CLOUD_ACCESS_AUDIENCE: ${{ vars.CHRO_CLOUD_ACCESS_AUDIENCE }}
   RUST_TOOLCHAIN: stable
   BUN_VERSION: "1.1.26"
 

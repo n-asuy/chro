@@ -1,7 +1,6 @@
 import { type TranslationFunction, useOptionalLanguage } from "@/i18n";
 import enDict from "@/i18n/locales/en";
 import type { TranslationDictionary } from "@/i18n/locales/ja";
-import { capture } from "@/lib/analytics";
 import { Button } from "@chro/ui/button";
 import { useRouter } from "@tanstack/react-router";
 import { Component, type ErrorInfo, type ReactNode, useState } from "react";
@@ -124,7 +123,7 @@ function ErrorFallback({
 
 interface ErrorBoundaryProps {
   children: ReactNode;
-  /** Distinguishes boundary locations in logs/telemetry. */
+  /** Distinguishes boundary locations in logs. */
   label: string;
   /** Provided so the fallback can offer a recovery action. */
   render: (state: {
@@ -162,7 +161,6 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
-    const { message } = describeError(error);
     this.setState((prev) => ({
       errorCount: prev.errorCount + 1,
       componentStack: info.componentStack ?? null,
@@ -172,11 +170,6 @@ export class ErrorBoundary extends Component<
       error,
       info.componentStack,
     );
-    try {
-      capture("error_boundary", { label: this.props.label, message });
-    } catch {
-      // Telemetry must never mask the original failure.
-    }
   }
 
   reset = (): void => {

@@ -181,6 +181,29 @@ export const useFeatureFlagStore = create<FeatureFlagState>()((set, get) => ({
   },
 }));
 
+/**
+ * Another window of the app (the edge toolbar's settings) can switch a beta
+ * feature or clear a developer force: follow the shared localStorage key it
+ * changed, so this window's flags change with it (turning the edge toolbar
+ * off there closes its window from here).
+ */
+export function followStorageChange(key: string | null): void {
+  if (key === BETA_OPT_INS_STORAGE_KEY) {
+    useFeatureFlagStore.setState({ optedIn: readPersistedOptIns() });
+  } else if (key === BETA_OPT_OUTS_STORAGE_KEY) {
+    useFeatureFlagStore.setState({ optedOut: readPersistedOptOuts() });
+  } else if (key === DEV_FLAG_OVERRIDES_STORAGE_KEY) {
+    useFeatureFlagStore.setState({ devOverrides: readPersistedDevOverrides() });
+  }
+}
+
+if (
+  typeof window !== "undefined" &&
+  typeof window.addEventListener === "function"
+) {
+  window.addEventListener("storage", (event) => followStorageChange(event.key));
+}
+
 /** Whether a flag's user switch is opt-in (off until switched on). */
 function isOptIn(key: string): boolean {
   return (FLAG_OPT_IN as Record<string, boolean>)[key] ?? false;
@@ -201,7 +224,8 @@ export function selectFlag(
 ): boolean {
   const forced = state.devOverrides[key];
   if (forced !== undefined) return forced;
-  if (!(state.resolved[key] ?? false)) return false;
+  // Cloud is offered locally; Access separately authorizes its use.
+  if (key !== "cloud_sessions" && !(state.resolved[key] ?? false)) return false;
   return isOptIn(key)
     ? state.optedIn.includes(key)
     : !state.optedOut.includes(key);

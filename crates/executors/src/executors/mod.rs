@@ -248,15 +248,15 @@ pub trait StandardCodingAgentExecutor {
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
 
-    /// A title for the session that `request` opens, written by a small
-    /// model this agent's CLI can reach in a one-shot call that is separate
-    /// from the run (see [`crate::session_title`]). `Ok(None)` when the agent
-    /// has no such call or the model returned nothing usable.
-    async fn generate_session_title(
+    /// A title and an icon for the session that `request` opens, written by
+    /// a small model this agent's CLI can reach in a one-shot call that is
+    /// separate from the run (see [`crate::session_title`]). `Ok(None)` when
+    /// the agent has no such call or the model returned nothing usable.
+    async fn generate_session_name(
         &self,
         _request: &str,
         _env: &ExecutionEnv,
-    ) -> Result<Option<String>, ExecutorError> {
+    ) -> Result<Option<crate::session_title::SessionName>, ExecutorError> {
         Ok(None)
     }
 

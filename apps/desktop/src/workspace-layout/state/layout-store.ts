@@ -61,6 +61,9 @@ interface LayoutActions {
   ) => string;
 
   closeTab: (tabId: string) => void;
+  /** Close the tabs showing a session that no longer exists. Session tabs
+   * name their task by id or by slug, so callers pass both. */
+  closeSessionTabs: (taskKeys: readonly string[]) => void;
   closeOthers: (tabId: string) => void;
   closeToRight: (tabId: string) => void;
   closeAllInLeaf: (leafId: string) => void;
@@ -390,6 +393,19 @@ const createLayoutStore: LayoutCreator = (set, get) => ({
     }
     set({ layout: nextLayout });
     persist(get());
+  },
+
+  closeSessionTabs: (taskKeys) => {
+    const keys = new Set(taskKeys);
+    const doomed = allLeaves(get().layout.root)
+      .flatMap((leaf) => leaf.tabs)
+      .filter(
+        (tab) =>
+          tab.kind.type === "session" &&
+          tab.kind.taskId !== undefined &&
+          keys.has(tab.kind.taskId),
+      );
+    for (const tab of doomed) get().closeTab(tab.id);
   },
 
   closeOthers: (tabId) => {

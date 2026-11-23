@@ -1,10 +1,35 @@
 # Changelog
 
-## 0.1.58
+## 0.1.62
 
-- Windows builds are now signed through Azure Artifact Signing, and the publisher shown by Windows changes to Curino LLC. Every binary in the installer still carries a timestamped signature, and a release still refuses to publish when signing is not configured
+- Fixed the command-line tool and server of 0.1.61, which failed to build for every platform because the Linux build could not link the system keychain library. Sign-in for cloud sessions now keeps its token in the kernel keyring on Linux, which needs no system library, and the macOS Keychain and Windows Credential Manager as before
+
+## 0.1.61
+
 - Updated the model picker: Fable now reads Fable 5.2, which is what the `fable` alias resolves to from Claude Code 2.1.322, and offers the Fast speed toggle like Opus. GPT-6.1 Terra joins the Codex models after GPT-6 Astra, as the Codex catalog orders it, and needs Codex CLI 0.153.0 or newer. On an older Claude Code the `fable` alias still runs Fable 5.1, so run `claude update` to get 5.2
 - The `chro` skill now ships working procedures beside its entry file: how to write a delegation brief and review what comes back, how a delegated session finishes and reports, how to cross-check a question with other models, and how to split a session by topic. An agent loads only the procedure that fits. `chro skill install` writes them to `references/` in the skill folder and updates an existing install in place. The command guide still comes from `chro skill show`. The skill now lives in `skills/chro` of the repository, so it can also be installed with `npx skills add n-asuy/chro --skill chro`
+- Added cloud sessions as a beta, off by default: turn on "Cloud sessions" under Settings › Beta features, and a new session's location picker offers Cloud beside This computer. A cloud session signs in through your browser, runs its agent in a machine of its own, streams the conversation and approvals back into chro, and brings the result back as a branch you review and merge as usual. The worktree and base-branch choices for a new session moved into the "…" menu next to the picker
+- Reworked Settings › Agents: installed agents and agents chro could not find are listed separately, with a count, a Set default button, and links to each agent's docs or install guide. Launch settings are behind "Show launch settings". Claude gains an "Ask questions" switch: when on, Claude can confirm with multiple-choice questions and the run waits for your answer
+- Added an edge toolbar as a beta, under Settings › Beta features: a small toolbar at the screen edge for your sessions, shown while chro is in the background
+
+## 0.1.59
+
+- macOS builds are now signed and notarized by Curino LLC, matching the Windows builds. The first launch after updating may ask again for permissions you had already granted to chro, such as controlling other apps
+- Fixed the Intel Mac app and the Intel Mac CLI missing from 0.1.58: their build machine type was retired, so they are now built on the same machine type as the Apple silicon builds
+
+## 0.1.58
+
+- Changed the operator API's send-message request: the `queue` true/false field is replaced by `when_busy`, which takes `queue`, `refuse` or `interrupt`. A script that still sends `"queue": false` now has its message queued instead of refused. `chro session send --no-queue` works as before
+- Windows builds are now signed through Azure Artifact Signing, and the publisher shown by Windows changes to Curino LLC. Every binary in the installer still carries a timestamped signature, and a release still refuses to publish when signing is not configured
+- Added `chro session send --now`, which stops the session's running turn and runs the message next, ahead of anything already queued. It cannot be combined with `--no-queue`
+- Added an option to nest delegated sessions under the session that delegated them in the left panel, turned on in Settings with "Nest delegated sessions". A delegating session shows how many sessions sit under it and folds them away with a click, a folded row shows when one of them needs your input, and under the Recent sort a group moves up with its most recently active session
+- Added session links in conversations: a session id an agent writes, such as `20CFfEXi`, shows as that session's title with its agent icon, previews the session on hover, and opens it on click
+- Added Back and Forward buttons to the title bar, next to the window controls. They do the same as ⌘[ and ⌘] and are disabled when there is nowhere to go
+- Changed a long prompt pinned at the top of the conversation to collapse to two lines, so its reply keeps the reading space. Click it to expand
+- Changed editing a queued message to save with ⌘Return or Ctrl+Return. Return now adds a new line, and confirming an IME conversion no longer saves the edit by accident
+- Fixed the server using tens of gigabytes of memory and slowing down when a command printed a lot of output. Each command in a conversation now keeps the last 64 KB of its output, marked "[chro] earlier output truncated" (the full output stays in the run log), and fast-changing output is sent to the app in batches
+- Fixed dev servers, browsers and watchers started by agents running forever after their session was done. Every five minutes chro stops the ones whose session was deleted, was cancelled, had its workspace cleaned up, or has had no run for 30 minutes
+- Fixed a session's delegation, note and cleaned-up-workspace notice disappearing from the left panel while a follow-up message was being sent
 
 ## 0.1.57
 

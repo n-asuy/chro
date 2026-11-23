@@ -2,6 +2,7 @@ import { cn } from "@/lib/cn";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
+import { useDensityStyle } from "./conversation-density";
 import { TextShimmer } from "./text-shimmer";
 
 /**
@@ -34,6 +35,7 @@ export const ThinkingSteps = ({
   children,
   className,
 }: ThinkingStepsProps) => {
+  const density = useDensityStyle();
   return (
     <div className={cn("w-full", className)}>
       <button
@@ -41,7 +43,8 @@ export const ThinkingSteps = ({
         onClick={() => onOpenChange(!open)}
         aria-expanded={open}
         className={cn(
-          "group/steps flex w-fit min-w-0 max-w-full cursor-pointer select-none items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] outline-none transition-colors",
+          "group/steps flex w-fit min-w-0 max-w-full cursor-pointer select-none items-center gap-1.5 rounded-md text-left outline-none transition-colors",
+          density.stepsHeader,
           "hover:bg-custom-sidebar-background-80",
           open ? "font-medium text-foreground" : "text-muted-foreground",
           "hover:text-foreground",
@@ -50,7 +53,7 @@ export const ThinkingSteps = ({
         {active ? (
           <TextShimmer
             as="span"
-            className="min-w-0 truncate text-[13px] font-medium"
+            className={cn("min-w-0 truncate font-medium", density.stepText)}
           >
             {label}
           </TextShimmer>
@@ -103,6 +106,7 @@ export const ThinkingStep = ({
   children,
   className,
 }: ThinkingStepProps) => {
+  const density = useDensityStyle();
   return (
     /* Outer animates height to open space, inner fades content in after. */
     <motion.div
@@ -116,7 +120,7 @@ export const ThinkingStep = ({
         animate={{ opacity: 1 }}
         transition={{ duration: 0.24, delay: 0.08, ease: "easeOut" }}
       >
-        <div className="flex gap-2.5 px-2 py-1.5">
+        <div className={cn("flex gap-2.5", density.step)}>
           {/* Icon column with continuous connector line */}
           <div className="flex w-[14px] shrink-0 flex-col items-center">
             <div className="flex h-[18px] items-center text-muted-foreground">

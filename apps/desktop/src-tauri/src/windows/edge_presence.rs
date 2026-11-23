@@ -107,6 +107,13 @@ pub fn on_window_event<R: TauriRuntime>(window: &Window<R>, event: &WindowEvent)
     });
 }
 
+/// Whether an Option gesture reaches the toolbar. While chro's own window is
+/// in front only Option twice does (the toolbar opens the next session that
+/// needs the person in that window); press to talk stays off.
+pub fn forward_gesture(hidden: bool, gesture: super::option_tap::OptionGesture) -> bool {
+    !hidden || gesture == super::option_tap::OptionGesture::Summon
+}
+
 /// The current state, for an edge window that just loaded.
 #[tauri::command]
 pub fn edge_presence() -> bool {
@@ -173,6 +180,17 @@ mod tests {
         focus.focus(EDGE_WINDOW_LABEL, false);
         focus.focus(MAIN, true);
         assert!(focus.main_in_front());
+    }
+
+    #[test]
+    fn with_chro_in_front_only_option_twice_reaches_the_toolbar() {
+        use crate::windows::option_tap::OptionGesture::*;
+        assert!(forward_gesture(true, Summon));
+        for talk in [HoldStart, HoldEnd, Send] {
+            assert!(!forward_gesture(true, talk));
+            assert!(forward_gesture(false, talk));
+        }
+        assert!(forward_gesture(false, Summon));
     }
 
     #[test]

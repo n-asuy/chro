@@ -7,6 +7,7 @@ const CLOUD_MESSAGES: [RegExp, TranslationKey][] = [
   [/Agent is running in Cloud/, "cloudAgentRunning"],
   [/Cloud result imported/, "cloudResultImported"],
   [/Could not deliver cloud approval/, "cloudErrorApproval"],
+  [/This account cannot use cloud sessions/, "cloudAccountRefused"],
   [/Cloud sign-in expired/, "cloudErrorExpired"],
   [/Sign in to Cloud first/, "cloudErrorSignInFirst"],
   [/Cloud instance limit/, "cloudErrorLimit"],

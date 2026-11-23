@@ -69,16 +69,54 @@ describe.each([
   beforeEach(() => {
     locale = dictionary;
   });
-  it("hides cloud and keeps branch controls inside the options menu when the flag is off", async () => {
+  it("shows the branch chip and hides cloud when the flag is off", async () => {
     const host = await render(false);
     expect(
       host.querySelector(`[aria-label="${locale.cloudLocationComputer}"]`),
     ).toBeNull();
     expect(
-      host.querySelector(`[aria-label="${locale.cloudSessionOptions}"]`),
-    ).not.toBeNull();
-    expect(host.textContent).not.toContain("main");
+      host.querySelector(`[aria-label="${locale.environmentFromLabel}"]`)
+        ?.textContent,
+    ).toBe("main");
+    expect(
+      host.querySelector(`[aria-label="${locale.environmentWorktreeLabel}"]`)
+        ?.textContent,
+    ).toBe(locale.environmentWorktreeLabel);
+    expect(host.querySelector(".lucide-ellipsis")).toBeNull();
     expect(desktopFetch).not.toHaveBeenCalled();
+  });
+  it("switches the checkout mode from the checkout chip", async () => {
+    const onUseWorktreeChange = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <NewSessionExecutionControls
+          {...props}
+          onUseWorktreeChange={onUseWorktreeChange}
+        />,
+      ),
+    );
+    const trigger = host.querySelector(
+      `[aria-label="${locale.environmentWorktreeLabel}"]`,
+    )!;
+    await act(async () =>
+      trigger.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+      ),
+    );
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.map((item) => item.textContent)).toEqual([
+      locale.environmentWorktreeLabel,
+      locale.environmentLocalLabel,
+    ]);
+    expect(items[0]?.getAttribute("aria-checked")).toBe("true");
+    await act(async () =>
+      items[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(onUseWorktreeChange).toHaveBeenCalledWith(false);
   });
   it("offers This computer and Cloud when the flag is on", async () => {
     const host = await render(true);
@@ -87,11 +125,87 @@ describe.each([
         ?.textContent,
     ).toBe(locale.cloudLocationComputer);
     expect(host.querySelector(".lucide-laptop")).not.toBeNull();
+    expect(host.querySelector(".lucide-ellipsis")).not.toBeNull();
+    expect(host.textContent).not.toContain("main");
     await openMenu(host);
-    expect(document.body.textContent).toContain(locale.cloudWorkIn);
+    expect(document.querySelector("input")?.placeholder).toBe(
+      locale.cloudWorkIn,
+    );
     expect(document.body.textContent).toContain(locale.cloudLocationComputer);
     expect(document.body.textContent).toContain(locale.cloudDefaultEnvironment);
     expect(desktopFetch).not.toHaveBeenCalled();
+  });
+  it("filters environment rows and shows the empty state", async () => {
+    const host = await render(false);
+    const trigger = host.querySelector(
+      `[aria-label="${locale.environmentWorktreeLabel}"]`,
+    )!;
+    await act(async () =>
+      trigger.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+      ),
+    );
+    const input = document.querySelector("input")!;
+    expect(input.placeholder).toBe(locale.executionEnvironmentSearch);
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setValue.call(input, locale.environmentLocalLabel);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(1);
+    await act(async () => {
+      setValue.call(input, "no-match-123");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain(locale.executionPickerEmpty);
+  });
+  it("filters location rows by label and secondary text", async () => {
+    const host = await render(true);
+    await openMenu(host);
+    const input = document.querySelector("input")!;
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setValue.call(input, locale.cloudDefaultEnvironment);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(1);
+    expect(
+      document.querySelector('[role="menuitemradio"]')?.textContent,
+    ).toContain(locale.cloudLocationCloud);
+    await act(async () => {
+      setValue.call(input, "no-match-123");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain(locale.executionPickerEmpty);
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+  it("keeps branch and environment accessible under more options", async () => {
+    const host = await render(true);
+    const trigger = host.querySelector(
+      `[aria-label="${locale.executionMoreOptions}"]`,
+    )!;
+    await act(async () =>
+      trigger.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(
+      document.querySelector(`[aria-label="${locale.environmentFromLabel}"]`),
+    ).not.toBeNull();
+    expect(
+      document.querySelector(
+        `[aria-label="${locale.environmentWorktreeLabel}"]`,
+      ),
+    ).not.toBeNull();
   });
   it("shows the selected Cloud location on the trigger", async () => {
     const host = await render(true, vi.fn(), vi.fn(), "cloud");
@@ -102,10 +216,8 @@ describe.each([
     expect(host.querySelector(".lucide-cloud")).not.toBeNull();
     expect(host.textContent).not.toContain(locale.cloudWorkIn);
   });
-  it("signs in before selecting Cloud", async () => {
-    vi.mocked(desktopFetch)
-      .mockResolvedValueOnce({ signed_in: false })
-      .mockResolvedValueOnce({ signed_in: true });
+  it("checks the existing Access sign-in before selecting Cloud", async () => {
+    vi.mocked(desktopFetch).mockResolvedValueOnce({ signed_in: true });
     const onChange = vi.fn();
     const pending = vi.fn();
     const host = await render(true, onChange, pending);
@@ -116,16 +228,16 @@ describe.each([
     await act(async () =>
       cloud.dispatchEvent(new MouseEvent("click", { bubbles: true })),
     );
-    expect(desktopFetch).toHaveBeenCalledWith("/rpc/cloud/login", {
-      method: "POST",
-    });
+    expect(desktopFetch).toHaveBeenCalledWith("/rpc/cloud/status");
+    expect(desktopFetch).not.toHaveBeenCalledWith(
+      "/rpc/cloud/login",
+      expect.anything(),
+    );
     expect(onChange).toHaveBeenCalledWith("cloud");
     expect(pending.mock.calls).toEqual([[true], [false]]);
   });
   it("keeps the computer selected and surfaces a sign-in failure", async () => {
-    vi.mocked(desktopFetch).mockRejectedValueOnce(
-      new Error("Cloud sign-in expired. Sign in again."),
-    );
+    vi.mocked(desktopFetch).mockResolvedValueOnce({ signed_in: false });
     const onChange = vi.fn();
     const host = await render(true, onChange);
     await openMenu(host);
@@ -137,7 +249,7 @@ describe.each([
     );
     expect(onChange).not.toHaveBeenCalled();
     expect(host.querySelector('[role="alert"]')?.textContent).toContain(
-      locale.cloudErrorExpired,
+      locale.cloudErrorSignInFirst,
     );
   });
 });

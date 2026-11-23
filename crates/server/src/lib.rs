@@ -130,19 +130,7 @@ pub async fn run(args: ServerArgs) -> anyhow::Result<()> {
 
     perf::set_perf_enabled(args.perf);
 
-    // Initialize PostHog analytics (no-op when POSTHOG_API_KEY is unset)
-    {
-        let config_service = config::ConfigService::new(config::config_path());
-        let user_config = config_service.load().unwrap_or_default();
-        analytics::init(analytics::AnalyticsConfig {
-            distinct_id: user_config.telemetry_id.clone(),
-            enabled: user_config.analytics_enabled,
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-        });
-    }
-
-    // Local activity recording for dogfooding. Independent of the telemetry
-    // opt-in above because nothing it writes leaves the machine.
+    // Local activity recording for dogfooding; nothing leaves this machine.
     analytics::dev::init(analytics::dev::Config {
         dir: config::asset_dir().join("dev-events"),
         enabled: analytics::dev::should_enable(),

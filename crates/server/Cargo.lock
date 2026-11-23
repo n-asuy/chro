@@ -85,7 +85,6 @@ name = "analytics"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "reqwest",
  "serde",
  "serde_json",
  "strum",
@@ -591,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "chro-server"
-version = "0.1.62"
+version = "0.1.63"
 dependencies = [
  "analytics",
  "anyhow",
@@ -1003,7 +1002,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "uuid",
 ]
 
 [[package]]

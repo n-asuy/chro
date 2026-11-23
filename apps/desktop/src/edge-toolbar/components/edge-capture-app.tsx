@@ -24,6 +24,7 @@ import {
 } from "../lib/edge-input-client";
 import { playEdgeSound } from "../lib/edge-sounds";
 import { onOptionGesture } from "../lib/edge-window-client";
+import { savedEdgePrefs } from "../state/edge-prefs";
 import { ArrowUpGlyph, MicGlyph } from "./edge-glyphs";
 
 /** How long the ask pill blurs away on send (the mock's leave). */
@@ -111,7 +112,10 @@ export function EdgeCaptureApp() {
     if (stateRef.current.phase !== "asking") return;
     dictationBase.current = stateRef.current.text;
     setDictating(true);
-    const outcome = await startTalking("capture");
+    const outcome = await startTalking(
+      "capture",
+      savedEdgePrefs().talkLanguage,
+    );
     if (outcome.outcome !== "started") {
       setDictating(false);
       if (outcome.outcome === "blocked" || outcome.outcome === "unavailable") {

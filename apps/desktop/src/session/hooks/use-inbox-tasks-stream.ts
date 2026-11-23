@@ -15,6 +15,8 @@ export interface UseInboxTasksStreamResult {
   /** Tasks across all projects, most recently updated first. */
   tasks: StoredTask[];
   isLoading: boolean;
+  /** The first snapshot has arrived: `tasks` is every task there is. */
+  hasSnapshot: boolean;
   isConnected: boolean;
   error: string | null;
 }
@@ -52,5 +54,5 @@ export function useInboxTasksStream(enabled = true): UseInboxTasksStreamResult {
 
   const isLoading = !data && !error;
 
-  return { tasks, isLoading, isConnected, error };
+  return { tasks, isLoading, hasSnapshot: !!data, isConnected, error };
 }

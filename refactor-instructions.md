@@ -112,7 +112,7 @@ crates/ (19)       Cargo ワークスペースなし。各クレート独立
 2. テストと実装が矛盾している(どちらが正かを勝手に決めない)
 3. 削除候補のコードについて「未使用」の証拠が完全でない(grep だけでなく、ビルドスクリプト・vite config・Tauri config・GitHub workflow・`tooling/scripts/` まで確認して初めて完全)
 4. 公開 API、DB schema、保存済みデータ(SQLite/D1/preferences/UI state)に影響しうる
-5. 認証(Clerk)、課金、通知、外部連携(PostHog/Slack webhook)に影響しうる
+5. 認証(Clerk)、課金、通知、外部連携(Slack webhook)に影響しうる
 6. ワイヤフォーマット(LogEntry, TerminalSnapshot, diff 型, JSON Patch 形状)の変更が必要に見える
 7. 複数の設計案がありプロダクト判断が必要(例: バリデーションライブラリ導入、codegen 導入)
 8. baseline で既に失敗しているテスト・チェックを発見した(自分の変更と混ぜずに即報告)

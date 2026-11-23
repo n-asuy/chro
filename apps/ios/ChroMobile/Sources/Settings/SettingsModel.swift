@@ -104,12 +104,6 @@ final class SettingsModel {
         await savePreferences(next)
     }
 
-    func setAnalyticsEnabled(_ on: Bool) async {
-        guard var next = preferences else { return }
-        next.analyticsEnabled = on
-        await savePreferences(next)
-    }
-
     /// Optimistic, then the server's answer; a failure restores what was saved.
     private func savePreferences(_ next: SharedPreferences) async {
         let previous = preferences

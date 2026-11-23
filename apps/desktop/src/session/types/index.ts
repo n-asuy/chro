@@ -51,6 +51,10 @@ export type StoredTask = {
   /** Short status line the session's agent or a person set with
    * `chro session set --note`. Null until someone sets it. */
   note?: string | null;
+  /** Name of the session's icon (see `edge-toolbar/domain/task-icons.ts`),
+   * picked by the call that titles the session or chosen by a person. Null
+   * until either happens. */
+  icon?: string | null;
 };
 
 /** A message waiting in a session's queue (`session_queue`). Queued from the

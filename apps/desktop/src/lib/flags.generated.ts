@@ -23,7 +23,7 @@ export const FLAG_DEFAULTS: Record<FlagKey, boolean> = {
  * user turns them on in Settings > Beta features.
  */
 export const FLAG_OPT_IN: Record<FlagKey, boolean> = {
-  cloud_sessions: false,
+  cloud_sessions: true,
   edge_toolbar: true,
   session_references_popover: false,
 };

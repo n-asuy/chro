@@ -626,12 +626,13 @@ impl LocalContainerService {
     }
 
     /// Name the session a run opens: replace the task's prompt-derived title
-    /// with one the agent's model writes from the opening request.
+    /// with one the agent's model writes from the opening request, and give
+    /// it the icon the same call picked.
     ///
     /// Detached and best-effort. The call takes seconds and may fail (CLI
     /// signed out, offline, timed out); none of that may hold the run back,
     /// and the task then simply keeps the title it has. A title a person
-    /// chose in the meantime is pinned and wins.
+    /// chose in the meantime is pinned and wins; so does an icon.
     fn spawn_session_titling(
         &self,
         run_id: Uuid,
@@ -642,8 +643,8 @@ impl LocalContainerService {
     ) {
         let pool = self.db.pool().clone();
         tokio::spawn(async move {
-            let title = match agent.generate_session_title(&request, &env).await {
-                Ok(Some(title)) => title,
+            let name = match agent.generate_session_name(&request, &env).await {
+                Ok(Some(name)) => name,
                 Ok(None) => return,
                 Err(err) => {
                     tracing::warn!(
@@ -655,7 +656,9 @@ impl LocalContainerService {
                     return;
                 }
             };
-            match TaskRecord::adopt_session_title(&pool, task_id, &title).await {
+            match TaskRecord::adopt_session_name(&pool, task_id, &name.title, name.icon.as_deref())
+                .await
+            {
                 Ok(changed) => tracing::debug!(
                     %run_id,
                     %task_id,
@@ -1519,11 +1522,9 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 
-    async fn cleanup_task_run_artifacts(&self, task_run_id: Uuid) -> Result<(), ContainerError> {
+    async fn release_task_run(&self, task_run_id: Uuid) {
         self.event_channels.write().await.remove(&task_run_id);
         self.msg_stores.write().await.remove(&task_run_id);
-        log_writer::delete_log_file(&self.logs_dir, task_run_id).await?;
-        Ok(())
     }
 
     async fn execution_event_stream(

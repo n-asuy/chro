@@ -16,7 +16,7 @@ struct LiveSkillsTests {
              "source_path": ".claude/skills/restock-check/SKILL.md", "base_dir": ".claude/skills", "abs_dir": "/repo/.claude/skills/restock-check"],
             ["id": "u1", "name": "future", "description": "", "source": "user_newtool", "source_label": "?", "source_path": "x", "base_dir": "x", "abs_dir": "x"],
         ]])
-        desktop.reply("GET /rpc/preferences", ["preferences": ["language": "en", "show_hidden_entries": true, "analytics_enabled": true, "telemetry_id": "t"]])
+        desktop.reply("GET /rpc/preferences", ["preferences": ["language": "en", "show_hidden_entries": true]])
         let skills = SkillsLiveService(calls: try await desktop.panelPhone().calls)
         #expect(try await skills.skills(workspacePath: " /repo ") == [
             SkillPackage(id: "w1", name: "restock-check", description: "Check SKUs.", source: .workspaceClaude,

@@ -50,17 +50,18 @@ describe("archiveTask", () => {
     expect(calls).toEqual(["cancel", "updateStatus"]);
   });
 
-  it("still archives when the best-effort cancel fails", async () => {
-    // A failed cancel (e.g. the run is already gone) must not block archiving:
-    // the task still needs to leave the active list.
-    const cancel = vi.fn().mockRejectedValue(new Error("no run"));
+  it("leaves the session in the list when its run cannot be stopped", async () => {
+    // Archiving hides the session; hiding one whose agent is still running
+    // would leave it working out of sight. "Nothing to stop" is not a failure
+    // (taskApi.cancel resolves for it), so a rejection here is a real one.
+    const cancel = vi.fn().mockRejectedValue(new Error("stop failed"));
     const { api, updateStatus } = makeApi(cancel);
     await expect(
       archiveTask(makeTask({ active_session_id: "sess-1" }), {
         ...api,
         cancel,
       }),
-    ).resolves.toBeUndefined();
-    expect(updateStatus).toHaveBeenCalledWith("task-1", ARCHIVED_STATUS);
+    ).rejects.toThrow("stop failed");
+    expect(updateStatus).not.toHaveBeenCalled();
   });
 });

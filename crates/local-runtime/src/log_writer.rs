@@ -176,16 +176,6 @@ pub fn log_file_path(logs_dir: &Path, task_run_id: Uuid) -> PathBuf {
     logs_dir.join("runs").join(format!("{}.jsonl", task_run_id))
 }
 
-/// Delete the JSONL log file for a task run if it exists.
-pub async fn delete_log_file(logs_dir: &Path, task_run_id: Uuid) -> std::io::Result<()> {
-    let path = log_file_path(logs_dir, task_run_id);
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 /// Read log entries from the JSONL file for a task run.
 ///
 /// Returns an empty vec if the file does not exist. The file is streamed line by
@@ -384,31 +374,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let entries = read_log_entries(dir.path(), Uuid::new_v4()).await.unwrap();
         assert!(entries.is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_missing_file_is_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        delete_log_file(dir.path(), Uuid::new_v4()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn delete_existing_file_removes_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let run_id = Uuid::new_v4();
-        let log_path = log_file_path(dir.path(), run_id);
-
-        {
-            let mut writer = ExecutionLogWriter::new(dir.path(), run_id).await.unwrap();
-            writer
-                .append_entry(&LogEntry::Stdout("hello".into()))
-                .await
-                .unwrap();
-        }
-
-        assert!(log_path.exists());
-        delete_log_file(dir.path(), run_id).await.unwrap();
-        assert!(!log_path.exists());
     }
 
     #[tokio::test]

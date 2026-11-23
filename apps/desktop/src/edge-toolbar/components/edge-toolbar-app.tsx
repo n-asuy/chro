@@ -1,7 +1,9 @@
 import "../edge-toolbar.css";
 import { useLanguage } from "@/i18n";
+import { useFeatureFlagStore } from "@/lib/feature-flags-store";
 import { useSessionReadSync } from "@/session/hooks/use-session-read-state";
 import {
+  type CSSProperties,
   type ReactNode,
   type RefObject,
   useCallback,
@@ -15,14 +17,19 @@ import {
   PANEL_CONTENT_WAIT_MS,
   type PanelPresence,
   closedPresence,
+  hitSpan,
+  keepsPeekOpen,
   keyboardSummon,
+  nextNeedsYou,
   nextPresence,
   panelOnScreen,
   panelTop,
   parseCssTime,
+  peekAnchor,
   toolbarSurface,
 } from "../domain/edge-motion";
 import { isTalking, optionAction } from "../domain/talk";
+import { EdgeVoiceActionsContext } from "../hooks/edge-voice-actions";
 import { useEdgeSessions } from "../hooks/use-edge-sessions";
 import { useEdgeVoice } from "../hooks/use-edge-voice";
 import {
@@ -33,16 +40,26 @@ import {
   onEdgePresence,
   onOptionGesture,
   openAppView,
+  openSessionInApp,
   setEdgeHitRegions,
+  setEdgeSide,
 } from "../lib/edge-window-client";
 import {
+  type EdgeSide,
+  clampEdgeY,
+  sideForDrop,
+  useEdgePrefs,
+} from "../state/edge-prefs";
+import {
   type EdgePanel,
+  type SettingsPage,
   useEdgeToolbarStore,
 } from "../state/edge-toolbar-store";
 import { MORE_ITEM_COUNT, type MoreItem } from "./edge-more";
 import { PanelReadyContext } from "./edge-panel-ready";
 import { EdgeSessionList, EdgeSessionPreview } from "./edge-session-list";
 import { EdgeSessionPanel } from "./edge-session-panel";
+import { EdgeSettingsMenu, EdgeSettingsPage } from "./edge-settings";
 import { EdgeTalkPill } from "./edge-talk-pill";
 import {
   DOT_GROWN_EVENT,
@@ -160,8 +177,17 @@ interface Slots {
   card: RefObject<HTMLDivElement | null>;
   list: RefObject<HTMLDivElement | null>;
   preview: RefObject<HTMLDivElement | null>;
+  peek: RefObject<HTMLDivElement | null>;
   usage: RefObject<HTMLDivElement | null>;
+  settingsMenu: RefObject<HTMLDivElement | null>;
+  settingsFly: RefObject<HTMLDivElement | null>;
 }
+
+/** The settings menu hangs from 8 item rows below the "…" capsule's top (the mock's). */
+const SETTINGS_MENU_REACH = 8 * 32;
+
+/** The settings flyout sits this much higher than the menu (the mock's). */
+const SETTINGS_FLY_RISE = 40;
 
 /**
  * Place the toolbar so its capsule's centre sits at the frame's vertical
@@ -189,7 +215,11 @@ function useEdgeLayout(
     if (growing) return;
     const center = capsule.offsetTop + capsule.offsetHeight / 2;
     toolbar.style.setProperty("--edge-capsule-center", `${center}px`);
-    const toolbarTop = root.clientHeight / 2 - center;
+    // The toolbar sits at the frame's centre, moved by the dragged offset.
+    const edgeY = Number.parseFloat(
+      root.style.getPropertyValue("--edge-y") || "0",
+    );
+    const toolbarTop = root.clientHeight / 2 - center + edgeY;
     const capsuleTop = toolbarTop + capsule.offsetTop;
     const placeSlot = (slot: HTMLDivElement | null, anchor: number) => {
       if (!slot) return;
@@ -198,6 +228,28 @@ function useEdgeLayout(
     placeSlot(slots.card.current, toolbarTop);
     placeSlot(slots.list.current, capsuleTop);
     placeSlot(slots.preview.current, capsuleTop);
+    // A tile's preview sits level with its tile. Once placed, a move to
+    // another tile slides it there (the transition is armed only after the
+    // first placement, so the card does not fly in from the frame's top).
+    const peek = slots.peek.current;
+    const peekTile = peek?.dataset.peek
+      ? capsule.querySelector<HTMLElement>(
+          `[data-edge-dot="${CSS.escape(peek.dataset.peek)}"]`,
+        )
+      : null;
+    if (peek && peekTile) {
+      placeSlot(
+        peek,
+        peekAnchor({
+          tileTop: capsuleTop + peekTile.offsetTop,
+          tileHeight: peekTile.offsetHeight,
+        }),
+      );
+      if (peek.dataset.placed === undefined) {
+        void peek.offsetTop;
+        peek.dataset.placed = "";
+      }
+    }
     // The talk pill is centred on the microphone, as the mock's is.
     const mic = toolbar.querySelector<HTMLElement>("[data-edge-mic]");
     const tools = mic?.offsetParent;
@@ -217,6 +269,19 @@ function useEdgeLayout(
         MORE_PADDING;
       placeSlot(usage, openBottom - usage.offsetHeight);
     }
+    // Settings: the menu hangs below the "…" capsule, the flyout beside it
+    // and a little higher (the mock's placement).
+    const menu = slots.settingsMenu.current;
+    if (more && menu) {
+      placeSlot(
+        menu,
+        toolbarTop + more.offsetTop + SETTINGS_MENU_REACH - menu.offsetHeight,
+      );
+      const fly = slots.settingsFly.current;
+      if (fly) {
+        placeSlot(fly, Number.parseFloat(menu.style.top) - SETTINGS_FLY_RISE);
+      }
+    }
   }, [rootRef, toolbarRef, capsuleRef, slots]);
 
   // After every render, and whenever the capsule or a panel changes size
@@ -229,7 +294,10 @@ function useEdgeLayout(
       slots.card,
       slots.list,
       slots.preview,
+      slots.peek,
       slots.usage,
+      slots.settingsMenu,
+      slots.settingsFly,
       rootRef,
     ]) {
       if (ref.current) observer.observe(ref.current);
@@ -264,20 +332,36 @@ function useHitRegions(
   rootRef: RefObject<HTMLDivElement | null>,
   /** Stepped aside: nothing takes the pointer. */
   hidden: boolean,
+  side: EdgeSide,
+  /** Being dragged: the whole frame takes the pointer. */
+  dragging: boolean,
 ) {
   const last = useRef("");
   const hiddenRef = useRef(hidden);
   hiddenRef.current = hidden;
+  const sideRef = useRef(side);
+  sideRef.current = side;
+  const draggingRef = useRef(dragging);
+  draggingRef.current = dragging;
   const report = useCallback(() => {
     const root = rootRef.current;
     if (!root) return;
     const regions: EdgeHitRegion[] = [];
     const frameRight = root.clientWidth;
-    const nodes = hiddenRef.current
-      ? []
-      : root.querySelectorAll<HTMLElement>(
-          "[data-edge-hit], [data-edge-hover]",
-        );
+    if (draggingRef.current && !hiddenRef.current) {
+      regions.push({
+        x: 0,
+        y: 0,
+        width: frameRight,
+        height: root.clientHeight,
+      });
+    }
+    const nodes =
+      hiddenRef.current || draggingRef.current
+        ? []
+        : root.querySelectorAll<HTMLElement>(
+            "[data-edge-hit], [data-edge-hover]",
+          );
     for (const node of nodes) {
       const own = node.getBoundingClientRect();
       const surface =
@@ -291,12 +375,16 @@ function useHitRegions(
       if (!box || box.right - box.left <= 0 || box.bottom - box.top <= 0)
         continue;
       // `to-edge` surfaces own the strip out to the screen edge too.
-      const right = node.dataset.edgeHit === "to-edge" ? frameRight : box.right;
-      const left = Math.floor(box.left);
+      const { left, right } = hitSpan(
+        box,
+        frameRight,
+        node.dataset.edgeHit === "to-edge",
+        sideRef.current,
+      );
       regions.push({
         x: left,
         y: Math.floor(box.top),
-        width: Math.ceil(right - left),
+        width: right - left,
         height: Math.ceil(box.bottom - Math.floor(box.top)),
         ...(node.dataset.edgeHover ? { id: node.dataset.edgeHover } : {}),
       });
@@ -343,6 +431,91 @@ function useHitRegions(
   }, [rootRef, report]);
 }
 
+/**
+ * Dragging the toolbar (the mock's dragTo/dragEnd): it follows the pointer up
+ * and down the edge, and on release it settles on the nearer half of the
+ * screen (left or right). A press that moves less than 5 pt is a click.
+ * While dragging the whole frame takes the pointer, and the click that ends
+ * a drag is swallowed.
+ */
+function useToolbarDrag(
+  toolbarRef: RefObject<HTMLDivElement | null>,
+  rootRef: RefObject<HTMLDivElement | null>,
+) {
+  useEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+    let start: { x: number; y: number; edgeY: number; pointer: number } | null =
+      null;
+    let dragged = false;
+    const swallowClick = (event: MouseEvent) => {
+      event.stopPropagation();
+      event.preventDefault();
+    };
+    const move = (event: PointerEvent) => {
+      if (!start || event.pointerId !== start.pointer) return;
+      const dx = event.screenX - start.x;
+      const dy = event.screenY - start.y;
+      if (!dragged && Math.hypot(dx, dy) < 5) return;
+      if (!dragged) {
+        dragged = true;
+        toolbar.setPointerCapture(start.pointer);
+        useEdgeToolbarStore.getState().setDragging(true);
+      }
+      const root = rootRef.current;
+      if (!root) return;
+      useEdgePrefs
+        .getState()
+        .setPref(
+          "edgeY",
+          clampEdgeY(start.edgeY + dy, root.clientHeight, toolbar.offsetHeight),
+        );
+    };
+    const up = (event: PointerEvent) => {
+      if (!start || event.pointerId !== start.pointer) return;
+      start = null;
+      if (!dragged) return;
+      dragged = false;
+      useEdgeToolbarStore.getState().setDragging(false);
+      const screen = window.screen as Screen & { availLeft?: number };
+      useEdgePrefs
+        .getState()
+        .setPref(
+          "side",
+          sideForDrop(event.screenX, screen.availLeft ?? 0, screen.availWidth),
+        );
+      toolbar.addEventListener("click", swallowClick, {
+        capture: true,
+        once: true,
+      });
+      window.setTimeout(
+        () => toolbar.removeEventListener("click", swallowClick, true),
+        0,
+      );
+    };
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      start = {
+        x: event.screenX,
+        y: event.screenY,
+        edgeY: useEdgePrefs.getState().edgeY,
+        pointer: event.pointerId,
+      };
+      dragged = false;
+    };
+    toolbar.addEventListener("pointerdown", down);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      toolbar.removeEventListener("pointerdown", down);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, [toolbarRef, rootRef]);
+}
+
 const isOpenCard = (panel: EdgePanel): EdgePanel =>
   panel?.kind === "unread" || panel?.kind === "session" ? panel : null;
 
@@ -362,14 +535,19 @@ const isOpenCard = (panel: EdgePanel): EdgePanel =>
 export function EdgeToolbarApp() {
   useSessionReadSync();
   const { t } = useLanguage();
-  const { sessions, dots, allDots, tasksById, existing } = useEdgeSessions();
   const expanded = useEdgeToolbarStore((s) => s.expanded);
   const panel = useEdgeToolbarStore((s) => s.panel);
+  const pointerInside = useEdgeToolbarStore((s) => s.pointerInside);
+  // Nothing joins the capsule or takes a slot there under the user's hand.
+  const { sessions, tiles, allDots, tasksById, existing } = useEdgeSessions(
+    pointerInside || panel !== null,
+  );
   const preview = useEdgeToolbarStore((s) => s.preview);
   const hint = useEdgeToolbarStore((s) => s.hint);
   const collapse = useEdgeToolbarStore((s) => s.collapse);
   const summon = useEdgeToolbarStore((s) => s.summon);
   const openList = useEdgeToolbarStore((s) => s.openList);
+  const pickIcon = useEdgeToolbarStore((s) => s.pickIcon);
   const openUnread = useEdgeToolbarStore((s) => s.openUnread);
   const openSession = useEdgeToolbarStore((s) => s.openSession);
   const closePanel = useEdgeToolbarStore((s) => s.closePanel);
@@ -383,16 +561,28 @@ export function EdgeToolbarApp() {
   const cardRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const peekRef = useRef<HTMLDivElement | null>(null);
   const usageRef = useRef<HTMLDivElement | null>(null);
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null);
+  const settingsFlyRef = useRef<HTMLDivElement | null>(null);
   const slots = useMemo<Slots>(
     () => ({
       card: cardRef,
       list: listRef,
       preview: previewRef,
+      peek: peekRef,
       usage: usageRef,
+      settingsMenu: settingsMenuRef,
+      settingsFly: settingsFlyRef,
     }),
     [],
   );
+  const toggleSettings = useEdgeToolbarStore((s) => s.toggleSettings);
+  const settingsPage = useEdgeToolbarStore((s) => s.settingsPage);
+  const setSettingsPage = useEdgeToolbarStore((s) => s.setSettingsPage);
+  const dragging = useEdgeToolbarStore((s) => s.dragging);
+  const side = useEdgePrefs((s) => s.side);
+  const edgeY = useEdgePrefs((s) => s.edgeY);
   const moreOpen = useEdgeToolbarStore((s) => s.moreOpen);
   const setMoreOpen = useEdgeToolbarStore((s) => s.setMoreOpen);
   const toggleUsage = useEdgeToolbarStore((s) => s.toggleUsage);
@@ -406,11 +596,40 @@ export function EdgeToolbarApp() {
   const card = usePanelPresence(isOpenCard(panel), "standard", rootRef);
   const list = usePanelPresence(listPanel, "quick", rootRef);
   const previewed = usePanelPresence(previewPanel, "quick", rootRef);
+  // A tile's preview: one frame for every tile (moving between tiles keeps
+  // it open and swaps its content), the last session kept while it closes.
+  const peekPanel: EdgePanel = panel?.kind === "peek" ? panel : null;
+  const peeked = usePanelPresence(peekPanel, "quick", rootRef);
+  const lastPeek = useRef<string | null>(null);
+  if (panel?.kind === "peek") lastPeek.current = panel.taskId;
   const usagePanel: EdgePanel = panel?.kind === "usage" ? panel : null;
   const usage = usePanelPresence(usagePanel, "quick", rootRef);
+  const settingsPanel: EdgePanel = panel?.kind === "settings" ? panel : null;
+  const settingsMenu = usePanelPresence(settingsPanel, "quick", rootRef);
+  // The flyout shows the open sub-page (and keeps the last one while it
+  // plays its exit).
+  const flyPanel: EdgePanel =
+    settingsPanel && settingsPage ? settingsPanel : null;
+  const settingsFly = usePanelPresence(flyPanel, "quick", rootRef);
+  const lastSettingsPage = useRef<SettingsPage>("look");
+  if (settingsPage) lastSettingsPage.current = settingsPage;
   useEdgeLayout(rootRef, toolbarRef, capsuleRef, slots);
   const hidden = useEdgeToolbarStore((s) => s.hidden);
-  useHitRegions(rootRef, hidden);
+  useHitRegions(rootRef, hidden, side, dragging);
+
+  // The shell docks the window against the chosen edge; the frame shows
+  // once it has (so it never appears on the wrong side first).
+  const [sideReady, setSideReady] = useState<EdgeSide | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void setEdgeSide(side).then(() => {
+      if (alive) setSideReady(side);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [side]);
+  useToolbarDrag(toolbarRef, rootRef);
 
   const collapseTimer = useRef<number | null>(null);
   const cancelCollapse = useCallback(() => {
@@ -424,23 +643,55 @@ export function EdgeToolbarApp() {
     collapseTimer.current = window.setTimeout(collapse, COLLAPSE_DELAY_MS);
   }, [cancelCollapse, collapse]);
   useEffect(() => cancelCollapse, [cancelCollapse]);
+  const peekCloseTimer = useRef<number | null>(null);
+  const cancelPeekClose = useCallback(() => {
+    if (peekCloseTimer.current !== null) {
+      window.clearTimeout(peekCloseTimer.current);
+      peekCloseTimer.current = null;
+    }
+  }, []);
+  const schedulePeekClose = useCallback(() => {
+    if (peekCloseTimer.current !== null) return;
+    peekCloseTimer.current = window.setTimeout(() => {
+      peekCloseTimer.current = null;
+      useEdgeToolbarStore.getState().endPeek();
+      scheduleCollapse();
+    }, COLLAPSE_DELAY_MS);
+  }, [scheduleCollapse]);
+  useEffect(() => cancelPeekClose, [cancelPeekClose]);
 
   // The mock's pointer triggers: the tab shows its hint, the capsule opens
   // the session list (only when nothing else is open), a row is previewed.
   const onPointer = useCallback(
-    ({ id }: EdgePointer) => {
+    ({ inside, id }: EdgePointer) => {
       const store = useEdgeToolbarStore.getState();
+      store.setPointerInside(inside);
       store.setHint(id === "tab");
       // "…" opens while pointed at (the mock's hoverOpens) and folds when
       // left, unless its usage panel is open.
       store.setMoreOpen(id === "more");
-      if (id === "capsule" && !store.panel && store.expanded) {
+      // A settings row with a chevron opens its page on pointing.
+      if (id?.startsWith("settings:")) {
+        store.setSettingsPage(id.slice("settings:".length) as SettingsPage);
+      }
+      // A session's tile previews it beside the tile; the capsule between
+      // the tiles opens the session list (when nothing else is open).
+      if (id?.startsWith("tile:") && store.expanded) {
         cancelCollapse();
-        openList();
+        store.peekSession(id.slice("tile:".length));
+      } else if (id === "capsule" && !store.panel && store.expanded) {
+        cancelCollapse();
+        store.openList();
+      }
+      // The preview stays while the pointer is on a tile, the card or the
+      // bridge between them; it closes a moment after leaving them all.
+      if (useEdgeToolbarStore.getState().panel?.kind === "peek") {
+        if (keepsPeekOpen(id)) cancelPeekClose();
+        else schedulePeekClose();
       }
       if (id?.startsWith("row:")) store.previewSession(id.slice(4));
     },
-    [cancelCollapse, openList],
+    [cancelCollapse, cancelPeekClose, schedulePeekClose],
   );
   useEffect(() => onEdgePointer(onPointer), [onPointer]);
 
@@ -467,7 +718,31 @@ export function EdgeToolbarApp() {
   // opens Unread when something needs the user, else the session list, and
   // again closes it; held, it is press to talk; tapped while listening, send.
   const hasUnread = sessions.length > 0;
+  // Option twice with chro's own window in front: the session that needs the
+  // person after the one opened last time (Unread's order), in that window.
+  const lastOpenedInMain = useRef<string | null>(null);
+  const unreadIds = sessions.map((session) => session.task.id).join("\n");
+  const openNextNeedsYou = useCallback(() => {
+    const order = unreadIds ? unreadIds.split("\n") : [];
+    const next = nextNeedsYou(order, lastOpenedInMain.current);
+    const task = next ? tasksById.get(next) : undefined;
+    if (!next || !task) return;
+    lastOpenedInMain.current = next;
+    openSessionInApp({ projectId: task.project_id, taskId: next });
+  }, [unreadIds, tasksById]);
   const { beginTalking, finishTalking, cancelTalking } = voice;
+  // A session's own controls (row microphone, panel microphone and camera)
+  // talk to or capture for that session.
+  const { toggleMic, beginCapture } = voice;
+  const voiceActions = useMemo(
+    () => ({
+      talkTo: (taskId: string) =>
+        toggleMic({ kind: "session", taskId } as const),
+      captureFor: (taskId: string) =>
+        void beginCapture({ kind: "session", taskId } as const),
+    }),
+    [toggleMic, beginCapture],
+  );
 
   // chro's own window came to the front or left it: the toolbar steps
   // aside (closing what is open, stopping any talking without a send) and
@@ -488,6 +763,13 @@ export function EdgeToolbarApp() {
     () =>
       onOptionGesture((gesture) => {
         const store = useEdgeToolbarStore.getState();
+        // chro's own window is in front (the toolbar is stepped aside): the
+        // shell passes only Option twice, which opens the next session that
+        // needs the person in that window.
+        if (store.hidden) {
+          if (gesture === "summon") openNextNeedsYou();
+          return;
+        }
         const action = optionAction(gesture, store.talk);
         if (action === "startTalk") void beginTalking();
         if (action === "endTalk") finishTalking();
@@ -505,26 +787,50 @@ export function EdgeToolbarApp() {
           store.openList();
         }
       }),
-    [hasUnread, cancelCollapse, handleClosePanel, beginTalking, finishTalking],
+    [
+      hasUnread,
+      cancelCollapse,
+      handleClosePanel,
+      beginTalking,
+      finishTalking,
+      openNextNeedsYou,
+    ],
   );
 
   // "…" items: Settings and Feedback live in the main window; Usage is a
   // panel of its own beside the open capsule.
   const handleMoreItem = useCallback(
     (item: MoreItem) => {
-      if (item !== "usage") {
+      if (item === "feedback") {
         openAppView(item);
         return;
       }
-      if (useEdgeToolbarStore.getState().panel?.kind === "usage") {
+      // Settings and Usage open beside the "…" capsule (Settings is the
+      // edge's own; its last rows lead to chro's full Settings).
+      const open = useEdgeToolbarStore.getState().panel?.kind;
+      if (open === item) {
         handleClosePanel();
         return;
       }
       cancelCollapse();
-      toggleUsage();
+      if (open) closePanel();
+      if (item === "usage") toggleUsage();
+      else toggleSettings();
     },
-    [cancelCollapse, handleClosePanel, toggleUsage],
+    [cancelCollapse, closePanel, handleClosePanel, toggleUsage, toggleSettings],
   );
+  const handleOpenChroSettings = useCallback(() => {
+    openAppView("settings");
+    handleClosePanel();
+  }, [handleClosePanel]);
+  const handleTurnOff = useCallback(() => {
+    // The same switch as Settings > Beta features: the main window follows
+    // the shared storage and closes this window. A developer force (dev
+    // builds) would otherwise keep the toolbar on, so it goes too.
+    const flags = useFeatureFlagStore.getState();
+    flags.setDevOverride("edge_toolbar", null);
+    flags.setBetaEnabled("edge_toolbar", false);
+  }, []);
 
   const handleSummon = useCallback(() => {
     cancelCollapse();
@@ -582,7 +888,10 @@ export function EdgeToolbarApp() {
       }
       if (isEditable(event.target)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (open && open.kind !== "list" && event.key === "?") {
+      if (
+        (open?.kind === "unread" || open?.kind === "session") &&
+        event.key === "?"
+      ) {
         event.preventDefault();
         toggleHelp();
         return;
@@ -607,6 +916,18 @@ export function EdgeToolbarApp() {
     cardShown?.kind === "session"
       ? tasksById.get(cardShown.taskId) ?? null
       : null;
+  const peekTask = lastPeek.current
+    ? tasksById.get(lastPeek.current) ?? null
+    : null;
+  const peekDot = peekTask
+    ? allDots.find((dot) => dot.task.id === peekTask.id)
+    : undefined;
+  const pinPeek = () => {
+    if (!peekTask) return;
+    cancelPeekClose();
+    handleOpenSession(peekTask.id);
+  };
+
   const previewShown = previewed.shown;
   const previewTask =
     previewShown?.kind === "session"
@@ -617,108 +938,181 @@ export function EdgeToolbarApp() {
     : undefined;
 
   return (
-    <div
-      ref={rootRef}
-      data-edge-root
-      data-presence={hidden ? "hidden" : "shown"}
-      className="edge-root"
-    >
-      {cardShown ? (
-        <div
-          ref={cardRef}
-          className="edge-panel-slot"
-          data-slot="card"
-          data-edge-hit={card.on ? "" : undefined}
-        >
-          <PanelFrame on={card.on} timing="standard">
-            {cardShown.kind === "unread" ? (
-              <UnreadPager
-                sessions={sessions}
-                tasksById={tasksById}
-                existing={existing}
-                onClose={handleClosePanel}
+    <EdgeVoiceActionsContext.Provider value={voiceActions}>
+      <div
+        ref={rootRef}
+        data-edge-root
+        data-presence={hidden ? "hidden" : "shown"}
+        data-side={side}
+        data-side-ready={sideReady === side ? "" : undefined}
+        data-dragging={dragging ? "" : undefined}
+        style={{ "--edge-y": `${edgeY}px` } as CSSProperties}
+        className="edge-root"
+      >
+        {cardShown ? (
+          <div
+            ref={cardRef}
+            className="edge-panel-slot"
+            data-slot="card"
+            data-edge-hit={card.on ? "" : undefined}
+          >
+            <PanelFrame on={card.on} timing="standard">
+              {cardShown.kind === "unread" ? (
+                <UnreadPager
+                  sessions={sessions}
+                  tasksById={tasksById}
+                  existing={existing}
+                  onClose={handleClosePanel}
+                />
+              ) : cardTask ? (
+                <EdgeSessionPanel
+                  key={cardTask.id}
+                  task={cardTask}
+                  onClose={handleClosePanel}
+                />
+              ) : null}
+            </PanelFrame>
+          </div>
+        ) : null}
+        {list.shown ? (
+          <div
+            ref={listRef}
+            className="edge-panel-slot"
+            data-slot="list"
+            data-edge-hit={list.on ? "" : undefined}
+          >
+            <PanelFrame on={list.on} timing="quick">
+              <EdgeSessionList
+                dots={allDots}
+                previewId={preview}
+                onOpenSession={handleOpenSession}
+                onPickIcon={(taskId) => {
+                  cancelCollapse();
+                  pickIcon(taskId);
+                }}
               />
-            ) : cardTask ? (
-              <EdgeSessionPanel
-                key={cardTask.id}
-                task={cardTask}
-                onClose={handleClosePanel}
+            </PanelFrame>
+          </div>
+        ) : null}
+        {settingsMenu.shown ? (
+          <div
+            ref={settingsMenuRef}
+            className="edge-panel-slot"
+            data-slot="settings-menu"
+            data-edge-hit={settingsMenu.on ? "" : undefined}
+          >
+            <PanelFrame on={settingsMenu.on} timing="quick">
+              <EdgeSettingsMenu
+                page={settingsPage}
+                onPage={setSettingsPage}
+                onOpenChroSettings={handleOpenChroSettings}
+                onTurnOff={handleTurnOff}
               />
-            ) : null}
-          </PanelFrame>
-        </div>
-      ) : null}
-      {list.shown ? (
-        <div
-          ref={listRef}
-          className="edge-panel-slot"
-          data-slot="list"
-          data-edge-hit={list.on ? "" : undefined}
-        >
-          <PanelFrame on={list.on} timing="quick">
-            <EdgeSessionList
-              dots={allDots}
-              previewId={preview}
-              onOpenSession={handleOpenSession}
+            </PanelFrame>
+          </div>
+        ) : null}
+        {settingsFly.shown ? (
+          <div
+            ref={settingsFlyRef}
+            className="edge-panel-slot"
+            data-slot="settings-fly"
+            data-edge-hit={settingsFly.on ? "" : undefined}
+          >
+            <PanelFrame on={settingsFly.on} timing="quick">
+              <EdgeSettingsPage page={lastSettingsPage.current} />
+            </PanelFrame>
+          </div>
+        ) : null}
+        {usage.shown ? (
+          <div
+            ref={usageRef}
+            className="edge-panel-slot"
+            data-slot="usage"
+            data-edge-hit={usage.on ? "" : undefined}
+          >
+            <PanelFrame on={usage.on} timing="quick">
+              <EdgeUsagePanel />
+            </PanelFrame>
+          </div>
+        ) : null}
+        {previewTask && previewDot ? (
+          <div
+            ref={previewRef}
+            className="edge-panel-slot"
+            data-slot="preview"
+            data-edge-hit={previewed.on ? "" : undefined}
+          >
+            <PanelFrame on={previewed.on} timing="quick">
+              <EdgeSessionPreview
+                task={previewTask}
+                status={previewDot.status}
+              />
+            </PanelFrame>
+          </div>
+        ) : null}
+        {peeked.shown && peekTask && peekDot ? (
+          <div
+            ref={peekRef}
+            className="edge-panel-slot"
+            data-slot="peek"
+            data-peek={peekTask.id}
+            data-edge-hit={peeked.on ? "" : undefined}
+            data-edge-hover={peeked.on ? "peek" : undefined}
+            role="button"
+            tabIndex={-1}
+            aria-label={peekTask.title || t("sessionUnresolved")}
+            // A click pins it: the session's panel, as a click on the tile.
+            onClick={pinPeek}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") pinPeek();
+            }}
+          >
+            {/* The gap to the toolbar belongs to the card, so the pointer
+                crosses it without the card closing. */}
+            <span
+              aria-hidden="true"
+              data-edge-hit={peeked.on ? "" : undefined}
+              data-edge-hover={peeked.on ? "peek" : undefined}
+              className="edge-peek-bridge"
             />
-          </PanelFrame>
-        </div>
-      ) : null}
-      {usage.shown ? (
-        <div
-          ref={usageRef}
-          className="edge-panel-slot"
-          data-slot="usage"
-          data-edge-hit={usage.on ? "" : undefined}
-        >
-          <PanelFrame on={usage.on} timing="quick">
-            <EdgeUsagePanel />
-          </PanelFrame>
-        </div>
-      ) : null}
-      {previewTask && previewDot ? (
-        <div
-          ref={previewRef}
-          className="edge-panel-slot"
-          data-slot="preview"
-          data-edge-hit={previewed.on ? "" : undefined}
-        >
-          <PanelFrame on={previewed.on} timing="quick">
-            <EdgeSessionPreview task={previewTask} status={previewDot.status} />
-          </PanelFrame>
-        </div>
-      ) : null}
-      <EdgeToolbar
-        surface={surface}
-        dots={dots}
-        unread={sessions}
-        panel={panel}
-        pager={panel?.kind === "unread" ? unread : null}
-        hint={hint}
-        toolbarRef={toolbarRef}
-        capsuleRef={capsuleRef}
-        onSummon={handleSummon}
-        onToggleList={handleToggleList}
-        onOpenUnread={() =>
-          panel?.kind === "unread" ? handleClosePanel() : openUnread()
-        }
-        onOpenSession={(taskId) =>
-          panel?.kind === "session" && panel.taskId === taskId
-            ? handleClosePanel()
-            : handleOpenSession(taskId)
-        }
-        moreOpen={moreOpen}
-        onOpenMore={() => setMoreOpen(true)}
-        onMoreItem={handleMoreItem}
-        recording={isTalking(voice.talk)}
-        onMic={voice.toggleMic}
-        onCapture={() => void voice.beginCapture()}
-      />
-      <EdgeTalkPill
-        talk={voice.talk}
-        targetTitle={voice.targetTitle}
-        onOpenSettings={voice.openSettings}
-      />
-    </div>
+            <PanelFrame on={peeked.on} timing="quick">
+              <EdgeSessionPreview task={peekTask} status={peekDot.status} />
+            </PanelFrame>
+          </div>
+        ) : null}
+        <EdgeToolbar
+          surface={surface}
+          tiles={tiles}
+          unread={sessions}
+          panel={panel}
+          pager={panel?.kind === "unread" ? unread : null}
+          hint={hint}
+          focus={panel?.kind === "peek" ? panel.taskId : null}
+          toolbarRef={toolbarRef}
+          capsuleRef={capsuleRef}
+          onSummon={handleSummon}
+          onToggleList={handleToggleList}
+          onOpenUnread={() =>
+            panel?.kind === "unread" ? handleClosePanel() : openUnread()
+          }
+          onOpenSession={(taskId) =>
+            panel?.kind === "session" && panel.taskId === taskId
+              ? handleClosePanel()
+              : handleOpenSession(taskId)
+          }
+          moreOpen={moreOpen}
+          onOpenMore={() => setMoreOpen(true)}
+          onMoreItem={handleMoreItem}
+          recording={isTalking(voice.talk)}
+          onMic={() => voice.toggleMic()}
+          onCapture={() => void voice.beginCapture()}
+        />
+        <EdgeTalkPill
+          talk={voice.talk}
+          targetTitle={voice.targetTitle}
+          onOpenSettings={voice.openSettings}
+        />
+      </div>
+    </EdgeVoiceActionsContext.Provider>
   );
 }

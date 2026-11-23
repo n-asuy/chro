@@ -1,4 +1,5 @@
-import { desktopFetch } from "@/lib/backend-client";
+import { BackendError, desktopFetch } from "@/lib/backend-client";
+import type { StoredTask } from "@/session/types";
 
 /**
  * Task / project data layer shared by the session surface.
@@ -89,6 +90,17 @@ const toProjectResponse = (
   badgeColor: payload.badge_color ?? null,
 });
 
+/** What deleting a session removes beyond its conversation and logs
+ * (`GET /rpc/tasks/:id/delete-plan`). */
+export interface SessionDeletePlan {
+  /** Kept by the delete. */
+  branch: string | null;
+  /** Worktrees only this session uses; removed with it. */
+  worktrees: string[];
+  /** Uncommitted files in those worktrees; `null` when unreadable. */
+  uncommitted_files: number | null;
+}
+
 export const taskApi = {
   list: async (workspacePath: string): Promise<TaskRecord[]> => {
     const response = await desktopFetch<{ tasks: TaskRecord[] }>(
@@ -117,12 +129,31 @@ export const taskApi = {
   /**
    * Cancel a task's active run. Forces the run to a terminal status and clears
    * the task's `active_session_id`, so a session that is stuck "running" (e.g.
-   * an orphaned run whose process already exited) settles. A no-op (404) when
-   * there is no run to cancel.
+   * an orphaned run whose process already exited) settles. Resolves when
+   * there is no run to cancel (404); rejects when a stop failed.
    */
   cancel: async (taskId: string): Promise<void> => {
-    await desktopFetch(`/rpc/tasks/${encodeURIComponent(taskId)}/cancel`, {
-      method: "POST",
+    try {
+      await desktopFetch(`/rpc/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        method: "POST",
+      });
+    } catch (error) {
+      if (error instanceof BackendError && error.status === 404) return;
+      throw error;
+    }
+  },
+
+  /** What `remove` would delete, for its confirmation dialog. */
+  deletePlan: async (taskId: string): Promise<SessionDeletePlan> =>
+    desktopFetch<SessionDeletePlan>(
+      `/rpc/tasks/${encodeURIComponent(taskId)}/delete-plan`,
+    ),
+
+  /** Delete the session: conversation, logs and the worktrees only it uses.
+   * Its branch stays. */
+  remove: async (taskId: string): Promise<void> => {
+    await desktopFetch(`/rpc/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
     });
   },
 
@@ -235,6 +266,22 @@ export const taskApi = {
       },
     );
     return toProjectResponse(response.project, response.is_general);
+  },
+
+  /** Set (an icon name) or clear (null = the default) a session's icon. */
+  setTaskIcon: async (
+    taskId: string,
+    icon: string | null,
+  ): Promise<StoredTask> => {
+    const response = await desktopFetch<{ task: StoredTask }>(
+      `/rpc/tasks/${encodeURIComponent(taskId)}/icon`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ icon }),
+      },
+    );
+    return response.task;
   },
 
   /**

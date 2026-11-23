@@ -24,7 +24,7 @@ Generated at: 2026-08-03T11:57:33.056Z
 | `apps/desktop/src/session/components/conversation-fork-origin.tsx` | ConversationForkOrigin, useForkEdge | - |
 | `apps/desktop/src/session/components/conversation-message-nav.tsx` | ConversationMessageNav | - |
 | `apps/desktop/src/session/components/diff-viewer-panel.tsx` | DiffViewerPanel | - |
-| `apps/desktop/src/session/components/execution-options-controls.tsx` | BaseBranchDropdown, BaseBranchOption, NewSessionExecutionControls, WorktreeModeDropdown | - |
+| `apps/desktop/src/session/components/execution-options-controls.tsx` | BaseBranchDropdown, BaseBranchOption, NewSessionExecutionControls | - |
 | `apps/desktop/src/session/components/file-path-utils.ts` | looksLikeFilePath, stripLineColumnSuffix | - |
 | `apps/desktop/src/session/components/image-upload-preview-list.tsx` | ImageUploadPreviewList | - |
 | `apps/desktop/src/session/components/markdown.tsx` | Markdown | - |

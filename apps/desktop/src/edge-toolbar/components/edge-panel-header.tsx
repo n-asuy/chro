@@ -76,9 +76,12 @@ export function EdgePanelHeader({
   help,
   onToggleHelp,
   onClose,
+  leading,
   children,
 }: {
   title: string;
+  /** A control before the title (the session's icon). */
+  leading?: ReactNode;
   pager?: EdgePagerControls;
   help: boolean;
   onToggleHelp: () => void;
@@ -91,6 +94,7 @@ export function EdgePanelHeader({
   return (
     <header className="flex shrink-0 flex-col px-3.5 pt-2">
       <div className="flex h-6 items-center gap-1.5 text-custom-text-100">
+        {leading}
         <h2
           title={title}
           className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-[-0.2px]"

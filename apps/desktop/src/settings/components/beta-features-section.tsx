@@ -1,9 +1,10 @@
 import { type TranslationKey, useLanguage } from "@/i18n";
-import { desktopFetch } from "@/lib/backend-client";
-import { localizeCloudMessage } from "@/lib/cloud-messages";
+import { useCloudAccessStore } from "@/lib/cloud-access-store";
 import { useFeatureFlagStore, useFlag } from "@/lib/feature-flags-store";
 import type { FlagKey } from "@/lib/flags.generated";
+import { Button } from "@chro/ui/button";
 import { Switch } from "@chro/ui/switch";
+import { Loader2 } from "lucide-react";
 import { useState } from "react";
 import { SettingsRow } from "./settings-row";
 import { SettingsSection } from "./settings-section";
@@ -47,16 +48,14 @@ export function BetaFeaturesSection() {
   const { t } = useLanguage();
   const resolved = useFeatureFlagStore((store) => store.resolved);
 
-  const cloudEnabled = useFlag("cloud_sessions");
   const offered = BETA_FEATURES.filter((feature) => resolved[feature.key]);
-  if (offered.length === 0 && !cloudEnabled) return null;
 
   return (
     <SettingsSection
       heading={t("betaFeaturesTitle")}
       description={t("betaFeaturesDescription")}
     >
-      {cloudEnabled && <CloudSignInRow />}
+      <CloudSignInRow />
       {offered.map((feature) => (
         <BetaFeatureRow key={feature.key} feature={feature} />
       ))}
@@ -86,38 +85,118 @@ function BetaFeatureRow({ feature }: { feature: BetaFeature }) {
 
 function CloudSignInRow() {
   const { t } = useLanguage();
-  const [busy, setBusy] = useState(false);
-  const [signedIn, setSignedIn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    configured,
+    signedIn,
+    busy,
+    signingOut,
+    email,
+    signInUrl,
+    error,
+    signIn,
+    signOut,
+    cancel,
+  } = useCloudAccessStore();
+  const [copied, setCopied] = useState(false);
   return (
     <SettingsRow
       title={t("cloudSignInTitle")}
-      description={
-        error !== null
-          ? localizeCloudMessage(error, t, "cloudSignInFailed")
-          : t(signedIn ? "cloudSignedIn" : "cloudSignInDescription")
-      }
+      description={t(
+        configured === false
+          ? "cloudUnavailable"
+          : busy
+            ? "cloudContinueInBrowser"
+            : "cloudSignInDescription",
+      )}
       control={
-        <button
-          type="button"
-          disabled={busy}
-          className="rounded-md border px-3 py-1.5 text-sm disabled:opacity-50"
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await desktopFetch("/rpc/cloud/login", { method: "POST" });
-              setSignedIn(true);
-            } catch (error) {
-              setError(error instanceof Error ? error.message : "");
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {t(busy ? "cloudSigningIn" : "cloudSignIn")}
-        </button>
+        configured && (
+          <Switch
+            checked={signedIn}
+            disabled={busy || signingOut}
+            onCheckedChange={(checked) => {
+              if (checked) void signIn();
+              else void signOut();
+            }}
+            aria-label={t("cloudSignInTitle")}
+          />
+        )
       }
-    />
+    >
+      {configured !== false && error && (
+        <p role="alert" className="text-[12px] text-destructive">
+          {t(error)}
+        </p>
+      )}
+      {configured === null && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="self-start"
+          onClick={() => void useCloudAccessStore.getState().refresh()}
+        >
+          {t("cloudRetryConnection")}
+        </Button>
+      )}
+      {configured && (
+        <div className="flex items-center gap-3">
+          {busy ? (
+            <>
+              <Loader2
+                className="size-4 animate-spin text-muted-foreground"
+                aria-label={t("cloudSigningIn")}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!signInUrl}
+                onClick={() => {
+                  if (signInUrl)
+                    void navigator.clipboard
+                      .writeText(signInUrl)
+                      .then(() => setCopied(true))
+                      .catch(() => setCopied(false));
+                }}
+              >
+                {t(copied ? "cloudLinkCopied" : "cloudCopySignInLink")}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setCopied(false);
+                  void cancel();
+                }}
+              >
+                {t("cancelButtonLabel")}
+              </Button>
+            </>
+          ) : signedIn ? (
+            <>
+              <span className="text-[13px] text-foreground">
+                {email || t("cloudSignedIn")}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={signingOut}
+                onClick={() => void signOut()}
+              >
+                {t("cloudSignOut")}
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => {
+                setCopied(false);
+                void signIn();
+              }}
+            >
+              {t("cloudSignIn")}
+            </Button>
+          )}
+        </div>
+      )}
+    </SettingsRow>
   );
 }

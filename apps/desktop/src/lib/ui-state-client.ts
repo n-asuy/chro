@@ -2,9 +2,12 @@ import { desktopFetch, getBackendBaseUrl } from "./backend-client";
 
 type UiStateResponse = {
   ui_state: Record<string, unknown>;
+  /** Id of the server's database; absent from servers that predate it. */
+  database?: string;
 };
 
 let cache: Record<string, unknown> = {};
+let database: string | null = null;
 let initialized = false;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingWrites: Record<string, unknown> = {};
@@ -15,6 +18,7 @@ export async function loadUiState(): Promise<void> {
   try {
     const res = await desktopFetch<UiStateResponse>("/rpc/ui-state");
     cache = res.ui_state;
+    database = res.database ?? null;
   } catch {
     cache = {};
   }
@@ -59,6 +63,16 @@ export function removeUiValue(key: string): void {
   delete cache[key];
   pendingWrites[key] = null;
   scheduleSave();
+}
+
+/**
+ * The database behind the loaded UI state, for values that mean something
+ * only in one database (UI state is stored per config file, which several
+ * databases can share). Null until loaded, when the load failed, and on
+ * servers that do not name it.
+ */
+export function getUiDatabase(): string | null {
+  return database;
 }
 
 export function isUiStateReady(): boolean {

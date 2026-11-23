@@ -54,8 +54,26 @@ async function start(command: string, args?: object): Promise<InputStart> {
 }
 
 /** Start listening (asks for the microphone and speech recognition once). */
-export function startTalking(owner: TalkOwner): Promise<InputStart> {
-  return start("edge_talk_start", { owner });
+export function startTalking(
+  owner: TalkOwner,
+  /** A locale from the settings; `null` is automatic. */
+  language: string | null = null,
+): Promise<InputStart> {
+  return start("edge_talk_start", { owner, language });
+}
+
+/** The talk languages the device recognizes, and what automatic resolves to. */
+export interface TalkLanguages {
+  automatic: string | null;
+  locales: string[];
+}
+
+export async function fetchTalkLanguages(): Promise<TalkLanguages> {
+  if (!isTauri()) return { automatic: null, locales: [] };
+  return invoke<TalkLanguages>("edge_talk_languages").catch(() => ({
+    automatic: null,
+    locales: [],
+  }));
 }
 
 /**

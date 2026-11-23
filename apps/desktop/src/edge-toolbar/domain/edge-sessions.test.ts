@@ -10,7 +10,7 @@ import {
   panelSessionState,
   resolveCursor,
   stepCursor,
-  unreadBadge,
+  unreadRing,
 } from "./edge-sessions";
 
 function task(id: string, fields: Partial<StoredTask> = {}): StoredTask {
@@ -108,7 +108,7 @@ describe("edgeDotStatus", () => {
   });
 });
 
-describe("unreadBadge", () => {
+describe("unreadRing", () => {
   const sessions = [
     session(task("done")),
     session(running("r")),
@@ -116,37 +116,34 @@ describe("unreadBadge", () => {
     session(waiting("w")),
   ];
 
-  it("counts sessions waiting on the user and unseen results, not running ones", () => {
-    expect(unreadBadge(sessions, null)?.count).toBe(3);
+  it("is amber while anything in Unread needs the user (a question or a failure)", () => {
+    expect(unreadRing(sessions, null)).toEqual({ count: 3, ring: "waiting" });
+    expect(unreadRing(sessions.slice(0, 3), null)?.ring).toBe("waiting");
   });
 
-  it("is absent when nothing needs the user", () => {
-    expect(unreadBadge([session(running("r"))], null)).toBeNull();
+  it("is green when only finished results are left", () => {
+    expect(unreadRing(sessions.slice(0, 2), null)).toEqual({
+      count: 1,
+      ring: "done",
+    });
   });
 
-  it("is amber while something needs the user (a question or a failure), green when results only finished", () => {
-    expect(unreadBadge(sessions, null)?.status).toBe("waiting");
-    expect(unreadBadge(sessions.slice(0, 3), null)?.status).toBe("waiting");
-    expect(unreadBadge(sessions.slice(0, 1), null)?.status).toBe("done");
+  it("is absent when Unread is empty (running sessions do not count)", () => {
+    expect(unreadRing([session(running("r"))], null)).toBeNull();
+    expect(unreadRing([], null)).toBeNull();
   });
 
-  it("counts what the open pager lists, so the badge and the pager agree after an item is read", () => {
+  it("counts what the open pager lists, so the label and the pager agree after an item is read", () => {
     // "done" was shown, so it is read and no longer an edge session, yet the
     // pager keeps it in place until it closes.
     const afterRead = sessions.filter((s) => s.task.id !== "done");
     const pager = { order: ["w", "bad", "done"], cursorId: "done" };
-    expect(unreadBadge(afterRead, pager)?.count).toBe(3);
+    expect(unreadRing(afterRead, pager)).toEqual({ count: 3, ring: "waiting" });
   });
 
-  it("follows the item the pager shows while it is still unread", () => {
-    const pager = { order: ["w", "bad", "done"], cursorId: "done" };
-    expect(unreadBadge(sessions, pager)?.status).toBe("done");
-  });
-
-  it("falls back to the most urgent listed item once the shown one is read", () => {
-    const afterRead = sessions.filter((s) => s.task.id !== "done");
-    const pager = { order: ["bad", "done"], cursorId: "done" };
-    expect(unreadBadge(afterRead, pager)?.status).toBe("waiting");
+  it("turns green once only results are left in the open pager", () => {
+    const pager = { order: ["done"], cursorId: "done" };
+    expect(unreadRing(sessions, pager)).toEqual({ count: 1, ring: "done" });
   });
 });
 

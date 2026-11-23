@@ -2,13 +2,16 @@ import { AgentLogo, hasAgentLogo } from "@/components/agent-logo";
 import { type TranslationKey, useLanguage } from "@/i18n";
 import type { StoredTask } from "@/session/types";
 import { useAllProjects } from "@/workspace-layout/hooks/use-all-projects";
-import { Folder, GitBranch } from "lucide-react";
+import { Folder, GitBranch, Mic } from "lucide-react";
 import { useMemo } from "react";
 import type { CapsuleDot, CapsuleDotStatus } from "../domain/capsule-dots";
+import { taskIcon } from "../domain/task-icons";
 import { turnPreview } from "../domain/turn-preview";
+import { useEdgeVoiceActions } from "../hooks/edge-voice-actions";
 import { useEdgeConversation } from "../hooks/use-edge-conversation";
 import { EdgeDot } from "./edge-dot";
 import { usePanelReady } from "./edge-panel-ready";
+import { EdgeTaskIcon } from "./edge-task-icon";
 
 const AGENT_LABEL: Record<string, TranslationKey> = {
   CLAUDE_CODE: "mcpExecutorOptionClaude",
@@ -34,22 +37,27 @@ function groupByProject(dots: readonly CapsuleDot[]) {
 
 /**
  * The session list the capsule opens (the mock's agents panel): every session
- * that still exists, grouped by project, each row its dot, agent and title.
- * The row under the pointer is previewed beside the list (`data-edge-hover`
- * rows, so the shell reports them while the app is inactive); a click opens
- * the session's compact panel.
+ * that still exists, grouped by project, each row its dot, icon and title,
+ * and a microphone that talks to that session (shown on the highlighted
+ * row, as the mock's row actions). The row under the pointer is previewed
+ * beside the list (`data-edge-hover` rows, so the shell reports them while
+ * the app is inactive); a click opens the session's compact panel, the
+ * context menu opens it with its icon picker.
  */
 export function EdgeSessionList({
   dots,
   previewId,
   onOpenSession,
+  onPickIcon,
 }: {
   dots: readonly CapsuleDot[];
   previewId: string | null;
   onOpenSession: (taskId: string) => void;
+  onPickIcon: (taskId: string) => void;
 }) {
   const { t } = useLanguage();
   const projectName = useProjectNames();
+  const voice = useEdgeVoiceActions();
   const groups = useMemo(() => groupByProject(dots), [dots]);
   usePanelReady(true);
   let index = 0;
@@ -65,27 +73,43 @@ export function EdgeSessionList({
           {group.map((dot) => {
             const at = index++;
             return (
-              <button
+              <div
                 key={dot.task.id}
-                type="button"
                 data-edge-hover={`row:${dot.task.id}`}
+                data-edge-row={dot.task.id}
                 data-previewed={previewId === dot.task.id ? "" : undefined}
-                onClick={() => onOpenSession(dot.task.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  onPickIcon(dot.task.id);
+                }}
                 className="edge-arow"
               >
-                <EdgeDot status={dot.status} index={at} />
-                <span className="edge-agent-icon">
-                  {hasAgentLogo(dot.task.last_executor) ? (
-                    <AgentLogo
-                      agent={dot.task.last_executor}
-                      className="size-[14px]"
-                    />
-                  ) : null}
+                <button
+                  type="button"
+                  onClick={() => onOpenSession(dot.task.id)}
+                  className="edge-arow-open"
+                >
+                  <EdgeDot status={dot.status} index={at} />
+                  <span className="edge-row-icon">
+                    <EdgeTaskIcon name={taskIcon(dot.task.icon)} />
+                  </span>
+                  <span className="edge-aname">
+                    {dot.task.title || t("sessionUnresolved")}
+                  </span>
+                </button>
+                <span className="edge-arow-acts">
+                  <button
+                    type="button"
+                    title={t("edgeToolbarTalkToSession")}
+                    aria-label={t("edgeToolbarTalkToSession")}
+                    data-edge-talk-to={dot.task.id}
+                    onClick={() => voice.talkTo(dot.task.id)}
+                    className="edge-arow-act"
+                  >
+                    <Mic />
+                  </button>
                 </span>
-                <span className="edge-aname">
-                  {dot.task.title || t("sessionUnresolved")}
-                </span>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -114,7 +138,9 @@ function statusLabel(
 }
 
 /**
- * The compact preview beside the list (the mock's preview thread panel): the
+ * A session's compact preview (the mock's preview thread panel), shown beside
+ * the list for the row under the pointer and beside the capsule for the tile
+ * under it; it only reads, never marks the session read. The
  * session's title, agent, project and state; its last turn's request, tool
  * calls on one line and latest reply; a live status; its folder and branch.
  */

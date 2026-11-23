@@ -1,20 +1,22 @@
 import { useLanguage } from "@/i18n";
 import { type RefObject, useLayoutEffect, useRef } from "react";
-import type { CapsuleDot } from "../domain/capsule-dots";
+import type { CapsuleTiles } from "../domain/capsule-slots";
 import {
   type ToolbarSurface,
-  badgeShown,
   dotsToGrow,
   parseCssTime,
 } from "../domain/edge-motion";
 import {
   type EdgeSession,
   type UnreadPagerView,
-  unreadBadge,
+  unreadRing,
 } from "../domain/edge-sessions";
+import { taskIcon } from "../domain/task-icons";
 import type { EdgePanel } from "../state/edge-toolbar-store";
-import { EdgeDot } from "./edge-dot";
 import { EdgeMore, type MoreItem } from "./edge-more";
+import { EdgeRing } from "./edge-ring";
+import { EdgeTabRing } from "./edge-tab-ring";
+import { EdgeTaskIcon } from "./edge-task-icon";
 import { EdgeTools } from "./edge-tools";
 
 /** Used when the stylesheet's value cannot be read. */
@@ -46,18 +48,19 @@ function TrayGlyph() {
 }
 
 /**
- * Dots that join after the first render grow into the capsule (height and
- * opacity, as the mock does); dots present from the start just appear.
+ * Dots appended after the first render grow into the capsule (height and
+ * opacity, as the mock does); dots present from the start, and a dot taking
+ * another's slot, just appear.
  */
 function useDotGrowth(
   capsuleRef: RefObject<HTMLDivElement | null>,
   ids: readonly string[],
 ) {
-  const seen = useRef<Set<string> | null>(null);
+  const before = useRef<readonly string[] | null>(null);
   useLayoutEffect(() => {
     const capsule = capsuleRef.current;
-    const grow = dotsToGrow(seen.current, ids);
-    seen.current = new Set(ids);
+    const grow = dotsToGrow(before.current, ids);
+    before.current = ids;
     if (!capsule || grow.length === 0) return;
     const style = getComputedStyle(capsule);
     const duration = parseCssTime(
@@ -66,7 +69,9 @@ function useDotGrowth(
     );
     const easing =
       style.getPropertyValue("--edge-ease-out").trim() || "ease-out";
-    const pitch = style.getPropertyValue("--edge-dot-pitch").trim() || "15px";
+    // The slot's height on the capsule's current shape (a dot's on the tab,
+    // a tile's on the expanded capsule).
+    const pitch = style.getPropertyValue("--edge-slot-h").trim() || "15px";
     for (const id of grow) {
       const slot = capsule.querySelector<HTMLElement>(
         `[data-edge-dot="${CSS.escape(id)}"]`,
@@ -90,23 +95,25 @@ function useDotGrowth(
 }
 
 /**
- * The toolbar in both of its shapes, with the mock's triggers (Dots design).
- * Collapsed, only the capsule shows, narrowed into a tab fused to the screen
- * edge; pointing at it shows a hint, clicking it brings the toolbar out with
- * Unread. Expanded, the Unread button unfolds above the capsule; pointing at
- * the capsule opens the session list, clicking a dot opens that session.
- * The two shapes are one element, so the CSS transitions between them (see
- * `edge-toolbar.css`). Each dot is a session that still exists; the badge
- * pops in on the expanded toolbar when Unread holds something.
- * Labels are native tooltips: in-page ones would pass the window's edge.
+ * The toolbar in both of its shapes, with the mock's triggers. Collapsed,
+ * only the capsule shows, narrowed into a tab fused to the screen edge, one
+ * dot per session it shows; pointing at it shows a hint, clicking it brings
+ * the toolbar out with Unread. Expanded, the Unread button unfolds above the
+ * capsule and each session is a tile (its icon inside the ring of its
+ * state); pointing at a tile previews that session beside it, clicking it
+ * pins the session's panel, and pointing at or clicking the capsule between
+ * the tiles opens the session list. The two shapes are one element, so
+ * the CSS transitions between them (see `edge-toolbar.css`); the Unread
+ * button carries a thin ring while Unread holds something.
  */
 export function EdgeToolbar({
   surface,
-  dots,
+  tiles,
   unread,
   panel,
   pager,
   hint,
+  focus,
   toolbarRef,
   capsuleRef,
   onSummon,
@@ -121,20 +128,23 @@ export function EdgeToolbar({
   onCapture,
 }: {
   surface: ToolbarSurface;
-  /** The capsule's dots (see `capsuleDots`). */
-  dots: { shown: readonly CapsuleDot[]; hidden: number };
-  /** The sessions in Unread, for the badge. */
+  /** The sessions on the edge and what is off it (see `capsuleTiles`). */
+  tiles: CapsuleTiles;
+  /** The sessions in Unread, for the button's ring and label. */
   unread: readonly EdgeSession[];
   panel: EdgePanel;
-  /** The open Unread pager, so the badge counts what it lists. */
+  /** The open Unread pager, so the label counts what it lists. */
   pager: UnreadPagerView | null;
   /** The pointer is on the collapsed tab. */
   hint: boolean;
+  /** The session whose tile is previewed (its tile is lit). */
+  focus: string | null;
   toolbarRef: RefObject<HTMLDivElement | null>;
   capsuleRef: RefObject<HTMLDivElement | null>;
   onSummon: () => void;
   onToggleList: () => void;
   onOpenUnread: () => void;
+  /** A tile was clicked: that session's compact panel. */
   onOpenSession: (taskId: string) => void;
   /** The "…" capsule is open. */
   moreOpen: boolean;
@@ -147,12 +157,12 @@ export function EdgeToolbar({
 }) {
   const { t } = useLanguage();
   const collapsed = surface === "collapsed";
-  const badge = unreadBadge(unread, pager);
-  const ids = dots.shown.map((dot) => dot.task.id);
+  const unreadState = unreadRing(unread, pager);
+  const ids = tiles.shown.map((dot) => dot.task.id);
   useDotGrowth(capsuleRef, ids);
 
-  const unreadLabel = badge
-    ? t("edgeToolbarUnreadCount", { count: badge.count })
+  const unreadLabel = unreadState
+    ? t("edgeToolbarUnreadCount", { count: unreadState.count })
     : t("edgeToolbarUnread");
 
   return (
@@ -174,12 +184,18 @@ export function EdgeToolbar({
         className="edge-chrome edge-round edge-inbox"
       >
         <TrayGlyph />
-        <span
-          data-edge-badge
-          data-on={badgeShown(surface, badge !== null) ? "" : undefined}
-          data-status={badge?.status}
-          className="edge-badge"
-        />
+        {/* The capsule's quiet ring, inside the button: amber while
+            something needs the user, green for finished results only. */}
+        {unreadState ? (
+          <svg
+            viewBox="0 0 28 28"
+            aria-hidden="true"
+            data-edge-unread-ring={unreadState.ring}
+            className="edge-unread-ring"
+          >
+            <circle cx="14" cy="14" r="13.25" data-status={unreadState.ring} />
+          </svg>
+        ) : null}
       </button>
       {/* Collapsed, the whole capsule is the tab's one target. */}
       <div
@@ -210,37 +226,51 @@ export function EdgeToolbar({
       >
         <span className="edge-flare" data-side="top" />
         <span className="edge-flare" data-side="bottom" />
-        {dots.shown.map((dot, index) => {
-          const label = dot.task.title || t("sessionUnresolved");
+        {tiles.shown.map((dot) => {
+          const { task } = dot;
+          const label = task.title || t("sessionUnresolved");
+          const open = panel?.kind === "session" && panel.taskId === task.id;
           return (
             <button
-              key={dot.task.id}
+              key={task.id}
               type="button"
-              data-edge-dot={dot.task.id}
+              data-edge-dot={task.id}
+              data-edge-hover={collapsed ? undefined : `tile:${task.id}`}
+              data-focused={focus === task.id || open ? "" : undefined}
               title={collapsed ? undefined : label}
               aria-label={label}
               aria-hidden={collapsed || undefined}
               tabIndex={collapsed ? -1 : undefined}
-              aria-pressed={
-                panel?.kind === "session" && panel.taskId === dot.task.id
-              }
+              aria-pressed={open}
               // A click opens the session without leaving focus (and so no
-              // ring) on the dot.
+              // ring) on the slot.
               onMouseDown={(event) => event.preventDefault()}
-              onClick={collapsed ? undefined : () => onOpenSession(dot.task.id)}
+              onClick={collapsed ? undefined : () => onOpenSession(task.id)}
               className="edge-dot-slot"
             >
-              <EdgeDot status={dot.status} index={index} />
+              {/* The tab shows the session's small ring (faint grey once read);
+                  the expanded capsule its icon inside the ring of its state
+                  (none once read). */}
+              <EdgeTabRing status={dot.status} />
+              <span className="edge-tile" aria-hidden="true">
+                <EdgeTaskIcon name={taskIcon(task.icon)} />
+                <EdgeRing status={dot.status} />
+              </span>
             </button>
           );
         })}
-        {dots.hidden > 0 ? (
+        {tiles.hidden > 0 ? (
           <span
-            title={t("edgeToolbarMoreSessions", { count: dots.hidden })}
+            title={t("edgeToolbarMoreSessions", { count: tiles.hidden })}
             className="edge-overflow"
           >
-            +{dots.hidden}
+            +{tiles.hidden}
           </span>
+        ) : null}
+        {/* On the tab, sessions that need a look but did not fit: one tick,
+            never text (nothing may stick out of the tab). */}
+        {tiles.overflow ? (
+          <span aria-hidden="true" className="edge-tab-tick" />
         ) : null}
       </div>
       <EdgeTools

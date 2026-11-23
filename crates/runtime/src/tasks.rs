@@ -49,6 +49,38 @@ pub struct MergeOutcome {
     pub target_branch: String,
 }
 
+/// What deleting a session removes beyond its conversation and logs.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionDeletePlan {
+    /// The session's branch, which the delete keeps.
+    pub branch: Option<String>,
+    /// Worktrees only this session uses; they are removed with it.
+    pub worktrees: Vec<String>,
+    /// Uncommitted and untracked files across those worktrees, lost with
+    /// them. `None` when a worktree's status could not be read.
+    pub uncommitted_files: Option<usize>,
+}
+
+fn count_uncommitted_files(git: &git::GitService, worktrees: &[String]) -> Option<usize> {
+    let mut total = 0;
+    for worktree in worktrees {
+        let path = Path::new(worktree);
+        if !path.exists() {
+            continue;
+        }
+        let status = git.status(path).ok()?;
+        let files: HashSet<&str> = status
+            .staged
+            .iter()
+            .chain(&status.modified)
+            .map(|change| change.path.as_str())
+            .chain(status.untracked.iter().map(String::as_str))
+            .collect();
+        total += files.len();
+    }
+    Some(total)
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskRunBranchStatus {
     pub commits_ahead: Option<usize>,
@@ -1084,52 +1116,62 @@ impl<'a, R: Runtime> TaskService<'a, R> {
         Ok(())
     }
 
+    /// What deleting the session would remove, for the confirmation dialog.
+    /// `worktrees` comes from the same query `delete_task` acts on, so the
+    /// dialog never promises to keep or remove something the delete does not.
+    pub async fn delete_plan(&self, task_id: Uuid) -> Result<SessionDeletePlan, RuntimeError> {
+        let task = TaskRecord::get(self.pool(), task_id).await?;
+        let worktrees = TaskRecord::exclusive_worktree_paths(self.pool(), task_id).await?;
+        let git = self.runtime().git().clone();
+        let paths = worktrees.clone();
+        let uncommitted_files = tokio::task::spawn_blocking(move || {
+            count_uncommitted_files(&git, &paths)
+        })
+        .await
+        .map_err(|e| RuntimeError::Other(anyhow::anyhow!("git status task failed: {e}")))?;
+        Ok(SessionDeletePlan {
+            branch: task.branch,
+            worktrees,
+            uncommitted_files,
+        })
+    }
+
+    /// Delete the session: its conversation, run history and the worktrees
+    /// only it uses. Branches stay, and so do the run log files and any
+    /// worktree another session also works in.
+    ///
+    /// A run that cannot be stopped aborts the delete before anything is
+    /// removed, so an agent is never left writing into a worktree that is
+    /// being torn down. Once the rows are gone the cleanup cannot be undone,
+    /// so later failures are logged rather than returned.
     pub async fn delete_task(&self, task_id: Uuid) -> Result<(), RuntimeError> {
         let task = TaskRecord::get(self.pool(), task_id).await?;
         let project = ProjectRecord::get(self.pool(), task.project_id).await?;
         let runs = TaskRun::list_by_task_id(self.pool(), task.id).await?;
-        let mut worktree_paths = HashSet::new();
+        let worktree_paths = TaskRecord::exclusive_worktree_paths(self.pool(), task.id).await?;
 
         for run in &runs {
-            if let Some(workspace_path) = run.workspace_path.as_ref() {
-                worktree_paths.insert(PathBuf::from(workspace_path));
-            }
-
             if matches!(run.status, RunStatus::Running | RunStatus::Pending) {
-                if let Err(err) = self.runtime().cancel_execution(run.id).await {
-                    warn!(
-                        task_run_id = %run.id,
-                        task_id = %task.id,
-                        error = ?err,
-                        "failed to cancel running execution before delete",
-                    );
-                }
+                self.runtime().cancel_execution(run.id).await?;
             }
         }
 
         TaskRecord::delete(self.pool(), task.id).await?;
 
         for run in &runs {
-            if let Err(err) = self.runtime().cleanup_task_run_artifacts(run.id).await {
-                warn!(
-                    task_run_id = %run.id,
-                    task_id = %task.id,
-                    error = ?err,
-                    "failed to cleanup task run artifacts after delete",
-                );
-            }
+            self.runtime().release_task_run(run.id).await;
         }
 
         for worktree_path in worktree_paths {
             if let Err(err) = self
                 .runtime()
                 .worktree()
-                .cleanup_worktree(&worktree_path, Some(Path::new(&project.git_repo_path)))
+                .cleanup_worktree(Path::new(&worktree_path), Some(Path::new(&project.git_repo_path)))
                 .await
             {
                 warn!(
                     task_id = %task.id,
-                    path = %worktree_path.display(),
+                    path = %worktree_path,
                     error = ?err,
                     "failed to cleanup worktree after task delete",
                 );

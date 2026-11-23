@@ -1,6 +1,6 @@
 import { Input } from "@chro/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@chro/ui/popover";
-import { Archive, RotateCcw, Search } from "lucide-react";
+import { Archive, RotateCcw, Search, Trash2 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArchivedSession } from "../hooks/use-archived-sessions";
 
@@ -36,6 +36,9 @@ interface ArchivedSessionItemProps {
   index: number;
   isSelected: boolean;
   onRestore: (id: string) => void;
+  onDelete: (session: ArchivedSession) => void;
+  restoreLabel: string;
+  deleteLabel: string;
   setRef: (index: number, el: HTMLDivElement | null) => void;
 }
 
@@ -44,6 +47,9 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
   index,
   isSelected,
   onRestore,
+  onDelete,
+  restoreLabel,
+  deleteLabel,
   setRef,
 }: ArchivedSessionItemProps) {
   const shortId = shortIdFromUuid(session.id);
@@ -54,6 +60,14 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
       onRestore(session.id);
     },
     [onRestore, session.id],
+  );
+
+  const handleDelete = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onDelete(session);
+    },
+    [onDelete, session],
   );
 
   const handleRef = useCallback(
@@ -83,11 +97,22 @@ const ArchivedSessionItem = memo(function ArchivedSessionItem({
               )}
             </span>
             <button
+              type="button"
               onClick={handleRestore}
               className="flex-shrink-0 text-muted-foreground hover:text-foreground active:text-foreground transition-[color,transform] duration-150 ease-out active:scale-[0.97]"
-              aria-label="Restore session"
+              aria-label={restoreLabel}
+              title={restoreLabel}
             >
               <RotateCcw className="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              onClick={handleDelete}
+              className="flex-shrink-0 text-muted-foreground hover:text-foreground active:text-foreground transition-[color,transform] duration-150 ease-out active:scale-[0.97]"
+              aria-label={deleteLabel}
+              title={deleteLabel}
+            >
+              <Trash2 className="h-3 w-3" />
             </button>
           </div>
           <div className="flex items-center justify-between gap-2">
@@ -110,12 +135,18 @@ interface ArchivePopoverProps {
   trigger: React.ReactNode;
   archivedSessions: ArchivedSession[];
   onRestore: (sessionId: string) => void;
+  onDelete: (session: ArchivedSession) => void;
+  restoreLabel: string;
+  deleteLabel: string;
 }
 
 export const ArchivePopover = memo(function ArchivePopover({
   trigger,
   archivedSessions,
   onRestore,
+  onDelete,
+  restoreLabel,
+  deleteLabel,
 }: ArchivePopoverProps) {
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -212,6 +243,15 @@ export const ArchivePopover = memo(function ArchivePopover({
     [onRestore],
   );
 
+  // Close first: the delete confirmation is a modal of its own.
+  const handleDeleteSession = useCallback(
+    (session: ArchivedSession) => {
+      setOpen(false);
+      onDelete(session);
+    },
+    [onDelete],
+  );
+
   const handleSetRef = useCallback(
     (index: number, el: HTMLDivElement | null) => {
       itemRefs.current[index] = el;
@@ -269,6 +309,9 @@ export const ArchivePopover = memo(function ArchivePopover({
                 index={index}
                 isSelected={index === selectedIndex}
                 onRestore={handleRestoreSession}
+                onDelete={handleDeleteSession}
+                restoreLabel={restoreLabel}
+                deleteLabel={deleteLabel}
                 setRef={handleSetRef}
               />
             ))

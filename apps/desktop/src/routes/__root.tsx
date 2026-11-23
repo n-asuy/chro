@@ -87,10 +87,7 @@ function AppRootLayout() {
         </SettingsModalProvider>
         <OnboardingFlow />
       </LanguageProvider>
-      <Toaster
-        viewportClassName="bottom-4 right-4 top-auto left-auto w-auto items-end p-3"
-        toastClassName="mx-0 max-w-sm bg-black px-3 py-2 text-xs text-white border-black/80 shadow-md [&_[toast-close]]:text-white/60 [&_[toast-close]]:hover:text-white"
-      />
+      <Toaster viewportClassName="bottom-4 right-4 top-auto left-auto w-auto items-end p-3" />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import type { StoredTask } from "@/session/types";
 import { describe, expect, it } from "vitest";
-import { CAPSULE_DOT_CAP, capsuleDotStatus, capsuleDots } from "./capsule-dots";
+import { capsuleDotStatus, sessionDots } from "./capsule-dots";
 
 let clock = 0;
 /** A task created after every task made before it. */
@@ -65,65 +65,15 @@ describe("capsuleDotStatus", () => {
   });
 });
 
-describe("capsuleDots", () => {
-  it("shows every session that still exists, read or not, in creation order", () => {
+describe("sessionDots", () => {
+  it("lists every session that still exists, read or not, in creation order", () => {
     const a = task("a");
     const b = task("b", { status: "cancelled" });
     const c = task("c", { updated_at: later(0) });
-    const { shown, hidden } = capsuleDots(
-      [c, b, a],
-      { c: later(1) },
-      CAPSULE_DOT_CAP,
-    );
-    expect(shown.map((d) => [d.task.id, d.status])).toEqual([
+    const dots = sessionDots([c, b, a], { c: later(1) });
+    expect(dots.map((d) => [d.task.id, d.status])).toEqual([
       ["a", "done"],
       ["c", "idle"],
     ]);
-    expect(hidden).toBe(0);
-  });
-
-  it("keeps the most recently active sessions past the cap, shown in creation order", () => {
-    const tasks = Array.from({ length: 10 }, (_, i) =>
-      task(`t${i}`, { updated_at: later(10 - i) }),
-    );
-    // t0 is the most recently active, t9 the least.
-    const { shown, hidden } = capsuleDots(tasks, {}, 8);
-    expect(shown.map((d) => d.task.id)).toEqual([
-      "t0",
-      "t1",
-      "t2",
-      "t3",
-      "t4",
-      "t5",
-      "t6",
-      "t7",
-    ]);
-    expect(hidden).toBe(2);
-  });
-
-  it("always shows sessions that need the user, even when they are not recent", () => {
-    const tasks = [
-      task("old-failed", { status: "failed", updated_at: later(0) }),
-      ...Array.from({ length: 9 }, (_, i) =>
-        task(`t${i}`, { updated_at: later(10 + i) }),
-      ),
-    ];
-    const { shown, hidden } = capsuleDots(tasks, {}, 8);
-    expect(shown[0]?.task.id).toBe("old-failed");
-    expect(shown).toHaveLength(8);
-    expect(hidden).toBe(2);
-  });
-
-  it("keeps a dot in place when its session updates, and adds new sessions at the end", () => {
-    const a = task("a");
-    const b = task("b");
-    const before = capsuleDots([a, b], {}, 8).shown.map((d) => d.task.id);
-    const bUpdated = { ...b, updated_at: later(30), active_session_id: "s" };
-    const c = task("c");
-    const after = capsuleDots([c, bUpdated, a], {}, 8).shown.map(
-      (d) => d.task.id,
-    );
-    expect(before).toEqual(["a", "b"]);
-    expect(after).toEqual(["a", "b", "c"]);
   });
 });

@@ -34,10 +34,11 @@ import type {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentAskUserQuestionTool } from "./components/agent-ask-user-question-tool";
 import { BrailleSpinner } from "./components/braille-spinner";
+import { useCollapsibleOverflow } from "./components/collapsible-message";
 import {
-  USER_MESSAGE_TWO_LINES_HEIGHT,
-  useCollapsibleOverflow,
-} from "./components/collapsible-message";
+  type DensityStyle,
+  useDensityStyle,
+} from "./components/conversation-density";
 import { Markdown } from "./components/markdown";
 import { PageAnnotationsCard } from "./components/page-annotations-card";
 import RawLogText from "./components/raw-log-text";
@@ -73,11 +74,6 @@ import { SESSION_SELECT_TEXT_ATTR } from "./utils/session-select-all";
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-// Two lines of prompt text plus the bubble's top padding (py-1) and a sliver
-// of slack: the user message stays pinned while its response scrolls, so a
-// long prompt must not eat the reading space.
-const COLLAPSED_HEIGHT = USER_MESSAGE_TWO_LINES_HEIGHT + 6;
-
 interface ExpandableUserMessageProps {
   children: ReactNode;
   dataUserMessageId: string;
@@ -93,29 +89,37 @@ const ExpandableUserMessage = ({
   dataUserMessageId,
   footer,
 }: ExpandableUserMessageProps) => {
+  const density = useDensityStyle();
+  const collapsedHeight = density.requestCollapsedHeight;
   const { contentRef, expanded, setExpanded, needsExpansion } =
-    useCollapsibleOverflow(COLLAPSED_HEIGHT);
+    useCollapsibleOverflow(collapsedHeight);
 
   return (
-    <div
-      data-user-message-id={dataUserMessageId}
-      className="sticky -top-5 z-10 w-full bg-background pt-5"
-    >
-      <div className="group/message mx-auto w-full max-w-2xl">
+    <div data-user-message-id={dataUserMessageId} className={density.request}>
+      <div
+        className={cn(
+          "group/message mx-auto w-full max-w-2xl",
+          density.actionsAnchor,
+        )}
+      >
         <div
           ref={contentRef}
           className={cn(
             "relative transition-[max-height] duration-200 ease-out",
+            density.requestBox,
             !expanded && needsExpansion && "overflow-hidden",
           )}
           style={{
-            maxHeight: expanded || !needsExpansion ? "none" : COLLAPSED_HEIGHT,
+            maxHeight: expanded || !needsExpansion ? "none" : collapsedHeight,
           }}
         >
-          <div className="pb-2">{children}</div>
+          <div className={density.requestInner}>{children}</div>
           {!expanded && needsExpansion && (
             <div
-              className="absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-background to-transparent cursor-pointer flex items-end justify-center pb-1"
+              className={cn(
+                "absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t to-transparent cursor-pointer flex items-end justify-center pb-1",
+                density.requestFade,
+              )}
               onClick={() => setExpanded(true)}
               role="button"
               tabIndex={0}
@@ -140,6 +144,12 @@ const ExpandableUserMessage = ({
         )}
         {footer}
       </div>
+      {density.requestUnderlap ? (
+        <div
+          aria-hidden="true"
+          className={cn("pointer-events-none", density.requestUnderlap)}
+        />
+      ) : null}
     </div>
   );
 };
@@ -188,6 +198,7 @@ const MessageActions = ({
   onFork,
 }: MessageActionsProps) => {
   const { t } = useLanguage();
+  const density = useDensityStyle();
   const [copied, setCopied] = useState(false);
   const time = formatMessageTime(timestamp);
 
@@ -211,7 +222,8 @@ const MessageActions = ({
   return (
     <div
       className={cn(
-        "flex h-6 items-center gap-2 px-1 text-muted-foreground opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/message:opacity-100",
+        "flex items-center gap-2 text-muted-foreground opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/message:opacity-100",
+        density.actions,
         align === "end" ? "justify-end" : "justify-start",
       )}
     >
@@ -386,10 +398,10 @@ const MessageCard = ({
   expanded,
   onToggle,
 }: MessageCardProps) => {
+  const density = useDensityStyle();
   const systemTheme =
     "flex min-w-0 w-full items-center gap-1.5 text-muted-foreground";
-  const errorTheme =
-    "flex min-w-0 w-full items-start gap-1.5 text-sm leading-relaxed text-destructive";
+  const errorTheme = `flex min-w-0 w-full items-start gap-1.5 text-destructive ${density.text}`;
 
   return (
     <div
@@ -557,6 +569,7 @@ type AgentThinkingStepsProps = {
  */
 const AgentThinkingSteps = ({ segment }: AgentThinkingStepsProps) => {
   const { t } = useLanguage();
+  const density = useDensityStyle();
   const { entries, live, awaitingApproval } = segment;
   const [open, setOpen] = useState(awaitingApproval);
   const userToggledRef = useRef(false);
@@ -578,7 +591,7 @@ const AgentThinkingSteps = ({ segment }: AgentThinkingStepsProps) => {
       active={live}
       open={open}
       onOpenChange={handleOpenChange}
-      className="px-2"
+      className={density.steps}
     >
       {entries.map((displayEntry, index) => {
         const entry = displayEntry.content;
@@ -606,12 +619,22 @@ const AgentThinkingSteps = ({ segment }: AgentThinkingStepsProps) => {
                 // Braille spinner frames use only the upper 6 dots, leaving the
                 // glyph's bottom cell row empty, so the ink rides high in its
                 // line box. Nudge down 2px to optically center it on the text.
-                <BrailleSpinner className="translate-y-[2px] text-[13px] text-muted-foreground/90" />
+                <BrailleSpinner
+                  className={cn(
+                    "translate-y-[2px] text-muted-foreground/90",
+                    density.stepText,
+                  )}
+                />
               }
               animateIn={live}
               isLast={isLast}
             >
-              <TextShimmer className="text-[13px] font-medium text-muted-foreground/90">
+              <TextShimmer
+                className={cn(
+                  "font-medium text-muted-foreground/90",
+                  density.stepText,
+                )}
+              >
                 {entry.content || t("processingPlaceholder")}
               </TextShimmer>
             </ThinkingStep>
@@ -620,7 +643,7 @@ const AgentThinkingSteps = ({ segment }: AgentThinkingStepsProps) => {
 
         return (
           <ThinkingStep key={displayEntry.key} animateIn={live} isLast={isLast}>
-            <div className="text-[13px] text-muted-foreground">
+            <div className={cn("text-muted-foreground", density.stepText)}>
               <Markdown tone="muted">{entry.content}</Markdown>
             </div>
           </ThinkingStep>
@@ -841,23 +864,27 @@ const toolIcon = (entry: NormalizedEntry): ReactNode => {
   }
 };
 
-const getEntryWrapperClasses = (entry: NormalizedEntry) => {
-  const base = "flex min-w-0 max-w-full flex-col gap-3 px-4 py-1";
+const getEntryWrapperClasses = (
+  entry: NormalizedEntry,
+  density: DensityStyle,
+) => {
+  const column = "flex min-w-0 max-w-full flex-col";
+  const base = `${column} ${density.entry}`;
   switch (entry.entry_type.type) {
     case "user_message":
-      return `${base} rounded-md bg-custom-sidebar-background-80`;
+      return `${column} ${density.bubble} bg-custom-sidebar-background-80`;
     case "assistant_message":
       return `${base}`;
     case "system_message": {
       // Compact style for model info
       const isModelInfo = /^Run with .+/.test(entry.content);
       if (isModelInfo) {
-        return "px-4 py-1.5";
+        return density.modelInfo;
       }
-      return `${base} text-sm text-muted-foreground`;
+      return `${base} ${density.notice} text-muted-foreground`;
     }
     case "error_message":
-      return `${base} rounded border border-destructive/40 bg-destructive/10 text-destructive`;
+      return `${column} ${density.errorEntry} rounded border border-destructive/40 bg-destructive/10 text-destructive`;
     default:
       return `${base}`;
   }
@@ -1440,6 +1467,7 @@ const ResolvedSessionReferencePill = ({ task }: { task: StoredTask }) => {
 };
 
 export const UserMessageContent = ({ content }: { content: string }) => {
+  const density = useDensityStyle();
   const { contextEntries, skillEntries, imageEntries, text } =
     parseContextFromContent(content);
 
@@ -1510,7 +1538,10 @@ export const UserMessageContent = ({ content }: { content: string }) => {
       ))}
       {text && (
         <p
-          className="whitespace-pre-wrap break-words text-sm font-medium leading-relaxed text-foreground"
+          className={cn(
+            "whitespace-pre-wrap break-words font-medium text-foreground",
+            density.text,
+          )}
           {...{ [SESSION_SELECT_TEXT_ATTR]: "true" }}
         >
           {text}
@@ -1523,6 +1554,7 @@ export const UserMessageContent = ({ content }: { content: string }) => {
 const renderEntryBody = (
   entry: NormalizedEntry,
   t: TranslationFunction,
+  density: DensityStyle,
   onWikilinkClick?: (path: string, subpath?: string) => void,
 ) => {
   switch (entry.entry_type.type) {
@@ -1582,7 +1614,12 @@ const renderEntryBody = (
       );
     default:
       return (
-        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
+        <p
+          className={cn(
+            "whitespace-pre-wrap break-words text-foreground",
+            density.text,
+          )}
+        >
           {entry.content}
         </p>
       );
@@ -1965,6 +2002,7 @@ interface GroupProps {
 
 const Group = memo(
   ({ group, onWikilinkClick, onForkFromRun }: GroupProps) => {
+    const density = useDensityStyle();
     const userMessage =
       group.userEntry?.type === "NORMALIZED_ENTRY"
         ? group.userEntry.content
@@ -1996,7 +2034,14 @@ const Group = memo(
         ? () => onForkFromRun(anchorRunId)
         : undefined;
     return (
-      <div className="relative">
+      <div
+        className={cn(
+          density.turn,
+          group.userEntry
+            ? density.turnWithRequest
+            : density.turnWithoutRequest,
+        )}
+      >
         {group.userEntry && (
           <ExpandableUserMessage
             dataUserMessageId={group.key}
@@ -2018,7 +2063,7 @@ const Group = memo(
         )}
         {segments.map((segment) => (
           <div key={segment.key} className="mx-auto w-full max-w-2xl">
-            <div className="pb-2">
+            <div className={density.block}>
               {segment.type === "THINKING_STEPS" ? (
                 <AgentThinkingSteps segment={segment} />
               ) : (
@@ -2105,12 +2150,13 @@ const EntryRenderer = memo(
     onFork,
   }: EntryRendererProps) => {
     const { t } = useLanguage();
+    const density = useDensityStyle();
     if (displayEntry.type === "STDOUT") {
       return (
         <RawLogText
           content={displayEntry.content}
           channel="stdout"
-          className="text-sm px-4 py-1"
+          className={density.rawOutput}
         />
       );
     }
@@ -2119,7 +2165,7 @@ const EntryRenderer = memo(
         <RawLogText
           content={localizeCloudMessage(displayEntry.content, t)}
           channel="stderr"
-          className="text-sm px-4 py-1"
+          className={density.rawOutput}
         />
       );
     }
@@ -2138,13 +2184,13 @@ const EntryRenderer = memo(
     return (
       <div
         className={cn(
-          getEntryWrapperClasses(entry),
-          showAssistantActions && "group/message",
+          getEntryWrapperClasses(entry, density),
+          showAssistantActions && cn("group/message", density.actionsAnchor),
         )}
       >
         <div className="flex items-start gap-3">
-          <div className="flex-1 space-y-2">
-            {renderEntryBody(entry, t, onWikilinkClick)}
+          <div className={cn("flex-1", density.messageStack)}>
+            {renderEntryBody(entry, t, density, onWikilinkClick)}
             {showAssistantActions && (
               <MessageActions
                 copyText={entry.content}

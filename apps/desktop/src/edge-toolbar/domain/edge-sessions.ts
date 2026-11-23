@@ -86,13 +86,6 @@ export function edgeDotStatus(state: EdgeSessionState): EdgeDotStatus {
   return DOT_STATUS[state];
 }
 
-const URGENCY: Record<EdgeSessionState, number> = {
-  waiting: 0,
-  failed: 1,
-  completed: 2,
-  running: 3,
-};
-
 /** The Unread pager's list and position, while it is open. */
 export interface UnreadPagerView {
   order: readonly string[];
@@ -100,29 +93,27 @@ export interface UnreadPagerView {
 }
 
 /**
- * The Unread button's badge: how many items Unread holds and the colour of
- * the one that matters most. While the pager is open it holds exactly what
- * the pager lists, read items kept in place included, so the badge and the
- * pager never disagree. The colour follows the item on screen while it still
- * needs the user, otherwise the most urgent one.
+ * The ring around the Unread button (the capsule's quiet ring): amber while
+ * something in Unread needs the user (a question, an approval or a failed
+ * run), green when only finished results are left, none when Unread is
+ * empty. `count` is how many items Unread holds, for the button's label;
+ * while the pager is open it holds exactly what the pager lists, read items
+ * kept in place included, so the label and the pager never disagree.
  */
-export function unreadBadge(
+export function unreadRing(
   sessions: readonly EdgeSession[],
   pager: UnreadPagerView | null,
-): { count: number; status: EdgeDotStatus } | null {
+): { count: number; ring: "waiting" | "done" } | null {
   const pending = sessions.filter((s) => needsUser(s.state));
   const count = pager ? pager.order.length : pending.length;
   if (count === 0) return null;
-
   const listed = pager ? new Set(pager.order) : null;
-  const candidates = listed
-    ? pending.filter((s) => listed.has(s.task.id))
-    : pending;
-  const current = candidates.find((s) => s.task.id === pager?.cursorId);
-  const front =
-    current ??
-    [...candidates].sort((a, b) => URGENCY[a.state] - URGENCY[b.state])[0];
-  return { count, status: front ? edgeDotStatus(front.state) : "done" };
+  const needsAnswer = pending.some(
+    (s) =>
+      (!listed || listed.has(s.task.id)) &&
+      edgeDotStatus(s.state) === "waiting",
+  );
+  return { count, ring: needsAnswer ? "waiting" : "done" };
 }
 
 /**

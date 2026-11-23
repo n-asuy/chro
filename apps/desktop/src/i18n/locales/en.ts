@@ -1,17 +1,29 @@
 import type { TranslationDictionary } from "./ja";
 
 const en = {
+  cloudRetryConnection: "Retry connection",
+  cloudUnavailable: "Cloud sessions are not available in this build.",
+  cloudContinueInBrowser: "Continue signing in in your browser.",
+  cloudCopySignInLink: "Copy sign-in link",
+  cloudLinkCopied: "Link copied",
+  cloudSignOut: "Sign out",
+  cloudSignInCancelled: "Sign-in cancelled. Sign in again when you’re ready.",
+  cloudSignInTimeout:
+    "Sign-in timed out. Start again and finish signing in in your browser.",
+  cloudSignInUnreachable:
+    "Cannot reach the cloud service. Check your connection and try again.",
   cloudLocationComputer: "This computer",
   cloudLocationCloud: "Cloud",
   cloudDefaultEnvironment: "Default environment",
   cloudSigningIn: "Signing in…",
   cloudWorkIn: "Work in",
-  cloudSessionOptions: "Session options",
-  cloudSignInTitle: "Cloud sign-in",
+  cloudSignInTitle: "Cloud sessions",
   cloudSignInDescription:
-    "Sign in again when your cloud session token expires.",
+    "Run agents in the cloud and bring their work back to this computer.",
+  cloudAccountRefused:
+    "This account cannot use cloud sessions. Check Access permissions and try signing in again.",
   cloudSignedIn: "Signed in to Cloud.",
-  cloudSignIn: "Sign in",
+  cloudSignIn: "Sign in with browser",
   cloudSignInFailed: "Could not sign in to Cloud. Try signing in again.",
   cloudErrorExpired: "Cloud sign-in expired. Sign in again.",
   cloudErrorSignInFirst: "Sign in to Cloud first.",
@@ -112,10 +124,6 @@ const en = {
   hiddenFilesCardDescription:
     "Show dot-prefixed folders in the Files file tree.",
   hiddenFilesToggleLabel: "Show hidden folders",
-  analyticsCardTitle: "Usage Analytics",
-  analyticsCardDescription:
-    "Send anonymous usage data to help improve Chro. No personal content is collected.",
-  analyticsToggleLabel: "Enable usage analytics",
   mergeCommitTemplateTitle: "Merge commit message template",
   mergeCommitTemplateDescription:
     "Template for the commit message when merging task changes. Available tokens: {{title}}, {{task_short_id}}, {{task_id}}, {{description}}, {{description_block}}",
@@ -284,6 +292,9 @@ const en = {
   branchSelectorCurrent: "current",
   environmentWorktreeLabel: "Worktree",
   environmentLocalLabel: "Current checkout",
+  executionMoreOptions: "More options",
+  executionEnvironmentSearch: "Environment",
+  executionPickerEmpty: "No results found",
   environmentFromLabel: "From",
   runStatusNoBranch: "No branch",
   runStatusOpenSourceControl: "Open Source Control",
@@ -460,6 +471,24 @@ const en = {
   pinSession: "Pin",
   unpinSession: "Unpin",
   archive: "Archive",
+  sessionArchived: "Archived",
+  undo: "Undo",
+  restore: "Restore",
+  archiveFailed: "Could not archive",
+  archiveRunningTitle: "Archive a running session?",
+  archiveRunningDescription: "\u201c{title}\u201d will be stopped, then archived.",
+  stopAndArchive: "Stop and archive",
+  deleteSessionTitle: "Delete \u201c{title}\u201d?",
+  deleteSessionRemoves: "This deletes the conversation. ",
+  deleteSessionRemovesWorktree: "This deletes the conversation and worktree. ",
+  deleteSessionUncommitted: "Uncommitted changes ({count} files) are lost too. ",
+  deleteSessionUncommittedUnknown: "Could not check for uncommitted changes. ",
+  deleteSessionKeepsBranch: "The branch stays. ",
+  cannotBeUndone: "This cannot be undone.",
+  sessionDeleted: "Deleted \u201c{title}\u201d",
+  deleteSessionFailed: "Could not delete \u201c{title}\u201d",
+  cancel: "Cancel",
+  delete: "Delete",
   // Fork is the internal name; the UI says what it does, matching how both
   // reference desktop apps word it ("Continue in new task").
   continueInNewSession: "Continue in new session",
@@ -693,6 +722,32 @@ const en = {
   edgeCaptureHint: "⏎ send · ⇧⏎ new line · esc discard",
   edgeCaptureDictate: "Say it",
   edgeCaptureSend: "Send",
+  edgeSettingsLook: "Edge & sound",
+  edgeSettingsTalkLanguage: "Talk language",
+  edgeSettingsAutomatic: "Automatic",
+  edgeSettingsAutomaticWith: "Automatic · {language}",
+  edgeToolbarSessionIconDescription:
+    "Picked from what the session is about when it is named. Choose another here.",
+  edgeToolbarChangeIcon: "Change icon",
+  edgeToolbarTalkToSession: "Talk to this session",
+  edgeToolbarCaptureFor: "Point at the screen and ask this session",
+  edgeSettingsTalkLanguageDescription:
+    "Languages this Mac can recognize on the device. Automatic uses Japanese when Japanese is one of the system languages, otherwise the system language.",
+  edgeSettingsLeft: "Left",
+  edgeSettingsRight: "Right",
+  edgeSettingsSoundsOn: "Sounds on",
+  edgeSettingsSoundsOff: "Sounds off",
+  edgeSettingsEdge: "Edge",
+  edgeSettingsPosition: "Position",
+  edgeSettingsKeyboard: "Keyboard",
+  edgeSettingsShortcuts: "Shortcuts",
+  edgeSettingsHold: "hold",
+  edgeSettingsShortcutsDescription:
+    "Press Option (⌥) twice from any app to open the toolbar. Hold Option to talk and release to send; while talking, one more tap sends.",
+  edgeSettingsSounds: "Sounds",
+  edgeSettingsPlaySounds: "Play sounds",
+  edgeSettingsOpenChro: "Open chro Settings",
+  edgeSettingsTurnOff: "Turn off edge toolbar",
 } satisfies TranslationDictionary;
 
 export default en;

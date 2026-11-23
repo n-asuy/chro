@@ -20,6 +20,7 @@ use executors::{
     ExecutorProfileId, LaunchArgsError, LoadedMcpConfig, McpConfigPayload, McpStatusResult,
     PiCredentialInfo, PiModelOption, SavedMcpConfig,
 };
+use runtime::Runtime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -76,8 +77,6 @@ struct PreferencesEnvelope {
 struct PreferencesPayload {
     language: LanguagePreference,
     show_hidden_entries: bool,
-    analytics_enabled: bool,
-    telemetry_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,8 +84,6 @@ struct UpdatePreferencesRequest {
     language: LanguagePreference,
     #[serde(default)]
     show_hidden_entries: Option<bool>,
-    #[serde(default)]
-    analytics_enabled: Option<bool>,
 }
 
 async fn get_preferences(
@@ -97,8 +94,6 @@ async fn get_preferences(
         preferences: PreferencesPayload {
             language: config.language,
             show_hidden_entries: config.show_hidden_entries,
-            analytics_enabled: config.analytics_enabled,
-            telemetry_id: config.telemetry_id,
         },
     }))
 }
@@ -114,18 +109,12 @@ async fn update_preferences(
             if let Some(flag) = payload.show_hidden_entries {
                 config.show_hidden_entries = flag;
             }
-            if let Some(flag) = payload.analytics_enabled {
-                config.analytics_enabled = flag;
-                analytics::set_enabled(flag);
-            }
         })
         .await?;
     Ok(Json(PreferencesEnvelope {
         preferences: PreferencesPayload {
             language: updated.language,
             show_hidden_entries: updated.show_hidden_entries,
-            analytics_enabled: updated.analytics_enabled,
-            telemetry_id: updated.telemetry_id,
         },
     }))
 }
@@ -749,12 +738,16 @@ async fn get_install_status_handler() -> Json<ExecutorInstallStatusResult> {
 #[derive(Debug, Serialize)]
 struct UiStateEnvelope {
     ui_state: serde_json::Map<String, Value>,
+    /// The config file holding UI state can serve several databases; this
+    /// names the one this server uses.
+    database: String,
 }
 
 async fn get_ui_state(State(state): State<AppState>) -> Result<Json<UiStateEnvelope>, ApiError> {
     let config = state.runtime().current_config().await;
     Ok(Json(UiStateEnvelope {
         ui_state: config.ui_state,
+        database: state.runtime().db().database_id().await?,
     }))
 }
 
@@ -776,6 +769,7 @@ async fn update_ui_state(
         .await?;
     Ok(Json(UiStateEnvelope {
         ui_state: updated.ui_state,
+        database: state.runtime().db().database_id().await?,
     }))
 }
 
@@ -925,6 +919,27 @@ mod launch_settings_tests {
         assert_eq!(body["error"]["code"], "question_tool_flag");
     }
 }
+#[cfg(test)]
+mod ui_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn names_the_database_the_same_on_every_read_and_write() {
+        let app = crate::test_support::app().await;
+        let Json(read) = get_ui_state(State(app.state.clone())).await.unwrap();
+        let payload = [("chro.check".to_string(), json!(1))].into_iter().collect();
+        let Json(written) = update_ui_state(State(app.state.clone()), Json(payload))
+            .await
+            .unwrap();
+        assert!(!read.database.is_empty());
+        assert_eq!(written.database, read.database);
+        assert_eq!(
+            read.database,
+            app.state.runtime().db().database_id().await.unwrap()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_accent_hex;

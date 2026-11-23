@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.63
+
+- Removed usage telemetry: chro no longer sends usage data anywhere, and the Usage Analytics switch is gone from Settings on the desktop and on the phone
+- Changed cloud sessions, still a beta, to sign in from Settings › Beta features: turning the switch on starts the browser sign-in, which you can finish from a copied link or cancel, and turning it off signs out. Your account email shows while signed in, and connection problems, cancelled or timed-out sign-ins, and accounts without access each show their own message. A build that carries no cloud service address says that cloud sessions are not available and offers no sign-in
+- Restyled the pickers above a new session's prompt: the base branch, worktree or current checkout, and location menus now share one look, with a search field at the top, an icon on each row and the same size and motion as the composer's "+" menu, and the worktree chip shows an icon for the mode in use
+- Reworked archiving and deleting sessions in the left panel. Archiving an idle session happens at once and offers Undo; archiving a running one asks first, because it stops the run. Deleting says what goes with it, including the number of uncommitted files, then removes the conversation and the worktrees only that session uses, and keeps the branch. The session leaves the list right away while the deletion finishes, and comes back with a message if it failed
+- Reworked the edge toolbar, still a beta: sessions show as icons picked from what each is about, which you can change, and keep their place after you read them. The panel shows a compact conversation, and you can talk to a session or point at the screen and ask it. The toolbar has its own settings for the edge, position, sounds and talk language, and can be turned off from there
+- Restyled notices such as "Archived" as one small dark bar
+- Fixed Return submitting an answer while an IME conversion was still being confirmed in an agent's multiple-choice question
+
 ## 0.1.62
 
 - Fixed the command-line tool and server of 0.1.61, which failed to build for every platform because the Linux build could not link the system keychain library. Sign-in for cloud sessions now keeps its token in the kernel keyring on Linux, which needs no system library, and the macOS Keychain and Windows Credential Manager as before

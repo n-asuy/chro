@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   type PanelPresence,
-  badgeShown,
   cardEnters,
   closedPresence,
   dotsToGrow,
+  hitSpan,
+  keepsPeekOpen,
   keyboardSummon,
+  nextNeedsYou,
   nextPresence,
   panelOnScreen,
   panelTop,
   parseCssTime,
+  peekAnchor,
   toolbarSurface,
 } from "./edge-motion";
 
@@ -62,18 +65,14 @@ describe("cardEnters", () => {
 });
 
 describe("dotsToGrow", () => {
-  it("grows only dots that join after the first render", () => {
+  it("grows only dots appended after the first render", () => {
     expect(dotsToGrow(null, ["a", "b"])).toEqual([]);
-    expect(dotsToGrow(new Set(["a", "b"]), ["c", "a", "b"])).toEqual(["c"]);
-    expect(dotsToGrow(new Set(["a", "b"]), ["a"])).toEqual([]);
+    expect(dotsToGrow(["a", "b"], ["a", "b", "c"])).toEqual(["c"]);
+    expect(dotsToGrow(["a", "b"], ["a"])).toEqual([]);
   });
-});
 
-describe("badgeShown", () => {
-  it("pops in only on the expanded toolbar, and only when something needs the user", () => {
-    expect(badgeShown("expanded", true)).toBe(true);
-    expect(badgeShown("collapsed", true)).toBe(false);
-    expect(badgeShown("expanded", false)).toBe(false);
+  it("does not grow a dot that took another's slot, so nothing moves", () => {
+    expect(dotsToGrow(["a", "b", "c"], ["a", "new", "c"])).toEqual([]);
   });
 });
 
@@ -168,5 +167,78 @@ describe("keyboardSummon", () => {
     );
     expect(keyboardSummon({ kind: "list" }, true)).toBe("unread");
     expect(keyboardSummon({ kind: "usage" }, false)).toBe("list");
+  });
+});
+
+describe("nextNeedsYou", () => {
+  it("opens the first session that needs the person", () => {
+    expect(nextNeedsYou(["a", "b", "c"], null)).toBe("a");
+  });
+
+  it("moves to the next one on each press, around to the first", () => {
+    expect(nextNeedsYou(["a", "b", "c"], "a")).toBe("b");
+    expect(nextNeedsYou(["a", "b", "c"], "c")).toBe("a");
+  });
+
+  it("starts over when the last opened one no longer needs the person", () => {
+    // Opening it marked it read, so it left the list.
+    expect(nextNeedsYou(["b", "c"], "a")).toBe("b");
+  });
+
+  it("does nothing when nothing needs the person", () => {
+    expect(nextNeedsYou([], null)).toBeNull();
+    expect(nextNeedsYou([], "a")).toBeNull();
+  });
+});
+
+describe("hitSpan", () => {
+  const box = { left: 718.4, right: 752.6 };
+
+  it("is the surface's own box when it does not reach the edge", () => {
+    expect(hitSpan(box, 760, false, "right")).toEqual({
+      left: 718,
+      right: 753,
+    });
+    expect(hitSpan(box, 760, false, "left")).toEqual({ left: 718, right: 753 });
+  });
+
+  it("reaches the right screen edge when docked right", () => {
+    expect(hitSpan(box, 760, true, "right")).toEqual({ left: 718, right: 760 });
+  });
+
+  it("reaches the left screen edge when docked left (the mirror)", () => {
+    const mirrored = { left: 7.4, right: 41.6 };
+    expect(hitSpan(mirrored, 760, true, "left")).toEqual({
+      left: 0,
+      right: 42,
+    });
+  });
+});
+
+describe("keepsPeekOpen", () => {
+  it("keeps a tile's preview open over a tile, the card and its bridge, and the capsule between tiles", () => {
+    for (const id of ["tile:t1", "tile:t2", "peek", "capsule"]) {
+      expect(keepsPeekOpen(id)).toBe(true);
+    }
+  });
+
+  it("lets it close anywhere else", () => {
+    for (const id of [null, "tab", "more", "mic", "row:t1", "settings:look"]) {
+      expect(keepsPeekOpen(id)).toBe(false);
+    }
+  });
+});
+
+describe("peekAnchor", () => {
+  it("puts the preview's header level with the tile", () => {
+    // A 32 pt tile at 300: its centre (316) meets the header's centre.
+    expect(peekAnchor({ tileTop: 300, tileHeight: 32 })).toBe(316 - 22);
+  });
+
+  it("is kept inside the frame by the panel clamp", () => {
+    const anchor = peekAnchor({ tileTop: 2, tileHeight: 32 });
+    expect(panelTop({ anchor, height: 300, frameHeight: 900 })).toBe(8);
+    const low = peekAnchor({ tileTop: 880, tileHeight: 32 });
+    expect(panelTop({ anchor: low, height: 300, frameHeight: 900 })).toBe(592);
   });
 });

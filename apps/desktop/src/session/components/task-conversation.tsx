@@ -1,4 +1,5 @@
 import { useLanguage } from "@/i18n";
+import { cn } from "@/lib/cn";
 import { Loader2 } from "lucide-react";
 import {
   type MutableRefObject,
@@ -25,6 +26,11 @@ import {
   shouldSelectSessionMessages,
   shouldUseNativeSelectAll,
 } from "../utils/session-select-all";
+import {
+  type ConversationDensity,
+  ConversationDensityProvider,
+  densityStyle,
+} from "./conversation-density";
 
 const SCROLL_BOTTOM_THRESHOLD = 50;
 
@@ -67,6 +73,8 @@ interface TaskConversationProps {
   onForkFromRun?: (runId: string) => void;
   /** Fork-origin block rendered above all entries (inherited history + boundary). */
   forkOrigin?: ReactNode;
+  /** How closely the conversation is set; a narrow panel uses `compact`. */
+  density?: ConversationDensity;
 }
 
 export const TaskConversation = memo(function TaskConversation({
@@ -86,6 +94,7 @@ export const TaskConversation = memo(function TaskConversation({
   onLoadMoreHistory,
   onForkFromRun,
   forkOrigin,
+  density = "regular",
 }: TaskConversationProps) {
   const { t } = useLanguage();
   const internalScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -383,17 +392,19 @@ export const TaskConversation = memo(function TaskConversation({
     );
 
   return (
-    <div
-      ref={scrollContainerRef}
-      {...{ [SESSION_SELECT_SCOPE_ATTR]: "true" }}
-      className="show-scrollbar flex-1 overflow-y-auto px-6 py-5"
-      style={{ contain: "strict" }}
-      onFocusCapture={activateSelectScope}
-      onPointerDownCapture={activateSelectScope}
-    >
-      <div ref={contentWrapperRef} className="min-h-full">
-        {conversationContent}
+    <ConversationDensityProvider value={density}>
+      <div
+        ref={scrollContainerRef}
+        {...{ [SESSION_SELECT_SCOPE_ATTR]: "true" }}
+        className={cn("show-scrollbar flex-1", densityStyle(density).viewport)}
+        style={{ contain: "strict" }}
+        onFocusCapture={activateSelectScope}
+        onPointerDownCapture={activateSelectScope}
+      >
+        <div ref={contentWrapperRef} className="min-h-full">
+          {conversationContent}
+        </div>
       </div>
-    </div>
+    </ConversationDensityProvider>
   );
 });

@@ -93,9 +93,11 @@ pub fn run() {
             tray::tray_update,
             windows::edge::edge_toolbar_set_enabled,
             windows::edge::edge_toolbar_set_hit_regions,
+            windows::edge::edge_toolbar_set_side,
             windows::edge_presence::edge_presence,
             windows::edge_talk::edge_talk_start,
             windows::edge_talk::edge_talk_stop,
+            windows::edge_talk::edge_talk_languages,
             windows::edge_talk::edge_log,
             windows::edge_capture::edge_capture_start,
             windows::edge_capture::edge_capture_region,
@@ -137,6 +139,9 @@ pub fn run() {
                     on_window_focused(&app, &label).await;
                 });
             }
+            WindowEvent::CloseRequested { api, .. } => {
+                windows::main_window::on_close_requested(window, api);
+            }
             WindowEvent::Destroyed => {
                 let label = window.label().to_string();
                 let app = window.app_handle().clone();
@@ -165,7 +170,16 @@ pub fn run() {
         .expect("error while running tauri application");
 
     let registry_for_exit = app.handle().clone();
-    app.run(move |_app, event| match event {
+    app.run(move |app, event| match event {
+        // The Dock icon, with the edge toolbar beta on: bring the main window
+        // back (it may be hidden behind the edge). With the beta off the
+        // system's own reopen handling stays as it was.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            if app.get_webview_window(windows::EDGE_WINDOW_LABEL).is_some() {
+                windows::main_window::reopen(app);
+            }
+        }
         RunEvent::ExitRequested { .. } => {
             tracing::info!("[lifecycle] exit requested");
             let handle = registry_for_exit.clone();

@@ -151,11 +151,6 @@ private struct WorkspacePane: View {
                     Task { await model.setNestDelegations(on) }
                 }
             }
-            SettingsRow(title: "Usage Analytics", description: "Send anonymous usage data to help improve Chro. No personal content is collected.") {
-                SettingsSwitch(title: "Usage Analytics", isOn: preferences?.analyticsEnabled ?? true, isEnabled: preferences != nil) { on in
-                    Task { await model.setAnalyticsEnabled(on) }
-                }
-            }
         }
         SettingsSection(heading: "Merge commit message template") {
             SettingsRow(title: "Merge commit message template",

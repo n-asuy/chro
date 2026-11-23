@@ -43,7 +43,7 @@ last_summary: string | null,
 /**
  * True once a person chose the title (rename). An unpinned title is the
  * first line of the prompt and is replaced by a title generated from the
- * opening request when the first run starts; see `adopt_session_title`.
+ * opening request when the first run starts; see `adopt_session_name`.
  */
 title_pinned: boolean, 
 /**
@@ -79,4 +79,10 @@ home_dir: string | null,
  * Short status line the session's agent or a person set ("fix
  * implemented; running tests"). `None` until someone sets it.
  */
-note: string | null, };
+note: string | null, 
+/**
+ * Name of the session's icon (one of the desktop's line icons), picked
+ * by the call that titles the session or chosen by a person. `None`
+ * until either happens; the desktop then draws a neutral default.
+ */
+icon: string | null, };

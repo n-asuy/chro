@@ -18,6 +18,7 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { type DensityStyle, useDensityStyle } from "./conversation-density";
 import { normalizeFilePathHref } from "./file-path-utils";
 import {
   absoluteImageTarget,
@@ -626,6 +627,7 @@ const LocalPathAnchor = ({
 };
 
 const createComponents = (
+  density: DensityStyle,
   onWikilinkClick?: (path: string, subpath?: string) => void,
   tone: MarkdownProps["tone"] = "default",
   localImages?: LocalImageMetadata[],
@@ -636,7 +638,7 @@ const createComponents = (
   const subtleTextClass =
     tone === "muted" ? "text-muted-foreground/80" : "text-foreground/80";
   const flatHeading = ({ children }: { children?: ReactNode }) => (
-    <p className={`mt-3 text-sm font-semibold leading-relaxed ${textClass}`}>
+    <p className={`mt-3 font-semibold ${density.text} ${textClass}`}>
       {children}
     </p>
   );
@@ -662,7 +664,7 @@ const createComponents = (
     // source would look identical to a single newline.
     p: ({ children }) => (
       <p
-        className={`mt-3 break-words [overflow-wrap:anywhere] text-sm leading-relaxed first:mt-0 ${textClass}`}
+        className={`mt-3 break-words [overflow-wrap:anywhere] first:mt-0 ${density.text} ${textClass}`}
       >
         {children}
       </p>
@@ -682,7 +684,7 @@ const createComponents = (
       // padding so they are never clipped by the renderer's overflow box.
       return (
         <ul
-          className={`space-y-1 text-sm leading-relaxed ${isTaskList ? "list-none ps-1" : "list-disc list-outside ps-6"}`}
+          className={`space-y-1 ${density.text} ${isTaskList ? "list-none ps-1" : `list-disc list-outside ${density.list}`}`}
         >
           {children}
         </ul>
@@ -692,7 +694,9 @@ const createComponents = (
     // needs enough `padding-inline-start` (ps-6) to keep multi-digit numbers
     // (e.g. "10.") fully visible instead of being clipped by the overflow box.
     ol: ({ children }) => (
-      <ol className="list-decimal list-outside space-y-1 ps-6 text-sm leading-relaxed">
+      <ol
+        className={`list-decimal list-outside space-y-1 ${density.list} ${density.text}`}
+      >
         {children}
       </ol>
     ),
@@ -726,7 +730,7 @@ const createComponents = (
     },
     blockquote: ({ children }) => (
       <blockquote
-        className={`border-l-2 border-muted-foreground/40 pl-3 text-sm italic ${subtleTextClass}`}
+        className={`border-l-2 border-muted-foreground/40 pl-3 italic ${density.quote} ${subtleTextClass}`}
       >
         {children}
       </blockquote>
@@ -763,43 +767,45 @@ const createComponents = (
       );
     },
     h1: ({ children }) => (
-      <h1 className={`mt-6 text-xl font-semibold ${textClass}`}>{children}</h1>
+      <h1 className={`${density.h1} font-semibold ${textClass}`}>{children}</h1>
     ),
     h2: ({ children }) => (
-      <h2 className={`mt-5 text-lg font-semibold ${textClass}`}>{children}</h2>
+      <h2 className={`${density.h2} font-semibold ${textClass}`}>{children}</h2>
     ),
     h3: ({ children }) => (
-      <h3 className={`mt-4 text-base font-semibold ${textClass}`}>
-        {children}
-      </h3>
+      <h3 className={`${density.h3} font-semibold ${textClass}`}>{children}</h3>
     ),
     h4: ({ children }) => (
-      <h4 className={`mt-4 text-base font-semibold ${subtleTextClass}`}>
+      <h4 className={`${density.h3} font-semibold ${subtleTextClass}`}>
         {children}
       </h4>
     ),
     h5: ({ children }) => (
-      <h5 className={`mt-3 text-sm font-semibold ${subtleTextClass}`}>
+      <h5 className={`${density.h5} font-semibold ${subtleTextClass}`}>
         {children}
       </h5>
     ),
     h6: ({ children }) => (
       <h6
-        className={`mt-3 text-sm font-semibold ${subtleTextClass} uppercase tracking-wide`}
+        className={`${density.h5} font-semibold ${subtleTextClass} uppercase tracking-wide`}
       >
         {children}
       </h6>
     ),
     code: CodeRenderer,
     pre: preRenderer,
-    hr: () => <hr className="my-6 border-muted" />,
+    hr: () => <hr className={`border-muted ${density.rule}`} />,
     table: ({ children }) => (
       // `contain: inline-size` stops the table's intrinsic width from
       // propagating up through the flex ancestors (whose `min-width: auto`
       // would otherwise grow to the table width and scroll the whole message
       // instead of just the table). Mirrors the CodeMirror table handling.
-      <div className="my-4 max-w-full overflow-x-auto rounded-lg border border-border [contain:inline-size]">
-        <table className="min-w-full divide-y divide-border text-sm">
+      <div
+        className={`max-w-full overflow-x-auto rounded-lg border border-border [contain:inline-size] ${density.table}`}
+      >
+        <table
+          className={`min-w-full divide-y divide-border ${density.tableText}`}
+        >
           {children}
         </table>
       </div>
@@ -811,7 +817,7 @@ const createComponents = (
     tr: ({ children }) => <tr className="hover:bg-muted/50">{children}</tr>,
     th: ({ children, style }) => (
       <th
-        className="min-w-[10rem] break-words px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        className={`break-words text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground ${density.tableCell}`}
         style={style}
       >
         {children}
@@ -819,7 +825,7 @@ const createComponents = (
     ),
     td: ({ children, style }) => (
       <td
-        className="min-w-[10rem] break-words px-4 py-2.5 text-foreground"
+        className={`break-words text-foreground ${density.tableCell}`}
         style={style}
       >
         {children}
@@ -889,20 +895,22 @@ export const Markdown = memo(
     headings = "document",
     localImages,
   }: MarkdownProps) => {
+    const density = useDensityStyle();
     const formatted = useMemo(
       () => toChapterHeading(children ?? ""),
       [children],
     );
     const components = useMemo(
-      () => createComponents(onWikilinkClick, tone, localImages, headings),
-      [onWikilinkClick, tone, localImages, headings],
+      () =>
+        createComponents(density, onWikilinkClick, tone, localImages, headings),
+      [density, onWikilinkClick, tone, localImages, headings],
     );
     const toneClass =
       tone === "muted" ? "text-muted-foreground" : "text-foreground";
 
     return (
       <div
-        className={`min-w-0 max-w-full overflow-hidden space-y-3 break-words [overflow-wrap:anywhere] text-sm leading-relaxed ${toneClass}`}
+        className={`min-w-0 max-w-full overflow-hidden space-y-3 break-words [overflow-wrap:anywhere] ${density.text} ${toneClass}`}
       >
         <ReactMarkdown
           // remarkBreaks runs last so wikilink parsing still sees whole text

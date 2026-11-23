@@ -140,7 +140,6 @@ export function SettingsPanel({
   const {
     language,
     showHiddenEntries,
-    analyticsEnabled,
     preferencesLoading,
     preferencesError,
     preferencesParseWarning,
@@ -148,7 +147,6 @@ export function SettingsPanel({
     preferencesSaveError,
     handleLanguageSelect,
     handleHiddenToggle,
-    handleAnalyticsToggle,
   } = usePreferencesSettings({
     activeLanguage,
     setAppLanguage,
@@ -549,19 +547,6 @@ export function SettingsPanel({
               checked={nestDelegations}
               onCheckedChange={setNestDelegations}
               aria-label={t("nestDelegationsCardTitle")}
-            />
-          }
-        />
-        <SettingsRow
-          title={t("analyticsCardTitle")}
-          description={t("analyticsCardDescription")}
-          disabled={preferencesLoading || preferencesSaveState === "saving"}
-          control={
-            <Switch
-              checked={analyticsEnabled}
-              onCheckedChange={handleAnalyticsToggle}
-              disabled={preferencesLoading || preferencesSaveState === "saving"}
-              aria-label={t("analyticsToggleLabel")}
             />
           }
         />

@@ -38,7 +38,9 @@ pub trait ContainerService: Send + Sync {
 
     async fn cancel_execution(&self, task_run_id: Uuid) -> Result<(), ContainerError>;
 
-    async fn cleanup_task_run_artifacts(&self, task_run_id: Uuid) -> Result<(), ContainerError>;
+    /// Drop the in-memory state of a run whose session was deleted. The run's
+    /// log file stays on disk.
+    async fn release_task_run(&self, task_run_id: Uuid);
 
     async fn execution_event_stream(
         &self,

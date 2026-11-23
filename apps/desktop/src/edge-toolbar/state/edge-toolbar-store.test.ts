@@ -1,5 +1,7 @@
+import { useSessionReadStore } from "@/session/state/session-read-store";
 import type { StoredTask } from "@/session/types";
 import { beforeEach, describe, expect, it } from "vitest";
+import { closedPresence, nextPresence } from "../domain/edge-motion";
 import {
   type EdgeSession,
   deriveEdgeSessionState,
@@ -292,5 +294,182 @@ describe("stepping aside for chro's own window", () => {
     expect(state.hidden).toBe(false);
     expect(state.expanded).toBe(false);
     expect(state.panel).toBeNull();
+  });
+});
+
+describe("the edge settings flyout", () => {
+  beforeEach(() => {
+    useEdgeToolbarStore.setState(useEdgeToolbarStore.getInitialState(), true);
+  });
+
+  it('opens beside the open "…" and keeps it open', () => {
+    const store = useEdgeToolbarStore.getState();
+    store.toggleSettings();
+    expect(useEdgeToolbarStore.getState()).toMatchObject({
+      expanded: true,
+      panel: { kind: "settings" },
+      moreOpen: true,
+      settingsPage: null,
+    });
+    store.setMoreOpen(false);
+    expect(useEdgeToolbarStore.getState().moreOpen).toBe(true);
+  });
+
+  it("shows a sub-page only while the settings are open", () => {
+    const store = useEdgeToolbarStore.getState();
+    store.setSettingsPage("look");
+    expect(useEdgeToolbarStore.getState().settingsPage).toBeNull();
+    store.toggleSettings();
+    store.setSettingsPage("language");
+    expect(useEdgeToolbarStore.getState().settingsPage).toBe("language");
+  });
+
+  it("closes with its sub-page", () => {
+    const store = useEdgeToolbarStore.getState();
+    store.toggleSettings();
+    store.setSettingsPage("look");
+    store.toggleSettings();
+    expect(useEdgeToolbarStore.getState()).toMatchObject({
+      panel: null,
+      settingsPage: null,
+    });
+    store.toggleSettings();
+    store.setSettingsPage("look");
+    store.closePanel();
+    expect(useEdgeToolbarStore.getState().settingsPage).toBeNull();
+  });
+});
+
+describe("a capsule tile under the pointer", () => {
+  beforeEach(() => {
+    useEdgeToolbarStore.setState(useEdgeToolbarStore.getInitialState(), true);
+    useSessionReadStore.setState({ viewedAt: {} });
+  });
+  const store = () => useEdgeToolbarStore.getState();
+
+  it("previews that session beside the tile, on the expanded toolbar only", () => {
+    store().peekSession("t1");
+    expect(store().panel).toBeNull();
+    store().expand();
+    store().peekSession("t1");
+    expect(store().panel).toEqual({ kind: "peek", taskId: "t1" });
+  });
+
+  it("swaps the previewed session in place from tile to tile (the frame does not re-open)", () => {
+    store().expand();
+    store().peekSession("t1");
+    const shown = nextPresence(closedPresence, store().panel);
+    store().peekSession("t2");
+    expect(store().panel).toEqual({ kind: "peek", taskId: "t2" });
+    // Same kind of panel: the presence is kept as is (no exit, no new open).
+    expect(nextPresence(shown, store().panel)).toBe(shown);
+  });
+
+  it("replaces the session list, which the capsule's background opens", () => {
+    store().expand();
+    store().openList();
+    store().peekSession("t1");
+    expect(store().panel).toEqual({ kind: "peek", taskId: "t1" });
+  });
+
+  it("leaves a pinned panel alone", () => {
+    store().expand();
+    for (const pin of [
+      () => store().openSession("t9"),
+      () => store().openUnread(),
+      () => store().toggleSettings(),
+    ]) {
+      store().closePanel();
+      pin();
+      const pinned = store().panel;
+      store().peekSession("t1");
+      expect(store().panel).toBe(pinned);
+    }
+  });
+
+  it("pins the previewed session on a click (the session panel)", () => {
+    store().expand();
+    store().peekSession("t1");
+    store().openSession("t1");
+    expect(store().panel).toEqual({ kind: "session", taskId: "t1" });
+    // Pinned: pointing at another tile no longer replaces it.
+    store().peekSession("t2");
+    expect(store().panel).toEqual({ kind: "session", taskId: "t1" });
+  });
+
+  it("closes when the pointer has left the tile and the card, and only the preview", () => {
+    store().expand();
+    store().peekSession("t1");
+    store().endPeek();
+    expect(store().panel).toBeNull();
+    store().openSession("t2");
+    store().endPeek();
+    expect(store().panel).toEqual({ kind: "session", taskId: "t2" });
+  });
+
+  it("never marks the previewed session read", () => {
+    store().expand();
+    store().peekSession("t1");
+    store().peekSession("t2");
+    store().endPeek();
+    expect(useSessionReadStore.getState().viewedAt).toEqual({});
+  });
+
+  it("does not open while the toolbar steps aside, and closes when it does", () => {
+    store().expand();
+    store().setHidden(true);
+    store().peekSession("t1");
+    expect(store().panel).toBeNull();
+    store().setHidden(false);
+    store().expand();
+    store().peekSession("t1");
+    store().setHidden(true);
+    expect(store().panel).toBeNull();
+  });
+});
+
+describe("the session icon picker", () => {
+  beforeEach(() => {
+    useEdgeToolbarStore.setState(useEdgeToolbarStore.getInitialState(), true);
+  });
+  const store = () => useEdgeToolbarStore.getState();
+
+  it("toggles inside the open compact panel of that session only", () => {
+    store().toggleIconPicker("t1");
+    expect(store().iconPicker).toBeNull();
+    store().openSession("t1");
+    store().toggleIconPicker("t2");
+    expect(store().iconPicker).toBeNull();
+    store().toggleIconPicker("t1");
+    expect(store().iconPicker).toBe("t1");
+    store().toggleIconPicker("t1");
+    expect(store().iconPicker).toBeNull();
+  });
+
+  it("toggles in Unread's card for the session it shows", () => {
+    useEdgeToolbarStore.setState({
+      panel: { kind: "unread" },
+      unread: {
+        order: ["t1", "t2"],
+        cursorId: "t1",
+        cursorIndex: 0,
+        shown: ["t1"],
+      },
+    });
+    store().toggleIconPicker("t2");
+    expect(store().iconPicker).toBeNull();
+    store().toggleIconPicker("t1");
+    expect(store().iconPicker).toBe("t1");
+  });
+
+  it("opens from a row's context with the picker shown, and closes with the panel", () => {
+    store().pickIcon("t4");
+    expect(store().panel).toEqual({ kind: "session", taskId: "t4" });
+    expect(store().iconPicker).toBe("t4");
+    store().openSession("t5");
+    expect(store().iconPicker).toBeNull();
+    store().pickIcon("t5");
+    store().closePanel();
+    expect(store().iconPicker).toBeNull();
   });
 });

@@ -14,6 +14,8 @@ interface PromptEditorProps {
   placeholder?: string;
   /** Shown instead of `placeholder` while files are dragged over the composer. */
   dropPlaceholder?: string;
+  /** Extra classes for the placeholder (e.g. one line with an ellipsis). */
+  placeholderClassName?: string;
   /** Whether files are currently being dragged over the composer. */
   dropActive?: boolean;
   onSubmit: () => void;
@@ -26,6 +28,7 @@ export function PromptEditor({
   handle,
   disabled = false,
   placeholder = "Input task",
+  placeholderClassName,
   dropPlaceholder,
   dropActive = false,
   onSubmit,
@@ -110,6 +113,7 @@ export function PromptEditor({
             dropActive && dropPlaceholder
               ? "text-primary"
               : "text-muted-foreground",
+            placeholderClassName,
           )}
         >
           {activePlaceholder}

@@ -20,6 +20,7 @@ import {
   useMergeSplitBlocks,
 } from "../hooks/use-merge-split";
 import { useProximityHover } from "../hooks/use-proximity-hover";
+import { isImeKeystroke } from "../lib/prompt-submit-policy";
 
 /**
  * Stepped question flow for agent-initiated user intake, adapted from a
@@ -479,7 +480,7 @@ export const AskUserQuestions = forwardRef<
   // mirroring the Continue button. Handled at the root so it works wherever
   // focus sits inside the card.
   const handleRootKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Enter") return;
+    if (e.key !== "Enter" || isImeKeystroke(e.nativeEvent)) return;
     const mod = isMac ? e.metaKey : e.ctrlKey;
     if (!mod || !isMulti) return;
     e.preventDefault(); // keep a focused button/row from also activating
@@ -889,8 +890,10 @@ export const AskUserQuestions = forwardRef<
                         // Standard chat pattern: plain Enter submits,
                         // Shift+Enter inserts a newline. In multi-select,
                         // plain Enter stays a newline and the root handler
-                        // catches ⌘/⌃+Enter for Continue.
-                        if (e.key !== "Enter") return;
+                        // catches ⌘/⌃+Enter for Continue. The Return that
+                        // confirms an IME conversion is the IME's, not ours.
+                        if (e.key !== "Enter" || isImeKeystroke(e.nativeEvent))
+                          return;
                         if (e.shiftKey) return; // Shift+Enter = newline
                         if (!isMulti) {
                           e.preventDefault();

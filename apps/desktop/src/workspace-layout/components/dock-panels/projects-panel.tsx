@@ -4,6 +4,11 @@ import { type ForkWorkspace, forkTaskLatest } from "@/lib/fork-client";
 import { revealInFinder } from "@/lib/project-client";
 import { getUiValue, isUiStateReady, setUiValue } from "@/lib/ui-state-client";
 import { ArchivePopover } from "@/session/components/archive-popover";
+import {
+  type RemovableSession,
+  SessionRemovalProvider,
+  useSessionRemoval,
+} from "@/session/components/session-removal";
 import { SessionActivityIndicator } from "@/session/components/session-activity-indicator";
 import { SessionLeadingMarker } from "@/session/components/session-leading-marker";
 import { projectBadgeColor } from "@/session/domain/project-color";
@@ -122,6 +127,7 @@ const ICON_BUTTON_CLASS =
 
 interface ArchivedSessionSummary {
   id: string;
+  slug: string | null;
   title: string;
   archivedAt: string;
 }
@@ -300,6 +306,14 @@ function sortTasks(tasks: StoredTask[], mode: SortMode): StoredTask[] {
  * active-session reveal effects, so nothing re-expands behind the user's back.
  */
 export function ProjectsDockPanel() {
+  return (
+    <SessionRemovalProvider>
+      <ProjectsDockPanelContent />
+    </SessionRemovalProvider>
+  );
+}
+
+function ProjectsDockPanelContent() {
   const { t } = useLanguage();
   const handleNewChat = useNewChat();
 
@@ -353,7 +367,8 @@ export function ProjectsDockPanel() {
   const pendingGroups = useAllPendingSessionSubmissions();
   const projectsById = useAllProjects(true);
   const setProjectBadgeColor = useSetProjectBadgeColor();
-  const { isArchived, archiveSession } = useArchivedSessions();
+  const { isArchived } = useArchivedSessions();
+  const removal = useSessionRemoval();
   const { pins, isPinned, togglePin } = usePinnedSessions();
   const openSession = useOpenSession();
   const activeTaskKey = useFocusedSessionTaskKey();
@@ -427,9 +442,15 @@ export function ProjectsDockPanel() {
   // One source of truth: the cross-project stream with optimistic rows overlaid.
   // Archived sessions are split off (hidden from the list but still restorable
   // from their project's archive popover).
+  // A session whose delete is confirmed leaves the list before the server
+  // finishes removing it.
+  const { isDeleting } = removal;
   const merged = useMemo(
-    () => applyPendingSubmissionGroupsToTasks(streamTasks, pendingGroups),
-    [streamTasks, pendingGroups],
+    () =>
+      applyPendingSubmissionGroupsToTasks(streamTasks, pendingGroups).filter(
+        (task) => !isDeleting(task.id),
+      ),
+    [streamTasks, pendingGroups, isDeleting],
   );
   // Counted over every session, archived and hidden ones included: a row
   // still waits on a delegated session the list does not show.
@@ -555,16 +576,14 @@ export function ProjectsDockPanel() {
   );
 
   const archivedByProject = useMemo(() => {
-    const byProject: Record<
-      string,
-      { id: string; title: string; archivedAt: string }[]
-    > = {};
+    const byProject: Record<string, ArchivedSessionSummary[]> = {};
     for (const task of merged) {
       if (!isArchived(task)) continue;
       const list = byProject[task.project_id] ?? [];
       byProject[task.project_id] = list;
       list.push({
         id: task.id,
+        slug: task.slug ?? null,
         title: task.title,
         archivedAt: task.updated_at,
       });
@@ -838,7 +857,8 @@ export function ProjectsDockPanel() {
                         isActive={isActiveTask(row.task)}
                         isRelated={relatedSessions.has(row.task.id)}
                         onOpen={() => openSession(row.task)}
-                        onArchive={() => archiveSession(row.task)}
+                        onArchive={() => removal.archive(row.task)}
+                        onDelete={() => removal.remove(row.task)}
                         onFork={(workspace) =>
                           void forkSession(row.task, workspace)
                         }
@@ -947,7 +967,8 @@ export function ProjectsDockPanel() {
                           isActive={isActiveTask(row.task)}
                           isRelated={relatedSessions.has(row.task.id)}
                           onOpen={() => openSession(row.task)}
-                          onArchive={() => archiveSession(row.task)}
+                          onArchive={() => removal.archive(row.task)}
+                          onDelete={() => removal.remove(row.task)}
                           onFork={(workspace) =>
                             void forkSession(row.task, workspace)
                           }
@@ -1226,7 +1247,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
   t,
 }: SessionGroupSectionProps) {
   const activeTaskKey = useFocusedSessionTaskKey();
-  const { archiveSession, restoreSession } = useArchivedSessions();
+  const { restoreSession } = useArchivedSessions();
+  const removal = useSessionRemoval();
   const { activateProject, newSession } = useProjectNavigation();
   const closeProject = useOpenProjectsStore((s) => s.closeProject);
   const openSession = useOpenSession();
@@ -1314,6 +1336,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
         showsFiles={showsFiles}
         onToggleFiles={canShowFiles ? handleToggleFiles : undefined}
         onRestore={restoreSession}
+        onDelete={removal.remove}
         onRevealInFinder={
           project
             ? () => {
@@ -1365,7 +1388,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
                   isActive={isActiveTask(row.task)}
                   isRelated={relatedSessions.has(row.task.id)}
                   onOpen={() => openSession(row.task)}
-                  onArchive={() => archiveSession(row.task)}
+                  onArchive={() => removal.archive(row.task)}
+                  onDelete={() => removal.remove(row.task)}
                   onFork={(workspace) => void forkSession(row.task, workspace)}
                   canUseWorktree={project !== null}
                   t={t}
@@ -1394,6 +1418,7 @@ interface GroupHeaderProps {
   /** Absent for sections without a checkout to browse. */
   onToggleFiles?: () => void;
   onRestore: (taskId: string) => void;
+  onDelete: (session: RemovableSession) => void;
   onRevealInFinder?: () => void;
   onRemove?: () => void;
   t: TranslationFunction;
@@ -1412,6 +1437,7 @@ function GroupHeader({
   showsFiles,
   onToggleFiles,
   onRestore,
+  onDelete,
   onRevealInFinder,
   onRemove,
   t,
@@ -1486,6 +1512,9 @@ function GroupHeader({
             }
             archivedSessions={archived as ArchivedSessionSummary[]}
             onRestore={onRestore}
+            onDelete={onDelete}
+            restoreLabel={t("restore")}
+            deleteLabel={t("delete")}
           />
         ) : null}
         {onToggleFiles ? (

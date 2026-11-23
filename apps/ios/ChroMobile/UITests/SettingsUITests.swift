@@ -34,6 +34,13 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(button("Agents").waitForExistence(timeout: 3))
     }
 
+    func testWorkspaceShowsOnlyCurrentPreferences() {
+        openPane("Workspace")
+        XCTAssertTrue(app.switches["Hidden directories"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches["Nest delegated sessions"].firstMatch.exists)
+        XCTAssertFalse(element("Usage Analytics").exists)
+    }
+
     func testNotificationsDisableTheirChildren() {
         openPane("Notifications")
         let enable = app.switches["Enable Notifications"].firstMatch

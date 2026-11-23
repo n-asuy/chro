@@ -38,19 +38,18 @@ pub fn primary_window<R: TauriRuntime>(app: &AppHandle<R>) -> Option<WebviewWind
         .map(|(_, window)| window)
 }
 
-/// Show and focus the app window and, when a target is given, open that
-/// session in it. With no app window left (the person closed it while the edge
-/// toolbar stayed), a new one is opened directly on the session.
+/// Show and focus the app window (also when it was hidden by closing it with
+/// the edge toolbar on) and, when a target is given, open that session in it.
+/// With no app window left, a new one is opened, directly on the session when
+/// there is one.
 pub fn activate_session<R: TauriRuntime>(app: &AppHandle<R>, target: Option<SessionTarget>) {
     let Some(window) = primary_window(app) else {
-        if let Some(target) = target {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(err) = open_window_on(&app, &target).await {
-                    warn!("[activate] open window failed: {err:#}");
-                }
-            });
-        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = open_main_window(&app, target.as_ref()).await {
+                warn!("[activate] open window failed: {err:#}");
+            }
+        });
         return;
     };
     let _ = window.unminimize();
@@ -63,9 +62,10 @@ pub fn activate_session<R: TauriRuntime>(app: &AppHandle<R>, target: Option<Sess
     }
 }
 
-async fn open_window_on<R: TauriRuntime>(
+/// Open a new app window, on a session when one is given.
+pub async fn open_main_window<R: TauriRuntime>(
     app: &AppHandle<R>,
-    target: &SessionTarget,
+    target: Option<&SessionTarget>,
 ) -> anyhow::Result<()> {
     let runtime = primary_runtime(app)
         .await
@@ -74,7 +74,7 @@ async fn open_window_on<R: TauriRuntime>(
         app,
         &runtime,
         RendererWindowOptions {
-            route_path: Some(target.route_path()),
+            route_path: target.map(SessionTarget::route_path),
             workspace_path: None,
         },
     )
